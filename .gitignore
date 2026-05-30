@@ -1,0 +1,37 @@
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+.env.*
+
+# ── 测试 / 类型 / lint 缓存 ─────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── 本地开发产物（见 dev/README.md）────────────────────
+run_config.py          # 由 dev/run_config.example.py 复制而来，含本地配置
+/.dev_data/
+*.db
+*.sqlite
+*.log
+/data/                 # 运行态数据/原件目录（含知识内容，不入库）
+
+# ── 前端（仅当存在 web/frontend/）───────────────────────
+web/frontend/node_modules/
+web/frontend/.next/
+web/frontend/out/
+
+# ── 编辑器 / 系统 ───────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+.antigravitycli/

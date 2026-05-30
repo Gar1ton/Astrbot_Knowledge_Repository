@@ -1,0 +1,20 @@
+# 依赖按分区填写。运行时核心为必装；可选区按启用的功能安装。
+
+# ── 运行时核心依赖 ─────────────────────────────────────────────
+aiosqlite                  # 异步 SQLite（repository/source_store、graph_store）
+
+# ── 可选 / 按功能启用 ─────────────────────────────────────────
+PyMuPDF                    # 本地 PDF 文本抽取（无 LLM）；ingest_manager 使用
+boto3                      # S3 兼容客户端，访问 Cloudflare R2（sync_targets/r2）
+aiohttp                    # 独立 web 控制台服务（web/，v0.5.0 起需要）
+numpy                      # 实体/关系向量余弦相似度（graph_store，v0.6.0 起需要）
+
+# 说明：
+# - 检索/embedding 复用 AstrBot 自带能力，故不在此引入向量库或 embedding 包。
+# - Notion 同步经 AstrBot 已配置的 notion MCP server，无需 notion-sdk。
+
+# ── 开发 / 测试 ───────────────────────────────────────────────
+pytest
+pytest-asyncio
+ruff
+mypy

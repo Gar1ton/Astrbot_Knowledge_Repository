@@ -1,0 +1,203 @@
+{
+  "source_store": {
+    "description": "源文档库（原件管理）",
+    "type": "object",
+    "hint": "以 PDF 等原件为中心：登记原件、本地 PyMuPDF 抽取文本（无 LLM），按集合/标签分类",
+    "items": {
+      "db_filename": {
+        "description": "源库 SQLite 文件名（存于插件数据目录）",
+        "type": "string",
+        "default": "knowledge_repository.db"
+      },
+      "default_collection": {
+        "description": "默认集合名（对应 AstrBot 知识库 collection）",
+        "type": "string",
+        "default": "default"
+      },
+      "ocr_enabled": {
+        "description": "对扫描型 PDF 启用 OCR/LLM 抽取",
+        "type": "bool",
+        "default": false,
+        "hint": "⚠️ 开启会产生额外 LLM/OCR 成本；默认仅用本地 PyMuPDF 无成本抽取"
+      }
+    }
+  },
+
+  "r2_sync": {
+    "description": "Cloudflare R2 备份（崩溃恢复）",
+    "type": "object",
+    "hint": "S3 兼容对象存储，备份原件 + manifest + kb.db 快照。免费额度 10GB，出口免费",
+    "items": {
+      "enabled": {
+        "description": "启用 R2 同步备份",
+        "type": "bool",
+        "default": false
+      },
+      "account_id": {
+        "description": "Cloudflare Account ID",
+        "type": "string",
+        "default": ""
+      },
+      "access_key_id": {
+        "description": "R2 Access Key ID",
+        "type": "string",
+        "default": ""
+      },
+      "secret_access_key": {
+        "description": "R2 Secret Access Key",
+        "type": "string",
+        "default": "",
+        "hint": "机密：仅存于 AstrBot 运行态配置目录（已 gitignore），切勿提交进仓库"
+      },
+      "bucket": {
+        "description": "R2 Bucket 名称",
+        "type": "string",
+        "default": ""
+      },
+      "cdn_domain": {
+        "description": "自定义 CDN 域名（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "例如 https://cdn.yourdomain.com；用于生成 Notion 引用大文件的公开链接"
+      },
+      "free_tier_gb": {
+        "description": "免费额度上限（GB）",
+        "type": "int",
+        "default": 10
+      },
+      "warn_threshold": {
+        "description": "用量预警比例（0~1）",
+        "type": "float",
+        "default": 0.8,
+        "hint": "用量达到 free_tier_gb × 该比例时警告；将超额时硬警告并要求确认"
+      },
+      "backup_interval_sec": {
+        "description": "周期备份间隔（秒）",
+        "type": "int",
+        "default": 86400,
+        "hint": "0 表示关闭周期备份，仅手动 /kr sync r2"
+      }
+    }
+  },
+
+  "notion_sync": {
+    "description": "Notion 单向镜像（经 MCP）",
+    "type": "object",
+    "hint": "KB → Notion 单向镜像到一个 Database，每文档一页；经 AstrBot 已配置的 notion MCP server",
+    "items": {
+      "enabled": {
+        "description": "启用 Notion 同步",
+        "type": "bool",
+        "default": false
+      },
+      "mcp_server_name": {
+        "description": "AstrBot 中配置的 Notion MCP server 名称",
+        "type": "string",
+        "default": "notion"
+      },
+      "database_id": {
+        "description": "目标 Notion Database ID（用户自定义提供）",
+        "type": "string",
+        "default": ""
+      },
+      "max_upload_mib": {
+        "description": "单文件上传上限（MiB）",
+        "type": "int",
+        "default": 5,
+        "hint": "免费工作区 API 上传上限 5MiB；超过则改为链接到 R2"
+      },
+      "link_large_to_r2": {
+        "description": "大文件改用 R2 链接而非上传",
+        "type": "bool",
+        "default": true,
+        "hint": "需同时启用 r2_sync 才能生成链接"
+      },
+      "rate_limit_rps": {
+        "description": "API 限流（请求/秒）",
+        "type": "int",
+        "default": 3,
+        "hint": "Notion API 平均 3 req/s；批量同步会按此节流，文档多时耗时较长"
+      }
+    }
+  },
+
+  "web_console": {
+    "description": "独立 Web 控制台（v0.5.0 起）",
+    "type": "object",
+    "hint": "独立端口的管理控制台：上传/管理/分类/同步/配额仪表盘，自带登录鉴权",
+    "items": {
+      "enabled": {
+        "description": "启用独立 Web 控制台",
+        "type": "bool",
+        "default": false
+      },
+      "host": {
+        "description": "监听地址",
+        "type": "string",
+        "default": "0.0.0.0"
+      },
+      "port": {
+        "description": "监听端口",
+        "type": "int",
+        "default": 6520,
+        "hint": "避开 AstrBot dashboard(6185/6186) 与 Moirai(2657)"
+      },
+      "username": {
+        "description": "登录用户名",
+        "type": "string",
+        "default": "admin"
+      },
+      "password": {
+        "description": "登录密码",
+        "type": "string",
+        "default": "",
+        "hint": "机密：留空将拒绝启动；仅存于运行态配置目录"
+      }
+    }
+  },
+
+  "graph": {
+    "description": "LightRAG 知识图谱（v0.6.0 起）",
+    "type": "object",
+    "hint": "增量式知识图谱：仅对内容变化的 chunk 抽取实体/关系，复用 KB 既有 embedding",
+    "items": {
+      "enabled": {
+        "description": "启用知识图谱",
+        "type": "bool",
+        "default": false
+      },
+      "llm_extraction": {
+        "description": "用 LLM 抽取实体/关系",
+        "type": "bool",
+        "default": true,
+        "hint": "增量抽取（仅变化 chunk）成本远低于 GraphRAG 全量重建"
+      },
+      "incremental": {
+        "description": "增量索引（按内容哈希跳过未变 chunk）",
+        "type": "bool",
+        "default": true
+      },
+      "reuse_kb_embedding": {
+        "description": "实体归并复用 AstrBot KB 的 embedding provider",
+        "type": "bool",
+        "default": true
+      },
+      "merge_similarity_threshold": {
+        "description": "实体归并相似度阈值（0~1）",
+        "type": "float",
+        "default": 0.9
+      },
+      "rrf_k": {
+        "description": "向量召回与图召回 RRF 融合常数",
+        "type": "int",
+        "default": 60,
+        "hint": "与 AstrBot 知识库检索的 RRF 常数对齐"
+      },
+      "query_top_k": {
+        "description": "图谱查询返回上限",
+        "type": "int",
+        "default": 5
+      }
+    }
+  }
+}

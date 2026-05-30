@@ -1,0 +1,18 @@
+# 工具链配置。约定：测试绿是 TODO 标 [x] 的前提；domain 层启用严格类型检查。
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"               # 异步测试免写事件循环样板
+pythonpath = [".", "tests/mocks"]   # 让测试可 import core 与测试替身
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]      # 基础错误 + 未用 + import 排序 + 语法升级
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["core/domain/"]            # 至少对零依赖的 domain 层严格把关

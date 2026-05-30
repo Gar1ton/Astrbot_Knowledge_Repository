@@ -1,0 +1,13 @@
+# TEMPLATE — 发布瘦身规则。
+# GitHub Release / 插件市场打 ZIP 时，export-ignore 的路径会被自动剥离，
+# 让最终发布包只含运行所需文件（单分支 monorepo + 精简发布包）。
+
+# 开发期资产，发布包无需携带：
+web/frontend/   export-ignore
+tests/          export-ignore
+dev/            export-ignore
+docs/           export-ignore
+.github/        export-ignore
+
+# 规范化文本行尾
+* text=auto

@@ -197,6 +197,21 @@
         "description": "图谱查询返回上限",
         "type": "int",
         "default": 5
+      },
+      "entity_types": {
+        "description": "自定义实体类型定义（支持不同学术领域的本体自定义）",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "Method/Algorithm",
+          "Scientific Problem/Task",
+          "Dataset",
+          "Evaluation Metric",
+          "Theory/Hypothesis"
+        ],
+        "hint": "不同学术领域可自定义。如生物医学可设为 [Gene, Disease, Drug, Protein, Pathway]"
       }
     }
   }

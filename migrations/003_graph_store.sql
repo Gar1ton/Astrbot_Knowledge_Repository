@@ -33,7 +33,7 @@ CREATE INDEX IF NOT EXISTS idx_graph_relations_dst ON graph_relations(dst_entity
 
 -- 3) 知识分块增量状态追踪表
 CREATE TABLE IF NOT EXISTS graph_chunk_status (
-    chunk_id TEXT PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+    chunk_id TEXT PRIMARY KEY,
     content_hash TEXT NOT NULL,
     extracted_at TEXT NOT NULL
 );

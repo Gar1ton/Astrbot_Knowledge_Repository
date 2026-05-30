@@ -116,6 +116,15 @@ class GraphConfig:
     merge_similarity_threshold: float = 0.9
     rrf_k: int = 60
     query_top_k: int = 5
+    entity_types: list[str] = field(
+        default_factory=lambda: [
+            "Method/Algorithm",
+            "Scientific Problem/Task",
+            "Dataset",
+            "Evaluation Metric",
+            "Theory/Hypothesis",
+        ]
+    )
 
 
 # ── 解析门面 ────────────────────────────────────────────────────
@@ -182,6 +191,13 @@ class Config:
             ),
             rrf_k=int(s.get("rrf_k", GraphConfig.rrf_k)),
             query_top_k=int(s.get("query_top_k", GraphConfig.query_top_k)),
+            entity_types=s.get("entity_types") if isinstance(s.get("entity_types"), list) else [
+                "Method/Algorithm",
+                "Scientific Problem/Task",
+                "Dataset",
+                "Evaluation Metric",
+                "Theory/Hypothesis",
+            ],
         )
 
 

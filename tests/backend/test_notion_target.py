@@ -233,3 +233,68 @@ async def test_notion_graceful_degradation(
     second_call_args = mock_call_tool.call_args_list[1][0][2]
     assert "Name" in second_call_args["properties"]
     assert "DocID" not in second_call_args["properties"]
+
+
+@pytest.mark.asyncio
+async def test_notion_initialize_database(
+    notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
+) -> None:
+    notion_config.database_id = ""
+    notion_config.parent_page_id = "parent-page"
+    notion_config.database_title = "KR Database"
+    mock_context = MagicMock()
+    mock_call_tool = AsyncMock(return_value={"id": "database-123"})
+    mock_context.call_mcp_tool = mock_call_tool
+
+    target = NotionSyncTarget(notion_config, store, mock_context)
+    result = await target.initialize_database()
+
+    assert result["status"] == "success"
+    assert result["created"] is True
+    assert result["database_id"] == "database-123"
+    args = mock_call_tool.call_args[0]
+    assert args[1] == "create_database"
+    assert args[2]["parent"]["page_id"] == "parent-page"
+    assert set(args[2]["properties"]) == {"Name", "Collection", "Tags", "DocID"}
+
+
+@pytest.mark.asyncio
+async def test_notion_pull_metadata_updates_only_collection_and_tags(
+    notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
+) -> None:
+    await store.add_document(_doc("d5"))
+    mock_context = MagicMock()
+    mock_context.call_mcp_tool = AsyncMock(return_value={
+        "results": [
+            {
+                "properties": {
+                    "DocID": {"rich_text": [{"plain_text": "d5"}]},
+                    "Collection": {"select": {"name": "papers"}},
+                    "Tags": {"multi_select": [{"name": "rag"}, {"name": "graph"}]},
+                    "Name": {"title": [{"plain_text": "renamed.pdf"}]},
+                }
+            },
+            {
+                "properties": {
+                    "DocID": {"rich_text": [{"plain_text": "missing"}]},
+                    "Collection": {"select": {"name": "archive"}},
+                    "Tags": {"multi_select": [{"name": "x"}]},
+                }
+            },
+        ]
+    })
+
+    target = NotionSyncTarget(notion_config, store, mock_context)
+    result = await target.pull_metadata()
+
+    assert result["status"] == "success"
+    assert result["updated_count"] == 1
+    assert result["skipped_count"] == 1
+    doc = await store.get_document("d5")
+    assert doc is not None
+    assert doc.title == "doc_d5.pdf"
+    assert doc.collection == "papers"
+    assert doc.tags == ["rag", "graph"]
+    args = mock_context.call_mcp_tool.call_args[0]
+    assert args[1] == "query_database"
+    assert args[2]["database_id"] == "test-database-id"

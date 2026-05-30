@@ -27,6 +27,7 @@ if str(_ROOT) not in sys.path:
 from aiohttp import web  # noqa: E402
 
 from core.api import KnowledgeRepositoryApi  # noqa: E402
+from core.config import Config  # noqa: E402
 from core.domain.models import (  # noqa: E402
     Collection,
     DocumentChunk,
@@ -95,11 +96,73 @@ def _seed_targets(empty: bool) -> dict[SyncTargetKind, InMemorySyncTarget]:
     return {SyncTargetKind.R2: r2, SyncTargetKind.NOTION: notion}
 
 
+class _DebugSyncPipeline:
+    async def sync(
+        self,
+        target_kind: SyncTargetKind,
+        doc_ids: list[str] | None = None,
+    ) -> dict:
+        return {
+            "status": "success",
+            "target": target_kind.value,
+            "synced_count": 0,
+            "failed_count": 0,
+            "message": "Debug pipeline: no remote writes performed.",
+        }
+
+    async def restore(self, target_kind: SyncTargetKind) -> dict:
+        return {
+            "status": "success",
+            "target": target_kind.value,
+            "message": "Debug pipeline: restore preview only.",
+        }
+
+    async def initialize_notion_database(
+        self,
+        parent_page_id: str | None = None,
+        database_title: str | None = None,
+    ) -> dict:
+        return {
+            "status": "success",
+            "database_id": "debug-notion-database",
+            "parent_page_id": parent_page_id or "debug-parent-page",
+            "database_title": database_title or "Knowledge Repository",
+            "created": True,
+            "message": "Debug pipeline: mocked Notion database creation.",
+        }
+
+    async def pull_notion_metadata(self) -> dict:
+        return {
+            "status": "success",
+            "updated_count": 0,
+            "skipped_count": 0,
+            "warnings": ["Debug pipeline: no Notion pages queried."],
+        }
+
+
 async def _make_app(args: argparse.Namespace) -> web.Application:
     store = InMemorySourceDocumentStore() if args.empty else await _seed_store()
     kb = InMemoryKnowledgeBaseReader({}) if args.empty else _seed_kb()
     targets = _seed_targets(args.empty)
-    api = KnowledgeRepositoryApi(source_store=store, kb_reader=kb, sync_targets=targets)
+    config = Config({
+        "source_store": {"default_collection": "default"},
+        "r2_sync": {"enabled": True, "bucket": "debug-bucket", "free_tier_gb": 10},
+        "notion_sync": {
+            "enabled": True,
+            "database_id": "debug-notion-database",
+            "parent_page_id": "debug-parent-page",
+            "database_title": "Knowledge Repository",
+        },
+        "web_console": {"enabled": True, "host": args.host, "port": args.port, "username": "admin"},
+        "graph": {"enabled": True},
+    })
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=kb,
+        sync_targets=targets,
+        sync_pipeline=_DebugSyncPipeline(),  # type: ignore[arg-type]
+        config=config,
+    )
     upload_dir = Path(tempfile.gettempdir()) / "kr_webui_uploads"
     return build_app(
         api=api,

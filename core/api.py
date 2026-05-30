@@ -16,9 +16,15 @@ from typing import TYPE_CHECKING
 from core.domain.models import Collection, SourceDocument, SyncTargetKind
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from core.config import Config
     from core.domain.models import DocumentChunk, QuotaUsage
     from core.managers.base import BaseCategoryManager, BaseIngestManager, BaseQuotaManager
+    from core.pipelines.graph_build_pipeline import GraphBuildPipeline
+    from core.pipelines.graph_search_pipeline import GraphSearchPipeline
     from core.pipelines.sync_pipeline import SyncPipeline
+    from core.repository.graph_store.base import GraphStore
     from core.repository.kb_reader.base import KnowledgeBaseReader
     from core.repository.source_store.base import SourceDocumentStore
     from core.repository.sync_targets.base import SyncTarget
@@ -37,6 +43,11 @@ class KnowledgeRepositoryApi:
         category_manager: BaseCategoryManager | None = None,
         quota_manager: BaseQuotaManager | None = None,
         sync_pipeline: SyncPipeline | None = None,
+        graph_store: GraphStore | None = None,
+        graph_build_pipeline: GraphBuildPipeline | None = None,
+        graph_search_pipeline: GraphSearchPipeline | None = None,
+        config: Config | None = None,
+        config_persist: Callable[[str, str, object], None] | None = None,
     ) -> None:
         self._source_store = source_store
         self._kb_reader = kb_reader
@@ -45,6 +56,11 @@ class KnowledgeRepositoryApi:
         self._category_manager = category_manager
         self._quota_manager = quota_manager
         self._sync_pipeline = sync_pipeline
+        self._graph_store = graph_store
+        self._graph_build_pipeline = graph_build_pipeline
+        self._graph_search_pipeline = graph_search_pipeline
+        self._config = config
+        self._config_persist = config_persist
 
     # ── 集合（分类）────────────────────────────────────────────
 
@@ -193,6 +209,43 @@ class KnowledgeRepositoryApi:
 
         raise NotImplementedError("sync_documents: available in v0.3.0 (r2) / v0.4.0 (notion)")
 
+    async def initialize_notion_database(
+        self,
+        parent_page_id: str | None = None,
+        database_title: str | None = None,
+    ) -> dict:
+        """自动创建 Notion 数据库，并回写生成的 database_id。"""
+        if not self._sync_pipeline:
+            raise NotImplementedError("initialize_notion_database: available in v0.8.0")
+
+        result = await self._sync_pipeline.initialize_notion_database(
+            parent_page_id=parent_page_id,
+            database_title=database_title,
+        )
+        if result.get("status") == "success":
+            database_id = result.get("database_id")
+            if isinstance(database_id, str) and database_id:
+                self._persist_config_value("notion_sync", "database_id", database_id)
+            parent = result.get("parent_page_id")
+            if isinstance(parent, str) and parent:
+                self._persist_config_value("notion_sync", "parent_page_id", parent)
+            title = result.get("database_title")
+            if isinstance(title, str) and title:
+                self._persist_config_value("notion_sync", "database_title", title)
+        return result
+
+    async def pull_notion_metadata(self) -> dict:
+        """从 Notion 反向拉取 Collection/Tags 元数据。"""
+        if self._sync_pipeline:
+            return await self._sync_pipeline.pull_notion_metadata()
+        raise NotImplementedError("pull_notion_metadata: available in v0.8.0")
+
+    async def get_effective_config(self) -> dict:
+        """返回前端可展示的有效配置。"""
+        if self._config is None:
+            raise NotImplementedError("get_effective_config: available in v0.8.0")
+        return self._config.to_public_dict()
+
     async def get_sync_status(self) -> list[dict]:
         """列出各文档在各目标的同步状态（SyncRecord 视图）。
 
@@ -236,13 +289,81 @@ class KnowledgeRepositoryApi:
 
         Reserved（v0.6.0 LightRAG）：返回新增/更新的实体与关系数。
         """
+        if self._graph_build_pipeline:
+            return await self._graph_build_pipeline.build_graph(collection)
         raise NotImplementedError("build_graph: available in v0.6.0")
 
-    async def query_graph(self, query: str, top_k: int = 5) -> dict:
+    async def query_graph(
+        self,
+        query: str,
+        top_k: int = 5,
+        collection: str | None = None,
+        debug: bool = False,
+    ) -> dict:
         """知识图谱查询（向量召回 + 图邻域扩展 + RRF 融合）。
 
         Reserved（v0.6.0）：返回命中实体/关系与来源 chunk。
         """
+        if self._graph_search_pipeline:
+            col = collection
+            if col is None:
+                cols = await self.list_collections()
+                col = cols[0].name if cols else "default"
+
+            res = await self._graph_search_pipeline.search(
+                collection=col,
+                query=query,
+                top_k=top_k,
+                debug=debug,
+            )
+
+            # 序列化为纯 dict 以确保 Web/JSON 兼容性
+            serialized_chunks = []
+            for ch in res.get("chunks", []):
+                serialized_chunks.append({
+                    "chunk_id": ch.chunk_id,
+                    "doc_id": ch.doc_id,
+                    "ordinal": ch.ordinal,
+                    "text": ch.text,
+                    "content_hash": ch.content_hash,
+                })
+
+            serialized_entities = []
+            for ent in res.get("entities", []):
+                serialized_entities.append({
+                    "entity_id": ent.entity_id,
+                    "name": ent.name,
+                    "entity_type": ent.entity_type,
+                    "description": ent.description,
+                    "source_chunk_ids": ent.source_chunk_ids,
+                    "degree": ent.degree,
+                })
+
+            serialized_relations = []
+            for rel in res.get("relations", []):
+                serialized_relations.append({
+                    "relation_id": rel.relation_id,
+                    "src_entity_id": rel.src_entity_id,
+                    "dst_entity_id": rel.dst_entity_id,
+                    "relation": rel.relation,
+                    "description": rel.description,
+                    "weight": rel.weight,
+                    "source_chunk_ids": rel.source_chunk_ids,
+                })
+
+            payload = {
+                "status": "success",
+                "query": res.get("query", query),
+                "collection": col,
+                "chunks": serialized_chunks,
+                "entities": serialized_entities,
+                "relations": serialized_relations,
+                "context": res.get("context", ""),
+            }
+            if debug:
+                payload["debug"] = res.get("debug", {})
+            return payload
+
         raise NotImplementedError("query_graph: available in v0.6.0")
 
     async def get_graph(self, collection: str | None = None) -> dict:
@@ -250,12 +371,93 @@ class KnowledgeRepositoryApi:
 
         Reserved（v0.7.0 图谱可视化）：返回 {nodes:[...], edges:[...]}。
         """
+        if self._graph_store:
+            col = collection
+            if col is None:
+                cols = await self.list_collections()
+                col = cols[0].name if cols else "default"
+
+            docs = await self._source_store.list_documents(collection=col)
+            chunk_by_id: dict[str, DocumentChunk] = {}
+            for doc in docs:
+                for chunk in await self._source_store.list_chunks(doc.doc_id):
+                    chunk_by_id[chunk.chunk_id] = chunk
+            scoped_chunk_ids = set(chunk_by_id)
+
+            nodes = []
+            for ent in await self._graph_store.list_entities():
+                source_ids = [cid for cid in ent.source_chunk_ids if cid in scoped_chunk_ids]
+                if not source_ids:
+                    continue
+                nodes.append({
+                    "id": ent.entity_id,
+                    "name": ent.name,
+                    "type": ent.entity_type,
+                    "description": ent.description,
+                    "degree": ent.degree,
+                    "source_chunk_ids": source_ids,
+                    "source_previews": _chunk_previews(chunk_by_id, source_ids),
+                })
+
+            node_ids = {node["id"] for node in nodes}
+            edges = []
+            for rel in await self._graph_store.list_relations():
+                source_ids = [cid for cid in rel.source_chunk_ids if cid in scoped_chunk_ids]
+                if not source_ids:
+                    continue
+                if rel.src_entity_id not in node_ids or rel.dst_entity_id not in node_ids:
+                    continue
+                edges.append({
+                    "id": rel.relation_id,
+                    "source": rel.src_entity_id,
+                    "target": rel.dst_entity_id,
+                    "relation": rel.relation,
+                    "description": rel.description,
+                    "weight": rel.weight,
+                    "source_chunk_ids": source_ids,
+                    "source_previews": _chunk_previews(chunk_by_id, source_ids),
+                })
+
+            return {
+                "status": "success",
+                "collection": col,
+                "nodes": nodes,
+                "edges": edges,
+            }
+
         raise NotImplementedError("get_graph: available in v0.7.0")
+
+    def _persist_config_value(self, section: str, key: str, value: object) -> None:
+        if self._config is not None:
+            self._config.set_value(section, key, value)
+        if self._config_persist is not None:
+            self._config_persist(section, key, value)
 
 
 def _now() -> datetime:
     """统一的 UTC aware 时间戳。"""
     return datetime.now(timezone.utc)
+
+
+def _chunk_previews(
+    chunk_by_id: dict[str, DocumentChunk],
+    chunk_ids: list[str],
+    limit: int = 360,
+) -> list[dict]:
+    previews = []
+    for chunk_id in chunk_ids[:5]:
+        chunk = chunk_by_id.get(chunk_id)
+        if chunk is None:
+            continue
+        text = chunk.text.strip()
+        previews.append({
+            "chunk_id": chunk.chunk_id,
+            "doc_id": chunk.doc_id,
+            "ordinal": chunk.ordinal,
+            "text": text[:limit],
+            "truncated": len(text) > limit,
+        })
+    return previews
 
 
 __all__ = ["KnowledgeRepositoryApi"]

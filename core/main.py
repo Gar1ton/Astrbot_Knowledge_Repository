@@ -63,6 +63,24 @@ class KnowledgeRepositoryPlugin:
             return "Error: EventHandler not initialized."
         return await self._handler.on_sync_notion()
 
+    # @register_command("kr notion init")
+    async def on_notion_init(
+        self,
+        parent_page_id: str | None = None,
+        database_title: str | None = None,
+    ) -> str:
+        """/kr notion init [parent_page_id] [database_title]"""
+        if self._handler is None:
+            return "Error: EventHandler not initialized."
+        return await self._handler.on_notion_init(parent_page_id, database_title)
+
+    # @register_command("kr sync notion --pull")
+    async def on_sync_notion_pull(self) -> str:
+        """/kr sync notion --pull"""
+        if self._handler is None:
+            return "Error: EventHandler not initialized."
+        return await self._handler.on_sync_notion_pull()
+
     # @register_command("kr sync status")
     async def on_sync_status(self) -> str:
         """/kr sync status"""
@@ -100,6 +118,20 @@ class KnowledgeRepositoryPlugin:
         if self._handler is None:
             return "Error: EventHandler not initialized."
         return await self._handler.on_tag(action, doc_id, tags_str)
+
+    # @register_command("kr graph build")
+    async def on_graph_build(self, collection: str | None = None) -> str:
+        """/kr graph build [--collection <col>]"""
+        if self._handler is None:
+            return "Error: EventHandler not initialized."
+        return await self._handler.on_graph_build(collection)
+
+    # @register_command("kr graph query")
+    async def on_graph_query(self, query: str, top_k: int = 5) -> str:
+        """/kr graph query <q> [--top_k <top_k>]"""
+        if self._handler is None:
+            return "Error: EventHandler not initialized."
+        return await self._handler.on_graph_query(query, top_k)
 
 
 __all__ = ["KnowledgeRepositoryPlugin"]

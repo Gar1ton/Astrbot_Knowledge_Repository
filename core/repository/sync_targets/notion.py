@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from core.adapters.notion_mcp import NotionMCPAdapter
@@ -161,6 +163,105 @@ class NotionSyncTarget(SyncTarget):
             return f"skipped:{page_id}"
         return page_id
 
+    async def initialize_database(
+        self,
+        parent_page_id: str | None = None,
+        database_title: str | None = None,
+    ) -> dict[str, Any]:
+        """在 Notion Parent Page 下创建标准数据库，并更新当前 target 配置。"""
+        if not self._config.enabled:
+            return {"status": "error", "message": "Notion sync is disabled in configuration."}
+        if self._config.database_id:
+            return {
+                "status": "success",
+                "database_id": self._config.database_id,
+                "created": False,
+                "message": "Notion database already configured.",
+            }
+
+        parent = parent_page_id or self._config.parent_page_id
+        if not parent:
+            return {"status": "error", "message": "Notion parent_page_id is required."}
+
+        title = database_title or self._config.database_title
+        database_id = await self._mcp_adapter.create_database(
+            parent_page_id=parent,
+            title=title,
+            properties=_standard_database_properties(),
+        )
+        self._config = replace(
+            self._config,
+            database_id=database_id,
+            parent_page_id=parent,
+            database_title=title,
+        )
+        return {
+            "status": "success",
+            "database_id": database_id,
+            "parent_page_id": parent,
+            "database_title": title,
+            "created": True,
+            "message": "Notion database created.",
+        }
+
+    async def pull_metadata(self) -> dict[str, Any]:
+        """从 Notion 拉取 Collection/Tags 并合并到本地文档。"""
+        if not self._config.enabled:
+            return {"status": "error", "message": "Notion sync is disabled in configuration."}
+        if not self._config.database_id:
+            return {"status": "error", "message": "Notion Database ID is required."}
+
+        delay = 1.0 / max(1, self._config.rate_limit_rps)
+        await asyncio.sleep(delay)
+
+        pages = await self._mcp_adapter.query_database(self._config.database_id)
+        updated_count = 0
+        skipped_count = 0
+        warnings: list[str] = []
+
+        for page in pages:
+            props = page.get("properties")
+            if not isinstance(props, dict):
+                skipped_count += 1
+                warnings.append("Skipped a Notion page without properties.")
+                continue
+
+            doc_id = _read_rich_text(props.get("DocID"))
+            if not doc_id:
+                skipped_count += 1
+                warnings.append("Skipped a Notion page without DocID.")
+                continue
+
+            doc = await self._source_store.get_document(doc_id)
+            if doc is None:
+                skipped_count += 1
+                warnings.append(f"Skipped Notion page for missing local document: {doc_id}")
+                continue
+
+            collection = _read_select(props.get("Collection"))
+            tags = _read_multi_select(props.get("Tags"))
+            changed = False
+            if collection and collection != doc.collection:
+                doc.collection = collection
+                changed = True
+            if tags is not None and tags != doc.tags:
+                doc.tags = tags
+                changed = True
+
+            if changed:
+                doc.updated_at = datetime.now(timezone.utc)
+                await self._source_store.update_document(doc)
+                updated_count += 1
+            else:
+                skipped_count += 1
+
+        return {
+            "status": "success",
+            "updated_count": updated_count,
+            "skipped_count": skipped_count,
+            "warnings": warnings,
+        }
+
     async def delete(self, remote_ref: str) -> bool:
         if not self._config.enabled:
             return False
@@ -179,6 +280,57 @@ class NotionSyncTarget(SyncTarget):
             limit_bytes=0,
             pending_bytes=pending_bytes,
         )
+
+
+def _standard_database_properties() -> dict[str, Any]:
+    return {
+        "Name": {"title": {}},
+        "Collection": {"select": {}},
+        "Tags": {"multi_select": {}},
+        "DocID": {"rich_text": {}},
+    }
+
+
+def _read_rich_text(prop: Any) -> str:
+    if not isinstance(prop, dict):
+        return ""
+    values = prop.get("rich_text")
+    if not isinstance(values, list):
+        return ""
+    parts = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        plain = item.get("plain_text")
+        if isinstance(plain, str):
+            parts.append(plain)
+            continue
+        text = item.get("text")
+        if isinstance(text, dict) and isinstance(text.get("content"), str):
+            parts.append(text["content"])
+    return "".join(parts).strip()
+
+
+def _read_select(prop: Any) -> str | None:
+    if not isinstance(prop, dict):
+        return None
+    select = prop.get("select")
+    if isinstance(select, dict) and isinstance(select.get("name"), str):
+        return select["name"]
+    return None
+
+
+def _read_multi_select(prop: Any) -> list[str] | None:
+    if not isinstance(prop, dict):
+        return None
+    values = prop.get("multi_select")
+    if not isinstance(values, list):
+        return None
+    tags = []
+    for item in values:
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            tags.append(item["name"])
+    return tags
 
 
 __all__ = ["NotionSyncTarget"]

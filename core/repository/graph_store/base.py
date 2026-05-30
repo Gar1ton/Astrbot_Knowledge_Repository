@@ -71,6 +71,16 @@ class GraphStore(ABC):
         ...
 
     @abstractmethod
+    async def list_entities(self) -> list[GraphEntity]:
+        """列出全部实体，按 degree 降序、name 升序返回。无数据返回空列表。"""
+        ...
+
+    @abstractmethod
+    async def list_relations(self) -> list[GraphRelation]:
+        """列出全部关系，按 weight 降序、relation_id 升序返回。无数据返回空列表。"""
+        ...
+
+    @abstractmethod
     async def get_neighbors(
         self, entity_id: str, depth: int = 1
     ) -> list[GraphRelation]:

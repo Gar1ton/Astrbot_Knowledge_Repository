@@ -19,6 +19,94 @@ class NotionMCPAdapter:
         self._context = context
         self._server_name = server_name
 
+    async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        if self._context is None:
+            return None
+
+        call_tool = getattr(self._context, "call_mcp_tool", None)
+        if call_tool is None:
+            mcp = getattr(self._context, "mcp", None)
+            if mcp is not None:
+                call_tool = getattr(mcp, "call_tool", None)
+
+        if not callable(call_tool):
+            return None
+
+        logger.info(
+            "Calling Notion MCP tool '%s' via server '%s'...",
+            tool_name,
+            self._server_name,
+        )
+        return await call_tool(self._server_name, tool_name, arguments)
+
+    def _coerce_payload(self, res: Any) -> Any:
+        if isinstance(res, str):
+            import json
+
+            try:
+                return json.loads(res)
+            except Exception:
+                return res
+        return res
+
+    def _extract_id(self, res: Any, *keys: str) -> str | None:
+        data = self._coerce_payload(res)
+        if isinstance(data, dict):
+            for key in keys:
+                value = data.get(key)
+                if value:
+                    return str(value)
+        return None
+
+    async def create_database(
+        self,
+        parent_page_id: str,
+        title: str,
+        properties: dict[str, Any],
+    ) -> str:
+        """在指定 Parent Page 下创建 Notion Database 并返回 database_id。"""
+        arguments = {
+            "parent": {"page_id": parent_page_id},
+            "title": [{"type": "text", "text": {"content": title}}],
+            "properties": properties,
+        }
+
+        try:
+            res = await self._call_tool("create_database", arguments)
+            database_id = self._extract_id(res, "id", "database_id")
+            if database_id:
+                return database_id
+            if res is not None:
+                logger.warning("Notion create_database returned unexpected payload shape.")
+        except Exception as e:
+            logger.error(f"Notion MCP create_database call failed: {e}.")
+            raise e
+
+        mock_id = str(uuid.uuid4())
+        logger.info(f"[Offline Stub] Mocked Notion Database created with ID: {mock_id}")
+        return mock_id
+
+    async def query_database(self, database_id: str) -> list[dict[str, Any]]:
+        """查询 Notion Database 页面列表。"""
+        arguments = {"database_id": database_id}
+        try:
+            res = await self._call_tool("query_database", arguments)
+            data = self._coerce_payload(res)
+            if isinstance(data, dict):
+                results = data.get("results")
+                if isinstance(results, list):
+                    return [r for r in results if isinstance(r, dict)]
+            if isinstance(data, list):
+                return [r for r in data if isinstance(r, dict)]
+            if data is not None:
+                logger.warning("Notion query_database returned unexpected payload shape.")
+        except Exception as e:
+            logger.error(f"Notion MCP query_database call failed: {e}.")
+            raise e
+
+        logger.info("[Offline Stub] Mocked empty Notion database query result.")
+        return []
+
     async def create_database_page(
         self,
         database_id: str,
@@ -36,48 +124,18 @@ class NotionMCPAdapter:
         if children is not None:
             arguments["children"] = children
 
-        # 1) 尝试利用运行态 context.call_mcp_tool 发起真实工具调用
-        if self._context is not None:
-            try:
-                call_tool = getattr(self._context, "call_mcp_tool", None)
-                if call_tool is None:
-                    mcp = getattr(self._context, "mcp", None)
-                    if mcp is not None:
-                        call_tool = getattr(mcp, "call_tool", None)
-
-                if callable(call_tool):
-                    logger.info(
-                        f"Calling Notion MCP tool 'create_page' via server '{self._server_name}'..."
-                    )
-                    res = await call_tool(
-                        self._server_name, "create_page", arguments
-                    )
-                    # 尝试解析返回的 page_id 或 id
-                    if isinstance(res, dict):
-                        page_id = res.get("id") or res.get("page_id")
-                        if page_id:
-                            return str(page_id)
-                    elif isinstance(res, str):
-                        # 有些 MCP 客户端返回 JSON 字符串
-                        import json
-
-                        try:
-                            data = json.loads(res)
-                            page_id = data.get("id") or data.get("page_id")
-                            if page_id:
-                                return str(page_id)
-                        except Exception:
-                            pass
-                    # 若接口调用成功但格式怪异，回退安全处理
-                    logger.warning(
-                        "Notion MCP call succeeded but returned unexpected payload shape."
-                    )
-
-            except Exception as e:
-                logger.error(
-                    f"Notion MCP create_page call failed: {e}."
+        try:
+            res = await self._call_tool("create_page", arguments)
+            page_id = self._extract_id(res, "id", "page_id")
+            if page_id:
+                return page_id
+            if res is not None:
+                logger.warning(
+                    "Notion MCP call succeeded but returned unexpected payload shape."
                 )
-                raise e
+        except Exception as e:
+            logger.error(f"Notion MCP create_page call failed: {e}.")
+            raise e
 
         # 2) 离线测试或异常时，进行优雅的降级 Stub 模拟
         mock_id = str(uuid.uuid4())
@@ -86,24 +144,12 @@ class NotionMCPAdapter:
 
     async def delete_page(self, page_id: str) -> bool:
         """删除 Notion 页面（归档）。"""
-        if self._context is not None:
-            try:
-                call_tool = getattr(self._context, "call_mcp_tool", None)
-                if call_tool is None:
-                    mcp = getattr(self._context, "mcp", None)
-                    if mcp is not None:
-                        call_tool = getattr(mcp, "call_tool", None)
-
-                if callable(call_tool):
-                    logger.info(
-                        f"Calling Notion MCP 'update_page' via server "
-                        f"'{self._server_name}' to archive page {page_id}..."
-                    )
-                    arguments = {"page_id": page_id, "archived": True}
-                    await call_tool(self._server_name, "update_page", arguments)
-                    return True
-            except Exception as e:
-                logger.error(f"Notion MCP update_page archive failed: {e}")
+        try:
+            res = await self._call_tool("update_page", {"page_id": page_id, "archived": True})
+            if res is not None:
+                return True
+        except Exception as e:
+            logger.error(f"Notion MCP update_page archive failed: {e}")
 
         logger.info(f"[Offline Stub] Mocked Notion Page archived: {page_id}")
         return True

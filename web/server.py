@@ -193,6 +193,24 @@ async def handle_sync(request: web.Request) -> web.Response:
     return await _reserved(_api(request).sync_documents(target, doc_ids), "v0.3.0 / v0.4.0")
 
 
+async def handle_notion_init(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    parent_page_id = body.get("parent_page_id") if isinstance(body, dict) else None
+    database_title = body.get("database_title") if isinstance(body, dict) else None
+    return await _reserved(
+        _api(request).initialize_notion_database(parent_page_id, database_title),
+        "v0.8.0",
+    )
+
+
+async def handle_notion_pull(request: web.Request) -> web.Response:
+    return await _reserved(_api(request).pull_notion_metadata(), "v0.8.0")
+
+
+async def handle_effective_config(request: web.Request) -> web.Response:
+    return await _reserved(_api(request).get_effective_config(), "v0.8.0")
+
+
 async def handle_sync_status(request: web.Request) -> web.Response:
     return await _reserved(_api(request).get_sync_status(), "v0.3.0")
 
@@ -216,7 +234,12 @@ async def handle_graph_build(request: web.Request) -> web.Response:
 async def handle_graph_query(request: web.Request) -> web.Response:
     query = request.query.get("q", "")
     top_k = int(request.query.get("top_k", "5"))
-    return await _reserved(_api(request).query_graph(query, top_k), "v0.6.0")
+    collection = request.query.get("collection") or None
+    debug = request.query.get("debug", "").lower() in {"1", "true", "yes", "on"}
+    return await _reserved(
+        _api(request).query_graph(query, top_k, collection=collection, debug=debug),
+        "v0.6.0",
+    )
 
 
 async def handle_graph_data(request: web.Request) -> web.Response:
@@ -298,8 +321,11 @@ def build_app(
     app.router.add_get("/api/kb/collections", handle_kb_collections)
     app.router.add_get("/api/kb/search", handle_kb_search)
     app.router.add_get("/api/quota", handle_quota)
+    app.router.add_get("/api/config/effective", handle_effective_config)
     # 预留端口（reserved，未实现回 501 + available_in）
     app.router.add_post("/api/sync/{target}", handle_sync)
+    app.router.add_post("/api/notion/init", handle_notion_init)
+    app.router.add_post("/api/sync/notion/pull", handle_notion_pull)
     app.router.add_get("/api/sync/status", handle_sync_status)
     app.router.add_post("/api/backup", handle_backup)
     app.router.add_post("/api/restore", handle_restore)

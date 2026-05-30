@@ -97,6 +97,21 @@ async def test_find_entities_by_name(store: GraphStore) -> None:
     assert await store.find_entities_by_name("bob") == []
 
 
+async def test_list_entities_and_relations_ordered(store: GraphStore) -> None:
+    await store.upsert_entities([
+        GraphEntity("e1", "Beta", source_chunk_ids=["c0"]),
+        GraphEntity("e2", "Alpha", source_chunk_ids=["c0"]),
+        GraphEntity("e3", "Gamma", source_chunk_ids=["c0"]),
+    ])
+    await store.upsert_relations([
+        GraphRelation("r1", "e1", "e2", "to", weight=1.0, source_chunk_ids=["c0"]),
+        GraphRelation("r2", "e1", "e3", "to", weight=3.0, source_chunk_ids=["c0"]),
+    ])
+
+    assert [e.entity_id for e in await store.list_entities()] == ["e1", "e2", "e3"]
+    assert [r.relation_id for r in await store.list_relations()] == ["r2", "r1"]
+
+
 async def test_delete_by_chunk_prunes_dangling(store: GraphStore) -> None:
     await store.upsert_entities(
         [GraphEntity("e1", "A", source_chunk_ids=["c0"]),

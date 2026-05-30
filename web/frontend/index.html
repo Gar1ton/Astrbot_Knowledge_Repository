@@ -41,6 +41,23 @@
     .empty { color:var(--muted); padding:20px; text-align:center; }
     .drop { border:2px dashed var(--line); border-radius:10px; padding:26px; text-align:center; color:var(--muted); cursor:pointer; }
     .drop.over { border-color:var(--accent); color:var(--fg); }
+    .graph-grid { display:grid; grid-template-columns:minmax(0,1fr) 320px; gap:14px; align-items:stretch; }
+    .graph-canvas { min-height:420px; background:var(--bg); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+    .graph-detail { min-height:420px; background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:14px; overflow:auto; }
+    .graph-node { cursor:pointer; }
+    .graph-node circle { stroke:rgba(255,255,255,.42); stroke-width:1.5; }
+    .graph-node text { fill:var(--fg); font-size:12px; pointer-events:none; }
+    .graph-edge { stroke:rgba(154,160,173,.58); stroke-width:1.4; }
+    .graph-edge-label { fill:var(--muted); font-size:10px; pointer-events:none; }
+    .debug-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; }
+    .debug-box { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; }
+    .settings-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; }
+    .kv { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px; }
+    .kv b { display:block; margin-bottom:8px; }
+    .kv dl { margin:0; display:grid; grid-template-columns:120px minmax(0,1fr); gap:6px 10px; }
+    .kv dt { color:var(--muted); }
+    .kv dd { margin:0; overflow-wrap:anywhere; }
+    @media (max-width:860px) { .graph-grid { grid-template-columns:1fr; } }
     .hidden { display:none; }
     #login { position:fixed; inset:0; background:var(--bg); display:flex; align-items:center; justify-content:center; }
     #login .box { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:28px; width:300px; }
@@ -79,6 +96,7 @@
     <button data-tab="kb" onclick="switchTab('kb')">知识库检索</button>
     <button data-tab="graph" onclick="switchTab('graph')">知识图谱</button>
     <button data-tab="quota" onclick="switchTab('quota')">配额仪表盘</button>
+    <button data-tab="settings" onclick="switchTab('settings')">设置核对</button>
   </nav>
 
   <main>
@@ -133,6 +151,8 @@
         <div class="row">
           <button class="btn" onclick="doSync('r2')">⬆ 同步到 R2</button>
           <button class="btn" onclick="doSync('notion')">⬆ 同步到 Notion</button>
+          <button class="btn ghost" onclick="doNotionPull()">⬇ 从 Notion 拉取分类/标签</button>
+          <button class="btn ghost" onclick="doNotionInit()">初始化 Notion Database</button>
           <button class="btn ghost" onclick="doSync('all')">同步全部</button>
           <button class="btn ghost" onclick="loadSyncStatus()">查看同步状态</button>
         </div>
@@ -166,11 +186,17 @@
     <section id="tab-graph" class="hidden">
       <div class="panel">
         <h2>知识图谱（LightRAG 增量）</h2>
-        <div class="row">
+        <div class="row" style="margin-bottom:12px">
+          <select id="graphCol" onchange="loadGraphData()"></select>
           <button class="btn" onclick="doGraphBuild()">⚙ 构建 / 增量更新图谱</button>
+          <button class="btn ghost" onclick="loadGraphData()">刷新图谱</button>
           <input id="graphQ" placeholder="图谱查询词" style="flex:1; min-width:200px"
                  onkeyup="if(event.key==='Enter')doGraphQuery()" />
           <button class="btn" onclick="doGraphQuery()">查询</button>
+        </div>
+        <div class="graph-grid">
+          <div id="graphCanvas" class="graph-canvas"></div>
+          <div id="graphDetail" class="graph-detail muted">选择节点或关系查看来源片段预览。</div>
         </div>
         <div id="graphResult" style="margin-top:14px"></div>
       </div>
@@ -182,6 +208,18 @@
         <h2>在线服务配额（接近上限时警告）</h2>
         <div id="quotaCards"></div>
         <p class="muted" style="margin-top:14px">R2 免费额度 10GB / 出口免费；Notion 不以字节计额度（单文件 5MiB、限流约 3 req/s）。</p>
+      </div>
+    </section>
+
+    <!-- 设置核对 -->
+    <section id="tab-settings" class="hidden">
+      <div class="panel">
+        <h2>后端有效配置</h2>
+        <div id="settingsGrid" class="settings-grid"></div>
+      </div>
+      <div class="panel">
+        <h2>前后端能力接线</h2>
+        <div id="capabilityGrid" class="settings-grid"></div>
       </div>
     </section>
   </main>
@@ -209,11 +247,31 @@
 
     let mockKbChunks = {
       "papers": [
-        { chunk_id: "k0", ordinal: 0, text: "The Transformer relies on self-attention." },
-        { chunk_id: "k1", ordinal: 0, text: "LightRAG builds an incremental KG." }
+        { chunk_id: "k0", doc_id: "seed-0", ordinal: 0, text: "The Transformer relies on self-attention." },
+        { chunk_id: "k1", doc_id: "seed-1", ordinal: 0, text: "LightRAG builds an incremental KG." }
       ],
       "manuals": [
-        { chunk_id: "k2", ordinal: 0, text: "Run AstrBot via docker, init data dir." }
+        { chunk_id: "k2", doc_id: "seed-2", ordinal: 0, text: "Run AstrBot via docker, init data dir." }
+      ]
+    };
+    let currentGraph = { nodes: [], edges: [] };
+
+    const mockGraph = {
+      status: "success",
+      collection: "papers",
+      nodes: [
+        { id:"transformer", name:"Transformer", type:"Method", description:"Self-attention model.", degree:2,
+          source_chunk_ids:["k0"], source_previews:[{chunk_id:"k0", doc_id:"seed-0", ordinal:0, text:"The Transformer relies on self-attention.", truncated:false}] },
+        { id:"attention", name:"Attention", type:"Method", description:"Sequence alignment mechanism.", degree:1,
+          source_chunk_ids:["k0"], source_previews:[{chunk_id:"k0", doc_id:"seed-0", ordinal:0, text:"The Transformer relies on self-attention.", truncated:false}] },
+        { id:"lightrag", name:"LightRAG", type:"Method", description:"Incremental knowledge graph RAG.", degree:1,
+          source_chunk_ids:["k1"], source_previews:[{chunk_id:"k1", doc_id:"seed-1", ordinal:0, text:"LightRAG builds an incremental KG.", truncated:false}] }
+      ],
+      edges: [
+        { id:"transformer:attention:uses", source:"transformer", target:"attention", relation:"uses", description:"Transformer uses attention.", weight:1.0,
+          source_chunk_ids:["k0"], source_previews:[{chunk_id:"k0", doc_id:"seed-0", ordinal:0, text:"The Transformer relies on self-attention.", truncated:false}] },
+        { id:"lightrag:transformer:compares", source:"lightrag", target:"transformer", relation:"compares", description:"LightRAG can retrieve Transformer-related context.", weight:0.7,
+          source_chunk_ids:["k1"], source_previews:[{chunk_id:"k1", doc_id:"seed-1", ordinal:0, text:"LightRAG builds an incremental KG.", truncated:false}] }
       ]
     };
 
@@ -301,6 +359,33 @@
               { target: "r2", used_bytes: 8053063680, limit_bytes: 10737418240, ratio: 0.75, detail: "R2 Object Storage" },
               { target: "notion", used_bytes: 0, limit_bytes: 0, ratio: 0.0, detail: "Notion Database (单文件 5MiB、限流约 3 req/s)" }
             ]);
+          } else if (pathname === "/api/config/effective") {
+            resolve({
+              source_store: { db_filename:"knowledge_repository.db", default_collection:"default", ocr_enabled:false },
+              r2_sync: { enabled:true, bucket:"kr-demo", account_id:"ac****nt", access_key_id:"ak****id", secret_access_key:"****", free_tier_gb:10, warn_threshold:0.8, backup_interval_sec:86400 },
+              notion_sync: { enabled:true, mcp_server_name:"notion", database_id:"demo-db", parent_page_id:"demo-parent", database_title:"Knowledge Repository", max_upload_mib:5, link_large_to_r2:true, rate_limit_rps:3 },
+              web_console: { enabled:true, host:"0.0.0.0", port:6520, username:"admin", password:"****" },
+              graph: { enabled:true, llm_extraction:true, incremental:true, reuse_kb_embedding:true, merge_similarity_threshold:0.9, rrf_k:60, query_top_k:5, entity_types:["Method/Algorithm","Dataset"] }
+            });
+          } else if (pathname === "/api/graph") {
+            resolve(mockGraph);
+          } else if (pathname === "/api/graph/query") {
+            const q = url.searchParams.get("q") || "";
+            resolve({
+              status: "success",
+              query: q,
+              collection: url.searchParams.get("collection") || "papers",
+              chunks: mockKbChunks.papers,
+              entities: mockGraph.nodes.filter(n => n.name.toLowerCase().includes(q.toLowerCase()) || q),
+              relations: mockGraph.edges,
+              context: "=== Retrieved Text Chunks ===\n" + mockKbChunks.papers.map(c => c.text).join("\n"),
+              debug: {
+                vector_chunk_ids: ["k0"],
+                keyword_chunk_ids: ["k0"],
+                graph_chunk_ids: ["k1"],
+                rrf_scores: { k0: 0.0327, k1: 0.0161 }
+              }
+            });
           } else {
             reject(new Error("Unknown Mock API: " + pathname));
           }
@@ -313,7 +398,11 @@
       const pathname = url.pathname;
       return new Promise((resolve) => {
         setTimeout(() => {
-          if (pathname.startsWith("/api/sync/")) {
+          if (pathname === "/api/notion/init") {
+            resolve({ reserved: false, result: { status:"success", database_id:"mock-db", created:true } });
+          } else if (pathname === "/api/sync/notion/pull") {
+            resolve({ reserved: false, result: { status:"success", updated_count:1, skipped_count:0, warnings:[] } });
+          } else if (pathname.startsWith("/api/sync/")) {
             const target = pathname.substring("/api/sync/".length);
             if (target === "status") {
               resolve({ reserved: true, available_in: "v0.4.0" });
@@ -322,6 +411,8 @@
             }
           } else if (pathname === "/api/backup" || pathname === "/api/restore") {
             resolve({ reserved: true, available_in: "v0.3.0" });
+          } else if (pathname === "/api/graph/build") {
+            resolve({ reserved: false, result: { status:"success", message:"Mock graph build completed." } });
           } else if (pathname.startsWith("/api/graph/")) {
             resolve({ reserved: true, available_in: "v0.6.0" });
           } else {
@@ -349,8 +440,10 @@
 
     function switchTab(t) {
       document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === t));
-      ["docs","cls","sync","kb","graph","quota"].forEach(x => $("tab-"+x).classList.toggle("hidden", x !== t));
+      ["docs","cls","sync","kb","graph","quota","settings"].forEach(x => $("tab-"+x).classList.toggle("hidden", x !== t));
       if (t === "cls") loadCols(); if (t === "kb") loadKbCols(); if (t === "quota") loadQuota();
+      if (t === "graph") loadGraphTab();
+      if (t === "settings") loadSettings();
     }
 
     async function callReserved(path, opts) {
@@ -382,6 +475,30 @@
       $("syncStatus").innerHTML = r.reserved ? reservedHtml(r.available_in)
         : `<pre style="white-space:pre-wrap">${JSON.stringify(r.result, null, 2)}</pre>`;
     }
+    async function doNotionInit() {
+      try {
+        const cfg = await api("/api/config/effective");
+        const notion = cfg.notion_sync || {};
+        const r = await callReserved("/api/notion/init", { method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({
+            parent_page_id: notion.parent_page_id || "",
+            database_title: notion.database_title || "Knowledge Repository"
+          }) });
+        $("syncStatus").innerHTML = r.reserved ? reservedHtml(r.available_in)
+          : `<pre style="white-space:pre-wrap">${JSON.stringify(r.result, null, 2)}</pre>`;
+        toast(r.reserved ? "Notion 初始化未接入" : "Notion 初始化完成");
+      } catch (e) { toast("Notion 初始化失败：" + e.message); }
+    }
+    async function doNotionPull() {
+      try {
+        const r = await callReserved("/api/sync/notion/pull", { method:"POST" });
+        $("syncStatus").innerHTML = r.reserved ? reservedHtml(r.available_in)
+          : `<pre style="white-space:pre-wrap">${JSON.stringify(r.result, null, 2)}</pre>`;
+        toast(r.reserved ? "Notion 拉取未接入" : "Notion 拉取完成");
+        if (!r.reserved) loadDocs();
+      } catch (e) { toast("Notion 拉取失败：" + e.message); }
+    }
     async function doBackup() {
       const r = await callReserved("/api/backup", { method:"POST" });
       $("backupNote").innerHTML = r.reserved ? "备份：将在 " + r.available_in + " 接入"
@@ -397,18 +514,152 @@
       toast(r.reserved ? "恢复（未接入）" : "恢复完成");
     }
 
-    // ── 知识图谱（预留）──
+    // ── 知识图谱（轻量可检验界面）──
+    async function loadGraphTab() {
+      await refreshCollections();
+      const opts = collections.map(c => `<option value="${c.name}">${c.name}</option>`).join("");
+      $("graphCol").innerHTML = opts || `<option value="default">default</option>`;
+      loadGraphData();
+    }
     async function doGraphBuild() {
+      const collection = $("graphCol").value || "default";
       const r = await callReserved("/api/graph/build", { method:"POST",
-        headers:{"Content-Type":"application/json"}, body: JSON.stringify({}) });
-      $("graphResult").innerHTML = r.reserved ? reservedHtml(r.available_in)
-        : `<pre style="white-space:pre-wrap">${JSON.stringify(r.result, null, 2)}</pre>`;
+        headers:{"Content-Type":"application/json"}, body: JSON.stringify({ collection }) });
+      $("graphResult").innerHTML = r.reserved ? reservedHtml(r.available_in) : graphNotice(r.result);
+      if (!r.reserved) loadGraphData();
+    }
+    function graphNotice(result) {
+      return `<div class="panel" style="margin:0"><b>${escapeHtml(result.status || "ok")}</b>
+        <span class="muted"> ${escapeHtml(result.message || "")}</span></div>`;
+    }
+    async function loadGraphData() {
+      const collection = $("graphCol").value || "default";
+      try {
+        const graph = await api("/api/graph?collection=" + encodeURIComponent(collection));
+        renderGraph(graph);
+        $("graphResult").innerHTML = `<p class="muted">Loaded ${graph.nodes.length} nodes / ${graph.edges.length} edges.</p>`;
+      } catch (e) {
+        $("graphCanvas").innerHTML = `<div class="empty">图谱暂不可用：${escapeHtml(e.message)}</div>`;
+      }
     }
     async function doGraphQuery() {
       const q = $("graphQ").value; if (!q) return toast("请输入查询词");
-      const r = await callReserved("/api/graph/query?q=" + encodeURIComponent(q));
-      $("graphResult").innerHTML = r.reserved ? reservedHtml(r.available_in)
-        : `<pre style="white-space:pre-wrap">${JSON.stringify(r.result, null, 2)}</pre>`;
+      const collection = $("graphCol").value || "default";
+      const res = await api(`/api/graph/query?collection=${encodeURIComponent(collection)}&q=${encodeURIComponent(q)}&debug=true`);
+      $("graphResult").innerHTML = renderGraphQuery(res);
+    }
+    function renderGraph(graph) {
+      currentGraph = graph;
+      if (!graph.nodes.length) {
+        $("graphCanvas").innerHTML = `<div class="empty">该集合暂无图谱数据。先执行构建或上传文档。</div>`;
+        $("graphDetail").innerHTML = "选择节点或关系查看来源片段预览。";
+        return;
+      }
+      const w = 760, h = 420, cx = w / 2, cy = h / 2, r = Math.min(w, h) * 0.34;
+      const pos = {};
+      graph.nodes.forEach((n, i) => {
+        const a = Math.PI * 2 * i / Math.max(1, graph.nodes.length) - Math.PI / 2;
+        pos[n.id] = { x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r };
+      });
+      const colors = ["#5b8def", "#4caf72", "#e0a23b", "#d56bd6", "#42b7a8"];
+      const typeColor = {};
+      graph.nodes.forEach(n => {
+        if (!typeColor[n.type]) typeColor[n.type] = colors[Object.keys(typeColor).length % colors.length];
+      });
+      const edges = graph.edges.map(e => {
+        const s = pos[e.source], t = pos[e.target]; if (!s || !t) return "";
+        const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2;
+        const sw = Math.max(1, Math.min(5, e.weight || 1));
+        return `<g onclick="showGraphDetailById('edge','${escapeAttr(e.id)}')">
+          <line class="graph-edge" x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" style="stroke-width:${sw}"></line>
+          <text class="graph-edge-label" x="${mx}" y="${my}">${escapeHtml(e.relation || "")}</text>
+        </g>`;
+      }).join("");
+      const nodes = graph.nodes.map(n => {
+        const p = pos[n.id], size = 12 + Math.min(14, (n.degree || 0) * 3);
+        return `<g class="graph-node" onclick="showGraphDetailById('node','${escapeAttr(n.id)}')">
+          <circle cx="${p.x}" cy="${p.y}" r="${size}" fill="${typeColor[n.type]}"></circle>
+          <text x="${p.x + size + 4}" y="${p.y + 4}">${escapeHtml(n.name)}</text>
+        </g>`;
+      }).join("");
+      $("graphCanvas").innerHTML = `<svg viewBox="0 0 ${w} ${h}" width="100%" height="100%">${edges}${nodes}</svg>`;
+    }
+    function showGraphDetailById(kind, id) {
+      const item = kind === "node"
+        ? currentGraph.nodes.find(n => n.id === id)
+        : currentGraph.edges.find(e => e.id === id);
+      if (item) showGraphDetail(item);
+    }
+    function showGraphDetail(item) {
+      const title = item.name || `${item.source} → ${item.target}`;
+      const meta = item.type || item.relation || "";
+      const previews = item.source_previews || [];
+      $("graphDetail").innerHTML = `<h3 style="margin-top:0">${escapeHtml(title)}</h3>
+        <p class="muted">${escapeHtml(meta)} ${item.degree !== undefined ? " · degree " + item.degree : ""}</p>
+        <p>${escapeHtml(item.description || "无描述")}</p>
+        <h4>来源片段预览</h4>
+        ${previews.length ? previews.map(p => `<div class="debug-box" style="margin-bottom:8px">
+          <div class="muted">${p.doc_id} · ${p.chunk_id} · ordinal ${p.ordinal}${p.truncated ? " · 已截断" : ""}</div>
+          <div>${escapeHtml(p.text)}</div>
+        </div>`).join("") : `<p class="muted">无来源片段。</p>`}`;
+    }
+    function renderGraphQuery(res) {
+      const debug = res.debug || {};
+      const chunks = res.chunks || [];
+      return `<div class="panel" style="margin:0 0 12px"><b>查询：</b>${escapeHtml(res.query || "")}
+        <span class="muted"> · ${escapeHtml(res.collection || "")}</span></div>
+        <div class="debug-grid">
+          ${debugBox("Vector", debug.vector_chunk_ids)}
+          ${debugBox("Keyword", debug.keyword_chunk_ids)}
+          ${debugBox("1-hop Graph", debug.graph_chunk_ids)}
+          ${debugBox("RRF Scores", Object.entries(debug.rrf_scores || {}).map(([k,v]) => `${k}: ${Number(v).toFixed(4)}`))}
+        </div>
+        <h3>融合结果</h3>
+        ${chunks.length ? chunks.map((ch, i) => `<div class="panel" style="margin:10px 0">
+          <b>#${i+1}</b> <span class="muted">${ch.doc_id} · ${ch.chunk_id}</span>
+          <div>${escapeHtml(ch.text || "")}</div>
+        </div>`).join("") : `<div class="empty">无融合结果</div>`}
+        <h3>Academic Context Preview</h3>
+        <pre style="white-space:pre-wrap">${escapeHtml((res.context || "").slice(0, 1200))}</pre>`;
+    }
+    function debugBox(title, items) {
+      const list = (items || []).map(x => `<span class="tag">${escapeHtml(String(x))}</span>`).join("") || `<span class="muted">empty</span>`;
+      return `<div class="debug-box"><b>${title}</b><div style="margin-top:8px">${list}</div></div>`;
+    }
+
+    // ── 设置核对 ──
+    async function loadSettings() {
+      try {
+        const cfg = await api("/api/config/effective");
+        $("settingsGrid").innerHTML = Object.entries(cfg).map(([section, values]) => configCard(section, values)).join("");
+      } catch (e) {
+        $("settingsGrid").innerHTML = `<div class="empty">配置读取失败：${escapeHtml(e.message)}</div>`;
+      }
+      const rows = [
+        ["文档管理", "GET/POST/PATCH/DELETE /api/documents"],
+        ["集合管理", "GET/POST/DELETE /api/collections"],
+        ["同步推送", "POST /api/sync/{target}"],
+        ["Notion 建库", "POST /api/notion/init"],
+        ["Notion 拉取", "POST /api/sync/notion/pull"],
+        ["配置核对", "GET /api/config/effective"],
+        ["知识图谱", "POST /api/graph/build · GET /api/graph/query · GET /api/graph"],
+        ["配额", "GET /api/quota"]
+      ];
+      $("capabilityGrid").innerHTML = rows.map(([name, endpoint]) =>
+        `<div class="kv"><b>${escapeHtml(name)}</b><span class="tag">已接线</span><p class="muted">${escapeHtml(endpoint)}</p></div>`
+      ).join("");
+    }
+    function configCard(section, values) {
+      const rows = Object.entries(values || {}).map(([k, v]) =>
+        `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(Array.isArray(v) ? v.join(", ") : String(v))}</dd>`
+      ).join("");
+      return `<div class="kv"><b>${escapeHtml(section)}</b><dl>${rows}</dl></div>`;
+    }
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+    }
+    function escapeAttr(s) {
+      return String(s).replace(/[&"'<>]/g, c => ({ "&":"&amp;", '"':"&quot;", "'":"&#39;", "<":"&lt;", ">":"&gt;" }[c]));
     }
 
     // ── 认证 ──

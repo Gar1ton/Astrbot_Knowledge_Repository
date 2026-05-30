@@ -258,6 +258,50 @@ class SQLiteGraphStore(GraphStore):
                 for row in rows
             ]
 
+    async def list_entities(self) -> list[GraphEntity]:
+        async with self._db.execute(
+            """
+            SELECT entity_id, name, entity_type, description, source_chunk_ids, degree
+            FROM graph_entities
+            ORDER BY degree DESC, LOWER(name) ASC, entity_id ASC
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                GraphEntity(
+                    entity_id=row[0],
+                    name=row[1],
+                    entity_type=row[2],
+                    description=row[3],
+                    source_chunk_ids=json.loads(row[4]),
+                    degree=row[5],
+                )
+                for row in rows
+            ]
+
+    async def list_relations(self) -> list[GraphRelation]:
+        async with self._db.execute(
+            """
+            SELECT relation_id, src_entity_id, dst_entity_id, relation,
+                   description, weight, source_chunk_ids
+            FROM graph_relations
+            ORDER BY weight DESC, relation_id ASC
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                GraphRelation(
+                    relation_id=row[0],
+                    src_entity_id=row[1],
+                    dst_entity_id=row[2],
+                    relation=row[3],
+                    description=row[4],
+                    weight=row[5],
+                    source_chunk_ids=json.loads(row[6]),
+                )
+                for row in rows
+            ]
+
     async def get_neighbors(
         self, entity_id: str, depth: int = 1
     ) -> list[GraphRelation]:

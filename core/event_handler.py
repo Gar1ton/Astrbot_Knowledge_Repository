@@ -233,6 +233,46 @@ class EventHandler:
         except Exception as e:
             return f"Error: Notion Sync execution failed: {e}"
 
+    async def on_notion_init(
+        self,
+        parent_page_id: str | None = None,
+        database_title: str | None = None,
+    ) -> str:
+        """/kr notion init [parent_page_id] [database_title]"""
+        if self._initializer.api is None:
+            return "Error: API facade not initialized."
+
+        try:
+            res = await self._initializer.api.initialize_notion_database(
+                parent_page_id=parent_page_id,
+                database_title=database_title,
+            )
+            if res.get("status") == "success":
+                action = "created" if res.get("created") else "already configured"
+                return f"Notion database {action}: {res.get('database_id')}"
+            return f"Notion init failed: {res.get('message')}"
+        except Exception as e:
+            return f"Error: Notion init failed: {e}"
+
+    async def on_sync_notion_pull(self) -> str:
+        """/kr sync notion --pull"""
+        if self._initializer.api is None:
+            return "Error: API facade not initialized."
+
+        try:
+            res = await self._initializer.api.pull_notion_metadata()
+            if res.get("status") == "success":
+                updated = res.get("updated_count", 0)
+                skipped = res.get("skipped_count", 0)
+                msg = f"Notion Pull successful! Updated: {updated}, Skipped: {skipped}."
+                warnings = res.get("warnings") or []
+                if warnings:
+                    msg += "\nWarnings:\n" + "\n".join(f"- {w}" for w in warnings[:5])
+                return msg
+            return f"Notion Pull failed: {res.get('message')}"
+        except Exception as e:
+            return f"Error: Notion Pull execution failed: {e}"
+
     async def on_sync_status(self) -> str:
         """/kr sync status"""
         if self._initializer.api is None:
@@ -254,6 +294,60 @@ class EventHandler:
             return "\n".join(lines)
         except Exception as e:
             return f"Error: Failed to fetch sync status: {e}"
+
+    async def on_graph_build(self, collection: str | None = None) -> str:
+        """/kr graph build [--collection <col>]"""
+        if self._initializer.api is None:
+            return "Error: API facade not initialized."
+
+        try:
+            res = await self._initializer.api.build_graph(collection)
+            if res.get("status") == "success":
+                return f"Success: {res.get('message')}"
+            return f"Error: Graph build failed: {res.get('message')}"
+        except Exception as e:
+            return f"Error: Graph build failed: {e}"
+
+    async def on_graph_query(self, query: str, top_k: int = 5) -> str:
+        """/kr graph query <q> [--top_k <top_k>]"""
+        if self._initializer.api is None:
+            return "Error: API facade not initialized."
+
+        try:
+            res = await self._initializer.api.query_graph(query, top_k=top_k)
+            if res.get("status") == "success":
+                lines = [f"=== Graph Query Results for '{query}' ==="]
+                if res.get("entities"):
+                    lines.append("\n[Entities]")
+                    for ent in res["entities"][:5]:
+                        lines.append(
+                            f"- [{ent['entity_type']}] {ent['name']}: "
+                            f"{ent['description']} (Degree: {ent['degree']})"
+                        )
+                if res.get("relations"):
+                    lines.append("\n[Relations]")
+                    for rel in res["relations"][:5]:
+                        lines.append(
+                            f"- {rel['src_entity_id']} --({rel['relation']})--> "
+                            f"{rel['dst_entity_id']}: {rel['description']}"
+                        )
+                if res.get("chunks"):
+                    lines.append("\n[Text Chunks]")
+                    for i, ch in enumerate(res["chunks"]):
+                        lines.append(f"Chunk {i+1} (DocID: {ch['doc_id']}): {ch['text'][:150]}...")
+
+                if res.get("context"):
+                    lines.append("\n[Academic Context Header Preview]")
+                    preview_len = 300
+                    lines.append(
+                        res["context"][:preview_len] + "\n..."
+                        if len(res["context"]) > preview_len
+                        else res["context"]
+                    )
+                return "\n".join(lines)
+            return f"Error: Graph query failed: {res.get('message')}"
+        except Exception as e:
+            return f"Error: Graph query failed: {e}"
 
 
 __all__ = ["EventHandler"]

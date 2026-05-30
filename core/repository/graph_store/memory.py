@@ -98,6 +98,20 @@ class InMemoryGraphStore(GraphStore):
             if e.name.strip().lower() == key
         ]
 
+    async def list_entities(self) -> list[GraphEntity]:
+        ordered = sorted(
+            self._entities.values(),
+            key=lambda e: (-e.degree, e.name.lower(), e.entity_id),
+        )
+        return [copy.deepcopy(e) for e in ordered]
+
+    async def list_relations(self) -> list[GraphRelation]:
+        ordered = sorted(
+            self._relations.values(),
+            key=lambda r: (-r.weight, r.relation_id),
+        )
+        return [copy.deepcopy(r) for r in ordered]
+
     async def get_neighbors(self, entity_id: str, depth: int = 1) -> list[GraphRelation]:
         if depth <= 0 or entity_id not in self._entities:
             return []

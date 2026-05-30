@@ -31,8 +31,16 @@ def test_r2_endpoint_and_free_tier_bytes() -> None:
 
 
 def test_notion_max_upload_bytes() -> None:
-    n = Config({"notion_sync": {"max_upload_mib": 5}}).get_notion_sync_config()
+    n = Config({
+        "notion_sync": {
+            "max_upload_mib": 5,
+            "parent_page_id": "parent-1",
+            "database_title": "KR",
+        }
+    }).get_notion_sync_config()
     assert n.max_upload_bytes == 5 * 1024 * 1024
+    assert n.parent_page_id == "parent-1"
+    assert n.database_title == "KR"
 
 
 def test_secret_env_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,3 +64,16 @@ def test_malformed_section_falls_back_to_defaults() -> None:
     # 子配置类型不符（非 dict）时应安全回退默认值
     cfg = Config({"graph": "not-a-dict"})
     assert cfg.get_graph_config().rrf_k == 60
+
+
+def test_public_config_masks_secrets() -> None:
+    cfg = Config({
+        "r2_sync": {"access_key_id": "abcdef", "secret_access_key": "secret123"},
+        "web_console": {"password": "password123"},
+        "notion_sync": {"database_id": "db1", "parent_page_id": "parent1"},
+    })
+    public = cfg.to_public_dict()
+    assert public["r2_sync"]["access_key_id"] == "ab****ef"
+    assert public["r2_sync"]["secret_access_key"] == "se****23"
+    assert public["web_console"]["password"] == "pa****23"
+    assert public["notion_sync"]["database_id"] == "db1"

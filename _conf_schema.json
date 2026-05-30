@@ -96,9 +96,19 @@
         "default": "notion"
       },
       "database_id": {
-        "description": "目标 Notion Database ID（用户自定义提供）",
+        "description": "目标 Notion Database ID（可由自动建库回写）",
         "type": "string",
         "default": ""
+      },
+      "parent_page_id": {
+        "description": "自动建库时使用的 Notion Parent Page ID",
+        "type": "string",
+        "default": ""
+      },
+      "database_title": {
+        "description": "自动创建的 Notion Database 标题",
+        "type": "string",
+        "default": "Knowledge Repository"
       },
       "max_upload_mib": {
         "description": "单文件上传上限（MiB）",

@@ -143,3 +143,9 @@ async def test_graph_search_pipeline_hybrid_rrf_and_context(
     assert "transformer --(uses)--> attention" in context
     assert "=== 精准检索文本分块 (Retrieved Text Chunks) ===" in context
     assert "Transformer is deep." in context
+
+    debug_res = await pipeline.search("papers", "Transformer", top_k=5, debug=True)
+    assert debug_res["debug"]["vector_chunk_ids"] == ["c2"]
+    assert debug_res["debug"]["keyword_chunk_ids"] == ["c1"]
+    assert debug_res["debug"]["graph_chunk_ids"] == ["c1"]
+    assert set(debug_res["debug"]["rrf_scores"]) == {"c1", "c2"}

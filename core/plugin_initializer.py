@@ -24,9 +24,13 @@ from core.managers.quota_manager import QuotaManager
 from core.pipelines.sync_pipeline import SyncPipeline
 from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
 from core.repository.sync_targets.r2 import R2SyncTarget
+from core.runtime_config import RuntimeConfigStore
 from migrations.runner import run_migrations
 
 if TYPE_CHECKING:
+    from core.pipelines.graph_build_pipeline import GraphBuildPipeline
+    from core.pipelines.graph_search_pipeline import GraphSearchPipeline
+    from core.repository.graph_store.base import GraphStore
     from core.repository.kb_reader.base import KnowledgeBaseReader
     from core.repository.source_store.base import SourceDocumentStore
 
@@ -38,8 +42,9 @@ class PluginInitializer:
 
     def __init__(self, context: Any, raw_config: dict[str, Any], data_dir: Path) -> None:
         self._context = context
-        self._config = Config(raw_config)
         self._data_dir = data_dir
+        self._runtime_config = RuntimeConfigStore(data_dir / "runtime_config.json")
+        self._config = Config(self._runtime_config.merged_with(raw_config))
         self._exit_stack: AsyncExitStack | None = None
         self._backup_task: asyncio.Task[Any] | None = None
 
@@ -47,6 +52,9 @@ class PluginInitializer:
         self.source_store: SourceDocumentStore | None = None
         self.kb_reader: KnowledgeBaseReader | None = None
         self.api: KnowledgeRepositoryApi | None = None
+        self.graph_store: GraphStore | None = None
+        self.graph_build_pipeline: GraphBuildPipeline | None = None
+        self.graph_search_pipeline: GraphSearchPipeline | None = None
 
         # 依赖句柄
         self.ingest_manager: IngestManager | None = None
@@ -96,6 +104,8 @@ class PluginInitializer:
         sync_targets[SyncTargetKind.NOTION] = notion_target
 
         # 4) 依赖前者的编排层 managers/pipelines
+        graph_cfg = self._config.get_graph_config()
+
         self.ingest_manager = IngestManager(
             source_store=self.source_store,
             config=source_cfg,
@@ -110,6 +120,27 @@ class PluginInitializer:
             db_path=db_path,
         )
 
+        # 4.5) 构造知识图谱子系统与管线
+        from core.adapters.llm import LLMAdapter
+        from core.pipelines.graph_build_pipeline import GraphBuildPipeline
+        from core.pipelines.graph_search_pipeline import GraphSearchPipeline
+        from core.repository.graph_store.sqlite import SQLiteGraphStore
+
+        self.graph_store = SQLiteGraphStore(db)
+        llm_adapter = LLMAdapter(self._context)
+        self.graph_build_pipeline = GraphBuildPipeline(
+            source_store=self.source_store,
+            graph_store=self.graph_store,
+            llm_adapter=llm_adapter,
+            config=graph_cfg,
+        )
+        self.graph_search_pipeline = GraphSearchPipeline(
+            source_store=self.source_store,
+            graph_store=self.graph_store,
+            kb_reader=self.kb_reader,
+            config=graph_cfg,
+        )
+
         # 5) 业务门面（依赖已装配的仓储/managers）。
         self.api = KnowledgeRepositoryApi(
             source_store=self.source_store,
@@ -119,6 +150,11 @@ class PluginInitializer:
             category_manager=self.category_manager,
             quota_manager=self.quota_manager,
             sync_pipeline=self.sync_pipeline,
+            graph_store=self.graph_store,
+            graph_build_pipeline=self.graph_build_pipeline,
+            graph_search_pipeline=self.graph_search_pipeline,
+            config=self._config,
+            config_persist=self._persist_config_value,
         )
 
         # 6) 周期任务（如 R2 周期备份，v0.3.0 起注册）。
@@ -126,6 +162,9 @@ class PluginInitializer:
             self._backup_task = asyncio.create_task(
                 self._periodic_backup(r2_cfg.backup_interval_sec)
             )
+
+    def _persist_config_value(self, section: str, key: str, value: object) -> None:
+        self._runtime_config.set_value(section, key, value)
 
     async def _periodic_backup(self, interval_sec: int) -> None:
         """周期性触发 R2 同步备份任务的后台循环。"""

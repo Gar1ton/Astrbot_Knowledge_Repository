@@ -42,6 +42,7 @@ class GraphSearchPipeline:
         collection: str,
         query: str,
         top_k: int | None = None,
+        debug: bool = False,
     ) -> dict[str, Any]:
         """执行混合图谱检索。
 
@@ -152,7 +153,7 @@ class GraphSearchPipeline:
 
         full_context = "\n".join(context_parts)
 
-        return {
+        result = {
             "status": "success",
             "query": query,
             "chunks": final_chunks,
@@ -160,6 +161,21 @@ class GraphSearchPipeline:
             "relations": matched_relations,
             "context": full_context,
         }
+        if debug:
+            result["debug"] = {
+                "vector_chunk_ids": [ch.chunk_id for ch in vector_chunks],
+                "keyword_chunk_ids": [ch.chunk_id for ch in keyword_chunks],
+                "graph_chunk_ids": [ch.chunk_id for ch in graph_chunks],
+                "rrf_scores": {
+                    chunk_id: score
+                    for chunk_id, (_, score) in sorted(
+                        rrf_scores.items(),
+                        key=lambda item: item[1][1],
+                        reverse=True,
+                    )
+                },
+            }
+        return result
 
     async def _find_local_chunk(self, chunk_id: str) -> DocumentChunk | None:
         """根据 chunk_id 从 SQLite 文档库中反查文本分块详情。"""

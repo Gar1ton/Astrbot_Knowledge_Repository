@@ -150,6 +150,28 @@ class SyncPipeline:
 
         return result
 
+    async def initialize_notion_database(
+        self,
+        parent_page_id: str | None = None,
+        database_title: str | None = None,
+    ) -> dict:
+        target = self._sync_targets.get(SyncTargetKind.NOTION)
+        if target is None:
+            return {"status": "error", "message": "Notion 同步目标未配置"}
+        initialize = getattr(target, "initialize_database", None)
+        if not callable(initialize):
+            return {"status": "error", "message": "Notion 目标不支持自动建库"}
+        return await initialize(parent_page_id, database_title)
+
+    async def pull_notion_metadata(self) -> dict:
+        target = self._sync_targets.get(SyncTargetKind.NOTION)
+        if target is None:
+            return {"status": "error", "message": "Notion 同步目标未配置"}
+        pull = getattr(target, "pull_metadata", None)
+        if not callable(pull):
+            return {"status": "error", "message": "Notion 目标不支持反向同步"}
+        return await pull()
+
     async def _backup_db_snapshot(self, target_kind: SyncTargetKind) -> None:
         """打包本地 SQLite 数据库快照备份至 R2 归档槽。"""
         if self._db_path is None or not self._db_path.exists():

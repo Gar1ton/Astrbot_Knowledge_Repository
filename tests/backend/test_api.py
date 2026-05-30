@@ -8,7 +8,14 @@ from __future__ import annotations
 import pytest
 
 from core.api import KnowledgeRepositoryApi
-from core.domain.models import DocumentChunk, SourceDocument, SyncTargetKind
+from core.domain.models import (
+    DocumentChunk,
+    GraphEntity,
+    GraphRelation,
+    SourceDocument,
+    SyncTargetKind,
+)
+from core.repository.graph_store.memory import InMemoryGraphStore
 from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
 from core.repository.source_store.memory import InMemorySourceDocumentStore
 from core.repository.sync_targets.memory import InMemorySyncTarget
@@ -117,3 +124,45 @@ async def test_list_quota_empty_when_no_targets() -> None:
         source_store=store, kb_reader=InMemoryKnowledgeBaseReader({})
     )
     assert await api.list_quota() == []
+
+
+async def test_get_graph_filters_by_collection_and_returns_source_previews() -> None:
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.add_document(_doc("d2", "manuals"))
+    await store.replace_chunks(
+        "d1",
+        [DocumentChunk("c1", "d1", 0, "Transformer source text " * 30, "h1")],
+    )
+    await store.replace_chunks("d2", [DocumentChunk("c2", "d2", 0, "Manual source text", "h2")])
+    graph = InMemoryGraphStore()
+    await graph.upsert_entities([
+        GraphEntity("transformer", "Transformer", "Method", "desc", ["c1"]),
+        GraphEntity("manual", "Manual", "Document", "desc", ["c2"]),
+    ])
+    await graph.upsert_relations([
+        GraphRelation(
+            "transformer:manual:mentions",
+            "transformer",
+            "manual",
+            "mentions",
+            "cross collection",
+            1.0,
+            ["c1"],
+        )
+    ])
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        graph_store=graph,
+    )
+
+    payload = await api.get_graph("papers")
+
+    assert payload["status"] == "success"
+    assert payload["collection"] == "papers"
+    assert [n["id"] for n in payload["nodes"]] == ["transformer"]
+    assert payload["edges"] == []
+    preview = payload["nodes"][0]["source_previews"][0]
+    assert preview["chunk_id"] == "c1"
+    assert preview["truncated"] is True

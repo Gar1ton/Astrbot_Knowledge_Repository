@@ -84,6 +84,8 @@ class NotionSyncConfig:
     enabled: bool = False
     mcp_server_name: str = "notion"
     database_id: str = ""
+    parent_page_id: str = ""
+    database_title: str = "Knowledge Repository"
     max_upload_mib: int = 5
     link_large_to_r2: bool = True
     rate_limit_rps: int = 3
@@ -136,6 +138,72 @@ class Config:
 
     raw: dict[str, Any] = field(default_factory=dict)
 
+    def apply_override(self, override: dict[str, Any]) -> None:
+        """合并运行时覆盖配置。用于自动建库后回填 database_id。"""
+        self.raw = merge_config_dicts(self.raw, override)
+
+    def set_value(self, section: str, key: str, value: Any) -> None:
+        """更新内存中的单个配置值。"""
+        current = self.raw.setdefault(section, {})
+        if not isinstance(current, dict):
+            current = {}
+            self.raw[section] = current
+        current[key] = value
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """返回前端可展示的有效配置；敏感字段脱敏。"""
+        source = self.get_source_store_config()
+        r2 = self.get_r2_sync_config()
+        notion = self.get_notion_sync_config()
+        web = self.get_web_console_config()
+        graph = self.get_graph_config()
+        return {
+            "source_store": {
+                "db_filename": source.db_filename,
+                "default_collection": source.default_collection,
+                "ocr_enabled": source.ocr_enabled,
+            },
+            "r2_sync": {
+                "enabled": r2.enabled,
+                "account_id": r2.account_id,
+                "access_key_id": _mask(r2.access_key_id),
+                "secret_access_key": _mask(r2.secret_access_key),
+                "bucket": r2.bucket,
+                "cdn_domain": r2.cdn_domain,
+                "free_tier_gb": r2.free_tier_gb,
+                "warn_threshold": r2.warn_threshold,
+                "backup_interval_sec": r2.backup_interval_sec,
+                "endpoint": r2.endpoint,
+            },
+            "notion_sync": {
+                "enabled": notion.enabled,
+                "mcp_server_name": notion.mcp_server_name,
+                "database_id": notion.database_id,
+                "parent_page_id": notion.parent_page_id,
+                "database_title": notion.database_title,
+                "max_upload_mib": notion.max_upload_mib,
+                "link_large_to_r2": notion.link_large_to_r2,
+                "rate_limit_rps": notion.rate_limit_rps,
+            },
+            "web_console": {
+                "enabled": web.enabled,
+                "host": web.host,
+                "port": web.port,
+                "username": web.username,
+                "password": _mask(web.password),
+            },
+            "graph": {
+                "enabled": graph.enabled,
+                "llm_extraction": graph.llm_extraction,
+                "incremental": graph.incremental,
+                "reuse_kb_embedding": graph.reuse_kb_embedding,
+                "merge_similarity_threshold": graph.merge_similarity_threshold,
+                "rrf_k": graph.rrf_k,
+                "query_top_k": graph.query_top_k,
+                "entity_types": graph.entity_types,
+            },
+        }
+
     def get_source_store_config(self) -> SourceStoreConfig:
         s = _section(self.raw, "source_store")
         return SourceStoreConfig(
@@ -164,6 +232,8 @@ class Config:
             enabled=bool(s.get("enabled", NotionSyncConfig.enabled)),
             mcp_server_name=s.get("mcp_server_name", NotionSyncConfig.mcp_server_name),
             database_id=s.get("database_id", NotionSyncConfig.database_id),
+            parent_page_id=s.get("parent_page_id", NotionSyncConfig.parent_page_id),
+            database_title=s.get("database_title", NotionSyncConfig.database_title),
             max_upload_mib=int(s.get("max_upload_mib", NotionSyncConfig.max_upload_mib)),
             link_large_to_r2=bool(s.get("link_large_to_r2", NotionSyncConfig.link_large_to_r2)),
             rate_limit_rps=int(s.get("rate_limit_rps", NotionSyncConfig.rate_limit_rps)),
@@ -201,9 +271,30 @@ class Config:
         )
 
 
+def merge_config_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """递归合并配置 dict，返回新对象。"""
+    merged: dict[str, Any] = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = merge_config_dicts(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _mask(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "****"
+    return f"{value[:2]}****{value[-2:]}"
+
+
 __all__ = [
     "ENV_R2_SECRET_ACCESS_KEY",
     "ENV_WEB_PASSWORD",
+    "merge_config_dicts",
     "SourceStoreConfig",
     "R2SyncConfig",
     "NotionSyncConfig",

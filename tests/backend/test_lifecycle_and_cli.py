@@ -38,6 +38,12 @@ def raw_config() -> dict[str, Any]:
             "bucket": "test-bucket",
             "backup_interval_sec": 60,
         },
+        "notion_sync": {
+            "enabled": True,
+            "parent_page_id": "parent-page",
+            "database_title": "KR Test",
+            "rate_limit_rps": 100,
+        },
     }
 
 
@@ -143,6 +149,23 @@ async def test_plugin_shell_lifecycle(
     with patch("boto3.client", return_value=mock_s3):
         res_sync = await plugin.on_sync_r2()
         assert "Sync successful" in res_sync or "Sync BLOCKED" in res_sync
+
+    # 10.5) 测试 /kr graph build
+    res_graph_build = await plugin.on_graph_build("papers")
+    assert "Success" in res_graph_build
+
+    # 测试 /kr graph query
+    res_graph_query = await plugin.on_graph_query("Transformer")
+    assert "Graph Query Results" in res_graph_query
+    assert "Transformer" in res_graph_query
+
+    # 10.6) 测试 /kr notion init 与 /kr sync notion --pull
+    res_notion_init = await plugin.on_notion_init()
+    assert "Notion database created" in res_notion_init
+    assert (temp_dir / "runtime_config.json").exists()
+
+    res_notion_pull = await plugin.on_sync_notion_pull()
+    assert "Notion Pull successful" in res_notion_pull
 
     # 11) 删除文档并删除集合
     assert plugin._initializer is not None

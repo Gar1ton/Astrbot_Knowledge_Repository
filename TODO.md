@@ -44,7 +44,59 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
-## v0.7.0 图谱可视化 + 检索预览进阶 (planning)
+## v0.9.0 Backend hardening without WebUI port changes (planning)
+
+### User constraints / 约束
+
+- 本版本只纳入不会影响前端端口与现有 WebUI 入口结构的重要优化。
+- 不修改 `web_console.host` / `web_console.port` 的运行语义。
+- 不做 WebUI 大改版；前端设计优化由用户后续单独处理。
+- 不执行任何 `git commit`，提交交给用户执行。
+
+### Technical implementation path
+
+- [ ] **Phase 1 — 配置持久化收敛**：为 `RuntimeConfigStore` 增加更清晰的加载/覆盖/写回边界，并预留 AstrBot 原生配置写回适配口；技术理由：v0.8.0 已能回写 `database_id`，但当前落点是 `data_dir/runtime_config.json`，需要把运行时覆盖与框架配置的职责固定下来。
+- [ ] **Phase 2 — Notion schema 与分页健壮性**：补 `query_database` 分页、标准属性存在性检查、缺失属性诊断信息；技术理由：真实 Notion 数据库页数变多或属性被用户改名时，当前 pull/push 需要更清楚地失败或降级。
+- [ ] **Phase 3 — 同步状态可审计性**：增强 Notion init/pull/push 的结果统计与错误消息，保证 `sync_records` 与 API 返回能区分 skipped、failed、schema_missing、remote_missing；技术理由：后续排查同步问题时不能只看泛化 error。
+- [ ] **Phase 4 — 历史 TODO 清理**：修正 v0.1.0 历史残留状态，把已被 v0.2.0+ 覆盖的初始化工作闭环；技术理由：避免后续 agent 误判项目仍卡在初始化阶段。
+- [ ] **Phase 5 — 回归与契约测试补强**：补 Notion 分页、schema 缺失、运行时配置覆盖优先级、错误消息稳定性的单元测试；技术理由：这些优化都在后端内部，不应改变前端端口或现有 UI 使用方式。
+
+### Verification
+
+- `python3 -m pytest tests/backend/test_config.py tests/backend/test_notion_target.py tests/backend/test_web_server.py tests/backend/test_lifecycle_and_cli.py` → 待执行
+- `python3 -m pytest` → 待执行
+- `ruff check . && mypy` → 待执行
+- `python3 tools/sync_frontend.py --check` → 待执行，确认前端静态产物仍一致
+
+---
+
+## v0.8.0 Notion 双向元数据 + 设置核对 (completed)
+
+### User constraints / 约束
+
+- 解决 Backlog 中两个 Notion 问题：自动建库与反向同步。
+- WebUI 设置项只做只读核对，不做完整配置编辑器。
+- 同步更新真实前端 `web/frontend/index.html` 与静态产物 `pages/index.html`。
+- 不执行任何 `git commit`，提交交给用户执行。
+
+### Technical implementation path
+
+- [x] **Phase 1** — Notion 自动建库：新增 `notion_sync.parent_page_id` / `database_title` 配置，经 Notion MCP `create_database` 创建标准 Database，并将生成的 `database_id` 写入 `data_dir/runtime_config.json` 运行时覆盖配置。
+- [x] **Phase 2** — Notion 反向同步：新增 pull 管线，只按 `DocID` 拉取 Notion 页面中的 `Collection` / `Tags` 并合并到本地文档；不覆盖标题、文件路径、content hash 或 PDF 原件，不做级联删除。
+- [x] **Phase 3** — API/CLI 接线：新增 `GET /api/config/effective`、`POST /api/notion/init`、`POST /api/sync/notion/pull`，并 plumb `/kr notion init` 与 `/kr sync notion --pull`。
+- [x] **Phase 4** — WebUI 设置核对：新增“设置核对”页，展示脱敏后的后端有效配置与前后端能力矩阵；同步/备份页新增 Notion 初始化和反向拉取按钮。
+- [x] **Phase 5** — 测试与前端同步：补充配置、Notion target、Web API、CLI 生命周期测试，并同步 `web/frontend/` 到 `pages/`。
+
+### Verification
+
+- `python3 -m pytest tests/backend/test_config.py tests/backend/test_notion_target.py tests/backend/test_web_server.py tests/backend/test_lifecycle_and_cli.py` → 43 passed
+- `python3 -m pytest` → 116 passed
+- `ruff check . && mypy` → All checks passed / Success
+- `python3 tools/sync_frontend.py --check` → pages/ 已与 web/frontend/ 一致
+
+---
+
+## v0.7.0 图谱可视化 + 检索预览进阶 (completed)
 
 ### User constraints / 约束
 
@@ -52,18 +104,25 @@
 
 ### Technical implementation path
 
-- [ ] **Phase 1** — 知识图谱可视化面板（实体/关系交互图，点击节点查看 source chunk）。
-- [ ] **Phase 2** — 图谱查询前端（dual-level 召回 + RRF 融合路径可视化）。
-- [ ] **Phase 3** — 检索预览增强：KB 向量召回 vs 图谱召回对比视图（调参用）。
+- [x] **Phase 1** — 后端图谱读接口补全：实现 `core/api.py::get_graph()` 与 `web/server.py` `/api/graph/data`，返回按 collection 过滤的 entities / relations / source chunk 引用；技术理由：前端图谱页不应直读 SQLite，必须走 API 门面。
+- [x] **Phase 2** — 图谱可视化数据模型与测试：为 graph data JSON 增加稳定字段（node id/name/type/degree、edge relation/weight/source_chunk_ids），补 `tests/backend/test_api.py` 与 `test_web_server.py`；技术理由：先锁定前后端契约，避免 UI 反复适配。
+- [x] **Phase 3** — 前端图谱视图：在 `web/frontend/index.html` 增加实体/关系交互图（原生 SVG/Canvas 或轻量 DOM，不引 npm），点击节点/边展示 source chunk 摘要；技术理由：延续 v0.5.0 零构建约束。
+- [x] **Phase 4** — 图谱查询前端：接 `/api/graph/query`，展示 RRF 融合后的 chunks、matched entities、relations 和 academic context preview；技术理由：把 Phase 5/6 后端能力变成可检查的用户流程。
+- [x] **Phase 5** — 检索预览增强：并排展示 KB 向量召回、实体关键词召回、1-hop 图邻域召回与最终 RRF 排序；技术理由：让调参时能判断是向量、实体匹配还是图扩展贡献了结果。
+- [x] **Phase 6** — 前端同步与 smoke：运行 `python tools/sync_frontend.py` 同步到 `pages/`，补/跑 web smoke 测试；技术理由：独立 Web 控制台的发布产物必须与源码一致。
 
 ### Verification
 
+- `python3 -m pytest tests/backend/test_api.py tests/backend/test_graph_store.py tests/backend/test_graph_search_pipeline.py tests/backend/test_web_server.py` → 46 passed
+- `python3 -m pytest` → 111 passed
+- `ruff check . && mypy` → All checks passed / Success
+- `python3 tools/sync_frontend.py --check` → pages/ 已与 web/frontend/ 一致
 - 打开图谱页 → 渲染实体/关系；点节点显示来源
 - 输入 query → 图示融合召回路径
 
 ---
 
-## v0.6.0 LightRAG 知识图谱 (in progress)
+## v0.6.0 LightRAG 知识图谱 (completed)
 
 ### User constraints / 约束
 
@@ -76,12 +135,14 @@
 - [x] **Phase 2** — `graph_store/sqlite.py`（实体表+关系表+实体嵌入表）+ `memory.py`；`migrations/003_graph_store.sql`。
 - [x] **Phase 3** — `pipelines/graph_build_pipeline.py`：变化 chunk → LLM 抽取 → 嵌入相似度归并 → upsert（增量）。
 - [x] **Phase 4** — 混合查询：向量召回 + 图邻域扩展 + RRF 融合（对齐 AstrBot rrf_k）。
-- 🚧 **Phase 5** — 命令 `/kr graph build`、`/kr graph query <q>`（薄壳一行委派）。
-- [ ] **Phase 6** — 领域本体预设与自定义引擎（Dynamic Ontology Preset & Customization Engine）：支持在 `GraphSyncConfig` 配置自定义 `entity_types` 列表，动态注入 LLM 抽取 Prompt 系统提示词并实现全链路类型过滤召回。
+- [x] **Phase 5** — 命令 `/kr graph build`、`/kr graph query <q>`（薄壳一行委派）。
+- [x] **Phase 6** — 领域本体预设与自定义引擎（Dynamic Ontology Preset & Customization Engine）：支持在 `GraphSyncConfig` 配置自定义 `entity_types` 列表，动态注入 LLM 抽取 Prompt 系统提示词并实现全链路类型过滤召回。
 
 ### Verification
 
-- `python -m pytest tests/backend/test_graph_store.py` → 全绿
+- `python3 -m pytest` → 107 passed
+- `ruff check . && mypy` → All checks passed / Success
+- `git diff --cached --check` → 无 whitespace/EOF 问题
 - `/kr graph build` 仅处理变化 chunk；`/kr graph query` 返回融合结果
 
 ---
@@ -212,8 +273,6 @@
 ### 功能 (Features)
 
 - 💬 **自动分类（可优化项）**：在手动分类基础上，提供可选 LLM/embedding 聚类自动打标签（默认关，开启时成本警告）。v0.3.0 已留 ABC 口，后续可升级为正式版本。
-- 💬 **Notion 自动建库（可优化项）**：在初始化/同步阶段，如果检测到未配置 `database_id`，利用 Notion MCP 的 `create_database` 工具在指定的 Parent Page 下自动为用户新建一个标准属性的数据库，并回写至配置，提供一键零配置体验。
-- 💬 **Notion 反向同步（可优化项）**：提供 `/kr sync notion --pull` 指令或 WebUI 拉取按钮，增量拉取 Notion 侧对页面属性（Tags/Collection）的修改并安全合并回本地，且绝不级联删除本地 PDF 原件。
 - 💬 （示例）<在此登记尚未排期的功能想法。>
 
 ### 架构 / 清理 (Architecture / Cleanup)

@@ -43,7 +43,10 @@ class PluginInitializer:
     def __init__(self, context: Any, raw_config: dict[str, Any], data_dir: Path) -> None:
         self._context = context
         self._data_dir = data_dir
-        self._runtime_config = RuntimeConfigStore(data_dir / "runtime_config.json")
+        self._runtime_config = RuntimeConfigStore(
+            data_dir / "runtime_config.json",
+            framework_persist_cb=self._astrbot_config_persist,
+        )
         self._config = Config(self._runtime_config.merged_with(raw_config))
         self._exit_stack: AsyncExitStack | None = None
         self._backup_task: asyncio.Task[Any] | None = None
@@ -165,6 +168,24 @@ class PluginInitializer:
 
     def _persist_config_value(self, section: str, key: str, value: object) -> None:
         self._runtime_config.set_value(section, key, value)
+
+    def _astrbot_config_persist(self, override: dict[str, Any]) -> None:
+        """尝试将合并后的运行时配置写回 AstrBot 原生配置系统。"""
+        if self._context is None:
+            return
+        # 自适应调用 AstrBot 原生配置存储与更新 API
+        for method_name in ("save_config", "update_config", "persist_config"):
+            save_cb = getattr(self._context, method_name, None)
+            if callable(save_cb):
+                try:
+                    save_cb(override)
+                    logger.info(
+                        "Successfully persisted runtime config back via "
+                        f"context.{method_name}"
+                    )
+                    return
+                except Exception as e:
+                    logger.debug(f"Attempt via context.{method_name} failed: {e}")
 
     async def _periodic_backup(self, interval_sec: int) -> None:
         """周期性触发 R2 同步备份任务的后台循环。"""

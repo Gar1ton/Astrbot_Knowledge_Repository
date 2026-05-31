@@ -67,9 +67,9 @@ python -m pytest
 # 代码检查 / 类型检查
 ruff check . && mypy
 
-# 前端（v0.5.0 起，web/frontend/ 存在后启用）
-# cd web/frontend && npm run build      # FRONTEND_BUILD_CMD
-# python tools/sync_frontend.py -f      # FRONTEND_SYNC_CMD（产物同步到 pages/）
+# 前端（v0.10.0 起，Next.js App Router）
+cd web/frontend && npm run build      # FRONTEND_BUILD_CMD（产物输出到 out/）
+python tools/sync_frontend.py         # FRONTEND_SYNC_CMD（out/ → pages/）
 ```
 
 ## 6. 语言约定

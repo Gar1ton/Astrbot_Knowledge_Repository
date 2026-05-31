@@ -6,7 +6,7 @@
 真实后端（v0.3.0/v0.4.0）就绪后，组合根换注入即可，前端与本脚本逻辑不变。
 
 用法：
-    python tests/run_webui.py                 # 端口 6520，需登录（默认 admin / kr-debug）
+    python tests/run_webui.py                 # 端口 6520，需登录（默认 admin / 111111）
     python tests/run_webui.py --no-auth       # 跳过登录，直接进入（仅本地调试）
     python tests/run_webui.py --port 8000     # 指定端口
     python tests/run_webui.py --empty         # 不播种示例数据
@@ -39,7 +39,7 @@ from core.repository.source_store.memory import InMemorySourceDocumentStore  # n
 from core.repository.sync_targets.memory import InMemorySyncTarget  # noqa: E402
 from web.server import build_app  # noqa: E402
 
-_DEFAULT_PASSWORD = "kr-debug"
+_DEFAULT_PASSWORD = "111111"
 _GB = 1024 * 1024 * 1024
 
 

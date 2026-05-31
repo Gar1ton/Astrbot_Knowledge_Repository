@@ -18,6 +18,7 @@ from core.domain.models import Collection, SourceDocument, SyncTargetKind
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from core.adapters.llm import LLMAdapter
     from core.config import Config
     from core.domain.models import DocumentChunk, QuotaUsage
     from core.managers.base import BaseCategoryManager, BaseIngestManager, BaseQuotaManager
@@ -48,6 +49,7 @@ class KnowledgeRepositoryApi:
         graph_search_pipeline: GraphSearchPipeline | None = None,
         config: Config | None = None,
         config_persist: Callable[[str, str, object], None] | None = None,
+        llm_adapter: LLMAdapter | None = None,
     ) -> None:
         self._source_store = source_store
         self._kb_reader = kb_reader
@@ -61,6 +63,7 @@ class KnowledgeRepositoryApi:
         self._graph_search_pipeline = graph_search_pipeline
         self._config = config
         self._config_persist = config_persist
+        self._llm_adapter = llm_adapter
 
     # ── 集合（分类）────────────────────────────────────────────
 
@@ -174,6 +177,77 @@ class KnowledgeRepositoryApi:
     ) -> list[DocumentChunk]:
         """在某 AstrBot 知识库集合内检索（复用 AstrBot 的 embedding + RRF）。"""
         return await self._kb_reader.search(collection, query, top_k)
+
+    async def ask(
+        self,
+        question: str,
+        collection: str | None = None,
+        top_k: int = 5,
+        conversation_id: str | None = None,
+    ) -> dict:
+        """基于知识库检索 + LLM 生成答案，返回 answer + sources（Ask Agent 端口）。"""
+        # 1. 检索相关 chunks
+        chunks: list[DocumentChunk] = []
+        if collection:
+            chunks = await self.search_kb(collection, question, top_k)
+        else:
+            all_cols = await self.list_kb_collections()
+            seen_ids: set[str] = set()
+            for col in all_cols[:5]:
+                for ch in await self.search_kb(col, question, top_k):
+                    if ch.chunk_id not in seen_ids:
+                        seen_ids.add(ch.chunk_id)
+                        chunks.append(ch)
+                    if len(chunks) >= top_k:
+                        break
+                if len(chunks) >= top_k:
+                    break
+
+        # 2. 构造来源列表 + LLM 上下文
+        sources = []
+        context_parts = []
+        for i, chunk in enumerate(chunks):
+            n = i + 1
+            doc = await self.get_document(chunk.doc_id)
+            title = doc.title if doc else chunk.doc_id
+            sources.append({
+                "n": n,
+                "doc_id": chunk.doc_id,
+                "title": title,
+                "chunk_id": chunk.chunk_id,
+                "ordinal": chunk.ordinal,
+                "text": chunk.text,
+            })
+            context_parts.append(f"[{n}] {title}\n{chunk.text}")
+
+        # 3. 调用 LLM 生成答案（无 LLM 时降级为摘要回答）
+        if self._llm_adapter is not None and context_parts:
+            system_prompt = (
+                "You are a helpful academic assistant. "
+                "Answer the question based solely on the provided context. "
+                "Cite sources using [n] notation (e.g. [1], [2]). "
+                "Answer in the same language as the question."
+            )
+            user_prompt = (
+                "Context:\n\n"
+                + "\n\n---\n\n".join(context_parts)
+                + f"\n\nQuestion: {question}"
+            )
+            answer = await self._llm_adapter.generate(user_prompt, system_prompt=system_prompt)
+        elif context_parts:
+            answer = f"根据知识库检索到 {len(chunks)} 个相关片段：\n\n" + "\n\n".join(
+                f"**[{s['n']}] {s['title']}**\n"
+                f"{s['text'][:300]}{'…' if len(s['text']) > 300 else ''}"
+                for s in sources
+            )
+        else:
+            answer = "未在知识库中找到与该问题相关的内容。请尝试其他关键词或上传相关文档。"
+
+        return {
+            "conversation_id": conversation_id or uuid.uuid4().hex,
+            "answer": answer,
+            "sources": sources,
+        }
 
     # ── 在线服务（配额）────────────────────────────────────────
 

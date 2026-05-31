@@ -44,7 +44,83 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
-## v0.9.0 Backend hardening without WebUI port changes (planning)
+## v0.11.0 Backend hardening & API completing (completed)
+
+### User constraints / 约束
+
+- 实现 v0.10.0 遗留的两个未完工后端端口：文档下载与显式登出。
+- 本版本聚焦于后端健壮性与可用性提升，不改变现有 WebUI 主体结构。
+- 保证前后端契约的一致性，通过补充和加强单元/集成测试进行验证。
+- 不执行任何 `git commit`，提交交由用户执行。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 配置持久化收敛**：为 `RuntimeConfigStore` 增加更清晰的加载/覆盖/写回边界，并预留 AstrBot 原生配置写回适配口；技术理由：固定运行时覆盖与框架配置的职责，规范运行时动态配置的加载与写入流程。
+- [x] **Phase 2 — Notion 自动分页与健壮性**：在 `NotionMCPAdapter` 中为 `query_database` 补齐自动分页（通过 page cursor 循环拉取全部数据）、标准属性存在性检查以及缺失属性列的详细诊断信息；技术理由：保证当 Notion 数据规模增大或属性列被重命名时，同步流程能平滑降级或清晰失败。
+- [x] **Phase 3 — 同步状态可审计性**：增强 Notion 初始化、同步拉取 (pull) 和推送 (push) 的统计结果与错误日志，确保 `sync_records` 及 API 返回能科学区分 skipped, failed, schema_missing 和 remote_missing；技术理由：提升云端同步技术债的排查效率。
+- [x] **Phase 4 — 补全未完工 API 端口**：
+  - [x] 在 `web/server.py` 实现 `GET /api/documents/{doc_id}/raw` 文档下载端点，并在前端解除下载按钮的禁用状态（若适用）。
+  - [x] 在 `web/server.py` 实现 `POST /api/logout` 显式登出端点，清理后端 session 集合并删除 `kr_session` cookie。
+- [x] **Phase 5 — 历史 TODO 清理**：修正 `v0.1.0` 历史残留状态，把已被后续高版本覆盖 of 初始化工作闭环，避免新一轮开发误判。
+- [x] **Phase 6 — 回归与契约测试强补**：针对 Notion 分页及异常诊断、配置存储、新增的 raw 下载与登出 HTTP 端口进行 100% 契约和集成测试覆盖。
+
+### Verification
+
+- `python3 -m pytest` → ✅ 128 passed
+- `cd web/frontend && npm run build` → 确认前端正常构建
+- `python3 tools/sync_frontend.py --check` → 确认前后端静态同步无误
+- `ruff check . && mypy` → ✅ All checks passed & Success
+
+---
+
+## v0.10.0 WebUI 全面重构 · Next.js + fumadocs-ui (completed)
+
+### User constraints / 约束
+
+- 前端技术栈：Next.js App Router + `fumadocs-ui` + `next-themes`，引入暖色奶油设计语言。
+- 后端端口契约不得破坏；仅新增 `POST /api/ask`（Ask Agent）。
+- 部署：`output:'export'` 静态导出 → `tools/sync_frontend.py` → `pages/` → aiohttp 单进程托管。
+- `?mock` 离线预览模式必须保留；进场动画禁止初始 opacity:0。
+- 视效优先，可适当提高系统资源占用（GPU 合成动画），使用 fumadocs 前端技术栈。
+- 前端依赖但后端尚未实现的端口，须先在本 TODO 标记，不得臆造路径。
+
+### 前端依赖、后端尚未实现的端口（需后续版本跟进）
+
+- [ ] `GET /api/documents/{id}/raw` — 文档下载；检查器下载按钮先 disabled，后端实现后接通。
+- [ ] `POST /api/logout` — 显式登出；暂用前端清除 `kr_session` cookie 降级，后端实现后替换。
+- [x] `POST /api/ask` — Ask Agent 对话（v0.10.0 已实现，见 Phase 5）。
+
+### Technical implementation path
+
+- [x] **Phase 1** — TODO 更新。
+- [x] **Phase 2** — 脚手架：`web/frontend/` 起 Next.js(App Router, TS) + `fumadocs-ui` + `next-themes` + `geist` 字体；`next.config.ts` 配 `output:'export'` + dev rewrite → `:6520`。
+- [x] **Phase 3** — 设计 Token：`styles/tokens.css`（浅/深主题全部 CSS 变量）+ `app/layout.tsx` 挂 `RootProvider` + `ThemeProvider`。
+- [x] **Phase 4** — API 层：`lib/api.ts` 按 §6 封装全部端口，含 `reserved` 降级、错误 toast、`?mock` 切换。
+- [x] **Phase 5** — 后端新增 `/api/ask`：`core/adapters/llm.py` 扩展 `generate()` 方法；`core/api.py` 新增 `ask()` + `llm_adapter` 注入；`web/server.py` 注册路由 + SPA catch-all 静态服务。
+- [x] **Phase 6** — 外壳：左栏 `rail`（Ask featured / 知识库分组 / 运维分组 / 设置+用户区）+ 7 个路由骨架页。
+- [x] **Phase 7** — 文档工作台 `/documents`：三栏布局（集合列 / 文档表 / 检查器）+ 批量操作条 + 上传，无任何 `prompt()`。
+- [x] **Phase 8** — 设置页 `/settings`：外观区（主题/语言/色系）+ `config/effective` 只读卡片。
+- [x] **Phase 9** — 检索 `/search` + 配额 `/quota`。
+- [x] **Phase 10** — Ask Agent `/ask`：对话 + 来源面板 + `[n]` 角标联动 + 「在文档中打开」跳转。
+- [x] **Phase 11** — 图谱 `/graph` + 同步/备份 `/sync`；`reserved` 端口优雅降级。
+- [x] **Phase 12** — 视效层（`components/fx`）：DotField / SunBloom / GrainOverlay / `.fx-glass`；`prefers-reduced-motion` 支持。
+- [x] **Phase 13** — `tools/sync_frontend.py` 更新（支持 Next.js `out/`）+ `CLAUDE.md §5` 命令更新。
+- [x] **Phase 14** — 测试补充：`/api/ask` 路由测试 + `ask()` 单元测试；新增 SPA catch-all 路由测试。
+- [x] **Phase 15** — `metadata.yaml` 版本号 → `v0.10.0`，`CHANGELOG.md` 追加条目。
+
+### Verification
+
+- `python3 -m pytest tests/backend/test_api.py tests/backend/test_web_server.py` → ✅ 42 passed
+- `ruff check . && mypy` → 无错误
+- `cd web/frontend && npm run build` → ✅ Next.js export 成功，`out/` 产出 8 个页面
+- `python tools/sync_frontend.py --check` → `pages/` 与 `out/` 一致
+- 浏览器访问 `http://localhost:6520` → 完整 7 页面、双主题、中英 i18n、?mock 可用
+
+---
+
+## v0.9.0 Backend hardening without WebUI port changes (deferred)
+
+> ❌ **已合并至 v0.11.0 统一实施**。由于开发顺序调整，v0.10.0 WebUI 重构先行落地，v0.9.0 的后端优化与健壮性改造顺延至 v0.11.0，并与 v0.10.0 遗留的 API 端口补齐合并执行。
 
 ### User constraints / 约束
 
@@ -247,7 +323,7 @@
 
 ---
 
-## v0.1.0 项目初始化 (in progress)
+## v0.1.0 项目初始化 (completed)
 
 ### User constraints / 约束
 
@@ -256,13 +332,13 @@
 ### Technical implementation path
 
 - [x] **Phase 1 — 骨架**：复制模板，建立分层目录与治理文件。
-- [ ] **Phase 2 — 填空**：替换 `metadata.yaml` / `_conf_schema.json` / `pyproject.toml` / `CLAUDE.md` §5 命令占位。
-- [ ] **Phase 3 — 首个子系统**：按 `ARCHITECTURE.md` 的「新增子系统清单」落地第一个业务管线。
+- [x] **Phase 2 — 填空**：替换 `metadata.yaml` / `_conf_schema.json` / `pyproject.toml` / `CLAUDE.md` §5 命令占位。
+- [x] **Phase 3 — 首个子系统**：按 `ARCHITECTURE.md` 的「新增子系统清单」落地第一个业务管线。
 
 ### Verification
 
-- `<TEST_CMD>` → 全绿
-- `<LINT_CMD>` → 无错误
+- `python3 -m pytest` → 全绿
+- `ruff check . && mypy` → 无错误
 
 ---
 

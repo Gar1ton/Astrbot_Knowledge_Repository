@@ -116,7 +116,15 @@ class SyncPipeline:
                 # 同步成功，修改记账
                 status = SyncStatus.SYNCED
                 msg = "同步成功"
-                if remote_ref.startswith("skipped:"):
+                if remote_ref.startswith("degraded_skipped:"):
+                    status = SyncStatus.SKIPPED
+                    remote_ref = remote_ref[len("degraded_skipped:"):]
+                    msg = "已跳过文件二进制镜像，且因 Notion 数据库列缺失已自动降级为仅推标题"
+                elif remote_ref.startswith("degraded:"):
+                    status = SyncStatus.SYNCED
+                    remote_ref = remote_ref[len("degraded:"):]
+                    msg = "同步成功，但因 Notion 数据库列缺失已自动降级为仅推标题"
+                elif remote_ref.startswith("skipped:"):
                     status = SyncStatus.SKIPPED
                     remote_ref = remote_ref[len("skipped:"):]
                     msg = "已跳过文件二进制镜像，仅推送元数据"

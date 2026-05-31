@@ -14,10 +14,60 @@ logger = logging.getLogger("LLMAdapter")
 
 
 class LLMAdapter:
-    """运行态 LLM 结构化调用适配器。"""
+    """运行态 LLM 通用调用适配器（结构化抽取 + 问答生成）。"""
 
     def __init__(self, context: Any = None) -> None:
         self._context = context
+
+    async def generate(self, prompt: str, system_prompt: str = "") -> str:
+        """通用文本生成（用于 Ask Agent 等问答场景）。
+
+        优先使用 AstrBot context 中的 LLM Provider；无运行态时返回离线占位答案。
+        """
+        raw = ""
+        if self._context is not None:
+            try:
+                call_llm = getattr(self._context, "call_llm", None)
+                if callable(call_llm):
+                    raw = await call_llm(prompt, system_prompt=system_prompt or None)
+
+                if not raw:
+                    provider = getattr(self._context, "llm_provider", None)
+                    if provider is not None:
+                        chat_fn = (
+                            getattr(provider, "chat", None)
+                            or getattr(provider, "generate", None)
+                        )
+                        if callable(chat_fn):
+                            raw = await chat_fn(prompt, system_prompt=system_prompt or None)
+
+                if not raw:
+                    get_provider = getattr(self._context, "get_llm_provider", None)
+                    if callable(get_provider):
+                        provider = await get_provider()
+                        chat_fn = (
+                            getattr(provider, "chat", None)
+                            or getattr(provider, "generate", None)
+                        )
+                        if callable(chat_fn):
+                            raw = await chat_fn(prompt, system_prompt=system_prompt or None)
+            except Exception as e:
+                logger.error(f"LLMAdapter.generate failed: {e}")
+
+        if not raw or not raw.strip():
+            logger.info("[Offline Stub] generate: returning placeholder answer.")
+            raw = self._mock_generate(prompt)
+
+        return raw.strip()
+
+    def _mock_generate(self, prompt: str) -> str:
+        """离线占位：从 prompt 中提取关键词，构造简单示例答案。"""
+        lines = [ln.strip() for ln in prompt.splitlines() if ln.strip()]
+        question = next((ln for ln in lines if ln.startswith("问题")), lines[0] if lines else "")
+        return (
+            f"根据知识库中的相关资料，对于「{question[:60]}」的问答如下：\n\n"
+            "这是一个离线测试占位答案。请配置 AstrBot LLM Provider 以获得真实回答。"
+        )
 
     async def extract_graph(
         self, text: str, entity_types: list[str]

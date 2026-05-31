@@ -166,3 +166,56 @@ async def test_get_graph_filters_by_collection_and_returns_source_previews() -> 
     preview = payload["nodes"][0]["source_previews"][0]
     assert preview["chunk_id"] == "c1"
     assert preview["truncated"] is True
+
+
+# ── ask() ────────────────────────────────────────────────────────
+
+
+async def test_ask_returns_answer_and_sources_without_llm() -> None:
+    """无 LLM 时 ask() 应降级为摘要回答，仍返回 conversation_id 和 sources。"""
+    api = await _make_api()
+    result = await api.ask(question="alpha", collection="kb1", top_k=3)
+    assert "conversation_id" in result and result["conversation_id"]
+    assert "answer" in result and result["answer"]
+    assert isinstance(result["sources"], list)
+    assert result["sources"][0]["text"] == "alpha"
+
+
+async def test_ask_with_mock_llm_calls_generate() -> None:
+    """注入 mock LLMAdapter 时 ask() 应调用 generate() 并返回其输出。"""
+
+    class MockLLM:
+        called: bool = False
+
+        async def generate(self, prompt: str, system_prompt: str = "") -> str:
+            MockLLM.called = True
+            return "Mock answer [1]"
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "kb1"))
+    kb = InMemoryKnowledgeBaseReader({"kb1": [DocumentChunk("c0", "d1", 0, "relevant text", "h0")]})
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=kb,
+        llm_adapter=MockLLM(),  # type: ignore[arg-type]
+    )
+    result = await api.ask(question="relevant", collection="kb1")
+    assert MockLLM.called
+    assert result["answer"] == "Mock answer [1]"
+    assert len(result["sources"]) == 1
+
+
+async def test_ask_returns_empty_message_when_no_chunks() -> None:
+    """知识库无内容时 ask() 应返回未找到相关内容的提示。"""
+    store = InMemorySourceDocumentStore()
+    kb = InMemoryKnowledgeBaseReader({})
+    api = KnowledgeRepositoryApi(source_store=store, kb_reader=kb)
+    result = await api.ask(question="anything")
+    assert result["sources"] == []
+    assert result["answer"]  # 有内容（降级提示）
+
+
+async def test_ask_uses_provided_conversation_id() -> None:
+    api = await _make_api()
+    result = await api.ask(question="alpha", collection="kb1", conversation_id="existing-id")
+    assert result["conversation_id"] == "existing-id"

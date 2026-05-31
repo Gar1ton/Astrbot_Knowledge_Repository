@@ -70,6 +70,16 @@ async def handle_login(request: web.Request) -> web.Response:
     return web.json_response({"error": "invalid credentials"}, status=401)
 
 
+async def handle_logout(request: web.Request) -> web.Response:
+    app = request.app
+    token = request.cookies.get(SESSION_COOKIE)
+    if token in app["sessions"]:
+        app["sessions"].remove(token)
+    resp = web.json_response({"ok": True})
+    resp.del_cookie(SESSION_COOKIE)
+    return resp
+
+
 async def handle_list_collections(request: web.Request) -> web.Response:
     cols = await _api(request).list_collections()
     return web.json_response([_collection_dict(c) for c in cols])
@@ -148,6 +158,22 @@ async def handle_classify_document(request: web.Request) -> web.Response:
 async def handle_delete_document(request: web.Request) -> web.Response:
     ok = await _api(request).delete_document(request.match_info["doc_id"])
     return web.json_response({"ok": ok}, status=200 if ok else 404)
+
+
+async def handle_download_document(request: web.Request) -> web.StreamResponse:
+    doc_id = request.match_info["doc_id"]
+    doc = await _api(request).get_document(doc_id)
+    if doc is None:
+        return web.json_response({"error": "document not found"}, status=404)
+    file_path = Path(doc.file_path)
+    if not file_path.is_file():
+        return web.json_response({"error": "file not found on disk"}, status=404)
+    return web.FileResponse(
+        file_path,
+        headers={
+            "Content-Disposition": f'attachment; filename="{doc.title}"',
+        }
+    )
 
 
 async def handle_kb_collections(request: web.Request) -> web.Response:
@@ -247,6 +273,27 @@ async def handle_graph_data(request: web.Request) -> web.Response:
     return await _reserved(_api(request).get_graph(collection), "v0.7.0")
 
 
+async def handle_ask(request: web.Request) -> web.Response:
+    """POST /api/ask — Ask Agent：检索 + LLM 答案生成。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    question = (body.get("question") or "").strip()
+    if not question:
+        return web.json_response({"error": "question required"}, status=400)
+    collection = body.get("collection") or None
+    top_k = int(body.get("top_k") or 5)
+    conversation_id = body.get("conversation_id") or None
+    result = await _api(request).ask(
+        question=question,
+        collection=collection,
+        top_k=max(1, min(top_k, 20)),
+        conversation_id=conversation_id,
+    )
+    return web.json_response(result)
+
+
 # ── 序列化 helper（domain → JSON-safe dict）─────────────────────
 
 
@@ -311,6 +358,7 @@ def build_app(
 
     app.router.add_get("/api/auth", handle_auth)
     app.router.add_post("/api/login", handle_login)
+    app.router.add_post("/api/logout", handle_logout)
     app.router.add_get("/api/collections", handle_list_collections)
     app.router.add_post("/api/collections", handle_create_collection)
     app.router.add_delete("/api/collections/{name}", handle_delete_collection)
@@ -318,6 +366,7 @@ def build_app(
     app.router.add_post("/api/documents", handle_upload_document)
     app.router.add_patch("/api/documents/{doc_id}", handle_classify_document)
     app.router.add_delete("/api/documents/{doc_id}", handle_delete_document)
+    app.router.add_get("/api/documents/{doc_id}/raw", handle_download_document)
     app.router.add_get("/api/kb/collections", handle_kb_collections)
     app.router.add_get("/api/kb/search", handle_kb_search)
     app.router.add_get("/api/quota", handle_quota)
@@ -332,13 +381,43 @@ def build_app(
     app.router.add_post("/api/graph/build", handle_graph_build)
     app.router.add_get("/api/graph/query", handle_graph_query)
     app.router.add_get("/api/graph", handle_graph_data)
+    app.router.add_post("/api/ask", handle_ask)
 
-    async def index(_: web.Request) -> web.StreamResponse:
-        return web.FileResponse(static_dir / "index.html")
-
-    app.router.add_get("/", index)
+    # 静态文件服务：兼容 Next.js export 产物（pages/ 下存在子目录 index.html）
+    # 和旧的单文件 HTML 产物。
     if static_dir.exists():
-        app.router.add_static("/static/", static_dir)
+        # Next.js 资源包（_next/static/…）直接映射，避免走 SPA 回退逻辑
+        next_dir = static_dir / "_next"
+        if next_dir.is_dir():
+            app.router.add_static("/_next/", next_dir)
+
+        _static_root = static_dir.resolve()
+
+        async def handle_spa(request: web.Request) -> web.StreamResponse:
+            """SPA 路径回退：按 Next.js export 目录结构查找 index.html，否则回退根页面。"""
+            rel = request.match_info.get("path", "").strip("/")
+            try:
+                if rel:
+                    # 安全检查：防止路径穿越
+                    direct = (static_dir / rel).resolve()
+                    direct.relative_to(_static_root)
+                    if direct.is_file():
+                        return web.FileResponse(direct)
+                    subindex = direct / "index.html"
+                    if subindex.is_file():
+                        return web.FileResponse(subindex)
+                    html = static_dir / f"{rel}.html"
+                    if html.is_file():
+                        return web.FileResponse(html)
+            except (ValueError, OSError):
+                pass
+            root_index = static_dir / "index.html"
+            if root_index.is_file():
+                return web.FileResponse(root_index)
+            return web.Response(status=404, text="Not Found")
+
+        app.router.add_get("/", handle_spa)
+        app.router.add_get("/{path:.*}", handle_spa)
     return app
 
 

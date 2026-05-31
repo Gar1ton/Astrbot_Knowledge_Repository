@@ -87,25 +87,44 @@ class NotionMCPAdapter:
         return mock_id
 
     async def query_database(self, database_id: str) -> list[dict[str, Any]]:
-        """查询 Notion Database 页面列表。"""
-        arguments = {"database_id": database_id}
-        try:
-            res = await self._call_tool("query_database", arguments)
-            data = self._coerce_payload(res)
-            if isinstance(data, dict):
-                results = data.get("results")
-                if isinstance(results, list):
-                    return [r for r in results if isinstance(r, dict)]
-            if isinstance(data, list):
-                return [r for r in data if isinstance(r, dict)]
-            if data is not None:
-                logger.warning("Notion query_database returned unexpected payload shape.")
-        except Exception as e:
-            logger.error(f"Notion MCP query_database call failed: {e}.")
-            raise e
+        """查询 Notion Database 页面列表，支持完整的自动分页拉取。"""
+        all_results: list[dict[str, Any]] = []
+        start_cursor: str | None = None
+        has_more = True
 
-        logger.info("[Offline Stub] Mocked empty Notion database query result.")
-        return []
+        while has_more:
+            arguments: dict[str, Any] = {"database_id": database_id}
+            if start_cursor:
+                arguments["start_cursor"] = start_cursor
+
+            try:
+                res = await self._call_tool("query_database", arguments)
+                data = self._coerce_payload(res)
+
+                if isinstance(data, dict):
+                    results = data.get("results")
+                    if isinstance(results, list):
+                        all_results.extend([r for r in results if isinstance(r, dict)])
+
+                    has_more = bool(data.get("has_more", False))
+                    start_cursor = data.get("next_cursor")
+                    # 防御：如果没有 next_cursor 了，就退出循环
+                    if not start_cursor:
+                        has_more = False
+                elif isinstance(data, list):
+                    all_results.extend([r for r in data if isinstance(r, dict)])
+                    has_more = False
+                else:
+                    if data is not None:
+                        logger.warning("Notion query_database returned unexpected payload shape.")
+                    has_more = False
+            except Exception as e:
+                logger.error(f"Notion MCP query_database call failed: {e}.")
+                raise e
+
+        if not all_results and self._context is None:
+            logger.info("[Offline Stub] Mocked empty Notion database query result.")
+        return all_results
 
     async def create_database_page(
         self,

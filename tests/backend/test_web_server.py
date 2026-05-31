@@ -416,3 +416,156 @@ async def test_notion_init_and_pull_routes_return_200(tmp_path: Path) -> None:
         assert (await pull.json())["updated_count"] == 1
     finally:
         await client.close()
+
+
+# ── /api/ask ──────────────────────────────────────────────────────
+
+
+async def test_ask_route_returns_answer_and_sources(tmp_path: Path) -> None:
+    """POST /api/ask 应委派 api.ask() 并返回 answer + sources JSON。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post(
+            "/api/ask",
+            json={"question": "alpha beta", "collection": "papers", "top_k": 5},
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert "answer" in body and body["answer"]
+        assert "sources" in body and isinstance(body["sources"], list)
+        assert "conversation_id" in body and body["conversation_id"]
+    finally:
+        await client.close()
+
+
+async def test_ask_route_requires_question(tmp_path: Path) -> None:
+    """question 为空时应返回 400。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post("/api/ask", json={"question": "  "})
+        assert resp.status == 400
+        body = await resp.json()
+        assert "error" in body
+    finally:
+        await client.close()
+
+
+async def test_ask_route_accepts_conversation_id(tmp_path: Path) -> None:
+    """conversation_id 由调用方提供时应原样返回。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post(
+            "/api/ask",
+            json={"question": "alpha", "conversation_id": "test-conv-123"},
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["conversation_id"] == "test-conv-123"
+    finally:
+        await client.close()
+
+
+async def test_ask_route_clamps_top_k(tmp_path: Path) -> None:
+    """top_k 超出边界应被截断而不是报错。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post("/api/ask", json={"question": "alpha", "top_k": 999})
+        assert resp.status == 200
+    finally:
+        await client.close()
+
+
+async def test_spa_static_fallback_serves_index(tmp_path: Path) -> None:
+    """非 /api 路径应由 SPA catch-all 回退到 index.html（存在时）。"""
+    static = tmp_path / "frontend"
+    static.mkdir()
+    (static / "index.html").write_text("<html>root</html>")
+    docs_dir = static / "documents"
+    docs_dir.mkdir()
+    (docs_dir / "index.html").write_text("<html>docs</html>")
+
+    app = build_app(
+        api=await _make_api(),
+        static_dir=static,
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        # 子路由返回子 index.html
+        resp = await client.get("/documents")
+        assert resp.status == 200
+        assert (await resp.text()) == "<html>docs</html>"
+
+        # 未知路由回退到根 index.html
+        resp2 = await client.get("/unknown-path")
+        assert resp2.status == 200
+        assert (await resp2.text()) == "<html>root</html>"
+    finally:
+        await client.close()
+
+
+async def test_logout_route(tmp_path: Path) -> None:
+    """显式登出端点应从 app sessions 中移除会话 Token 并清除 Cookie。"""
+    client = await _client(tmp_path, auth_required=True)
+    try:
+        # 1. 登录以创建 Token
+        resp = await client.post("/api/login", json={"username": "admin", "password": "pw"})
+        assert resp.status == 200
+        cookies = client.session.cookie_jar.filter_cookies(client.make_url("/"))
+        assert SESSION_COOKIE in cookies
+
+        # 2. 登出
+        resp_logout = await client.post("/api/logout")
+        assert resp_logout.status == 200
+        body = await resp_logout.json()
+        assert body["ok"] is True
+
+        # 3. 再次获取 api 资源应返回 401
+        resp_api = await client.get("/api/collections")
+        assert resp_api.status == 401
+    finally:
+        await client.close()
+
+
+async def test_download_document_route(tmp_path: Path) -> None:
+    """文档下载端点应正确下载物理原件，不存在的 doc_id 或物理文件应返回 404。"""
+    api = await _make_api()
+    
+    # 模拟真实物理原件写入
+    file_path = tmp_path / "test_doc.pdf"
+    file_path.write_bytes(b"pdf data here")
+    
+    # 在内存 store 中更新文档物理路径
+    doc = await api._source_store.get_document("d1")
+    assert doc is not None
+    doc.file_path = str(file_path)
+    await api._source_store.update_document(doc)
+
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        # 1. 下载存在的文档
+        resp = await client.get("/api/documents/d1/raw")
+        assert resp.status == 200
+        assert (await resp.read()) == b"pdf data here"
+        assert resp.headers["Content-Disposition"] == 'attachment; filename="Doc 1"'
+
+        # 2. 下载不存在的文档
+        resp_missing = await client.get("/api/documents/missing-id/raw")
+        assert resp_missing.status == 404
+        
+        # 3. 物理文件缺失的文档
+        doc.file_path = "/missing/path.pdf"
+        await api._source_store.update_document(doc)
+        resp_file_missing = await client.get("/api/documents/d1/raw")
+        assert resp_file_missing.status == 404
+    finally:
+        await client.close()

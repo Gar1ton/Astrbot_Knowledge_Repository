@@ -1,0 +1,207 @@
+/*
+ * Knowledge Repository · Design Tokens
+ * 暖色奶油 + 橙色强调 · 浅/深双主题
+ * Dark mode via `.dark` class (aligned with fumadocs-ui / Tailwind v4 convention)
+ */
+
+/* ─── 浅色主题（默认 · cream） ─────────────────────────────── */
+:root {
+  /* 背景层 */
+  --bg: #f7f4ed;
+  --bg-subtle: #f1ecdf;
+  --bg-inset: #e9e3d3;
+
+  /* 面板 */
+  --surface: #fffefb;
+  --surface-hover: #f4f0e6;
+
+  /* 边框 */
+  --border: #e6dfce;
+  --border-strong: #d6cdb6;
+
+  /* 文字 */
+  --fg: #2b291f;
+  --fg-muted: #6d6755;
+  --fg-subtle: #9c9580;
+  --heading: #3a3b21;
+
+  /* 主强调色：暖橙 */
+  --accent: #df7a18;
+  --accent-fg: #ffffff;
+  --accent-soft: #fbeedb;
+  --accent-border: #f1d3a6;
+
+  /* 次强调色：橄榄绿 */
+  --accent-2: #83851f;
+  --accent-2-soft: #eef0d6;
+
+  /* 语义色 */
+  --ok: #4f8a3d;
+  --ok-soft: #e7f0dd;
+  --warn: #c5851a;
+  --warn-soft: #f6ebd2;
+  --danger: #c5503b;
+  --danger-soft: #f6e3dd;
+
+  /* 焦点环 / 阴影 */
+  --ring: rgba(223, 122, 24, 0.26);
+  --shadow: 0 1px 2px rgba(60, 50, 30, 0.05), 0 6px 22px rgba(60, 50, 30, 0.07);
+  --shadow-pop: 0 12px 36px rgba(60, 50, 30, 0.16);
+
+  /* 导航栏宽度 */
+  --rail-w: 220px;
+  --rail-w-collapsed: 60px;
+
+  /* fumadocs-ui 颜色覆盖 → 暖色系对齐 */
+  --color-fd-background: #f7f4ed;
+  --color-fd-foreground: #2b291f;
+  --color-fd-muted: #f1ecdf;
+  --color-fd-muted-foreground: #6d6755;
+  --color-fd-popover: #fffefb;
+  --color-fd-popover-foreground: #2b291f;
+  --color-fd-card: #fffefb;
+  --color-fd-card-foreground: #2b291f;
+  --color-fd-border: rgba(230, 223, 206, 0.7);
+  --color-fd-primary: #df7a18;
+  --color-fd-primary-foreground: #ffffff;
+  --color-fd-secondary: #f1ecdf;
+  --color-fd-secondary-foreground: #2b291f;
+  --color-fd-accent: rgba(230, 223, 206, 0.5);
+  --color-fd-accent-foreground: #2b291f;
+  --color-fd-ring: rgba(223, 122, 24, 0.4);
+}
+
+/* ─── 深色主题（ink） ───────────────────────────────────────── */
+.dark {
+  /* 背景层 */
+  --bg: #0b0b0c;
+  --bg-subtle: #121211;
+  --bg-inset: #1b1b18;
+
+  /* 面板 */
+  --surface: #141413;
+  --surface-hover: #1e1e1b;
+
+  /* 边框 */
+  --border: #282823;
+  --border-strong: #3a3a31;
+
+  /* 文字 */
+  --fg: #ece9e0;
+  --fg-muted: #9b978a;
+  --fg-subtle: #6b6759;
+  --heading: #f2efe6;
+
+  /* 主强调色 */
+  --accent: #e8842a;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(232, 132, 42, 0.15);
+  --accent-border: rgba(232, 132, 42, 0.38);
+
+  /* 次强调色 */
+  --accent-2: #c2cb4a;
+  --accent-2-soft: rgba(194, 203, 74, 0.14);
+
+  /* 语义色 */
+  --ok: #6abf5a;
+  --ok-soft: rgba(106, 191, 90, 0.15);
+  --warn: #e0a23b;
+  --warn-soft: rgba(224, 162, 59, 0.15);
+  --danger: #e06a55;
+  --danger-soft: rgba(224, 106, 85, 0.15);
+
+  /* 焦点环 / 阴影 */
+  --ring: rgba(232, 132, 42, 0.4);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 22px rgba(0, 0, 0, 0.45);
+  --shadow-pop: 0 14px 40px rgba(0, 0, 0, 0.6);
+
+  /* fumadocs-ui 深色覆盖 */
+  --color-fd-background: #0b0b0c;
+  --color-fd-foreground: #ece9e0;
+  --color-fd-muted: #1b1b18;
+  --color-fd-muted-foreground: rgba(155, 151, 138, 0.8);
+  --color-fd-popover: #141413;
+  --color-fd-popover-foreground: #ece9e0;
+  --color-fd-card: #141413;
+  --color-fd-card-foreground: #ece9e0;
+  --color-fd-border: rgba(40, 40, 35, 0.4);
+  --color-fd-primary: #e8842a;
+  --color-fd-primary-foreground: #ffffff;
+  --color-fd-secondary: #1b1b18;
+  --color-fd-secondary-foreground: #ece9e0;
+  --color-fd-accent: rgba(58, 58, 49, 0.3);
+  --color-fd-accent-foreground: #ece9e0;
+  --color-fd-ring: rgba(232, 132, 42, 0.5);
+}
+
+/* ─── 色系 swatch（占位，由 data-palette 切换） ──────────────── */
+[data-palette="moirai"] {
+  --accent: #6b7adb;
+  --accent-soft: rgba(107, 122, 219, 0.15);
+  --accent-border: rgba(107, 122, 219, 0.35);
+  --accent-fg: #ffffff;
+}
+[data-palette="forest"] {
+  --accent: #3d8a4f;
+  --accent-soft: rgba(61, 138, 79, 0.15);
+  --accent-border: rgba(61, 138, 79, 0.35);
+  --accent-fg: #ffffff;
+}
+[data-palette="graphite"] {
+  --accent: #6e7480;
+  --accent-soft: rgba(110, 116, 128, 0.15);
+  --accent-border: rgba(110, 116, 128, 0.35);
+  --accent-fg: #ffffff;
+}
+
+/* ─── 全局视效工具类 ──────────────────────────────────────────── */
+.fx-glass {
+  background: color-mix(in srgb, var(--bg-subtle) 72%, transparent);
+  backdrop-filter: saturate(1.4) blur(12px);
+  -webkit-backdrop-filter: saturate(1.4) blur(12px);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.fx-glass-edge {
+  box-shadow: inset 1px 0 0 color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* ─── 动画 keyframes ──────────────────────────────────────────── */
+@keyframes dotDrift {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(4px, -6px); }
+  50% { transform: translate(6px, -8px); }
+  75% { transform: translate(-3px, -4px); }
+}
+@keyframes dotTwinkle {
+  0%, 100% { opacity: 0.10; }
+  50% { opacity: 0.32; }
+}
+@keyframes sunSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes sunBreathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+}
+@keyframes sparkleFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+@keyframes fadeUp {
+  from { transform: translateY(8px); }
+  to { transform: translateY(0); }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── 无障碍：关闭所有动画 ───────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

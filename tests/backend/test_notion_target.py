@@ -226,7 +226,7 @@ async def test_notion_graceful_degradation(
     page_id = await target.push(doc, payload)
 
     # 验证成功返回 page-degraded-id 降级页面
-    assert page_id == "page-degraded-id"
+    assert page_id == "degraded:page-degraded-id"
     # 验证一共调用了两次
     assert mock_call_tool.call_count == 2
     # 验证第二次调用时只推送了 Name
@@ -290,6 +290,7 @@ async def test_notion_pull_metadata_updates_only_collection_and_tags(
     assert result["status"] == "success"
     assert result["updated_count"] == 1
     assert result["skipped_count"] == 1
+    assert result["skipped_details"]["schema_missing"] == 1
     doc = await store.get_document("d5")
     assert doc is not None
     assert doc.title == "doc_d5.pdf"
@@ -298,3 +299,53 @@ async def test_notion_pull_metadata_updates_only_collection_and_tags(
     args = mock_context.call_mcp_tool.call_args[0]
     assert args[1] == "query_database"
     assert args[2]["database_id"] == "test-database-id"
+
+
+@pytest.mark.asyncio
+async def test_notion_query_database_paging(
+    notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
+) -> None:
+    mock_context = MagicMock()
+    mock_call_tool = AsyncMock()
+    mock_call_tool.side_effect = [
+        {
+            "results": [
+                {
+                    "properties": {
+                        "DocID": {"rich_text": [{"plain_text": "d1"}]},
+                        "Collection": {"select": {"name": "papers"}},
+                        "Tags": {"multi_select": []},
+                        "Name": {"title": [{"plain_text": "doc1.pdf"}]},
+                    }
+                }
+            ],
+            "has_more": True,
+            "next_cursor": "page-2-cursor"
+        },
+        {
+            "results": [
+                {
+                    "properties": {
+                        "DocID": {"rich_text": [{"plain_text": "d2"}]},
+                        "Collection": {"select": {"name": "papers"}},
+                        "Tags": {"multi_select": []},
+                        "Name": {"title": [{"plain_text": "doc2.pdf"}]},
+                    }
+                }
+            ],
+            "has_more": False,
+            "next_cursor": None
+        }
+    ]
+    mock_context.call_mcp_tool = mock_call_tool
+
+    target = NotionSyncTarget(notion_config, store, mock_context)
+    results = await target._mcp_adapter.query_database(notion_config.database_id)
+    
+    # 验证拉取了全部两个分页的数据
+    assert len(results) == 2
+    assert mock_call_tool.call_count == 2
+    
+    # 验证第二次调用传递了 start_cursor
+    second_call_arguments = mock_call_tool.call_args_list[1][0][2]
+    assert second_call_arguments["start_cursor"] == "page-2-cursor"

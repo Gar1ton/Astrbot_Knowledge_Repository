@@ -137,6 +137,7 @@ class NotionSyncTarget(SyncTarget):
                 )
 
         # 4) 调用 MCP 创建页面（带渐进降级保护）
+        is_degraded = False
         try:
             page_id = await self._mcp_adapter.create_database_page(
                 database_id=self._config.database_id,
@@ -148,19 +149,28 @@ class NotionSyncTarget(SyncTarget):
                 f"Failed to create database page with full properties: {e}. "
                 "Attempting graceful degradation to Name-only properties..."
             )
+            is_degraded = True
             # 降级：仅包含必填的 "Name" 属性
             min_properties = {
                 "Name": {"title": [{"text": {"content": document.title}}]}
             }
-            page_id = await self._mcp_adapter.create_database_page(
-                database_id=self._config.database_id,
-                properties=min_properties,
-                children=children,
-            )
+            try:
+                page_id = await self._mcp_adapter.create_database_page(
+                    database_id=self._config.database_id,
+                    properties=min_properties,
+                    children=children,
+                )
+            except Exception as inner_e:
+                logger.error(f"Degraded Notion push also failed: {inner_e}")
+                raise inner_e
 
         # 5) 对超过 5MiB 的大文档，利用 "skipped:" 前缀将跳过状态通知 SyncPipeline 记账
         if is_large:
+            if is_degraded:
+                return f"degraded_skipped:{page_id}"
             return f"skipped:{page_id}"
+        if is_degraded:
+            return f"degraded:{page_id}"
         return page_id
 
     async def initialize_database(
@@ -217,24 +227,52 @@ class NotionSyncTarget(SyncTarget):
         pages = await self._mcp_adapter.query_database(self._config.database_id)
         updated_count = 0
         skipped_count = 0
+        skipped_no_properties = 0
+        skipped_schema_missing = 0
+        skipped_no_docid = 0
+        skipped_missing_local = 0
+        skipped_no_change = 0
         warnings: list[str] = []
 
         for page in pages:
             props = page.get("properties")
             if not isinstance(props, dict):
                 skipped_count += 1
-                warnings.append("Skipped a Notion page without properties.")
+                skipped_no_properties += 1
+                page_id = page.get("id", "unknown")
+                warnings.append(
+                    f"Skipped Notion page (ID: {page_id}) "
+                    "because properties block is missing."
+                )
+                continue
+
+            # 标准属性存在性检查与缺失属性诊断
+            missing_props = [p for p in ("DocID", "Collection", "Tags", "Name") if p not in props]
+            if missing_props:
+                skipped_count += 1
+                skipped_schema_missing += 1
+                page_id = page.get("id", "unknown")
+                warnings.append(
+                    f"Skipped Notion page (ID: {page_id}) due to missing schema properties: "
+                    f"{', '.join(missing_props)}. Please ensure your Notion database "
+                    "contains 'Name', 'Collection', 'Tags', and 'DocID' columns."
+                )
                 continue
 
             doc_id = _read_rich_text(props.get("DocID"))
             if not doc_id:
                 skipped_count += 1
-                warnings.append("Skipped a Notion page without DocID.")
+                skipped_no_docid += 1
+                page_id = page.get("id", "unknown")
+                warnings.append(
+                    f"Skipped Notion page (ID: {page_id}) because DocID rich text is empty."
+                )
                 continue
 
             doc = await self._source_store.get_document(doc_id)
             if doc is None:
                 skipped_count += 1
+                skipped_missing_local += 1
                 warnings.append(f"Skipped Notion page for missing local document: {doc_id}")
                 continue
 
@@ -254,11 +292,19 @@ class NotionSyncTarget(SyncTarget):
                 updated_count += 1
             else:
                 skipped_count += 1
+                skipped_no_change += 1
 
         return {
             "status": "success",
             "updated_count": updated_count,
             "skipped_count": skipped_count,
+            "skipped_details": {
+                "no_properties": skipped_no_properties,
+                "schema_missing": skipped_schema_missing,
+                "no_docid": skipped_no_docid,
+                "missing_local": skipped_missing_local,
+                "no_change": skipped_no_change,
+            },
             "warnings": warnings,
         }
 

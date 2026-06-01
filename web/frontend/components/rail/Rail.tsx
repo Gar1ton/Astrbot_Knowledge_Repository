@@ -33,39 +33,6 @@ function SearchIcon() {
   );
 }
 
-function ShortcutSearch() {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 7,
-        margin: "4px 0 6px",
-        padding: "7px 10px",
-        borderRadius: 999,
-        background: "var(--bg-inset)",
-        border: "1px solid var(--border)",
-        color: "var(--fg-subtle)",
-        fontSize: 12,
-      }}
-    >
-      <SearchIcon />
-      <span style={{ flex: 1 }}>搜索 / 跳转</span>
-      <span
-        style={{
-          padding: "0 4px",
-          borderRadius: 4,
-          border: "1px solid var(--border)",
-          background: "var(--surface)",
-          fontSize: 10,
-          lineHeight: "16px",
-        }}
-      >
-        ⌘K
-      </span>
-    </div>
-  );
-}
 
 function GraphIcon() {
   return (
@@ -346,8 +313,6 @@ export function Rail({ onLogout }: RailProps) {
           </span>
         </div>
       </div>
-
-      <ShortcutSearch />
 
       {/* Ask Agent（featured） */}
       <div style={{ padding: "6px 0" }}>

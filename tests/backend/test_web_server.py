@@ -36,7 +36,18 @@ async def _make_api() -> KnowledgeRepositoryApi:
         SourceDocument("d1", "Doc 1", "/p/d1.pdf", "application/pdf", 100, "h1", "papers", ["t"])
     )
     kb = InMemoryKnowledgeBaseReader(
-        {"papers": [DocumentChunk("c0", "d1", 0, "alpha beta", "h0")]}
+        {
+            "papers": [
+                DocumentChunk(
+                    "c0",
+                    "d1",
+                    0,
+                    "alpha beta",
+                    "h0",
+                    metadata={"page_number": 1, "locator": "page_1_p1", "paragraph": 1},
+                )
+            ]
+        }
     )
     targets = {
         SyncTargetKind.R2: InMemorySyncTarget(SyncTargetKind.R2, 10 * _GB, base_used_bytes=8 * _GB),
@@ -451,6 +462,12 @@ async def test_ask_route_returns_answer_and_sources(tmp_path: Path) -> None:
         body = await resp.json()
         assert "answer" in body and body["answer"]
         assert "sources" in body and isinstance(body["sources"], list)
+        assert len(body["sources"]) > 0
+        src = body["sources"][0]
+        assert "chunk_id" in src and src["chunk_id"] == "c0"
+        assert "doc_id" in src and src["doc_id"] == "d1"
+        assert "metadata" in src and src["metadata"]
+        assert "locator" in src["metadata"] and src["metadata"]["locator"] == "page_1_p1"
         assert "conversation_id" in body and body["conversation_id"]
     finally:
         await client.close()
@@ -587,3 +604,82 @@ async def test_download_document_route(tmp_path: Path) -> None:
         assert resp_file_missing.status == 404
     finally:
         await client.close()
+
+
+async def test_config_update_route(tmp_path: Path) -> None:
+    """测试 POST /api/config/update 接口更新配置以及写白名单保护。"""
+    api = await _make_api()
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        # 1. 成功更新允许的配置键
+        resp = await client.post(
+            "/api/config/update",
+            json={"section": "vector_db", "key": "embedding_provider", "value": "local"}
+        )
+        assert resp.status == 200
+        assert (await resp.json()) == {"status": "success"}
+
+        # 2. 拒绝非白名单配置节的更新
+        resp_blocked = await client.post(
+            "/api/config/update",
+            json={"section": "r2_sync", "key": "secret_access_key", "value": "hack"}
+        )
+        assert resp_blocked.status == 400
+        data = await resp_blocked.json()
+        assert data["status"] == "error"
+        assert "write-protected" in data["message"]
+    finally:
+        await client.close()
+
+
+async def test_ask_route_sources_contain_locator_fields(tmp_path: Path) -> None:
+    """POST /api/ask 返回的 sources 每条应包含 chunk_id/doc_id/metadata 字段。"""
+    store = InMemorySourceDocumentStore()
+    await store.upsert_collection(Collection(name="papers", description="d"))
+    await store.add_document(
+        SourceDocument("d1", "Doc 1", "/p/d1.pdf", "application/pdf", 100, "h1", "papers", [])
+    )
+    locator_meta = {"page_number": 3, "locator": "page_3_p2", "paragraph": 2}
+    kb = InMemoryKnowledgeBaseReader(
+        {"papers": [DocumentChunk("c0", "d1", 0, "alpha beta", "h0", metadata=locator_meta)]}
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=kb,
+        sync_targets={},
+        config=Config({}),
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/ask",
+            json={"question": "alpha beta", "collection": "papers"},
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["sources"], "sources 不应为空"
+        src = body["sources"][0]
+        assert "chunk_id" in src, "sources[0] 缺少 chunk_id"
+        assert "doc_id" in src, "sources[0] 缺少 doc_id"
+        assert "metadata" in src, "sources[0] 缺少 metadata"
+        assert src["chunk_id"] == "c0"
+        assert src["doc_id"] == "d1"
+        assert src["metadata"]["page_number"] == 3
+        assert src["metadata"]["locator"] == "page_3_p2"
+    finally:
+        await client.close()
+

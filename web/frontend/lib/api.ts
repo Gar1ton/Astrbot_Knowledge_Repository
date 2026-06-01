@@ -479,6 +479,22 @@ export async function getEffectiveConfig(): Promise<EffectiveConfig> {
   return apiFetch<EffectiveConfig>("/api/config/effective");
 }
 
+export async function updateConfigValue(
+  section: string,
+  key: string,
+  value: unknown
+): Promise<{ status: string }> {
+  if (isMock()) return { status: "success" };
+  return apiFetch<{ status: string }>("/api/config/update", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ section, key, value }),
+  });
+}
+
+
 // ─────────────────────────────────────────────────────────────
 // 知识图谱 Graph
 // ─────────────────────────────────────────────────────────────

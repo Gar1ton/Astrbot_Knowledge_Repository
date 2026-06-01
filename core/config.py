@@ -137,7 +137,7 @@ class VectorDbConfig:
     """向量数据库与检索后端配置。"""
 
     backend: str = "astr"
-    embedding_provider: str = "external"
+    embedding_provider: str = "local"
     db_filename: str = "milvus_lite.db"
 
 

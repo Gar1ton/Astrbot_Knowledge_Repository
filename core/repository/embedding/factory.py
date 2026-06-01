@@ -29,25 +29,30 @@ class EmbeddingProviderFactory:
 
         inner_provider: EmbeddingProvider
         
-        if provider_type == "local":
+        if provider_type == "astr":
+            # AstrBot 内置 Embedding：复用主框架已配置的 embedding 模型，
+            # 目前尚未完整对接 AstrBot embedding 接口，先抛出明确错误避免静默降级。
+            raise NotImplementedError(
+                "embedding_provider='astr' (复用 AstrBot 内置 Embedding) 尚未实现。"
+                " 请暂时改用 'local' 或 'external'。"
+            )
+        elif provider_type == "local":
             # 引入本地懒加载实现
             from core.repository.embedding.local import LocalEmbeddingProvider
-            
-            # 本地模型：从配置中提取。为了极强的自适应配置扩展，我们在 raw 字典里获取用户配置，
-            # 默认为 BAAI/bge-large-en-v1.5 （英文顶尖模型）以满足学术论文检索
+
             vdb_raw = config.raw.get("vector_db", {})
             model_name = vdb_raw.get("embedding_model") or "BAAI/bge-large-en-v1.5"
-            
+
             inner_provider = LocalEmbeddingProvider(model_name=model_name)
         else:
-            # 引入云端 API 兼容接口
+            # 云端 API 兼容接口（provider_type == "external" 或未知值）
             from core.repository.embedding.external import ExternalEmbeddingProvider
-            
+
             vdb_raw = config.raw.get("vector_db", {})
             api_key = vdb_raw.get("api_key") or ""
             base_url = vdb_raw.get("base_url") or "https://api.openai.com/v1"
             model_name = vdb_raw.get("embedding_model") or "text-embedding-3-large"
-            
+
             inner_provider = ExternalEmbeddingProvider(
                 api_key=api_key,
                 base_url=base_url,

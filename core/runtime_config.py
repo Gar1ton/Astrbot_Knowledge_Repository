@@ -18,6 +18,15 @@ logger = logging.getLogger("RuntimeConfigStore")
 
 _ALLOWED_RUNTIME_KEYS = {
     "notion_sync": frozenset({"database_id", "parent_page_id", "database_title"}),
+    "vector_db": frozenset({
+        "backend",
+        "embedding_provider",
+        "embedding_model",
+        "api_key",
+        "base_url",
+        "db_filename",
+    }),
+    "ask": frozenset({"conversation_enhancement_mode", "persona_enabled"}),
 }
 
 

@@ -11,7 +11,7 @@ import uuid
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import fitz  # PyMuPDF
 
@@ -107,7 +107,9 @@ class IngestManager(BaseIngestManager):
         return doc_id
 
     def _extract_and_chunk(self, pdf_path: Path, doc_id: str) -> list[DocumentChunk]:
-        """使用 PyMuPDF 抽取文本并按「物理页隔离 + 动态段落合并」执行高稳定性切分。"""
+        """使用 PyMuPDF 抽取文本并按「物理页隔离 + 动态段落合并」执行高稳定性切分，
+        同时生成页码、定位符等元数据。
+        """
         # 触发 OCR/LLM 可选功能警示提示
         if self._config.ocr_enabled:
             warnings.warn(
@@ -133,24 +135,47 @@ class IngestManager(BaseIngestManager):
         target_max = int(chunk_size * 1.2)   # 默认 1200 字
         hard_limit = int(chunk_size * 1.5)   # 默认 1500 字
 
-        chunk_texts: list[str] = []
+        chunk_entries: list[tuple[str, dict[str, Any]]] = []
 
         if chunk_by_page:
             # 方案 A: 物理页物理边界隔离，独立切分，哈希变动仅局限单页
-            for page_text in pages_text:
-                chunk_texts.extend(
-                    self._split_into_paragraphs(page_text, target_min, target_max, hard_limit)
-                )
+            for page_idx, page_text in enumerate(pages_text):
+                page_num = page_idx + 1
+                paras = self._split_into_paragraphs(page_text, target_min, target_max, hard_limit)
+                for para_idx, text in enumerate(paras):
+                    chunk_entries.append((
+                        text,
+                        {
+                            "page_number": page_num,
+                            "locator": f"page_{page_num}_p{para_idx + 1}",
+                            "paragraph": para_idx + 1,
+                        }
+                    ))
         else:
             # 方案 B: 全文打散合并，无边界连续段落合并
             all_text = "\n\n".join(pages_text)
-            chunk_texts.extend(
-                self._split_into_paragraphs(all_text, target_min, target_max, hard_limit)
-            )
+            paras = self._split_into_paragraphs(all_text, target_min, target_max, hard_limit)
+            for para_idx, text in enumerate(paras):
+                # 启发式页码定位：在 pages_text 中搜索该文本的前 100 个字符
+                page_num = 1
+                sample = text[:100].strip()
+                if sample:
+                    for p_idx, p_txt in enumerate(pages_text):
+                        if sample in p_txt:
+                            page_num = p_idx + 1
+                            break
+                chunk_entries.append((
+                    text,
+                    {
+                        "page_number": page_num,
+                        "locator": f"page_{page_num}_p{para_idx + 1}",
+                        "paragraph": para_idx + 1,
+                    }
+                ))
 
         # 构造领域 DocumentChunk 对象
         chunks = []
-        for idx, text in enumerate(chunk_texts):
+        for idx, (text, meta) in enumerate(chunk_entries):
             chunk_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
             chunks.append(
                 DocumentChunk(
@@ -159,9 +184,12 @@ class IngestManager(BaseIngestManager):
                     ordinal=idx,
                     text=text,
                     content_hash=chunk_hash,
+                    metadata=meta,
                 )
             )
         return chunks
+
+
 
     def _split_into_paragraphs(
         self, text: str, target_min: int, target_max: int, hard_limit: int

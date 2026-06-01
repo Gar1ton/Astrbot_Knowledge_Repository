@@ -250,8 +250,8 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             for chunk in chunks:
                 await self._db.execute(
                     """
-                    INSERT INTO chunks (chunk_id, doc_id, ordinal, text, content_hash)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO chunks (chunk_id, doc_id, ordinal, text, content_hash, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chunk.chunk_id,
@@ -259,6 +259,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                         chunk.ordinal,
                         chunk.text,
                         chunk.content_hash,
+                        json.dumps(chunk.metadata),
                     ),
                 )
             await self._db.commit()
@@ -269,23 +270,34 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
     async def list_chunks(self, doc_id: str) -> list[DocumentChunk]:
         async with self._db.execute(
             """
-            SELECT chunk_id, ordinal, text, content_hash
+            SELECT chunk_id, ordinal, text, content_hash, metadata
               FROM chunks WHERE doc_id = ?
              ORDER BY ordinal ASC
             """,
             (doc_id,),
         ) as cursor:
             rows = await cursor.fetchall()
-            return [
-                DocumentChunk(
-                    chunk_id=row[0],
-                    doc_id=doc_id,
-                    ordinal=row[1],
-                    text=row[2],
-                    content_hash=row[3],
+            results = []
+            for row in rows:
+                try:
+                    # 兼容可能存在的旧数据或未应用迁移时的情况，若列数不对或报错做安全回退
+                    meta = json.loads(row[4]) if len(row) > 4 and row[4] else {}
+                    if not isinstance(meta, dict):
+                        meta = {}
+                except Exception:
+                    meta = {}
+                
+                results.append(
+                    DocumentChunk(
+                        chunk_id=row[0],
+                        doc_id=doc_id,
+                        ordinal=row[1],
+                        text=row[2],
+                        content_hash=row[3],
+                        metadata=meta,
+                    )
                 )
-                for row in rows
-            ]
+            return results
 
     # ── 同步状态 ──────────────────────────────────────────────────
 

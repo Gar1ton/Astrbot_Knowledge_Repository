@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 # ── 领域枚举 ────────────────────────────────────────────────────
 
@@ -95,6 +96,7 @@ class DocumentChunk:
     ordinal: int
     text: str
     content_hash: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ── 在线同步 ────────────────────────────────────────────────────

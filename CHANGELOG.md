@@ -25,6 +25,12 @@
 
 ### 新增功能 (Added)
 
+- **NotebookLM 风格引用定位元数据与定位能力**：
+  - 在 `core/domain/models.py` 的 `DocumentChunk` 中新增了 `metadata` 字典字段。
+  - 在 `migrations/004_chunk_metadata.sql` 中新增数据库迁移，为 `chunks` 表追加了 `metadata` 列，并在 `core/repository/source_store/sqlite.py` 中实现了 JSON 格式的序列化存取。
+  - 在 `core/managers/ingest_manager.py` 中，在 PDF 分块提取时自动捕获物理页码 (`page_number`)、段落序号 (`paragraph`) 与定位符 (`locator`) 元数据。
+  - 在 `core/api.py` 的 `ask` 接口中，返回的 `sources` 列表支持透传 `metadata` 信息，并自动将页码信息注入到 LLM 的提示词上下文中，实现高可信的 NotebookLM 风格证据定位。
+  - 在 `web/server.py` 的 `_chunk_dict` 序列化辅助函数中增加了对分块 `metadata` 的返回支持。
 - **本地向量数据库适配器 (`core/repository/vector_store/milvus_lite.py`)**：使用 `pymilvus` 和内嵌进程级 Milvus Lite 实现了对分块的多集合 Dense 向量检索、条件检索与增量写删。
 - **混合检索编排 (`core/api.py`, `core/plugin_initializer.py`)**：在组合根与业务层完整接入并实例化本地向量库、EmbeddingProvider 及统一检索编排器 `RetrievalOrchestrator`，实现 Dense + Lexical + Graph-RAG 多路融合。
 - **消息 Hook 骨架与 Agent 控制 (`core/main.py`, `core/event_handler.py`)**：注册了普通消息捕获 Hook 骨架并打通信号通路；新增了用于普通对话记忆召回控制的 `/kr agent on|off` 开关指令。

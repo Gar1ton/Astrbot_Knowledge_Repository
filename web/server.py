@@ -251,6 +251,32 @@ async def handle_effective_config(request: web.Request) -> web.Response:
     return await _reserved(_api(request).get_effective_config(), "v0.8.0")
 
 
+async def handle_update_config(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    if not isinstance(body, dict):
+        return web.json_response(
+            {"status": "error", "message": "Invalid JSON body"}, status=400
+        )
+    section = body.get("section")
+    key = body.get("key")
+    value = body.get("value")
+    if not section or not key:
+        return web.json_response(
+            {"status": "error", "message": "Missing section or key"}, status=400
+        )
+
+    async def _update():
+        await _api(request).update_config_value(section, key, value)
+        return {"status": "success"}
+
+    try:
+        return await _reserved(_update(), "v0.10.0")
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
+
+
 async def handle_sync_status(request: web.Request) -> web.Response:
     return await _reserved(_api(request).get_sync_status(), "v0.3.0")
 
@@ -343,7 +369,13 @@ async def _document_dict(api: KnowledgeRepositoryApi, d: object) -> dict:
 
 
 def _chunk_dict(c: object) -> dict:
-    return {"chunk_id": c.chunk_id, "doc_id": c.doc_id, "ordinal": c.ordinal, "text": c.text}  # type: ignore[attr-defined]
+    return {
+        "chunk_id": c.chunk_id,  # type: ignore[attr-defined]
+        "doc_id": c.doc_id,      # type: ignore[attr-defined]
+        "ordinal": c.ordinal,    # type: ignore[attr-defined]
+        "text": c.text,          # type: ignore[attr-defined]
+        "metadata": getattr(c, "metadata", {}),
+    }
 
 
 def _quota_dict(u: object) -> dict:
@@ -431,6 +463,7 @@ def build_app(
     app.router.add_get("/api/kb/search", handle_kb_search)
     app.router.add_get("/api/quota", handle_quota)
     app.router.add_get("/api/config/effective", handle_effective_config)
+    app.router.add_post("/api/config/update", handle_update_config)
     # 预留端口（reserved，未实现回 501 + available_in）
     app.router.add_post("/api/sync/{target}", handle_sync)
     app.router.add_post("/api/notion/init", handle_notion_init)

@@ -125,6 +125,19 @@ const zh = {
   settings_config_ask: "Ask Agent",
   settings_config_vector_db: "向量数据库与检索后端",
 
+  // 配置修改
+  settings_edit_title: "核心参数配置",
+  settings_vector_backend: "向量数据库后端",
+  settings_embed_provider: "Embedding 提供商",
+  settings_embed_model: "Embedding 模型名称",
+  settings_api_key: "API 密钥",
+  settings_base_url: "API 接口地址",
+  settings_ask_mode: "对话增强模式",
+  settings_save: "保存配置",
+  settings_saving: "正在保存...",
+  settings_local_guide: "💡 本地离线 Embedding 部署指引",
+  settings_local_guide_text: "您已选择本地模型。为支持本地离线运行（如 BAAI 检索），请确保已在 Python 终端中执行：",
+
   // 状态
   reserved_prefix: "即将上线",
   error_generic: "请求失败，请重试",
@@ -241,6 +254,18 @@ const en: Record<keyof typeof zh, string> = {
   settings_config_graph: "Knowledge Graph",
   settings_config_ask: "Ask Agent",
   settings_config_vector_db: "Vector Database & Backend",
+
+  settings_edit_title: "Core Parameters Configuration",
+  settings_vector_backend: "Vector DB Backend",
+  settings_embed_provider: "Embedding Provider",
+  settings_embed_model: "Embedding Model Name",
+  settings_api_key: "API Key",
+  settings_base_url: "API Base URL",
+  settings_ask_mode: "Conversation Enhancement Mode",
+  settings_save: "Save Config",
+  settings_saving: "Saving...",
+  settings_local_guide: "💡 Local Offline Embedding Guide",
+  settings_local_guide_text: "You have selected a local model. To support local offline running (e.g. BAAI retrieval), please ensure you run in your Python console:",
 
   reserved_prefix: "Coming in",
   error_generic: "Request failed, please retry",

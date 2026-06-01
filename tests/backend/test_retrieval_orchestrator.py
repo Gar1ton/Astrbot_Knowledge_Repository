@@ -61,7 +61,8 @@ async def sqlite_store(temp_dir):
         doc_id TEXT REFERENCES documents(doc_id) ON DELETE CASCADE,
         ordinal INTEGER,
         text TEXT,
-        content_hash TEXT
+        content_hash TEXT,
+        metadata TEXT DEFAULT '{}'
     )
     """)
     

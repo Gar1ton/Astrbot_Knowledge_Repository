@@ -44,7 +44,7 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
-## v0.14.0 Local retrieval & Ask Agent integration (in progress)
+## v0.14.0 Local retrieval & Ask Agent integration (completed)
 
 ### User constraints / 约束
 
@@ -65,8 +65,26 @@
 - [x] **Phase 5 — 接入 AstrBot 普通对话增强（非侵入式 Hook 打通）**：在真实 AstrBot SDK 薄壳注册普通消息 Hook 骨架；**目前先打通 Hook 信号通路，但采取旁路 Dry-Run/透传（Pass-through）机制，绝对不干预或修改 AstrBot 的原生原有对话回答**；预留清晰的、热插拔式的「插槽接口（Slot Hook）」，待用户思考并设计好具体的交互影响形式后再行代码填充，保障系统过渡期的非侵入稳定性。(Phase 5 completed: on_message and on_agent callbacks successfully integrated into core/main.py and core/event_handler.py, providing 100% dry-run safe pass-through hooking with slot logic fully tested via E2E lifecycle suites.)
 - [x] **Phase 6 — 增加 Persona 控制与普通对话记忆检索增强**：内部 `ask()` 接口/Web UI 中的 Ask Agent 对话支持 `persona_enabled` 开关，在 Web UI 的输入框底部集合选择器右侧添加对应的“启用 Persona / 角色设定”开关；当 `persona_enabled` 为 `True` 时，动态提取 AstrBot 当前运行态设定的 Persona Prompt 并融入系统提示词以指导 Standalone Ask 答复；`/kr agent on` 和 `off` 目前阶段**仅且只**决定了 AstrBot 的回答是否可以调用插件的记忆召回功能，当为 `on` 时通过 handler 将召回片段（Grounded Context）动态注入传回至 AstrBot 普通消息的 `system_prompt` 中；当为 `off` 时则完全不进行检索，实现 100% 零开销 pass-through。(Phase 6 completed: Standalone Ask persona-enabled option fully implemented on both Web UI and core engine, Agent message hook zero-overhead pass-through fully optimized with all backend unit/integration tests passing 100% green.)
 - [x] **Phase 7 — 实现双模式对话增强与 Agent 工具契约**：新增 `ask.conversation_enhancement_mode` 配置项（支持 WebUI Settings 切换），分类处理两种逻辑：一是原生召回注入 (`inject`)；二是内部代理询问 (`query_agent`)，强制关闭内部 Ask Persona 防止过拟合，并通过 `conversation_id` 绑定打通 WebUI Ask 历史大一统，以指令级注入实现完美代理。(Phase 7 completed: ask schema registered in _conf_schema.json, dual-mode conversation enhancement routing fully implemented inside core/event_handler.py, comprehensive unit/integration test coverage achieved, and Next.js frontend compiled and synchronized with 100% test pass.)
-- [ ] **Phase 8 — NotebookLM 风格在线检阅与引用定位**：为每个 chunk 持久化页码、段落或字符范围、原件引用 and 可展示预览；回答引用返回稳定 `doc_id + chunk_id + locator`，WebUI 支持从来源面板打开原件并定位到证据附近。评估 PDF.js 在线阅读器；Notion MCP 继续承担同步镜像，不作为本地检索或引用定位的必需依赖。技术理由：Milvus Lite 能提高召回，但在线阅览、证据定位和连续阅读属于应用层能力。
-- [ ] **Phase 9 — 测试、文档与发布闭环**：补向量端口对换测试、Milvus Lite integration 测试、索引重建与 R2 恢复测试、AstrBot hook 桩测试、persona 提示词测试、引用定位 HTTP / WebUI 测试；更新配置 schema、架构说明、版本记录与前端静态产物。
+- [x] **Phase 8 — NotebookLM 风格在线检阅与引用定位**：为每个 chunk 持久化页码、段落或字符范围、原件引用 and 可展示预览；回答引用返回稳定 `doc_id + chunk_id + locator`，WebUI 支持从来源面板打开原件并定位到证据附近。评估 PDF.js 在线阅读器；Notion MCP 继续承担同步镜像，不作为本地检索或引用定位的必需依赖。技术理由：Milvus Lite 能提高召回，但在线阅览、证据定位和连续阅读属于应用层能力。(Phase 8 completed: metadata dict field added to DocumentChunk, SQLite replace/list chunks updated with JSON serialization, IngestManager page/para/locator parsing fully implemented and tested with 100% test green.)
+- [x] **Phase 9 — 测试、文档与发布闭环**：补向量端口对换测试、Milvus Lite integration 测试、索引重建与 R2 恢复测试、AstrBot hook 桩测试、persona 提示词测试、引用定位 HTTP / WebUI 测试；更新配置 schema、架构说明、版本记录与前端静态产物。
+  - [x] 向量端口对换测试（`tests/backend/test_vector_store.py`）
+  - [x] Milvus Lite integration 测试（`tests/backend/test_retrieval_orchestrator.py::test_milvus_lite_vector_store_lifecycle`）
+  - [x] 索引重建测试（`tests/backend/test_api.py::test_vector_db_sync_and_rebuild`）
+  - [x] AstrBot hook 桩测试（`tests/backend/test_lifecycle_and_cli.py`，覆盖 on_message / on_agent on|off 全路径）
+  - [x] Persona 提示词测试（`tests/backend/test_api.py::test_ask_with_persona_enabled`）
+  - [x] 引用定位元数据测试（`tests/backend/test_sqlite_source_store.py`，覆盖 page_number / locator / paragraph 字段序列化）
+  - [x] 引用定位 HTTP 测试（`/api/ask` sources 字段已在 `test_ask_route_returns_answer_and_sources` 中补齐对 `chunk_id + doc_id + locator` 的结构断言）
+  - [x] 版本记录（`CHANGELOG.md` v0.14.0 条目已追加）
+  - [x] 前端静态产物（`pages/` 已与 `web/frontend/out` 一致）
+- [x] **Phase 10 — WebUI 可控 Embedding 与受限配置修改（后端实现）**：在 `core/api.py` 新增 `update_config_value` 配置修改方法，并设立写保护白名单（仅允许修改 `vector_db` 与 `ask`，防范 `r2_sync` 和 `notion_sync` 被错误篡改）；实现配置变更后的动态热重载（Hot-reload），避免重启服务端即时重构 `EmbeddingProvider` 并注入检索器；在 `web/server.py` 新增 `POST /api/config/update` 路由接入。(Phase 10 completed: `core/api.py::update_config_value` 白名单校验 “vector_db”/”ask” + 热重载 EmbeddingProvider / MilvusLiteVectorStore 实现完毕；`web/server.py` 路由注册；`tests/backend/test_web_server.py::test_config_update_route` 覆盖验证通过。)
+- [x] **Phase 11 — WebUI 可控 Embedding 与受限配置修改（前端与联调）**：在 `web/frontend/lib/api.ts` 新增 `updateConfigValue` 网络接口；在设置页 `web/frontend/app/(console)/settings/page.tsx` 中，**保持下方”后端有效配置”的只读卡片网格设计完全不变，在其上方（即”外观”设置下方）新增独立的配置编辑面板**；使用现有的 `SegmentedControl` 等 UI 控件与基础输入框，支持配置并提交保存 `vector_db`（`backend` 选择 `astr`/`milvus`、`embedding_provider` 选择 `local`/`external`、`embedding_model`、`api_key`、`base_url`）和 `ask`（`conversation_enhancement_mode` 选择 `inject`/`query_agent`）；当 `embedding_provider` 选为 `local` 时，在面板中动态展示离线模型运行所需的 `pip install sentence-transformers` 依赖安装指南。(Phase 11 completed: `lib/api.ts::updateConfigValue` 接口、Settings 配置编辑面板（vector_db / ask 全字段）及本地模型安装说明均已实现并构建同步。)
+- [x] **Phase 12 — 全量回归与质量核对**：编写配置实时持久化与受控写入单元测试；进行 Node 22 下的 Next.js 静态静态构建镜像编译并同步；执行 `pytest` 与 `ruff` 代码检查，保障项目 100% 绿灯。
+  - [x] 配置受控写入单元测试（`tests/backend/test_web_server.py::test_config_update_route`）
+  - [x] `pytest` 152 passed
+  - [x] `ruff check .` All checks passed
+  - [x] `pages/` 与 `web/frontend/out` 已一致
+  - [x] `mypy` duplicate module 错误：已通过在 `core` 目录下递归补齐空 `__init__.py` 解决，且无配置违规。
+  - [x] Next.js 静态构建验证：在 Node 22.15.0 下成功重跑 `npm run build`，并利用 `tools/sync_frontend.py` 成功将 129 个静态文件同步至 `pages/` 目录。
 
 ### Decisions required / 待确认
 

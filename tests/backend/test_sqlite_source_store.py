@@ -194,3 +194,37 @@ async def test_file_database_survives_restart(tmp_path: Path) -> None:
     got = await reopened_store.get_document("persisted")
     assert got is not None and got.doc_id == "persisted"
     await reopened.close()
+
+
+async def test_chunk_metadata_persistence(sqlite_store: SQLiteSourceDocumentStore) -> None:
+    # 1) Setup document and chunks with metadata
+    doc = _doc("meta_doc")
+    await sqlite_store.add_document(doc)
+
+    chunks = [
+        DocumentChunk(
+            chunk_id="mc1",
+            doc_id="meta_doc",
+            ordinal=0,
+            text="First paragraph text on page 1.",
+            content_hash="h1",
+            metadata={"page_number": 1, "locator": "page_1_p1", "paragraph": 1}
+        ),
+        DocumentChunk(
+            chunk_id="mc2",
+            doc_id="meta_doc",
+            ordinal=1,
+            text="Second paragraph text on page 2.",
+            content_hash="h2",
+            metadata={"page_number": 2, "locator": "page_2_p1", "paragraph": 1}
+        )
+    ]
+    await sqlite_store.replace_chunks("meta_doc", chunks)
+
+    # 2) Retrieve chunks and verify metadata
+    got = await sqlite_store.list_chunks("meta_doc")
+    assert len(got) == 2
+    assert got[0].chunk_id == "mc1"
+    assert got[0].metadata == {"page_number": 1, "locator": "page_1_p1", "paragraph": 1}
+    assert got[1].chunk_id == "mc2"
+    assert got[1].metadata == {"page_number": 2, "locator": "page_2_p1", "paragraph": 1}

@@ -360,8 +360,15 @@ class KnowledgeRepositoryApi:
                 "chunk_id": chunk.chunk_id,
                 "ordinal": chunk.ordinal,
                 "text": chunk.text,
+                "metadata": chunk.metadata,
             })
-            context_parts.append(f"[{n}] {title}\n{chunk.text}")
+            has_page = chunk.metadata and "page_number" in chunk.metadata
+            page_info = (
+                f" (Page {chunk.metadata['page_number']})"
+                if has_page
+                else ""
+            )
+            context_parts.append(f"[{n}] {title}{page_info}\n{chunk.text}")
 
         # 3. 调用 LLM 生成答案（无 LLM 时降级为摘要回答）
         if self._llm_adapter is not None and context_parts:
@@ -480,6 +487,46 @@ class KnowledgeRepositoryApi:
         if self._config is None:
             raise NotImplementedError("get_effective_config: available in v0.8.0")
         return self._config.to_public_dict()
+
+    async def update_config_value(self, section: str, key: str, value: Any) -> None:
+        """更新受限配置项，并进行写保护校验与运行时热重载。"""
+        if section not in ("vector_db", "ask"):
+            raise ValueError(f"Section '{section}' is write-protected or read-only.")
+
+        # 保存配置到内存与物理存储
+        self._persist_config_value(section, key, value)
+
+        # 针对 vector_db 的改动，触发热重载 (Hot-reload)
+        if section == "vector_db" and self._config:
+            vdb = self._config.get_vector_db_config()
+            
+            # 如果 vector_db 开启了 milvus，但 vector_store 尚未初始化，在此进行动态构建
+            if vdb.backend == "milvus" and not self._vector_store:
+                from core.repository.vector_store.milvus_lite import MilvusLiteVectorStore
+                db_dir_path = (
+                    self._managed_documents_dir.parent
+                    if self._managed_documents_dir
+                    else Path("./data")
+                )
+                milvus_db_path = str(db_dir_path / vdb.db_filename)
+                self._vector_store = MilvusLiteVectorStore(db_path=milvus_db_path)
+            
+            # 重新实例化并构建 Embedding Provider 实例
+            from core.repository.embedding.factory import EmbeddingProviderFactory
+            db_dir_str = (
+                str(self._managed_documents_dir.parent)
+                if self._managed_documents_dir
+                else "./data"
+            )
+            self._embedding_provider = EmbeddingProviderFactory.create_provider(
+                self._config, db_dir=db_dir_str
+            )
+            
+            # 将更新后的实例同步回统一检索编排器 (RetrievalOrchestrator) 内部
+            if self._retrieval_orchestrator:
+                self._retrieval_orchestrator._embedding_provider = self._embedding_provider
+                self._retrieval_orchestrator._vector_store = self._vector_store
+
 
     async def get_sync_status(self) -> list[dict]:
         """列出各文档在各目标的同步状态（SyncRecord 视图）。

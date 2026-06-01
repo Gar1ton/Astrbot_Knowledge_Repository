@@ -107,3 +107,21 @@ def test_runtime_config_store_only_persists_generated_notion_values(tmp_path: Pa
     assert persisted == [{"notion_sync": {"database_id": "db1"}}]
     with pytest.raises(ValueError, match="runtime config key is not allowed"):
         store.set_value("r2_sync", "secret_access_key", "forbidden")
+
+
+def test_runtime_config_store_permits_vector_db_and_ask_keys(tmp_path: Path) -> None:
+    path = tmp_path / "runtime_config.json"
+    store = RuntimeConfigStore(path)
+
+    # These should pass successfully without raising ValueError
+    store.set_value("vector_db", "backend", "milvus")
+    store.set_value("vector_db", "embedding_provider", "local")
+    store.set_value("vector_db", "embedding_model", "BAAI/bge-m3")
+    store.set_value("ask", "conversation_enhancement_mode", "query_agent")
+
+    data = store.load()
+    assert data["vector_db"]["backend"] == "milvus"
+    assert data["vector_db"]["embedding_provider"] == "local"
+    assert data["vector_db"]["embedding_model"] == "BAAI/bge-m3"
+    assert data["ask"]["conversation_enhancement_mode"] == "query_agent"
+

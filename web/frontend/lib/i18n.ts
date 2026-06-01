@@ -74,6 +74,7 @@ const zh = {
   ask_empty_title: "开始与 Ask Agent 对话",
   ask_empty_sub: "您可以提问任何关于当前知识库中存储文档的问题，支持混合检索与智能生成。",
   ask_collection_all: "全部集合",
+  ask_persona_toggle: "启用 Persona 角色设定",
 
   // 图谱
   graph_build: "构建 / 增量更新",
@@ -122,6 +123,7 @@ const zh = {
   settings_config_web: "Web 控制台",
   settings_config_graph: "知识图谱",
   settings_config_ask: "Ask Agent",
+  settings_config_vector_db: "向量数据库与检索后端",
 
   // 状态
   reserved_prefix: "即将上线",
@@ -193,6 +195,7 @@ const en: Record<keyof typeof zh, string> = {
   ask_empty_title: "Start a conversation with Ask Agent",
   ask_empty_sub: "Ask any question about the documents in the knowledge base. Powered by hybrid search and generation.",
   ask_collection_all: "All Collections",
+  ask_persona_toggle: "Enable Persona constraints",
 
   graph_build: "Build / Incremental Update",
   graph_query: "Graph Query",
@@ -237,6 +240,7 @@ const en: Record<keyof typeof zh, string> = {
   settings_config_web: "Web Console",
   settings_config_graph: "Knowledge Graph",
   settings_config_ask: "Ask Agent",
+  settings_config_vector_db: "Vector Database & Backend",
 
   reserved_prefix: "Coming in",
   error_generic: "Request failed, please retry",

@@ -30,9 +30,12 @@ from migrations.runner import run_migrations
 if TYPE_CHECKING:
     from core.pipelines.graph_build_pipeline import GraphBuildPipeline
     from core.pipelines.graph_search_pipeline import GraphSearchPipeline
+    from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
+    from core.repository.embedding.base import EmbeddingProvider
     from core.repository.graph_store.base import GraphStore
     from core.repository.kb_reader.base import KnowledgeBaseReader
     from core.repository.source_store.base import SourceDocumentStore
+    from core.repository.vector_store.base import VectorStore
 
 logger = logging.getLogger("PluginInitializer")
 
@@ -59,6 +62,10 @@ class PluginInitializer:
         self.graph_store: GraphStore | None = None
         self.graph_build_pipeline: GraphBuildPipeline | None = None
         self.graph_search_pipeline: GraphSearchPipeline | None = None
+        self.vector_store: VectorStore | None = None
+        self.embedding_provider: EmbeddingProvider | None = None
+        self.retrieval_orchestrator: RetrievalOrchestrator | None = None
+        self.agent_enabled: bool = False
 
         # 依赖句柄
         self.ingest_manager: IngestManager | None = None
@@ -145,6 +152,29 @@ class PluginInitializer:
             config=graph_cfg,
         )
 
+        # 4.6) 构造本地向量检索与 Embedding 子系统 (Phase 4)
+        vdb_cfg = self._config.get_vector_db_config()
+        if vdb_cfg.backend == "milvus":
+            from core.repository.embedding.factory import EmbeddingProviderFactory
+            from core.repository.vector_store.milvus_lite import MilvusLiteVectorStore
+
+            milvus_db_path = str(self._data_dir / vdb_cfg.db_filename)
+            self.vector_store = MilvusLiteVectorStore(db_path=milvus_db_path)
+            self.embedding_provider = EmbeddingProviderFactory.create_provider(
+                self._config, db_dir=str(self._data_dir)
+            )
+
+        # 4.7) 构造统一检索编排器 (RetrievalOrchestrator)
+        from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
+        self.retrieval_orchestrator = RetrievalOrchestrator(
+            source_store=self.source_store,
+            kb_reader=self.kb_reader,
+            config=self._config,
+            vector_store=self.vector_store,
+            embedding_provider=self.embedding_provider,
+            graph_store=self.graph_store,
+        )
+
         # 5) 业务门面（依赖已装配的仓储/managers）。
         self.api = KnowledgeRepositoryApi(
             source_store=self.source_store,
@@ -161,6 +191,9 @@ class PluginInitializer:
             config_persist=self._persist_config_value,
             llm_adapter=llm_adapter,
             managed_documents_dir=self._data_dir / "documents",
+            vector_store=self.vector_store,
+            embedding_provider=self.embedding_provider,
+            retrieval_orchestrator=self.retrieval_orchestrator,
         )
 
         # 6) 周期任务（如 R2 周期备份，v0.3.0 起注册）。
@@ -217,6 +250,13 @@ class PluginInitializer:
             except Exception:
                 pass
             self._backup_task = None
+
+        if self.vector_store is not None:
+            try:
+                await self.vector_store.close()
+            except Exception as e:
+                logger.error(f"Failed to close vector store on teardown: {e}")
+            self.vector_store = None
 
         if self._exit_stack is not None:
             await self._exit_stack.aclose()

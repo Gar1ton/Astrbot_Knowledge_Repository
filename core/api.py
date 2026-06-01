@@ -13,7 +13,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.domain.models import Collection, SourceDocument, SyncTargetKind
 
@@ -28,11 +28,55 @@ if TYPE_CHECKING:
     from core.managers.base import BaseCategoryManager, BaseIngestManager, BaseQuotaManager
     from core.pipelines.graph_build_pipeline import GraphBuildPipeline
     from core.pipelines.graph_search_pipeline import GraphSearchPipeline
+    from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
     from core.pipelines.sync_pipeline import SyncPipeline
+    from core.repository.embedding.base import EmbeddingProvider
     from core.repository.graph_store.base import GraphStore
     from core.repository.kb_reader.base import KnowledgeBaseReader
     from core.repository.source_store.base import SourceDocumentStore
     from core.repository.sync_targets.base import SyncTarget
+    from core.repository.vector_store.base import VectorStore
+
+
+def _get_astrbot_persona_prompt(context: Any) -> str:
+    """从 AstrBot context 中动态检索当前的 persona prompt。"""
+    if context is None:
+        return ""
+    try:
+        get_active_prompt = getattr(context, "get_active_persona_prompt", None)
+        if callable(get_active_prompt):
+            return str(get_active_prompt())
+
+        active_persona = getattr(context, "active_persona", None)
+        if active_persona is not None:
+            prompt = getattr(active_persona, "prompt", None) or getattr(
+                active_persona, "system_prompt", None
+            )
+            if prompt:
+                return str(prompt)
+
+        get_active_persona = getattr(context, "get_active_persona", None)
+        if callable(get_active_persona):
+            persona_obj = get_active_persona()
+            if persona_obj:
+                prompt = getattr(persona_obj, "prompt", None) or getattr(
+                    persona_obj, "system_prompt", None
+                )
+                if prompt:
+                    return str(prompt)
+
+        config_obj = getattr(context, "config", None)
+        if config_obj:
+            get_cfg = getattr(config_obj, "get", None)
+            if callable(get_cfg):
+                p = get_cfg("persona") or get_cfg("active_persona")
+                if isinstance(p, dict):
+                    return str(p.get("prompt") or p.get("system_prompt") or "")
+                elif isinstance(p, str):
+                    return p
+    except Exception as e:
+        logger.warning(f"Failed to fetch AstrBot persona dynamically: {e}")
+    return ""
 
 
 class KnowledgeRepositoryApi:
@@ -55,9 +99,15 @@ class KnowledgeRepositoryApi:
         config_persist: Callable[[str, str, object], None] | None = None,
         llm_adapter: LLMAdapter | None = None,
         managed_documents_dir: Path | None = None,
+        vector_store: VectorStore | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
+        retrieval_orchestrator: RetrievalOrchestrator | None = None,
     ) -> None:
         self._source_store = source_store
         self._kb_reader = kb_reader
+        self._vector_store = vector_store
+        self._embedding_provider = embedding_provider
+        self._retrieval_orchestrator = retrieval_orchestrator
         self._sync_targets = sync_targets or {}
         self._ingest_manager = ingest_manager
         self._category_manager = category_manager
@@ -88,6 +138,11 @@ class KnowledgeRepositoryApi:
 
     async def delete_collection(self, name: str) -> bool:
         """删除集合本身（不级联删其文档）。返回 False 表示 name 不存在。"""
+        if self._config:
+            vdb = self._config.get_vector_db_config()
+            if vdb.backend == "milvus" and self._vector_store:
+                await self._vector_store.delete_collection(name)
+
         if self._category_manager:
             return await self._category_manager.delete_collection(name)
         return await self._source_store.delete_collection(name)
@@ -124,7 +179,7 @@ class KnowledgeRepositoryApi:
         预览级登记：仅写入源库元数据。v0.3.0 起本操作委派 ingest_manager（含 PyMuPDF 抽取/分块）。
         """
         if self._ingest_manager:
-            return await self._ingest_manager.ingest(
+            doc_id = await self._ingest_manager.ingest(
                 title=title,
                 file_path=file_path,
                 content_type=content_type,
@@ -132,6 +187,18 @@ class KnowledgeRepositoryApi:
                 collection=collection,
                 tags=tags,
             )
+            # 同步写入 Milvus 向量库
+            if self._config:
+                vdb = self._config.get_vector_db_config()
+                if vdb.backend == "milvus" and self._vector_store and self._embedding_provider:
+                    if hasattr(self._vector_store, "set_doc_collection_mapping"):
+                        self._vector_store.set_doc_collection_mapping(doc_id, collection)
+                    chunks = await self._source_store.list_chunks(doc_id)
+                    if chunks:
+                        texts = [c.text for c in chunks]
+                        embeddings = await self._embedding_provider.embed_documents(texts)
+                        await self._vector_store.upsert_chunks(chunks, embeddings)
+            return doc_id
 
         doc_id = uuid.uuid4().hex
         await self._source_store.add_document(
@@ -197,6 +264,13 @@ class KnowledgeRepositoryApi:
             for chunk in chunks:
                 await self._graph_store.delete_by_chunk(chunk.chunk_id)
 
+        if self._config:
+            vdb = self._config.get_vector_db_config()
+            if vdb.backend == "milvus" and self._vector_store:
+                chunk_ids = [c.chunk_id for c in chunks]
+                if chunk_ids:
+                    await self._vector_store.delete_chunks(chunk_ids)
+
         deleted = await self._source_store.delete_document(doc_id)
         if deleted:
             self._unlink_managed_document(doc.file_path)
@@ -211,8 +285,36 @@ class KnowledgeRepositoryApi:
     async def search_kb(
         self, collection: str, query: str, top_k: int
     ) -> list[DocumentChunk]:
-        """在某 AstrBot 知识库集合内检索（复用 AstrBot 的 embedding + RRF）。"""
+        """在某 AstrBot 知识库集合内检索。"""
+        if self._retrieval_orchestrator is not None:
+            return await self._retrieval_orchestrator.retrieve(collection, query, top_k)
         return await self._kb_reader.search(collection, query, top_k)
+
+    async def rebuild_vector_store(self) -> dict[str, int]:
+        """清除并从 SQLite 事实源全量 rebuild 本地向量数据库。"""
+        if not self._config or not self._vector_store or not self._embedding_provider:
+            raise RuntimeError("VectorStore or EmbeddingProvider is not configured.")
+
+        # 1. 清空向量库
+        await self._vector_store.clear()
+
+        # 2. 从 SQLite 中读取所有的文档
+        docs = await self._source_store.list_documents()
+        total_chunks = 0
+
+        # 3. 逐个文档批量进行 Embedding 计算与 upsert
+        for doc in docs:
+            chunks = await self._source_store.list_chunks(doc.doc_id)
+            if chunks:
+                if hasattr(self._vector_store, "set_doc_collection_mapping"):
+                    self._vector_store.set_doc_collection_mapping(doc.doc_id, doc.collection)
+                texts = [c.text for c in chunks]
+                embeddings = await self._embedding_provider.embed_documents(texts)
+                await self._vector_store.upsert_chunks(chunks, embeddings)
+                total_chunks += len(chunks)
+
+        logger.info("Successfully rebuilt vector store index: %d chunks", total_chunks)
+        return {"rebuilt_chunks": total_chunks}
 
     async def ask(
         self,
@@ -220,6 +322,7 @@ class KnowledgeRepositoryApi:
         collection: str | None = None,
         top_k: int = 5,
         conversation_id: str | None = None,
+        persona_enabled: bool = False,
     ) -> dict:
         """基于知识库检索 + LLM 生成答案，返回 answer + sources（Ask Agent 端口）。"""
         # 1. 检索相关 chunks
@@ -227,7 +330,11 @@ class KnowledgeRepositoryApi:
         if collection:
             chunks = await self.search_kb(collection, question, top_k)
         else:
-            all_cols = await self.list_kb_collections()
+            # 优先从本地源库获取集合列表，如果没有再回退到 AstrBot 知识库列表
+            cols = await self.list_collections()
+            all_cols = [c.name for c in cols]
+            if not all_cols:
+                all_cols = await self.list_kb_collections()
             seen_ids: set[str] = set()
             for col in all_cols[:5]:
                 for ch in await self.search_kb(col, question, top_k):
@@ -264,6 +371,11 @@ class KnowledgeRepositoryApi:
                 "Cite sources using [n] notation (e.g. [1], [2]). "
                 "Answer in the same language as the question."
             )
+            if persona_enabled:
+                bot_persona = _get_astrbot_persona_prompt(self._llm_adapter._context)
+                if bot_persona:
+                    system_prompt = f"{bot_persona}\n\n[RAG Constraints]\n{system_prompt}"
+
             user_prompt = (
                 "Context:\n\n"
                 + "\n\n---\n\n".join(context_parts)

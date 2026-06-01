@@ -132,6 +132,22 @@ class GraphConfig:
     )
 
 
+@dataclass
+class VectorDbConfig:
+    """向量数据库与检索后端配置。"""
+
+    backend: str = "astr"
+    embedding_provider: str = "external"
+    db_filename: str = "milvus_lite.db"
+
+
+@dataclass
+class AskAgentConfig:
+    """Ask Agent 的会话增强和回答配置。"""
+
+    conversation_enhancement_mode: str = "inject"
+
+
 # ── 解析门面 ────────────────────────────────────────────────────
 
 
@@ -160,6 +176,8 @@ class Config:
         notion = self.get_notion_sync_config()
         web = self.get_web_console_config()
         graph = self.get_graph_config()
+        vector_db = self.get_vector_db_config()
+        ask = self.get_ask_agent_config()
         return {
             "source_store": {
                 "db_filename": source.db_filename,
@@ -204,6 +222,14 @@ class Config:
                 "rrf_k": graph.rrf_k,
                 "query_top_k": graph.query_top_k,
                 "entity_types": graph.entity_types,
+            },
+            "vector_db": {
+                "backend": vector_db.backend,
+                "embedding_provider": vector_db.embedding_provider,
+                "db_filename": vector_db.db_filename,
+            },
+            "ask": {
+                "conversation_enhancement_mode": ask.conversation_enhancement_mode,
             },
             "diagnostics": self.get_diagnostics(),
         }
@@ -304,6 +330,22 @@ class Config:
             ],
         )
 
+    def get_vector_db_config(self) -> VectorDbConfig:
+        s = _section(self.raw, "vector_db")
+        return VectorDbConfig(
+            backend=s.get("backend", VectorDbConfig.backend),
+            embedding_provider=s.get("embedding_provider", VectorDbConfig.embedding_provider),
+            db_filename=s.get("db_filename", VectorDbConfig.db_filename),
+        )
+
+    def get_ask_agent_config(self) -> AskAgentConfig:
+        s = _section(self.raw, "ask")
+        return AskAgentConfig(
+            conversation_enhancement_mode=s.get(
+                "conversation_enhancement_mode", AskAgentConfig.conversation_enhancement_mode
+            ),
+        )
+
 
 def merge_config_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """递归合并配置 dict，返回新对象。"""
@@ -334,5 +376,7 @@ __all__ = [
     "NotionSyncConfig",
     "WebConsoleConfig",
     "GraphConfig",
+    "VectorDbConfig",
+    "AskAgentConfig",
     "Config",
 ]

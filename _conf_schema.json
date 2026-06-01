@@ -225,5 +225,44 @@
         "hint": "不同学术领域可自定义。如生物医学可设为 [Gene, Disease, Drug, Protein, Pathway]"
       }
     }
+  },
+
+  "vector_db": {
+    "description": "向量数据库与检索后端（v0.14.0 起）",
+    "type": "object",
+    "hint": "选择基于主框架内置的 AstrBot 检索，或是基于本地高性能嵌入式 Milvus Lite 向量引擎",
+    "items": {
+      "backend": {
+        "description": "检索后端",
+        "type": "string",
+        "default": "astr",
+        "hint": "astr 表示复用 AstrBot 自带检索（FAISS+FTS5+RRF）；milvus 表示开启插件本地 Milvus Lite 向量引擎"
+      },
+      "embedding_provider": {
+        "description": "Embedding 提供商（仅 milvus 后端有效）",
+        "type": "string",
+        "default": "external",
+        "hint": "external 表示基于云端 API 转换；local 表示加载本地 bge-m3 轻量模型离线转换"
+      },
+      "db_filename": {
+        "description": "Milvus Lite 本地数据库文件名",
+        "type": "string",
+        "default": "milvus_lite.db"
+      }
+    }
+  },
+
+  "ask": {
+    "description": "Ask Agent 问答与对话增强",
+    "type": "object",
+    "hint": "配置 Standalone Ask Agent 以及 AstrBot 普通对话的增强行为模式",
+    "items": {
+      "conversation_enhancement_mode": {
+        "description": "普通对话增强模式",
+        "type": "string",
+        "default": "inject",
+        "hint": "inject: 召回注入模式（将片段作为 Grounded Context 注入 system prompt，由原生 LLM 组织作答）；query_agent: 代理问答模式（直接由 Standalone Ask Agent 闭环生成纯学术级严谨回答并进行指令级绝对代理代理输出，强制关闭 persona 防止过拟合）"
+      }
+    }
   }
 }

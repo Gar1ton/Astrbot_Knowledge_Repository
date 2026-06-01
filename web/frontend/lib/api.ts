@@ -44,6 +44,7 @@ export interface EffectiveConfig {
   web_console?: Record<string, unknown>;
   graph?: Record<string, unknown>;
   ask?: Record<string, unknown>;
+  vector_db?: Record<string, unknown>;
   diagnostics?: string[];
 }
 
@@ -292,6 +293,7 @@ const MOCK_CONFIG: EffectiveConfig = {
   web_console: { enabled: true, host: "0.0.0.0", port: 6520, username: "admin", password: "****" },
   graph: { enabled: true, llm_extraction: true, rrf_k: 60, query_top_k: 5 },
   ask: { top_k: 5, cite_sources: true },
+  vector_db: { backend: "astr", embedding_provider: "external", db_filename: "milvus_lite.db" },
 };
 
 const MOCK_ASK: AskResult = {
@@ -582,6 +584,7 @@ export async function ask(opts: {
   collection?: string | null;
   top_k?: number;
   conversation_id?: string | null;
+  persona_enabled?: boolean;
 }): Promise<AskResult> {
   if (isMock()) {
     await new Promise((r) => setTimeout(r, 800));
@@ -595,6 +598,7 @@ export async function ask(opts: {
       collection: opts.collection ?? null,
       top_k: opts.top_k ?? 5,
       conversation_id: opts.conversation_id ?? null,
+      persona_enabled: opts.persona_enabled ?? false,
     }),
   });
 }

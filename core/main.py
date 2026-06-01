@@ -133,5 +133,19 @@ class KnowledgeRepositoryPlugin:
             return "Error: EventHandler not initialized."
         return await self._handler.on_graph_query(query, top_k)
 
+    # @register_command("kr agent")
+    async def on_agent(self, action: str) -> str:
+        """/kr agent <on|off>"""
+        if self._handler is None:
+            return "Error: EventHandler not initialized."
+        return await self._handler.on_agent(action)
+
+    # @register_event_listener("message")
+    async def on_message(self, event: Any) -> Any:
+        """普通消息捕获 Hook 骨架 (Phase 5)."""
+        if self._handler is None:
+            return None
+        return await self._handler.on_message(event)
+
 
 __all__ = ["KnowledgeRepositoryPlugin"]

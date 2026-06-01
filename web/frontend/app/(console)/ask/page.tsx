@@ -178,6 +178,7 @@ export default function AskPage() {
   const [activeN, setActiveN] = useState<number | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [personaEnabled, setPersonaEnabled] = useState(false);
 
   useEffect(() => {
     listKbCollections()
@@ -206,6 +207,7 @@ export default function AskPage() {
         collection: collection || null,
         top_k: 5,
         conversation_id: conversationId,
+        persona_enabled: personaEnabled,
       });
 
       setConversationId(result.conversation_id);
@@ -381,6 +383,31 @@ export default function AskPage() {
                 <span style={{ fontSize: 11, color: "var(--fg-subtle)" }}>
                   embedding + RRF
                 </span>
+                <span style={{ color: "var(--border)", opacity: 0.5, fontSize: 11 }}>|</span>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 5,
+                    fontSize: 11,
+                    color: "var(--fg-muted)",
+                    cursor: "pointer",
+                    userSelect: "none",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={personaEnabled}
+                    onChange={(e) => setPersonaEnabled(e.target.checked)}
+                    style={{
+                      accentColor: "var(--accent)",
+                      cursor: "pointer",
+                      width: 12,
+                      height: 12,
+                    }}
+                  />
+                  <span>{t("ask_persona_toggle")}</span>
+                </label>
                 <span style={{ flex: 1 }} />
                 {/* 圆形发送按钮 */}
                 <button

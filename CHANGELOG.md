@@ -21,6 +21,29 @@
 
 ---
 
+## [v0.14.0] — 2026-06-01
+
+### 新增功能 (Added)
+
+- **本地向量数据库适配器 (`core/repository/vector_store/milvus_lite.py`)**：使用 `pymilvus` 和内嵌进程级 Milvus Lite 实现了对分块的多集合 Dense 向量检索、条件检索与增量写删。
+- **混合检索编排 (`core/api.py`, `core/plugin_initializer.py`)**：在组合根与业务层完整接入并实例化本地向量库、EmbeddingProvider 及统一检索编排器 `RetrievalOrchestrator`，实现 Dense + Lexical + Graph-RAG 多路融合。
+- **消息 Hook 骨架与 Agent 控制 (`core/main.py`, `core/event_handler.py`)**：注册了普通消息捕获 Hook 骨架并打通信号通路；新增了用于普通对话记忆召回控制的 `/kr agent on|off` 开关指令。
+- **Ask Agent Persona 开关与 UI 联动 (`web/frontend/app/(console)/ask/page.tsx`, `web/frontend/lib/api.ts`, `web/frontend/lib/i18n.ts`)**：前端问答输入框底部操作栏新增奶油风“启用 Persona 角色设定”Toggle开关，参数下发后由 `core/api.py` 动态拉取当前 AstrBot 设定的 Persona Prompt 融入系统提示词以指导 Standalone Ask 答复。
+- **双模式对话增强与 Agent 工具契约 (`core/event_handler.py`, `_conf_schema.json`, `core/config.py`)**：新增了 `ask.conversation_enhancement_mode` 配置项，允许用户在原生召回注入 (`inject`) 和内部代理问答 (`query_agent`) 之间自由切换；在 `query_agent` 模式下，委派内部 Standalone Ask Agent 产生纯学术级客观严谨回答并强制关闭其 Persona，同时衍生绑定 `session_id` 以便在 WebUI 统一追踪 Ask 历史，并利用绝对系统提示词（Absolute System Override）控制主 LLM 进行 verbatim 代理输出。
+
+### 修复与优化 (Fixed & Optimized)
+
+- **普通消息 Hook 零开销旁路优化 (`core/event_handler.py`)**：优化了 `EventHandler.on_message` 的旁路分支，当 `/kr agent off` 状态下彻底不触发任何向量库或 FTS5 检索逻辑，实现 100% 零开销 pass-through 快速放行。
+
+### 测试 (Tests)
+
+- **混合检索与向量库单元测试 (`tests/backend/test_retrieval_orchestrator.py`)**：新增覆盖 Milvus Lite 完整生命周期 and `RetrievalOrchestrator` RRF 融合及词匹配倒排得分回退的单元/集成测试。
+- **消息 Hook 旁路与双模式 Hook 测试 (`tests/backend/test_lifecycle_and_cli.py`)**：新增在事件分发链中对 `/kr agent` 命令和普通消息捕获 Hook 的透传验证，并为 Phase 7 增加了全面的 `inject` 和 `query_agent` 双模式消息 Hook 的集成与绑定测试。
+
+### 构建与工程 (Build/CI)
+
+- **前端静态产物编译与同步更新 (`web/frontend/app/(console)/settings/page.tsx`, `pages/`)**：在控制台 Settings 模块接入了 `ask` 状态数据卡片，并通过 Node 20 编译并成功同步了 Next.js 静态文件。
+
 ## [v0.13.0] — 2026-06-01
 
 ### 新增功能 (Added)

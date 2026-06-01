@@ -302,11 +302,13 @@ async def handle_ask(request: web.Request) -> web.Response:
     collection = body.get("collection") or None
     top_k = int(body.get("top_k") or 5)
     conversation_id = body.get("conversation_id") or None
+    persona_enabled = bool(body.get("persona_enabled") or False)
     result = await _api(request).ask(
         question=question,
         collection=collection,
         top_k=max(1, min(top_k, 20)),
         conversation_id=conversation_id,
+        persona_enabled=persona_enabled,
     )
     return web.json_response(result)
 

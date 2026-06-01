@@ -11,7 +11,7 @@ import hashlib
 import logging
 import mimetypes
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.domain.models import SyncStatus, SyncTargetKind
 
@@ -348,6 +348,229 @@ class EventHandler:
             return f"Error: Graph query failed: {res.get('message')}"
         except Exception as e:
             return f"Error: Graph query failed: {e}"
+
+    async def on_agent(self, action: str) -> str:
+        """/kr agent <on|off>"""
+        if action not in ("on", "off"):
+            return "Invalid action. Use '/kr agent on' or '/kr agent off'."
+
+        enabled = action == "on"
+        self._initializer.agent_enabled = enabled
+        return f"Ask Agent has been turned {action.upper()}."
+
+    async def on_message(self, event: Any) -> Any:
+        """捕获 AstrBot 普通消息事件的非侵入式旁路 Hook。
+
+        若 /kr agent 为 off，采取旁路 Dry-Run 机制，仅用于验证物理通道 the stable；
+        若 /kr agent 为 on，触发高性能召回，并通过多版本兼容注入技术将 Grounded Context
+        传回 AstrBot 的 system prompt。
+        """
+        logger.info("AstrBot message captured by Knowledge Repository Hook.")
+
+        # 1. 安全提取事件中的文本
+        message_text = ""
+        if hasattr(event, "message_str"):
+            message_text = getattr(event, "message_str")
+        elif hasattr(event, "message") and hasattr(event.message, "text"):
+            message_text = event.message.text
+        elif hasattr(event, "text"):
+            message_text = getattr(event, "text")
+        elif isinstance(event, dict):
+            message_text = event.get("text") or event.get("message") or ""
+
+        query = str(message_text).strip()
+        if not query:
+            return None
+
+        # 2. 如果 /kr agent 开启，进行真实记忆检索并动态注入至 AstrBot system_prompt
+        if self._initializer.agent_enabled:
+            try:
+                if self._initializer.api is not None:
+                    # 获取当前增强模式，默认为 "inject"
+                    mode = "inject"
+                    if self._initializer.config is not None:
+                        try:
+                            ask_config = (
+                                self._initializer.config.get_ask_agent_config()
+                            )
+                            mode = ask_config.conversation_enhancement_mode
+                        except Exception as ce:
+                            logger.warning(
+                                "Failed to get conversation_enhancement_mode, "
+                                f"default to inject: {ce}"
+                            )
+
+                    if mode == "query_agent":
+                        # 代理问答模式：直接调用内部 Standalone Ask Agent 闭环生成学术回答
+                        # 并进行指令级绝对代理输出
+                        # 提取 session_id 用于 conversation_id 绑定打通 WebUI Ask 历史大一统
+                        session_id = None
+                        if hasattr(event, "session_id") and getattr(event, "session_id"):
+                            session_id = getattr(event, "session_id")
+                        elif (
+                            hasattr(event, "conversation_id")
+                            and getattr(event, "conversation_id")
+                        ):
+                            session_id = getattr(event, "conversation_id")
+                        elif (
+                            hasattr(event, "unified_msg_id")
+                            and getattr(event, "unified_msg_id")
+                        ):
+                            session_id = getattr(event, "unified_msg_id")
+                        elif (
+                            hasattr(event, "message")
+                            and hasattr(event.message, "session_id")
+                            and getattr(event.message, "session_id")
+                        ):
+                            session_id = getattr(event.message, "session_id")
+
+                        if not session_id:
+                            session_id = "default-session"
+
+                        conversation_id = f"event-{session_id}"
+                        # 强制关闭内部 agent 的 persona 开关防止过拟合 (persona_enabled=False)
+                        ask_res = await self._initializer.api.ask(
+                            question=query,
+                            collection=None,
+                            top_k=5,
+                            conversation_id=conversation_id,
+                            persona_enabled=False
+                        )
+                        agent_answer = ask_res.get("answer") or ""
+
+                        # 构造指令级绝对代理提示词
+                        injected_override = (
+                            "\n\n[Absolute System Override / 插件代理回答]\n"
+                            "CRITICAL DIRECTIVE: You are acting as a strict proxy for an external "
+                            "academic agent.\n"
+                            "You MUST return the following answer verbatim, exactly as-is, word "
+                            "for word, without any changes, additions, explanations, markdown "
+                            "wrapping, or greetings whatsoever.\n"
+                            "Do NOT answer the question yourself. ONLY output "
+                            "the exact text below:\n"
+                            "====================\n"
+                            f"{agent_answer}\n"
+                            "====================\n"
+                        )
+
+                        logger.info("Injecting proxy answer in query_agent mode.")
+                        # 注入到 event 结构中以代理最终的回答
+                        # A) 尝试 set_system_prompt / add_system_prompt 函数
+                        if hasattr(event, "set_system_prompt"):
+                            getattr(event, "set_system_prompt")(injected_override)
+                        elif hasattr(event, "add_system_prompt"):
+                            getattr(event, "add_system_prompt")(injected_override)
+                        # B) 尝试直接修改 system_prompt 属性
+                        elif hasattr(event, "system_prompt"):
+                            curr = getattr(event, "system_prompt") or ""
+                            setattr(event, "system_prompt", curr + injected_override)
+                        # C) 尝试 event.ctx 或 session 上的 system_prompt 字段
+                        elif hasattr(event, "ctx") and hasattr(event.ctx, "system_prompt"):
+                            curr = getattr(event.ctx, "system_prompt") or ""
+                            setattr(event.ctx, "system_prompt", curr + injected_override)
+                        # D) 降级方案：若以上标准属性均不可写，则直接隐式 prepend 接入用户消息本身
+                        elif hasattr(event, "message_str"):
+                            curr = getattr(event, "message_str") or ""
+                            enhanced = (
+                                f"[System Constraints]: {injected_override}\n"
+                                f"[User Msg]: {curr}"
+                            )
+                            setattr(event, "message_str", enhanced)
+
+                    else:
+                        # 召回注入模式 (inject)
+                        cols = await self._initializer.api.list_collections()
+                        all_cols = [c.name for c in cols] if cols else ["default"]
+
+                        if self._initializer.retrieval_orchestrator is not None:
+                            # 检索各集合下最相关的文本分块并去重，限制在 top 3
+                            chunks = []
+                            seen_ids = set()
+                            for col in all_cols:
+                                results = (
+                                    await self._initializer.retrieval_orchestrator.retrieve(
+                                        collection=col,
+                                        query=query,
+                                        top_k=3
+                                    )
+                                )
+                                for ch in results:
+                                    if ch.chunk_id not in seen_ids:
+                                        seen_ids.add(ch.chunk_id)
+                                        chunks.append(ch)
+                                    if len(chunks) >= 3:
+                                        break
+                                if len(chunks) >= 3:
+                                    break
+
+                            if chunks:
+                                context_lines = []
+                                for i, chunk in enumerate(chunks):
+                                    doc = await self._initializer.api.get_document(chunk.doc_id)
+                                    title = doc.title if doc else chunk.doc_id
+                                    context_lines.append(
+                                        f"[{i+1}] 来源: 《{title}》 | 内容: {chunk.text}"
+                                    )
+                                
+                                grounded_context = "\n".join(context_lines)
+                                injected_system_prompt = (
+                                    "\n\n[Knowledge Base Context / 插件记忆召回]\n"
+                                    "请优先结合以下从知识库召回的相关文献分块"
+                                    "回答用户的问题，并以 [n] 格式标注引用来源：\n"
+                                    f"{grounded_context}\n"
+                                )
+
+                                # 动态注入以引导其最终对话回答
+                                logger.info(
+                                    "Injecting knowledge context into "
+                                    f"system prompt: {len(chunks)} chunks."
+                                )
+                                
+                                # A) 尝试 set_system_prompt / add_system_prompt 函数
+                                if hasattr(event, "set_system_prompt"):
+                                    getattr(event, "set_system_prompt")(
+                                        injected_system_prompt
+                                    )
+                                elif hasattr(event, "add_system_prompt"):
+                                    getattr(event, "add_system_prompt")(
+                                        injected_system_prompt
+                                    )
+                                # B) 尝试直接修改 system_prompt 属性
+                                elif hasattr(event, "system_prompt"):
+                                    curr = getattr(event, "system_prompt") or ""
+                                    setattr(
+                                        event,
+                                        "system_prompt",
+                                        curr + injected_system_prompt
+                                    )
+                                # C) 尝试 event.ctx 或 session 上的 system_prompt 字段
+                                elif (
+                                    hasattr(event, "ctx")
+                                    and hasattr(event.ctx, "system_prompt")
+                                ):
+                                    curr = getattr(event.ctx, "system_prompt") or ""
+                                    setattr(
+                                        event.ctx,
+                                        "system_prompt",
+                                        curr + injected_system_prompt
+                                    )
+                                # D) 降级方案：若以上标准属性均不可写，
+                                # 则直接隐式 prepend 接入用户消息本身
+                                elif hasattr(event, "message_str"):
+                                    curr = getattr(event, "message_str") or ""
+                                    enhanced = (
+                                        f"[System Constraints]: {injected_system_prompt}\n"
+                                        f"[User Msg]: {curr}"
+                                    )
+                                    setattr(event, "message_str", enhanced)
+            except Exception as exc:
+                logger.error(f"Failed to inject retrieved knowledge into message: {exc}")
+        else:
+            # 旁路完全不进行任何检索与干预，实现 100% 零开销 pass-through
+            logger.debug("Slot Hook bypassed (agent disabled).")
+
+        # 3. 严格逻辑透传（Pass-through）：返回 None，确保原有消息回答链条 100% 完好
+        return None
 
 
 __all__ = ["EventHandler"]

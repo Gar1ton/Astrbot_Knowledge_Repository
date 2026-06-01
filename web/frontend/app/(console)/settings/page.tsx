@@ -390,6 +390,7 @@ export default function SettingsPage() {
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
             <ConfigCard title={t("settings_config_source")} data={config?.source_store as Record<string, unknown>} />
+            <ConfigCard title={t("settings_config_vector_db")} data={config?.vector_db as Record<string, unknown>} />
             <ConfigCard title={t("settings_config_r2")} data={config?.r2_sync as Record<string, unknown>} />
             <ConfigCard title={t("settings_config_notion")} data={config?.notion_sync as Record<string, unknown>} />
             <ConfigCard title={t("settings_config_web")} data={config?.web_console as Record<string, unknown>} />

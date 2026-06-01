@@ -270,6 +270,42 @@ async def test_ask_with_mock_llm_calls_generate() -> None:
     assert len(result["sources"]) == 1
 
 
+async def test_ask_with_persona_enabled() -> None:
+    """开启 persona_enabled 时 ask() 应从 LLMAdapter 绑定的 context 中动态提取并拼接 Persona。"""
+
+    class MockContext:
+        def get_active_persona_prompt(self) -> str:
+            return "Active Persona Prompt: You are a cute cat."
+
+    class MockLLM:
+        called: bool = False
+        captured_system_prompt: str = ""
+
+        def __init__(self) -> None:
+            self._context = MockContext()
+
+        async def generate(self, prompt: str, system_prompt: str = "") -> str:
+            MockLLM.called = True
+            self.captured_system_prompt = system_prompt
+            return "Mock answer [1]"
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "kb1"))
+    kb = InMemoryKnowledgeBaseReader({"kb1": [DocumentChunk("c0", "d1", 0, "relevant text", "h0")]})
+    
+    mock_llm = MockLLM()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=kb,
+        llm_adapter=mock_llm,  # type: ignore[arg-type]
+    )
+    
+    _ = await api.ask(question="relevant", collection="kb1", persona_enabled=True)
+    assert MockLLM.called
+    assert "Active Persona Prompt: You are a cute cat." in mock_llm.captured_system_prompt
+    assert "RAG Constraints" in mock_llm.captured_system_prompt
+
+
 async def test_ask_returns_empty_message_when_no_chunks() -> None:
     """知识库无内容时 ask() 应返回未找到相关内容的提示。"""
     store = InMemorySourceDocumentStore()
@@ -284,3 +320,66 @@ async def test_ask_uses_provided_conversation_id() -> None:
     api = await _make_api()
     result = await api.ask(question="alpha", collection="kb1", conversation_id="existing-id")
     assert result["conversation_id"] == "existing-id"
+
+
+async def test_vector_db_sync_and_rebuild() -> None:
+    """测试在 milvus 模式下
+    rebuild_vector_store、delete_document 和 delete_collection 的联动一致性。
+    """
+    from core.config import Config
+    from core.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    store = InMemorySourceDocumentStore()
+    doc_id = "test_doc"
+    await store.add_document(_doc(doc_id, "col1"))
+    chunks = [
+        DocumentChunk("chunk_A", doc_id, 0, "text A", "hashA"),
+        DocumentChunk("chunk_B", doc_id, 1, "text B", "hashB"),
+    ]
+    await store.replace_chunks(doc_id, chunks)
+
+    # 1. 构造配置与内存 Mock 组件
+    config = Config(raw={
+        "vector_db": {
+            "backend": "milvus",
+            "embedding_provider": "local",
+        }
+    })
+    v_store = InMemoryVectorStore()
+    v_store.set_doc_collection_mapping(doc_id, "col1")
+    embedding = MockEmbeddingProvider(dimension=4)
+
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=config,
+        vector_store=v_store,
+        embedding_provider=embedding,
+    )
+
+    # 2. 测试全量 rebuild
+    res = await api.rebuild_vector_store()
+    assert res["rebuilt_chunks"] == 2
+    # 验证内存向量库中确实有了这 2 个分块
+    assert "chunk_A" in v_store._data
+    assert "chunk_B" in v_store._data
+
+    # 3. 测试删除文档时的联动删除
+    deleted = await api.delete_document(doc_id)
+    assert deleted is True
+    # 验证内存向量库中的分块已被清空
+    assert "chunk_A" not in v_store._data
+    assert "chunk_B" not in v_store._data
+
+    # 4. 测试删除集合时的联动删除
+    # 由于 rebuild_vector_store 会调用 clear() 清空包括测试辅助映射在内的所有数据，在此重新注册
+    v_store.set_doc_collection_mapping(doc_id, "col1")
+    # 重新 upsert 分块
+    await v_store.upsert_chunks(chunks, [[0.1] * 4, [0.2] * 4])
+    assert "chunk_A" in v_store._data
+    await api.delete_collection("col1")
+    assert "chunk_A" not in v_store._data
+
+
+

@@ -44,6 +44,30 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.12.0 WebUI visual optimization (completed)
+
+### User constraints / 约束
+
+- 严格按照《视效优化-落地说明.md》的要求，对控制台前端（Next.js + fumadocs-ui）的视效进行增强与交互细化。
+- 所有数据请求路径、契约和 API 完全保持一致，不做任何后端或网络传输层改动。
+- 引入 HSL 强调色渐变滑杆与预设，确保全站级联换肤与本地持久化。
+- 移除空状态示例提问气泡；在应用各页移除冗余的 SunBloom 装饰背景。
+- 知识图谱节点重构为扁平淡毛玻璃 HTML 圆盘，连线高亮，关系小药丸仅在聚焦邻域时展示。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 氛围视觉层落地**：扩充 `DotField` 数量至 22 个并增加微光深度感；编写 `Atmosphere` 组件，基于 RAF 和 LERP（0.06）实现对鼠标指针坐标的惯性跟随；在页面 `main` 容器底层全局挂载，以及登录页作为 Hero 底层（`components/fx/Atmosphere.tsx`, `components/fx/DotField.tsx`, `app/(console)/layout.tsx`）。
+- [x] **Phase 2 — Ask Agent 初始页化繁为简**：重构 `AskPage` 空状态，移除示例卡片气泡推荐，仅渲染居中 `✦` 星尘图标及标题介绍（`ask_empty_title` 和 `ask_empty_sub`），同时移除应用页冗余的 `SunBloom` 太阳背景（`app/(console)/ask/page.tsx`）。
+- [x] **Phase 3 — 自定义 HSL 级联变色与持久化**：重构 `tokens.css` 设计令牌，使强调色由 H/S/L 三个变量和 `color-mix` 混合公式动态控制；在 Settings 页新增 Hue/Saturation/Lightness 渐变轨道滑杆与 6 组 HSL 预设按钮，写入 document 并同步持久化到 localStorage（`app/(console)/settings/page.tsx`, `styles/tokens.css`, `lib/theme.ts`）。
+- [x] **Phase 4 — 混合淡毛玻璃知识图谱**：重写 `GraphPage`，使节点以 HTML 圆盘展现并辅以 `backdrop-filter: blur(7px)` 与 HSL 半透明混色，SVG 承载连线与点击热区；关系小药丸采用扁平毛玻璃外观，且仅在选中/Hover节点的关联边上动态浮现，支持 1-hop 聚焦淡化（`app/(console)/graph/page.tsx`）。
+- [x] **Phase 5 — 翻译键值对对齐**：在 `lib/i18n.ts` 中补全空状态标题、滑杆轨道及说明的对应中英文翻译条目，维持语言持久化与流畅切换。
+
+### Verification
+
+- `npm run build` inside `web/frontend` → ✅ Compiled and static exported successfully, 0 TypeScript/Turbopack errors.
+
+---
+
 ## v0.11.0 Backend hardening & API completing (completed)
 
 ### User constraints / 约束

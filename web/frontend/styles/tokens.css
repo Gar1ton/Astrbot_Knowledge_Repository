@@ -25,11 +25,18 @@
   --fg-subtle: #9c9580;
   --heading: #3a3b21;
 
-  /* 主强调色：暖橙 */
-  --accent: #df7a18;
+  /* 主强调色：HSL 驱动 */
+  --accent-h: 32;          /* 色相 0–360 */
+  --accent-s: 80%;         /* 饱和度 */
+  --accent-l: 48%;         /* 明度 */
+  --accent:        hsl(var(--accent-h) var(--accent-s) var(--accent-l));
+  --accent-strong: color-mix(in srgb, var(--accent) 80%, #1a1206);
   --accent-fg: #ffffff;
-  --accent-soft: #fbeedb;
-  --accent-border: #f1d3a6;
+  --accent-soft:   color-mix(in srgb, var(--accent) 14%, var(--surface));
+  --accent-softer: color-mix(in srgb, var(--accent)  7%, var(--surface));
+  --accent-border: color-mix(in srgb, var(--accent) 42%, var(--border));
+  --ring:          color-mix(in srgb, var(--accent) 32%, transparent);
+  --glow:          color-mix(in srgb, var(--accent) 30%, transparent);
 
   /* 次强调色：橄榄绿 */
   --accent-2: #83851f;
@@ -62,13 +69,13 @@
   --color-fd-card: #fffefb;
   --color-fd-card-foreground: #2b291f;
   --color-fd-border: rgba(230, 223, 206, 0.7);
-  --color-fd-primary: #df7a18;
+  --color-fd-primary: var(--accent);
   --color-fd-primary-foreground: #ffffff;
   --color-fd-secondary: #f1ecdf;
   --color-fd-secondary-foreground: #2b291f;
   --color-fd-accent: rgba(230, 223, 206, 0.5);
   --color-fd-accent-foreground: #2b291f;
-  --color-fd-ring: rgba(223, 122, 24, 0.4);
+  --color-fd-ring: var(--ring);
 }
 
 /* ─── 深色主题（ink） ───────────────────────────────────────── */
@@ -92,11 +99,12 @@
   --fg-subtle: #6b6759;
   --heading: #f2efe6;
 
-  /* 主强调色 */
-  --accent: #e8842a;
+  /* 主强调色：HSL 驱动 */
+  --accent-h: 30;
+  --accent-s: 82%;
+  --accent-l: 54%;
+  --accent-strong: color-mix(in srgb, var(--accent) 78%, #ffffff);
   --accent-fg: #ffffff;
-  --accent-soft: rgba(232, 132, 42, 0.15);
-  --accent-border: rgba(232, 132, 42, 0.38);
 
   /* 次强调色 */
   --accent-2: #c2cb4a;
@@ -125,13 +133,13 @@
   --color-fd-card: #141413;
   --color-fd-card-foreground: #ece9e0;
   --color-fd-border: rgba(40, 40, 35, 0.4);
-  --color-fd-primary: #e8842a;
+  --color-fd-primary: var(--accent);
   --color-fd-primary-foreground: #ffffff;
   --color-fd-secondary: #1b1b18;
   --color-fd-secondary-foreground: #ece9e0;
   --color-fd-accent: rgba(58, 58, 49, 0.3);
   --color-fd-accent-foreground: #ece9e0;
-  --color-fd-ring: rgba(232, 132, 42, 0.5);
+  --color-fd-ring: var(--ring);
 }
 
 /* ─── 色系 swatch（占位，由 data-palette 切换） ──────────────── */

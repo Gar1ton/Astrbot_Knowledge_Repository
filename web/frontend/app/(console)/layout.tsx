@@ -3,6 +3,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { Rail } from "@/components/rail/Rail";
 import { GrainOverlay } from "@/components/fx/GrainOverlay";
+import { Atmosphere } from "@/components/fx/Atmosphere";
 import { ToastProvider, useToast } from "@/components/ui/Toast";
 import { I18nContext, Lang, makeT } from "@/lib/i18n";
 import { initPalette } from "@/lib/theme";
@@ -43,18 +44,8 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
         zIndex: 100,
       }}
     >
-      {/* Aurora 背景 */}
-      <div
-        aria-hidden
-        style={{
-          position: "fixed",
-          inset: 0,
-          pointerEvents: "none",
-          background:
-            "radial-gradient(ellipse at 20% 20%, var(--accent-soft) 0%, transparent 50%), radial-gradient(ellipse at 80% 80%, var(--accent-2-soft) 0%, transparent 50%)",
-          opacity: 0.7,
-        }}
-      />
+      {/* Atmosphere Hero 背景 */}
+      <Atmosphere variant="login" sun={true} follow={true} />
 
       <div
         style={{
@@ -215,6 +206,7 @@ function ConsoleShell({ children }: { children: React.ReactNode }) {
           position: "relative",
         }}
       >
+        <Atmosphere follow={true} />
         {children}
       </main>
     </div>

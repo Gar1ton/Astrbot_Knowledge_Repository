@@ -4,8 +4,6 @@ import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Btn } from "@/components/ui/Btn";
 import { Tag } from "@/components/ui/Tag";
-import { SunBloom } from "@/components/fx/SunBloom";
-import { DotField } from "@/components/fx/DotField";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import { AskResult, AskSource, ApiError, ask, listKbCollections } from "@/lib/api";
@@ -226,9 +224,6 @@ export default function AskPage() {
 
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", position: "relative" }}>
-      {/* 背景 */}
-      <SunBloom size={480} style={{ top: -60, left: -60, opacity: 0.75 }} />
-      <DotField />
 
       {/* 对话区 */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", zIndex: 1 }}>
@@ -260,12 +255,49 @@ export default function AskPage() {
           {messages.length === 0 ? (
             <div
               style={{
-                display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-                height: "100%", gap: 12, color: "var(--fg-muted)", fontSize: 14,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                height: "100%",
+                gap: 8,
+                textAlign: "center",
+                maxWidth: 400,
+                margin: "0 auto",
               }}
             >
-              <span style={{ fontSize: 32 }}>✦</span>
-              {t("ask_empty")}
+              <span
+                style={{
+                  fontSize: 36,
+                  color: "var(--accent)",
+                  marginBottom: 10,
+                  filter: "drop-shadow(0 0 8px var(--ring))",
+                  animation: "sparkleFloat 3s ease-in-out infinite",
+                  display: "inline-block",
+                }}
+              >
+                ✦
+              </span>
+              <h2
+                style={{
+                  margin: "0 0 4px",
+                  fontSize: 16,
+                  fontWeight: 700,
+                  color: "var(--heading)",
+                }}
+              >
+                {t("ask_empty_title")}
+              </h2>
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: 13,
+                  color: "var(--fg-muted)",
+                  lineHeight: 1.6,
+                }}
+              >
+                {t("ask_empty_sub")}
+              </p>
             </div>
           ) : (
             messages.map((msg, i) => (

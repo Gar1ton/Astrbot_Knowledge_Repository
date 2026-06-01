@@ -27,4 +27,20 @@ export function setPalette(p: Palette) {
 export function initPalette() {
   const p = getPalette();
   if (p !== "default") setPalette(p);
+
+  if (typeof localStorage !== "undefined" && typeof document !== "undefined") {
+    const hue = localStorage.getItem("kr-hue");
+    const sat = localStorage.getItem("kr-sat");
+    const light = localStorage.getItem("kr-light");
+    
+    if (hue !== null) {
+      document.documentElement.style.setProperty("--accent-h", hue);
+    }
+    if (sat !== null) {
+      document.documentElement.style.setProperty("--accent-s", sat.includes("%") ? sat : `${sat}%`);
+    }
+    if (light !== null) {
+      document.documentElement.style.setProperty("--accent-l", light.includes("%") ? light : `${light}%`);
+    }
+  }
 }

@@ -8,104 +8,311 @@ import {
   GraphData, GraphNode, GraphEdge, KbChunk, ApiError,
   getGraph, queryGraph, buildGraph, isReserved,
 } from "@/lib/api";
-import { DotField } from "@/components/fx/DotField";
-import { SunBloom } from "@/components/fx/SunBloom";
 
-// ─── 简单力导向图（纯 SVG） ───────────────────────────────────
+// ─── 类型配色 ─────────────────────────────────────────────────
 
-const W = 600, H = 420;
-const TYPE_COLORS: Record<string, string> = {
-  "Method/Algorithm": "#df7a18",
-  "Dataset": "#4f8a3d",
-  "default": "#6b7adb",
-};
-
-function nodeColor(type?: string): string {
-  return TYPE_COLORS[type ?? "default"] ?? TYPE_COLORS.default;
+function getNodeTypeColor(type?: string): string {
+  if (type === "Method/Algorithm") return "var(--accent)";
+  if (type === "Dataset") return "var(--accent-2)";
+  if (type === "Concept") return "#3b82f6"; // Blue
+  if (type === "Person") return "#8b5cf6";  // Purple
+  return "var(--accent)";
 }
 
-interface SVGGraphProps {
+// ─── 混合式扁平毛玻璃图谱（HTML + SVG Hybrid） ────────────────────
+
+interface HybridGraphProps {
   data: GraphData;
   onSelectNode: (n: GraphNode) => void;
   onSelectEdge: (e: GraphEdge) => void;
-  selectedId: string | null;
+  selectedNode: GraphNode | null;
+  selectedEdge: GraphEdge | null;
+  onClearSelection: () => void;
 }
 
-function SVGGraph({ data, onSelectNode, onSelectEdge, selectedId }: SVGGraphProps) {
-  const nodeMap = new Map(data.nodes.map((n) => [n.id, n]));
-  const RADIUS = 18;
+function HybridGraph({
+  data,
+  onSelectNode,
+  onSelectEdge,
+  selectedNode,
+  selectedEdge,
+  onClearSelection,
+}: HybridGraphProps) {
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  
+  // Calculate focused node
+  const focusedNodeId = hoveredNodeId || selectedNode?.id || null;
 
-  const positions: Record<string, { x: number; y: number }> = {};
-  data.nodes.forEach((n, i) => {
-    const angle = (2 * Math.PI * i) / data.nodes.length - Math.PI / 2;
-    const r = Math.min(W, H) * 0.35;
-    positions[n.id] = {
-      x: W / 2 + r * Math.cos(angle),
-      y: H / 2 + r * Math.sin(angle),
-    };
-  });
+  // Build connection map to quickly find neighbors
+  const adjacencyMap = React.useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    data.nodes.forEach((n) => map.set(n.id, new Set()));
+    data.edges.forEach((e) => {
+      map.get(e.source)?.add(e.target);
+      map.get(e.target)?.add(e.source);
+    });
+    return map;
+  }, [data]);
+
+  // Ellipse positioning on a 560x440 canvas
+  const W = 560;
+  const H = 440;
+  const positions = React.useMemo(() => {
+    const pos: Record<string, { x: number; y: number }> = {};
+    data.nodes.forEach((n, i) => {
+      const angle = (2 * Math.PI * i) / data.nodes.length - Math.PI / 2;
+      const rx = W * 0.36;
+      const ry = H * 0.34;
+      pos[n.id] = {
+        x: W / 2 + rx * Math.cos(angle),
+        y: H / 2 + ry * Math.sin(angle),
+      };
+    });
+    return pos;
+  }, [data]);
+
+  // Neighborhood helper
+  const isNodeHighlighted = (nodeId: string) => {
+    if (focusedNodeId === null) return true;
+    if (nodeId === focusedNodeId) return true;
+    return adjacencyMap.get(focusedNodeId)?.has(nodeId) ?? false;
+  };
+
+  const isEdgeHighlighted = (edge: GraphEdge) => {
+    if (focusedNodeId === null) return true;
+    return edge.source === focusedNodeId || edge.target === focusedNodeId;
+  };
 
   return (
-    <svg
-      width="100%" height="100%"
-      viewBox={`0 0 ${W} ${H}`}
-      style={{ background: "var(--bg)", borderRadius: 10 }}
+    <div
+      onClick={onClearSelection}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        aspectRatio: "560/440",
+        background: "var(--bg)",
+        borderRadius: 12,
+        overflow: "hidden",
+        cursor: "default",
+        userSelect: "none",
+      }}
     >
-      {/* 边 */}
+      {/* 1. SVG 连线层 */}
+      <svg
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          pointerEvents: "none",
+          zIndex: 1,
+        }}
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+      >
+        {data.edges.map((edge) => {
+          const src = positions[edge.source];
+          const tgt = positions[edge.target];
+          if (!src || !tgt) return null;
+
+          const isSelected = selectedEdge?.id === edge.id;
+          const isHighlighted = isEdgeHighlighted(edge);
+          const opacity = isHighlighted ? 1 : 0.16;
+
+          return (
+            <g key={edge.id} style={{ transition: "opacity 0.25s ease" }}>
+              {/* Visible connecting line */}
+              <line
+                x1={src.x}
+                y1={src.y}
+                x2={tgt.x}
+                y2={tgt.y}
+                stroke={isSelected ? "var(--accent)" : "var(--border-strong)"}
+                strokeWidth={isSelected ? 2.5 : 1.2}
+                opacity={opacity}
+                style={{
+                  transition: "all 0.25s ease",
+                }}
+                vectorEffect="non-scaling-stroke"
+              />
+            </g>
+          );
+        })}
+      </svg>
+
+      {/* 2. SVG 点击热区层（置于最底层，方便交互） */}
+      <svg
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          zIndex: 2,
+        }}
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+      >
+        {data.edges.map((edge) => {
+          const src = positions[edge.source];
+          const tgt = positions[edge.target];
+          if (!src || !tgt) return null;
+
+          return (
+            <line
+              key={`hotspot-${edge.id}`}
+              x1={src.x}
+              y1={src.y}
+              x2={tgt.x}
+              y2={tgt.y}
+              stroke="transparent"
+              strokeWidth={8}
+              style={{ cursor: "pointer", pointerEvents: "auto" }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelectEdge(edge);
+              }}
+            />
+          );
+        })}
+      </svg>
+
+      {/* 3. HTML 关系标签小药丸 */}
       {data.edges.map((edge) => {
         const src = positions[edge.source];
         const tgt = positions[edge.target];
         if (!src || !tgt) return null;
+
+        const isHighlighted = isEdgeHighlighted(edge);
+        const isSelected = selectedEdge?.id === edge.id;
+        
+        // Show only if the edge is in the focused set or explicitly selected
+        const showLabel = isHighlighted && focusedNodeId !== null || isSelected;
+        if (!showLabel) return null;
+
+        const midX = (src.x + tgt.x) / 2;
+        const midY = (src.y + tgt.y) / 2;
+
         return (
-          <g key={edge.id} onClick={() => onSelectEdge(edge)} style={{ cursor: "pointer" }}>
-            <line
-              x1={src.x} y1={src.y} x2={tgt.x} y2={tgt.y}
-              stroke={selectedId === edge.id ? "var(--accent)" : "rgba(154,160,173,.5)"}
-              strokeWidth={selectedId === edge.id ? 2.5 : 1.4}
-            />
-            <text
-              x={(src.x + tgt.x) / 2}
-              y={(src.y + tgt.y) / 2 - 4}
-              textAnchor="middle"
-              fontSize={9}
-              fill="var(--fg-subtle)"
-            >
-              {edge.relation}
-            </text>
-          </g>
+          <div
+            key={`pill-${edge.id}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelectEdge(edge);
+            }}
+            style={{
+              position: "absolute",
+              left: `${(midX / W) * 100}%`,
+              top: `${(midY / H) * 100}%`,
+              transform: "translate(-50%, -50%)",
+              zIndex: 4,
+              background: "color-mix(in srgb, var(--surface) 70%, transparent)",
+              backdropFilter: "blur(6px)",
+              WebkitBackdropFilter: "blur(6px)",
+              border: `1px solid ${isSelected ? "var(--accent)" : "var(--border)"}`,
+              borderRadius: 999,
+              padding: "2px 8px",
+              fontSize: 10,
+              fontWeight: 600,
+              color: isSelected ? "var(--accent)" : "var(--fg-muted)",
+              boxShadow: "var(--shadow)",
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+              transition: "all 0.2s ease",
+            }}
+          >
+            {edge.relation}
+          </div>
         );
       })}
 
-      {/* 节点 */}
+      {/* 4. HTML 节点圆盘 (扁平淡毛玻璃) */}
       {data.nodes.map((node) => {
         const pos = positions[node.id];
-        const color = nodeColor(node.type);
-        const isSelected = selectedId === node.id;
+        if (!pos) return null;
+
+        const typeColor = getNodeTypeColor(node.type);
+        const isSelected = selectedNode?.id === node.id;
+        const isHighlighted = isNodeHighlighted(node.id);
+
+        const diameter = 34 + (node.degree ?? 1) * 8;
+        const opacity = isHighlighted ? 1 : 0.34;
+
         return (
-          <g
+          <div
             key={node.id}
-            transform={`translate(${pos.x},${pos.y})`}
-            onClick={() => onSelectNode(node)}
-            style={{ cursor: "pointer" }}
+            onMouseEnter={() => setHoveredNodeId(node.id)}
+            onMouseLeave={() => setHoveredNodeId(null)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelectNode(node);
+            }}
+            style={{
+              position: "absolute",
+              left: `${(pos.x / W) * 100}%`,
+              top: `${(pos.y / H) * 100}%`,
+              width: diameter,
+              height: diameter,
+              transform: `translate(-50%, -50%) ${isSelected ? "scale(1.08)" : "scale(1)"}`,
+              borderRadius: "50%",
+              background: `color-mix(in srgb, ${typeColor} ${isSelected ? 34 : 20}%, color-mix(in srgb, var(--surface) 52%, transparent))`,
+              backdropFilter: "blur(7px)",
+              WebkitBackdropFilter: "blur(7px)",
+              border: `1px solid color-mix(in srgb, ${typeColor} ${isSelected ? 72 : 40}%, transparent)`,
+              boxShadow: isSelected ? `0 0 0 3px color-mix(in srgb, ${typeColor} 20%, transparent)` : "none",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              zIndex: isSelected ? 5 : 3,
+              opacity: opacity,
+              transition: "all 0.25s cubic-bezier(0.4, 0, 0.2, 1)",
+            }}
           >
-            <circle
-              r={RADIUS + (node.degree ?? 1)}
-              fill={color}
-              opacity={isSelected ? 1 : 0.75}
-              stroke={isSelected ? "var(--fg)" : "rgba(255,255,255,.3)"}
-              strokeWidth={isSelected ? 2.5 : 1.5}
-            />
-            <text
-              textAnchor="middle" dominantBaseline="central"
-              fontSize={10} fontWeight={600} fill="#fff"
-              style={{ pointerEvents: "none", userSelect: "none" }}
+            {/* 节点内部简写或全称 */}
+            <span
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                color: typeColor,
+                textAlign: "center",
+                lineHeight: 1.1,
+                padding: 4,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                maxWidth: "90%",
+              }}
             >
-              {node.name.length > 10 ? node.name.slice(0, 9) + "…" : node.name}
-            </text>
-          </g>
+              {node.name.length > 5 ? node.name.slice(0, 4) + "…" : node.name}
+            </span>
+
+            {/* 下方标签 */}
+            <div
+              style={{
+                position: "absolute",
+                top: "100%",
+                left: "50%",
+                transform: "translateX(-50%)",
+                marginTop: 6,
+                fontSize: 11,
+                fontWeight: 600,
+                color: isSelected ? "var(--accent)" : "var(--fg)",
+                whiteSpace: "nowrap",
+                background: "color-mix(in srgb, var(--surface) 80%, transparent)",
+                padding: "2px 6px",
+                borderRadius: 4,
+                border: "1px solid var(--border)",
+                boxShadow: "var(--shadow)",
+                pointerEvents: "none",
+              }}
+            >
+              {node.name}
+            </div>
+          </div>
         );
       })}
-    </svg>
+    </div>
   );
 }
 
@@ -209,12 +416,13 @@ export default function GraphPage() {
     }
   }
 
+  function handleClearSelection() {
+    setSelectedNode(null);
+    setSelectedEdge(null);
+  }
+
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", position: "relative" }}>
-      {/* 视效层 */}
-      <SunBloom size={420} style={{ top: -80, right: -40, opacity: 0.65, zIndex: 0 }} />
-      <DotField />
-
       {/* 主视图 */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {/* 工具条 */}
@@ -244,11 +452,13 @@ export default function GraphPage() {
             </div>
           ) : graphData ? (
             <div style={{ width: "100%", height: "100%", borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}>
-              <SVGGraph
+              <HybridGraph
                 data={graphData}
                 onSelectNode={(n) => { setSelectedNode(n); setSelectedEdge(null); }}
                 onSelectEdge={(e) => { setSelectedEdge(e); setSelectedNode(null); }}
-                selectedId={selectedId}
+                selectedNode={selectedNode}
+                selectedEdge={selectedEdge}
+                onClearSelection={handleClearSelection}
               />
             </div>
           ) : (
@@ -258,7 +468,7 @@ export default function GraphPage() {
           )}
         </div>
 
-        {/* 图谱查询 */}
+        {/* 图谱增强查询 */}
         <div style={{ borderTop: "1px solid var(--border)", padding: "10px 16px" }}>
           <form onSubmit={handleQuery} style={{ display: "flex", gap: 8 }}>
             <input
@@ -349,3 +559,4 @@ export default function GraphPage() {
     </div>
   );
 }
+

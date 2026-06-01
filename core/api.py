@@ -9,11 +9,15 @@ managers/pipelines（ingest/category/sync/quota）后，对应写操作改为委
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from core.domain.models import Collection, SourceDocument, SyncTargetKind
+
+logger = logging.getLogger("KnowledgeRepositoryApi")
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -50,6 +54,7 @@ class KnowledgeRepositoryApi:
         config: Config | None = None,
         config_persist: Callable[[str, str, object], None] | None = None,
         llm_adapter: LLMAdapter | None = None,
+        managed_documents_dir: Path | None = None,
     ) -> None:
         self._source_store = source_store
         self._kb_reader = kb_reader
@@ -64,6 +69,7 @@ class KnowledgeRepositoryApi:
         self._config = config
         self._config_persist = config_persist
         self._llm_adapter = llm_adapter
+        self._managed_documents_dir = managed_documents_dir
 
     # ── 集合（分类）────────────────────────────────────────────
 
@@ -97,6 +103,10 @@ class KnowledgeRepositoryApi:
     async def get_document(self, doc_id: str) -> SourceDocument | None:
         """取单个文档；不存在返回 None。"""
         return await self._source_store.get_document(doc_id)
+
+    async def list_document_chunks(self, doc_id: str) -> list[DocumentChunk]:
+        """列出单个文档的本地文本分块，供管理端展示摘要统计。"""
+        return await self._source_store.list_chunks(doc_id)
 
     async def register_document(
         self,
@@ -163,8 +173,34 @@ class KnowledgeRepositoryApi:
         return await self._source_store.update_document(doc)
 
     async def delete_document(self, doc_id: str) -> bool:
-        """删除文档及其分块。返回 False 表示 doc_id 不存在。"""
-        return await self._source_store.delete_document(doc_id)
+        """删除文档、图谱贡献、远端镜像和插件托管原件。"""
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return False
+
+        chunks = await self._source_store.list_chunks(doc_id)
+        records = [
+            record
+            for record in await self._source_store.list_sync_records()
+            if record.doc_id == doc_id and record.remote_ref
+        ]
+        for record in records:
+            target = self._sync_targets.get(record.target)
+            if target is None:
+                continue
+            try:
+                await target.delete(record.remote_ref or "")
+            except Exception as exc:
+                logger.warning("Failed to delete remote mirror %s: %s", record.remote_ref, exc)
+
+        if self._graph_store is not None:
+            for chunk in chunks:
+                await self._graph_store.delete_by_chunk(chunk.chunk_id)
+
+        deleted = await self._source_store.delete_document(doc_id)
+        if deleted:
+            self._unlink_managed_document(doc.file_path)
+        return deleted
 
     # ── AstrBot 知识库（调用 / 检索）────────────────────────────
 
@@ -275,6 +311,19 @@ class KnowledgeRepositoryApi:
         Reserved（v0.3.0 R2 / v0.4.0 Notion 接入）：返回逐文档同步结果汇总 + 配额预警。
         """
         if self._sync_pipeline:
+            if target == "all":
+                results = {
+                    kind.value: await self._sync_pipeline.sync(kind, doc_ids)
+                    for kind in SyncTargetKind
+                }
+                return {
+                    "status": (
+                        "success"
+                        if all(result.get("status") == "success" for result in results.values())
+                        else "error"
+                    ),
+                    "targets": results,
+                }
             try:
                 kind = SyncTargetKind(target)
             except ValueError:
@@ -339,7 +388,7 @@ class KnowledgeRepositoryApi:
         ]
 
     async def backup_now(self) -> dict:
-        """立即触发一次 R2 全量备份（原件 + manifest + kb.db 快照）。
+        """立即触发一次 R2 全量备份（插件托管原件 + knowledge_repository.db 快照）。
 
         Reserved（v0.3.0）：返回备份对象数与用量；接近 10GB 时含警告。
         """
@@ -506,6 +555,16 @@ class KnowledgeRepositoryApi:
             self._config.set_value(section, key, value)
         if self._config_persist is not None:
             self._config_persist(section, key, value)
+
+    def _unlink_managed_document(self, file_path: str) -> None:
+        if self._managed_documents_dir is None:
+            return
+        try:
+            path = Path(file_path).resolve()
+            path.relative_to(self._managed_documents_dir.resolve())
+            path.unlink(missing_ok=True)
+        except (OSError, ValueError) as exc:
+            logger.warning("Failed to remove managed document %s: %s", file_path, exc)
 
 
 def _now() -> datetime:

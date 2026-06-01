@@ -1,11 +1,19 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { DotField } from "@/components/fx/DotField";
 import { Btn } from "@/components/ui/Btn";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import { KbChunk, ApiError, listKbCollections, searchKb } from "@/lib/api";
+
+function SearchIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  );
+}
 
 function highlight(text: string, query: string): React.ReactNode {
   if (!query.trim()) return text;
@@ -58,17 +66,32 @@ export default function SearchPage() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden", position: "relative" }}>
-      <DotField />
-
-      {/* 搜索栏 */}
-      <div
-        className="fx-glass"
-        style={{ position: "sticky", top: 0, zIndex: 3, padding: "16px 24px" }}
-      >
-        <h1 style={{ margin: "0 0 12px", fontSize: 18, fontWeight: 700, color: "var(--heading)", letterSpacing: "-0.02em" }}>
+      <div style={{ position: "relative", zIndex: 1, width: "100%", maxWidth: 820, margin: "0 auto", padding: "32px 24px 0" }}>
+        <div style={{ color: "var(--fg-subtle)", fontSize: 11, fontWeight: 700, marginBottom: 4 }}>
+          知识库
+        </div>
+        <h1 style={{ margin: "0 0 2px", fontSize: 24, fontWeight: 700, color: "var(--heading)", letterSpacing: "-0.04em" }}>
           {t("nav_search")}
         </h1>
-        <form onSubmit={handleSearch} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <p style={{ margin: "0 0 16px", fontSize: 13, color: "var(--fg-muted)" }}>
+          <span style={{ color: "var(--accent-2)", marginRight: 6 }}>●</span>
+          复用 AstrBot embedding + RRF
+        </p>
+        <form
+          onSubmit={handleSearch}
+          style={{
+            display: "flex", gap: 8, alignItems: "center",
+            padding: 10, border: "1px solid var(--accent-border)",
+            borderRadius: 14, background: "var(--surface)", boxShadow: "var(--shadow-pop)",
+          }}
+        >
+          <SearchIcon />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t("search_placeholder")}
+            style={{ flex: 1, minWidth: 180, height: 34, border: "none", background: "transparent", padding: "0 4px", boxShadow: "none" }}
+          />
           <select
             value={collection}
             onChange={(e) => setCollection(e.target.value)}
@@ -78,13 +101,6 @@ export default function SearchPage() {
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
-
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={t("search_placeholder")}
-            style={{ flex: 1, minWidth: 200, height: 36 }}
-          />
 
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>{t("search_top_k")}</span>
@@ -103,7 +119,7 @@ export default function SearchPage() {
       </div>
 
       {/* 结果区 */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+      <div style={{ flex: 1, overflowY: "auto", padding: "72px 24px 20px", position: "relative", zIndex: 1 }}>
         {results === null ? (
           <div style={{ padding: 40, textAlign: "center", color: "var(--fg-muted)", fontSize: 13 }}>
             输入关键词开始检索

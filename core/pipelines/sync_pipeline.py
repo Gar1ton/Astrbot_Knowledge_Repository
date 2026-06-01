@@ -5,7 +5,11 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +22,7 @@ if TYPE_CHECKING:
     from core.repository.sync_targets.base import SyncTarget
 
 logger = logging.getLogger("SyncPipeline")
+_DB_BACKUP_KEY = "backups/knowledge_repository.db"
 
 
 class SyncPipeline:
@@ -190,23 +195,12 @@ class SyncPipeline:
             return
 
         try:
-            # 读取本地 knowledge_repository.db 二进制数据
-            with open(self._db_path, "rb") as f:
-                db_payload = f.read()
-
-            # 构造虚拟文档载体，R2 实现会将其推送至 backups/ 路径
-            from core.domain.models import SourceDocument
-            fake_doc = SourceDocument(
-                doc_id="knowledge_repository.db",
-                title="SQLite 数据库备份",
-                file_path=str(self._db_path),
-                content_type="application/x-sqlite3",
-                size_bytes=len(db_payload),
-                content_hash="db-snapshot",
-                collection="backups",
+            db_payload = await asyncio.to_thread(_create_sqlite_snapshot, self._db_path)
+            await target.push_backup(
+                _DB_BACKUP_KEY,
+                db_payload,
+                "application/x-sqlite3",
             )
-            # 执行云端推送
-            await target.push(fake_doc, db_payload)
             logger.info("Local SQLite database snapshot backed up to R2 cloud successfully.")
         except Exception as e:
             logger.error(f"Failed to backup database snapshot to R2: {e}")
@@ -224,26 +218,15 @@ class SyncPipeline:
             return {"status": "error", "message": "本地数据库路径未配置"}
 
         try:
-            # 延迟导入 boto3 client 以防未启用异常
-            s3 = target._get_client()
             logger.info("Fetching SQLite database snapshot from Cloudflare R2...")
-
-            # 下载备份快照
-            response = s3.get_object(
-                Bucket=target._config.bucket,
-                Key="backups/knowledge_repository.db"
-            )
-            payload = response["Body"].read()
-
-            # 覆盖写入本地 SQLite 文件
-            # 注意：aiosqlite 在写时是加锁的，直接写入二进制文件在非并发活动下可直接覆盖
-            with open(self._db_path, "wb") as f:
-                f.write(payload)
+            payload = await target.pull_backup(_DB_BACKUP_KEY)
+            await asyncio.to_thread(_replace_with_validated_snapshot, self._db_path, payload)
 
             logger.info("Successfully restored local database from cloud backup.")
             return {
                 "status": "success",
-                "message": "数据库成功恢复，本地文档元数据已刷新为最新云端版本。",
+                "restart_required": True,
+                "message": "数据库快照已安全替换，请重启插件以加载恢复后的数据。",
             }
         except Exception as e:
             logger.error(f"Failed to restore database from R2: {e}")
@@ -251,3 +234,42 @@ class SyncPipeline:
 
 
 __all__ = ["SyncPipeline"]
+
+
+def _create_sqlite_snapshot(db_path: Path) -> bytes:
+    """使用 SQLite backup API 生成一致性快照并返回字节。"""
+    fd, temp_name = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    snapshot_path = Path(temp_name)
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as source:
+            with sqlite3.connect(snapshot_path) as target:
+                source.backup(target)
+        _check_sqlite_integrity(snapshot_path)
+        return snapshot_path.read_bytes()
+    finally:
+        snapshot_path.unlink(missing_ok=True)
+
+
+def _replace_with_validated_snapshot(db_path: Path, payload: bytes) -> None:
+    """校验下载快照后在同目录原子替换；现有连接需由插件重启后重建。"""
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{db_path.name}.",
+        suffix=".restore",
+        dir=db_path.parent,
+    )
+    os.close(fd)
+    snapshot_path = Path(temp_name)
+    try:
+        snapshot_path.write_bytes(payload)
+        _check_sqlite_integrity(snapshot_path)
+        os.replace(snapshot_path, db_path)
+    finally:
+        snapshot_path.unlink(missing_ok=True)
+
+
+def _check_sqlite_integrity(db_path: Path) -> None:
+    with sqlite3.connect(db_path) as db:
+        result = db.execute("PRAGMA integrity_check").fetchone()
+    if result != ("ok",):
+        raise ValueError(f"invalid SQLite snapshot: {result}")

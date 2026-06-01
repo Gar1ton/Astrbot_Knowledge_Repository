@@ -117,3 +117,27 @@ async def test_ingest_raises_if_file_missing(tmp_path: Path) -> None:
             size_bytes=100,
             collection="default",
         )
+
+
+async def test_ingest_rolls_back_managed_copy_when_chunk_write_fails(
+    temp_pdf: Path,
+    tmp_path: Path,
+) -> None:
+    class FailingStore(InMemorySourceDocumentStore):
+        async def replace_chunks(self, doc_id, chunks) -> None:
+            raise RuntimeError("chunk write failed")
+
+    store = FailingStore()
+    manager = IngestManager(source_store=store, config=SourceStoreConfig(), data_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="chunk write failed"):
+        await manager.ingest(
+            title="Rollback",
+            file_path=str(temp_pdf),
+            content_type="application/pdf",
+            size_bytes=temp_pdf.stat().st_size,
+            collection="default",
+        )
+
+    assert await store.list_documents() == []
+    assert list((tmp_path / "documents").iterdir()) == []

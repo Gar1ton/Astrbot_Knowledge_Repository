@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 
 from core.api import KnowledgeRepositoryApi
-from core.config import Config
+from core.config import Config, merge_config_dicts
 from core.domain.models import SyncTargetKind
 from core.managers.category_manager import CategoryManager
 from core.managers.ingest_manager import IngestManager
@@ -43,6 +43,7 @@ class PluginInitializer:
     def __init__(self, context: Any, raw_config: dict[str, Any], data_dir: Path) -> None:
         self._context = context
         self._data_dir = data_dir
+        self._raw_config = raw_config
         self._runtime_config = RuntimeConfigStore(
             data_dir / "runtime_config.json",
             framework_persist_cb=self._astrbot_config_persist,
@@ -158,6 +159,8 @@ class PluginInitializer:
             graph_search_pipeline=self.graph_search_pipeline,
             config=self._config,
             config_persist=self._persist_config_value,
+            llm_adapter=llm_adapter,
+            managed_documents_dir=self._data_dir / "documents",
         )
 
         # 6) 周期任务（如 R2 周期备份，v0.3.0 起注册）。
@@ -173,12 +176,14 @@ class PluginInitializer:
         """尝试将合并后的运行时配置写回 AstrBot 原生配置系统。"""
         if self._context is None:
             return
+        merged = merge_config_dicts(self._raw_config, override)
         # 自适应调用 AstrBot 原生配置存储与更新 API
         for method_name in ("save_config", "update_config", "persist_config"):
             save_cb = getattr(self._context, method_name, None)
             if callable(save_cb):
                 try:
-                    save_cb(override)
+                    save_cb(merged)
+                    self._raw_config = merged
                     logger.info(
                         "Successfully persisted runtime config back via "
                         f"context.{method_name}"

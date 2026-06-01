@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import aiosqlite
 import pytest
@@ -175,3 +176,21 @@ async def test_sync_record_crud(sqlite_store: SQLiteSourceDocumentStore) -> None
     assert got_updated.status == SyncStatus.FAILED
     assert got_updated.message == "Failed to reconnect"
 
+
+async def test_file_database_survives_restart(tmp_path: Path) -> None:
+    db_path = tmp_path / "restart.db"
+    conn = await aiosqlite.connect(db_path)
+    await conn.execute("PRAGMA foreign_keys = ON")
+    await run_migrations(conn)
+    store = SQLiteSourceDocumentStore(conn)
+    await store.upsert_collection(Collection(name="default"))
+    await store.add_document(_doc("persisted"))
+    await conn.close()
+
+    reopened = await aiosqlite.connect(db_path)
+    await reopened.execute("PRAGMA foreign_keys = ON")
+    assert await run_migrations(reopened) == []
+    reopened_store = SQLiteSourceDocumentStore(reopened)
+    got = await reopened_store.get_document("persisted")
+    assert got is not None and got.doc_id == "persisted"
+    await reopened.close()

@@ -44,6 +44,7 @@ export interface EffectiveConfig {
   web_console?: Record<string, unknown>;
   graph?: Record<string, unknown>;
   ask?: Record<string, unknown>;
+  diagnostics?: string[];
 }
 
 export interface GraphNode {
@@ -108,6 +109,15 @@ export interface ReservedResult {
 
 export type MaybeReserved<T> = T | ReservedResult;
 
+export interface SyncRecord {
+  doc_id: string;
+  target: string;
+  remote_ref?: string | null;
+  status: string;
+  synced_at?: string | null;
+  message?: string;
+}
+
 // ─── mock 检测 ─────────────────────────────────────────────────
 
 function isMock(): boolean {
@@ -141,6 +151,12 @@ async function apiFetch<T>(
     let msg = res.statusText;
     try {
       const body = await res.json();
+      if (res.status === 501 && body.status === "reserved") {
+        return {
+          ...body,
+          reserved: true,
+        } as T;
+      }
       msg = body.error || body.detail || msg;
     } catch {
       /* ignore parse error */
@@ -311,10 +327,7 @@ export async function login(username: string, password: string): Promise<void> {
 
 export async function logout(): Promise<void> {
   if (isMock()) return;
-  // 后端暂无 /api/logout，前端清除 cookie 降级（见 TODO）
-  if (typeof document !== "undefined") {
-    document.cookie = "kr_session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-  }
+  await apiFetch<{ ok: boolean }>("/api/logout", { method: "POST" });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -426,6 +439,11 @@ export async function deleteDocument(id: string): Promise<void> {
   });
 }
 
+export function downloadDocument(id: string): void {
+  if (isMock() || typeof window === "undefined") return;
+  window.location.assign(`/api/documents/${encodeURIComponent(id)}/raw`);
+}
+
 // ─────────────────────────────────────────────────────────────
 // 知识库检索 KB
 // ─────────────────────────────────────────────────────────────
@@ -441,7 +459,7 @@ export async function searchKb(
   k: number = 5
 ): Promise<KbChunk[]> {
   if (isMock()) return [...MOCK_KB_CHUNKS];
-  const params = new URLSearchParams({ collection, q, k: String(k) });
+  const params = new URLSearchParams({ collection, q, top_k: String(k) });
   return apiFetch<KbChunk[]>(`/api/kb/search?${params}`);
 }
 
@@ -528,9 +546,21 @@ export async function syncNotionPull(): Promise<
   return apiFetch("/api/sync/notion/pull", { method: "POST" });
 }
 
-export async function getSyncStatus(): Promise<MaybeReserved<unknown>> {
+export async function getSyncStatus(): Promise<MaybeReserved<SyncRecord[]>> {
   if (isMock()) return { reserved: true, available_in: "v0.4.0" };
-  return apiFetch("/api/sync/status");
+  return apiFetch<MaybeReserved<SyncRecord[]>>("/api/sync/status");
+}
+
+export async function syncDocuments(
+  target: "r2" | "notion" | "all",
+  docIds?: string[]
+): Promise<MaybeReserved<{ status: string; synced_count?: number; failed_count?: number }>> {
+  if (isMock()) return { reserved: true, available_in: "v0.4.0" };
+  return apiFetch(`/api/sync/${target}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(docIds ? { doc_ids: docIds } : {}),
+  });
 }
 
 export async function backupNow(): Promise<MaybeReserved<unknown>> {

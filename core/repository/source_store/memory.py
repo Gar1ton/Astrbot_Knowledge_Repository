@@ -71,6 +71,9 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         if doc_id not in self._documents:
             return False
         self._chunks.pop(doc_id, None)   # 先删分块
+        self._sync_records = {
+            key: record for key, record in self._sync_records.items() if key[0] != doc_id
+        }
         del self._documents[doc_id]       # 再删文档
         return True
 

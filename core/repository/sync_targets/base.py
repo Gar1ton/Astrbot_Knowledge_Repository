@@ -40,6 +40,17 @@ class SyncTarget(ABC):
         """删除远端对象。返回 False 表示 remote_ref 不存在（非异常）。"""
         ...
 
+    async def push_backup(self, key: str, payload: bytes, content_type: str) -> str:
+        """上传灾备对象并保留调用方指定的稳定 key。
+
+        仅支持对象存储灾备的目标需要覆盖本方法；不支持的目标抛 NotImplementedError。
+        """
+        raise NotImplementedError(f"{self.kind.value} does not support backup objects")
+
+    async def pull_backup(self, key: str) -> bytes:
+        """下载灾备对象字节。仅支持恢复的对象存储目标需要覆盖本方法。"""
+        raise NotImplementedError(f"{self.kind.value} does not support backup objects")
+
     @abstractmethod
     async def check_quota(self, pending_bytes: int = 0) -> QuotaUsage:
         """报告当前用量快照；pending_bytes 为本次将写入的增量大小，用于判断是否将超额。

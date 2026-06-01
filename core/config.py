@@ -79,7 +79,10 @@ class R2SyncConfig:
 
 @dataclass
 class NotionSyncConfig:
-    """Notion 单向镜像配置。经 mcp_server_name 指向的 MCP server 调用，本侧不持 token。"""
+    """Notion 单向镜像配置。经 mcp_server_name 指向的 MCP server 调用，本侧不持 token。
+
+    link_large_to_r2 为向后兼容的预留配置；当前大文件仅同步元数据，不生成公开链接。
+    """
 
     enabled: bool = False
     mcp_server_name: str = "notion"
@@ -109,7 +112,7 @@ class WebConsoleConfig:
 
 @dataclass
 class GraphConfig:
-    """LightRAG 知识图谱配置。incremental 决定是否按 content_hash 跳过未变 chunk。"""
+    """LightRAG 图谱配置。向量召回复用 KB chunk 检索；实体 embedding 持久化尚未接入。"""
 
     enabled: bool = False
     llm_extraction: bool = True
@@ -202,7 +205,38 @@ class Config:
                 "query_top_k": graph.query_top_k,
                 "entity_types": graph.entity_types,
             },
+            "diagnostics": self.get_diagnostics(),
         }
+
+    def get_diagnostics(self) -> list[str]:
+        """返回已启用子系统的缺失配置提示，不阻断保存半成品配置。"""
+        diagnostics = []
+        r2 = self.get_r2_sync_config()
+        if r2.enabled:
+            required = {
+                "account_id": r2.account_id,
+                "access_key_id": r2.access_key_id,
+                "secret_access_key": r2.secret_access_key,
+                "bucket": r2.bucket,
+            }
+            diagnostics.extend(
+                f"r2_sync.{key} is required when r2_sync.enabled=true"
+                for key, value in required.items()
+                if not value
+            )
+
+        notion = self.get_notion_sync_config()
+        if notion.enabled:
+            if not notion.mcp_server_name:
+                diagnostics.append(
+                    "notion_sync.mcp_server_name is required when notion_sync.enabled=true"
+                )
+            if not notion.database_id and not notion.parent_page_id:
+                diagnostics.append(
+                    "notion_sync.database_id or notion_sync.parent_page_id is required "
+                    "when notion_sync.enabled=true"
+                )
+        return diagnostics
 
     def get_source_store_config(self) -> SourceStoreConfig:
         s = _section(self.raw, "source_store")

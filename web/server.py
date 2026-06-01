@@ -90,8 +90,9 @@ async def handle_create_collection(request: web.Request) -> web.Response:
     name = (body.get("name") or "").strip()
     if not name:
         return web.json_response({"error": "name required"}, status=400)
-    await _api(request).create_collection(name, body.get("description", ""))
-    return web.json_response({"ok": True})
+    description = body.get("description", "")
+    await _api(request).create_collection(name, description)
+    return web.json_response({"name": name, "description": description})
 
 
 async def handle_delete_collection(request: web.Request) -> web.Response:
@@ -103,7 +104,7 @@ async def handle_list_documents(request: web.Request) -> web.Response:
     collection = request.query.get("collection") or None
     tag = request.query.get("tag") or None
     docs = await _api(request).list_documents(collection=collection, tag=tag)
-    return web.json_response([_document_dict(d) for d in docs])
+    return web.json_response([await _document_dict(_api(request), d) for d in docs])
 
 
 async def handle_upload_document(request: web.Request) -> web.Response:
@@ -141,7 +142,10 @@ async def handle_upload_document(request: web.Request) -> web.Response:
         collection=collection,
         tags=tags,
     )
-    return web.json_response({"ok": True, "doc_id": doc_id})
+    doc = await _api(request).get_document(doc_id)
+    if doc is None:
+        return web.json_response({"error": "document registration failed"}, status=500)
+    return web.json_response(await _document_dict(_api(request), doc))
 
 
 async def handle_classify_document(request: web.Request) -> web.Response:
@@ -152,7 +156,12 @@ async def handle_classify_document(request: web.Request) -> web.Response:
         collection=body.get("collection"),
         tags=[str(t) for t in tags] if isinstance(tags, list) else None,
     )
-    return web.json_response({"ok": ok}, status=200 if ok else 404)
+    if not ok:
+        return web.json_response({"error": "document not found"}, status=404)
+    doc = await _api(request).get_document(request.match_info["doc_id"])
+    if doc is None:
+        return web.json_response({"error": "document not found"}, status=404)
+    return web.json_response(await _document_dict(_api(request), doc))
 
 
 async def handle_delete_document(request: web.Request) -> web.Response:
@@ -206,7 +215,12 @@ async def _reserved(coro, available_in: str) -> web.Response:
         result = await coro
     except NotImplementedError as exc:
         return web.json_response(
-            {"status": "reserved", "available_in": available_in, "detail": str(exc)},
+            {
+                "status": "reserved",
+                "reserved": True,
+                "available_in": available_in,
+                "detail": str(exc),
+            },
             status=501,
         )
     return web.json_response(result)
@@ -262,10 +276,13 @@ async def handle_graph_query(request: web.Request) -> web.Response:
     top_k = int(request.query.get("top_k", "5"))
     collection = request.query.get("collection") or None
     debug = request.query.get("debug", "").lower() in {"1", "true", "yes", "on"}
-    return await _reserved(
+    response = await _reserved(
         _api(request).query_graph(query, top_k, collection=collection, debug=debug),
         "v0.6.0",
     )
+    if response.status == 200:
+        response = web.json_response(_graph_query_dict(response.body))
+    return response
 
 
 async def handle_graph_data(request: web.Request) -> web.Response:
@@ -301,15 +318,25 @@ def _collection_dict(c: object) -> dict:
     return {"name": c.name, "description": c.description}  # type: ignore[attr-defined]
 
 
-def _document_dict(d: object) -> dict:
+async def _document_dict(api: KnowledgeRepositoryApi, d: object) -> dict:
+    chunks = await api.list_document_chunks(d.doc_id)  # type: ignore[attr-defined]
+    updated_at = d.updated_at.isoformat() if d.updated_at else None  # type: ignore[attr-defined]
+    filename = Path(d.file_path).name  # type: ignore[attr-defined]
+    ext = Path(filename).suffix.lstrip(".").lower()
     return {
         "doc_id": d.doc_id,                  # type: ignore[attr-defined]
         "title": d.title,                    # type: ignore[attr-defined]
+        "filename": filename,
         "content_type": d.content_type,      # type: ignore[attr-defined]
         "size_bytes": d.size_bytes,          # type: ignore[attr-defined]
+        "size": d.size_bytes,                # type: ignore[attr-defined]
         "collection": d.collection,          # type: ignore[attr-defined]
         "tags": d.tags,                      # type: ignore[attr-defined]
         "content_hash": d.content_hash,      # type: ignore[attr-defined]
+        "chunks": len(chunks),
+        "updated_at": updated_at,
+        "updated": updated_at,
+        "ext": ext,
     }
 
 
@@ -325,6 +352,37 @@ def _quota_dict(u: object) -> dict:
         "ratio": round(u.ratio, 4),          # type: ignore[attr-defined]
         "detail": u.detail,                  # type: ignore[attr-defined]
     }
+
+
+def _graph_query_dict(payload: bytes) -> dict:
+    """把业务门面的图谱查询字段翻译为 WebUI 稳定模型。"""
+    import json
+
+    body = json.loads(payload)
+    body["entities"] = [
+        {
+            "id": ent["entity_id"],
+            "name": ent["name"],
+            "type": ent.get("entity_type", ""),
+            "description": ent.get("description", ""),
+            "degree": ent.get("degree", 0),
+            "source_chunk_ids": ent.get("source_chunk_ids", []),
+        }
+        for ent in body.get("entities", [])
+    ]
+    body["relations"] = [
+        {
+            "id": rel["relation_id"],
+            "source": rel["src_entity_id"],
+            "target": rel["dst_entity_id"],
+            "relation": rel["relation"],
+            "description": rel.get("description", ""),
+            "weight": rel.get("weight", 1.0),
+            "source_chunk_ids": rel.get("source_chunk_ids", []),
+        }
+        for rel in body.get("relations", [])
+    ]
+    return body
 
 
 # ── 应用装配 ────────────────────────────────────────────────────

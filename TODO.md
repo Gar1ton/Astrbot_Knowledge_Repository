@@ -44,6 +44,104 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.14.0 Local retrieval & Ask Agent integration (planning)
+
+### User constraints / 约束
+
+- 本版本先完成方案讨论与验证，再进入业务代码实现；未获用户批准前不修改检索、AstrBot hook、WebUI 或持久化代码。
+- 评估将向量检索改为插件本地运行，并以进程内、单文件持久化的 Milvus Lite 作为优先候选；AstrBot KB 读取保留为可回退或迁移期兼容路径。
+- Ask Agent 需要支持 `/kr agent on|off`：打开后，AstrBot 普通对话可使用插件检索结果；关闭后不得影响原有 AstrBot 普通对话。
+- Ask Agent 增加可选的“关系 persona”影响：打开时以真人 RA（Research Assistant）风格总结证据与结论，关闭时保持当前问答风格。WebUI 开关放在输入框底部集合选择器右侧。
+- 外部 agent 与内部 agent 的边界尚待讨论；本计划先给出推荐职责划分，不提前固化 HTTP 或 AstrBot SDK 契约。
+- 评估 NotebookLM 风格的“在线检阅文档”：回答必须能回到来源文档、定位证据片段并继续阅读，而不是只展示不可追溯的向量命中摘要。
+
+### Technical implementation path
+
+- [ ] **Phase 0 — Milvus Lite 可行性 spike 与基准**：用隔离原型验证 `pymilvus[milvus-lite]` 本地文件 URI、Linux 部署、单进程生命周期、dense vector CRUD、metadata filter、删除重建、混合检索、数据库文件备份恢复与异常重启；记录小规模边界、仅 `FLAT` 索引、无 partition / 用户角色等限制。单独验证当前 Milvus Lite 版本能否直接使用内建 BM25；官方资料存在版本差异，未通过原型前不得将该能力写入正式契约。技术理由：Milvus Lite 适合作为本地候选，但不能根据 Standalone 能力推断 Lite 行为。
+- [ ] **Phase 1 — 定义本地检索端口与数据所有权**：新增独立 `retrieval` / `vector_store` ABC，明确 SQLite `source_store` 仍是文档与 chunk 的事实源，Milvus Lite 只是可重建索引；AstrBot KB reader 降为兼容 adapter，不再作为 Ask Agent 的唯一检索源。索引行至少保存 `chunk_id`、`doc_id`、`collection`、文本、内容哈希和可定位引用元数据。技术理由：避免把可丢弃索引与原始文档生命周期混为一体，并允许后续切换 Standalone。
+- [ ] **Phase 2 — 明确本地 embedding 策略**：先比较本地 `bge-m3` 候选与可配置外部 embedding provider，确定模型下载、缓存目录、CPU / 内存占用、批量摄入耗时和离线启动降级；Milvus Lite 只保存和检索 dense vector，不承担 dense embedding 生成。技术理由：将向量库改成本地并不等于向量生成已经本地化，必须把模型运行成本纳入设计。
+- [ ] **Phase 3 — 收敛索引生命周期与灾备**：上传、更新、删除文档时同步 upsert / delete 本地索引；提供按 chunk 哈希增量补建、全量 rebuild、健康检查与版本迁移；将 Milvus Lite 文件纳入 R2 快照范围，恢复后支持校验或从 SQLite 重建。技术理由：当前本地上传文档不会写入 AstrBot KB，改用本地索引后必须补齐一致性闭环。
+- [ ] **Phase 4 — 统一 Ask retrieval orchestrator**：让 WebUI Ask、AstrBot 普通对话增强和后续外部工具调用共享一条检索管线；候选召回包含 local dense、可验证后再启用的 lexical / sparse 检索、实体召回和图邻域扩展，并统一去重、RRF、来源编号与引用结构。技术理由：当前 `ask()` 只查 AstrBot KB，而图谱查询另走独立管线，继续叠加入口会产生不同答案与不同引用。
+- [ ] **Phase 5 — 接入 AstrBot 普通对话增强**：在真实 AstrBot SDK 薄壳注册 `/kr agent on|off` 与普通消息 hook；开关状态持久化，默认关闭。推荐按会话或频道记录开关，并提供原生配置中的全局默认值；开启时优先把检索上下文和引用注入 AstrBot 原有回答链路，避免额外生成一次 Ask Agent 答案后再让 AstrBot 二次改写。技术理由：保留 AstrBot 原有会话、persona 与 provider 行为，同时控制延迟和 token 成本。
+- [ ] **Phase 6 — 增加 RA persona 模式**：为 Ask 请求和 AstrBot 内部增强上下文增加 `persona_enabled`；关闭时保留现有提示词，打开时使用关系 persona 模板，要求先归纳证据、再给出面向真人研究助理交流的总结，并保持来源引用。WebUI 在集合选择器右侧增加独立开关；后端配置提供默认值，单次请求允许覆盖。实施前与用户确认：这里是插件自带 RA persona，还是复用 AstrBot 已选 persona 并追加 RA 行为约束。技术理由：persona 影响应作用于最终回答提示词，不应污染检索排序。
+- [ ] **Phase 7 — 明确内部 / 外部 agent 契约**：推荐将“内部 agent”定义为 AstrBot 普通对话中的检索增强器，只返回 grounded context 给 AstrBot 现有回答链路；将“外部 agent”定义为 WebUI / API 主动调用的独立问答入口，由插件负责检索与生成答案。后续如需供第三方 agent 调用，再增加只返回检索上下文的 tool/API，避免强制二次 LLM 生成。技术理由：共享检索核心，但让最终回答责任归属清晰。
+- [ ] **Phase 8 — NotebookLM 风格在线检阅与引用定位**：为每个 chunk 持久化页码、段落或字符范围、原件引用和可展示预览；回答引用返回稳定 `doc_id + chunk_id + locator`，WebUI 支持从来源面板打开原件并定位到证据附近。评估 PDF.js 在线阅读器；Notion MCP 继续承担同步镜像，不作为本地检索或引用定位的必需依赖。技术理由：Milvus Lite 能提高召回，但在线阅览、证据定位和连续阅读属于应用层能力。
+- [ ] **Phase 9 — 测试、文档与发布闭环**：补向量端口对换测试、Milvus Lite 集成测试、索引重建与 R2 恢复测试、AstrBot hook 桩测试、persona 提示词测试、引用定位 HTTP / WebUI 测试；更新配置 schema、架构说明、版本记录与前端静态产物。
+
+### Decisions required / 待确认
+
+- [ ] `/kr agent on|off` 的作用域：推荐“当前会话或频道”，是否还需要用户级和全局级命令。
+- [ ] AstrBot 普通对话增强方式：推荐“注入检索上下文，由 AstrBot 原链路生成一次答案”；是否还需要“先调用独立 Ask Agent，再直接引用其答案”的可选模式。
+- [ ] “关系 persona”的来源：推荐插件内置 RA 模板并允许叠加 AstrBot 当前 persona；是否需要读取并完全继承 AstrBot persona。
+- [ ] 外部 agent 首版范围：推荐先保留 WebUI `/api/ask`，并增加只返回 grounded context 的工具契约设计；是否需要同步暴露 MCP tool。
+- [ ] 本地 embedding 的目标：需要确认优先级是“完全离线”、低内存 CPU 运行，还是优先复用用户已有 embedding provider 以降低安装体积。
+
+### Verification
+
+- `python3 -m pytest tests/backend` → 待实现后执行
+- `ruff check . && mypy` → 待实现后执行
+- `cd web/frontend && npm run lint && npm run build` → 待实现后执行
+- `python3 tools/sync_frontend.py && python3 tools/sync_frontend.py --check` → 待实现后执行
+- Milvus Lite spike：摄入、查询、更新、删除、重启、快照恢复、全量 rebuild、异常恢复 → 待执行并记录基准
+- AstrBot 人工验收：`/kr agent off` 不影响普通对话；`/kr agent on` 后普通对话带可追溯引用；RA persona 开关只改变回答表达 → 待执行
+
+## v0.13.0 Contract convergence & persistence hardening (completed)
+
+### User constraints / 约束
+
+- 先提交计划供用户审核；本轮不修改业务代码、不执行迁移、不改变现有运行态数据。
+- R2 与 Notion 信息由用户在 AstrBot 原生插件配置中填写；WebUI 的有效配置页继续保持只读核对模式，并对机密字段脱敏。
+- Notion token 不写入插件配置：仍由 AstrBot 中 `notion_sync.mcp_server_name` 指向的 MCP server 管理。
+- 持久化修复须兼容现有 `knowledge_repository.db` 与 `data_dir/documents/`，数据库结构变更只允许追加幂等 migration。
+- 本版本为功能与数据一致性修复，版本号按次版本升级为 `v0.13.0`，不作为 `v0.12.x` 视觉补丁继续扩展。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 锁定前后端 HTTP 契约并补端到端测试**：统一 collection 创建、文档上传、文档更新的返回资源结构；把文档字段 `size_bytes` / `updated_at` 等映射为前端稳定模型；修正 KB 搜索 `k` 与后端 `top_k` 参数不一致；统一 reserved `501` 降级协议；将图谱查询的 `entity_id` / `relation_id` / `src_entity_id` / `dst_entity_id` 序列化为前端消费结构。技术理由：现有后端路由测试未覆盖真实前端 wrapper，多个已实现端点仍会在 UI 中产生字段错位或异常。
+- [x] **Phase 2 — 接通已有但 UI 尚未消费的能力**：前端接入 `POST /api/logout`、`GET /api/documents/{id}/raw`、`POST /api/sync/{target}`、同步状态读取、集合删除与图谱 collection 筛选；明确 `/api/sync/all` 为真实 fan-out 或移除未支持入口；在组合根把现有 `LLMAdapter` 注入 `KnowledgeRepositoryApi`，避免 Ask 生产环境始终退化为检索摘要。技术理由：这些后端能力已存在，但当前端到端用户流程没有闭环。
+- [x] **Phase 3 — 加固 AstrBot 原生配置入口**：保留 `_conf_schema.json` 已有的 R2 字段（`account_id`、`access_key_id`、`secret_access_key`、`bucket`、`cdn_domain` 等）与 Notion MCP 字段（`mcp_server_name`、`database_id`、`parent_page_id` 等）；补 enabled 状态下的必填校验、字段说明与可用性诊断；确认 AstrBot schema 支持时将 secret 字段标记为密码输入；保持 `/api/config/effective` 只读且脱敏。技术理由：配置入口已经存在，下一步应补约束与诊断，而不是在 WebUI 再造一套可写配置页。
+- [x] **Phase 4 — 收敛运行时配置持久化边界**：为 `RuntimeConfigStore` 增加允许写入键白名单，仅持久化 Notion 自动建库产生的非敏感字段；校验 AstrBot `save_config` / `update_config` / `persist_config` 的参数语义，避免用局部 override 覆盖原生完整配置；Notion 自动建库后同步刷新内存 `Config`，使只读有效配置无需重启即可看到新 `database_id`。技术理由：当前 JSON override 可写任意键，框架写回适配与内存刷新仍不完整。
+- [x] **Phase 5 — 修复 R2 灾备真实闭环**：为数据库快照定义专用对象键与上传方法，修复真实 R2 上传为 `backups/knowledge_repository.db.pdf` 而恢复读取 `backups/knowledge_repository.db` 的不一致；使用 SQLite backup API 或受控 checkpoint 生成一致性快照；恢复时下载到临时文件、校验 SQLite 完整性，并在关闭现有连接后原子替换或明确要求重启；补真实 `R2SyncTarget` mock 集成测试。技术理由：当前内存替身测试未覆盖真实键名，且直接覆盖已连接 SQLite 文件存在损坏风险。
+- [x] **Phase 6 — 完善本地数据生命周期**：把摄入的“复制原件 + documents 写入 + chunks 写入”收敛为失败可回滚流程；删除文档时清理 `data_dir/documents/` 原件、关联图谱贡献与增量状态，并明确是否删除 R2 对象 / 归档 Notion 页面；补孤儿文件、孤儿图谱记录与重启后读取测试。技术理由：SQLite 表内级联删除已存在，但文件系统、图谱仓储和远端镜像当前没有随文档生命周期同步收敛。
+- [x] **Phase 7 — 校准图谱与备份能力声明**：决定 `graph_entities.embedding` 与 `reuse_kb_embedding` 是正式接入还是明确 defer；修正文档中“manifest + kb.db 快照”“大文件改用 R2 链接”等尚未完整落地的声明，或实现对应能力；明确插件备份范围是本插件 `knowledge_repository.db`、原件目录，还是还需纳入 AstrBot 自身 KB 数据。技术理由：当前 schema、配置、TODO 历史声明与实际实现存在偏差，恢复能力边界需要对用户可解释。
+- [x] **Phase 8 — 全量回归与发布闭环**：补前端 wrapper ↔ aiohttp 路由集成测试、配置持久化测试、SQLite 重启/迁移测试、R2 快照备份恢复测试与删除生命周期测试；完成版本记录、前端静态构建同步与质量检查。
+
+### Verification
+
+- `python3 -m pytest tests/backend/test_config.py tests/backend/test_sqlite_source_store.py tests/backend/test_graph_store.py tests/backend/test_sync_pipeline.py tests/backend/test_r2_target.py tests/backend/test_web_server.py` → 相关契约均包含在全量回归中并通过
+- `python3 -m pytest` → 136 passed
+- `ruff check . && mypy` → All checks passed / Success
+- `cd web/frontend && npm run lint && npm run build`（通过 Node 22 执行）→ lint 通过（保留 5 个既有 hook dependency warning）；Next.js export 成功
+- `python3 tools/sync_frontend.py && python3 tools/sync_frontend.py --check` → `pages/` 已与 `web/frontend/out` 一致
+- `curl http://localhost:3000/{ask,documents,search,graph,sync,settings}` → 动态预览路由均返回 HTTP 200
+- AstrBot 原生插件设置填写 R2 / Notion，打开 `/settings` → 代码路径与脱敏契约已覆盖；真实 AstrBot 环境待人工验收
+- 上传、更新、删除、R2 同步、R2 恢复、Notion 初始化与拉取、重启后读取 → 自动化契约已覆盖；真实 R2 / Notion 凭据环境待人工验收
+
+## v0.12.1 WebUI screenshot parity patch (completed)
+
+### User constraints / 约束
+
+- 以 `docs/屏幕截图 2026-06-01 133003.png` 至 `133036.png` 五张截图为视觉验收基线。
+- 本版本为 `v0.12.0` 的补丁修复，只处理 WebUI 截图对齐、前端发布链路与版本记录一致性。
+- 所有现有 `/api/*` 请求路径、方法与字段契约保持不变。
+- 不手改 `pages/`；仅通过前端构建与 `tools/sync_frontend.py` 同步生成。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 治理与发布链路修复**：统一 `metadata.yaml` 版本号；让 `tests/run_webui.py` 优先托管 `web/frontend/out/`，不存在时回退 `pages/`；技术理由：避免动态预览继续加载旧源码目录或过期静态产物。
+- [x] **Phase 2 — 全局视觉基线收敛**：修正 HSL 派生 token 覆盖，保留唯一全局 `Atmosphere`，移除页面重复 `DotField` 与额外 Aurora；技术理由：当前重复视效叠加造成背景噪声与截图明显不一致。
+- [x] **Phase 3 — 左栏外壳截图对齐**：补齐搜索/跳转框、品牌副标题、`AI` badge、在线状态与激活项左侧强调条，并校准 rail 间距；技术理由：左栏是五张截图共享的固定视觉锚点。
+- [x] **Phase 4 — 五页截图对齐**：分别校准 Ask、文档、检索、图谱、同步页面的布局密度、空状态、面板位置、图谱平面节点和同步分组；技术理由：当前页面功能已存在，但结构与目标截图存在明显偏差。
+- [x] **Phase 5 — 构建、静态同步与回归**：构建 Next.js export，经 `tools/sync_frontend.py` 同步 `pages/`，运行前端 lint、后端测试、`ruff` 与 `mypy`；技术理由：确保补丁可由 aiohttp 单进程托管且不破坏后端。
+
+### Verification
+
+- `cd web/frontend && npm run lint && npm run build` → lint 通过（保留 5 个既有 hook dependency warning）；Next.js export 成功
+- `python3 tools/sync_frontend.py && python3 tools/sync_frontend.py --check` → `pages/` 已与 `web/frontend/out` 一致
+- `python3 -m pytest` → 128 passed
+- `ruff check . && mypy` → All checks passed / Success
+- 浏览器逐张对照 `docs/屏幕截图 2026-06-01 133003.png` 至 `133036.png` → 动态预览已启动于 `http://localhost:3000/`
+
 ## v0.12.0 WebUI visual optimization (completed)
 
 ### User constraints / 约束

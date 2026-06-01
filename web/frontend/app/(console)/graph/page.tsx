@@ -1,12 +1,12 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Btn } from "@/components/ui/Btn";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
   GraphData, GraphNode, GraphEdge, KbChunk, ApiError,
-  getGraph, queryGraph, buildGraph, isReserved,
+  getGraph, queryGraph, buildGraph, isReserved, listCollections,
 } from "@/lib/api";
 
 // ─── 类型配色 ─────────────────────────────────────────────────
@@ -269,24 +269,6 @@ function HybridGraph({
               transition: "all 0.25s cubic-bezier(0.4, 0, 0.2, 1)",
             }}
           >
-            {/* 节点内部简写或全称 */}
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 700,
-                color: typeColor,
-                textAlign: "center",
-                lineHeight: 1.1,
-                padding: 4,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                maxWidth: "90%",
-              }}
-            >
-              {node.name.length > 5 ? node.name.slice(0, 4) + "…" : node.name}
-            </span>
-
             {/* 下方标签 */}
             <div
               style={{
@@ -299,11 +281,7 @@ function HybridGraph({
                 fontWeight: 600,
                 color: isSelected ? "var(--accent)" : "var(--fg)",
                 whiteSpace: "nowrap",
-                background: "color-mix(in srgb, var(--surface) 80%, transparent)",
-                padding: "2px 6px",
-                borderRadius: 4,
-                border: "1px solid var(--border)",
-                boxShadow: "var(--shadow)",
+                padding: "2px 0",
                 pointerEvents: "none",
               }}
             >
@@ -357,17 +335,25 @@ export default function GraphPage() {
   const [querying, setQuerying] = useState(false);
   const [buildReserved, setBuildReserved] = useState<string | null>(null);
   const [graphReserved, setGraphReserved] = useState<string | null>(null);
-
-  const selectedId = selectedNode?.id ?? selectedEdge?.id ?? null;
+  const [collections, setCollections] = useState<string[]>([]);
+  const [collection, setCollection] = useState("");
 
   useEffect(() => {
-    loadGraph();
+    listCollections()
+      .then((items) => {
+        const names = items.map((item) => item.name);
+        setCollections(names);
+        const initial = names[0] ?? "";
+        setCollection(initial);
+        loadGraph(initial);
+      })
+      .catch(() => loadGraph());
   }, []);
 
-  async function loadGraph() {
+  async function loadGraph(selectedCollection: string = collection) {
     setLoading(true);
     try {
-      const res = await getGraph();
+      const res = await getGraph(selectedCollection || undefined);
       if (isReserved(res)) {
         setGraphReserved(res.available_in);
       } else {
@@ -383,12 +369,12 @@ export default function GraphPage() {
   async function handleBuild() {
     setBuilding(true);
     try {
-      const res = await buildGraph();
+      const res = await buildGraph(collection || undefined);
       if (isReserved(res)) {
         setBuildReserved(res.available_in);
       } else {
         toast("图谱构建已启动", "ok");
-        setTimeout(loadGraph, 2000);
+        setTimeout(() => loadGraph(collection), 2000);
       }
     } catch (err) {
       toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
@@ -403,7 +389,7 @@ export default function GraphPage() {
     setQuerying(true);
     setQueryResult(null);
     try {
-      const res = await queryGraph(queryInput);
+      const res = await queryGraph(queryInput, collection || undefined);
       if (isReserved(res)) {
         toast(`图谱查询即将上线（${res.available_in}）`, "info");
       } else {
@@ -432,7 +418,23 @@ export default function GraphPage() {
         >
           <h1 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "var(--heading)", flex: 1 }}>
             {t("nav_graph")}
+            {graphData && (
+              <span style={{ marginLeft: 8, fontSize: 11, color: "var(--fg-muted)", fontWeight: 500 }}>
+                {graphData.nodes.length} 实体 · {graphData.edges.length} 关系
+              </span>
+            )}
           </h1>
+          <select
+            value={collection}
+            onChange={(event) => {
+              const next = event.target.value;
+              setCollection(next);
+              loadGraph(next);
+            }}
+            style={{ height: 30, fontSize: 12, padding: "0 8px", borderRadius: 8 }}
+          >
+            {collections.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
           {buildReserved ? (
             <ReservedBanner availableIn={buildReserved} />
           ) : (
@@ -451,7 +453,7 @@ export default function GraphPage() {
               <ReservedBanner availableIn={graphReserved} />
             </div>
           ) : graphData ? (
-            <div style={{ width: "100%", height: "100%", borderRadius: 12, overflow: "hidden", border: "1px solid var(--border)" }}>
+            <div style={{ width: "100%", height: "100%", borderRadius: 14, overflow: "hidden", border: "1px solid var(--border)", boxShadow: "inset 0 0 26px color-mix(in srgb, var(--border) 70%, transparent), var(--shadow)" }}>
               <HybridGraph
                 data={graphData}
                 onSelectNode={(n) => { setSelectedNode(n); setSelectedEdge(null); }}
@@ -551,12 +553,13 @@ export default function GraphPage() {
         )}
 
         {!selectedNode && !selectedEdge && !queryResult && (
-          <div style={{ color: "var(--fg-muted)", fontSize: 12, padding: 8 }}>
-            点击节点或关系查看详情，或在下方输入查询词
+          <div style={{ color: "var(--fg-muted)", fontSize: 12, minHeight: 180, padding: 8, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", lineHeight: 1.7 }}>
+            点击节点或关系查看来源
+            <br />
+            或在下方做图谱增强查询
           </div>
         )}
       </div>
     </div>
   );
 }
-

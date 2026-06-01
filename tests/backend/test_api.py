@@ -5,6 +5,8 @@ auto 模式下被重复收集的已知问题。
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from core.api import KnowledgeRepositoryApi
@@ -13,6 +15,8 @@ from core.domain.models import (
     GraphEntity,
     GraphRelation,
     SourceDocument,
+    SyncRecord,
+    SyncStatus,
     SyncTargetKind,
 )
 from core.repository.graph_store.memory import InMemoryGraphStore
@@ -111,6 +115,44 @@ async def test_delete_document() -> None:
     assert await api.delete_document("d1") is False
 
 
+async def test_delete_document_cleans_graph_remote_and_managed_file(tmp_path: Path) -> None:
+    managed_dir = tmp_path / "documents"
+    managed_dir.mkdir()
+    managed_file = managed_dir / "d1.pdf"
+    managed_file.write_bytes(b"pdf")
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(
+        SourceDocument("d1", "d1", str(managed_file), "application/pdf", 3, "h", "c")
+    )
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "text", "ch")])
+    await store.upsert_sync_record(
+        SyncRecord(
+            doc_id="d1",
+            target=SyncTargetKind.R2,
+            remote_ref="c/d1",
+            status=SyncStatus.SYNCED,
+        )
+    )
+    graph = InMemoryGraphStore()
+    await graph.upsert_entities([GraphEntity("e1", "Entity", source_chunk_ids=["c1"])])
+    target = InMemorySyncTarget()
+    target._objects["c/d1"] = b"pdf"
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        sync_targets={SyncTargetKind.R2: target},
+        graph_store=graph,
+        managed_documents_dir=managed_dir,
+    )
+
+    assert await api.delete_document("d1") is True
+    assert not managed_file.exists()
+    assert target._objects == {}
+    assert await graph.get_entity("e1") is None
+    assert await store.list_sync_records() == []
+
+
 async def test_list_quota() -> None:
     api = await _make_api()
     usages = {u.target: u for u in await api.list_quota()}
@@ -124,6 +166,29 @@ async def test_list_quota_empty_when_no_targets() -> None:
         source_store=store, kb_reader=InMemoryKnowledgeBaseReader({})
     )
     assert await api.list_quota() == []
+
+
+async def test_sync_all_fans_out_to_each_target() -> None:
+    class StubPipeline:
+        calls = []
+
+        async def sync(self, target, doc_ids=None):
+            self.calls.append((target, doc_ids))
+            return {"status": "success", "synced_count": 1, "failed_count": 0}
+
+    pipeline = StubPipeline()
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        sync_pipeline=pipeline,  # type: ignore[arg-type]
+    )
+    result = await api.sync_documents("all", ["d1"])
+    assert result["status"] == "success"
+    assert set(result["targets"]) == {"r2", "notion"}
+    assert pipeline.calls == [
+        (SyncTargetKind.NOTION, ["d1"]),
+        (SyncTargetKind.R2, ["d1"]),
+    ]
 
 
 async def test_get_graph_filters_by_collection_and_returns_source_previews() -> None:

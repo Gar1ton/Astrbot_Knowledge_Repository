@@ -3,7 +3,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Btn } from "@/components/ui/Btn";
-import { Tag } from "@/components/ui/Tag";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import { AskResult, AskSource, ApiError, ask, listKbCollections } from "@/lib/api";
@@ -232,8 +231,10 @@ export default function AskPage() {
           className="fx-glass"
           style={{ position: "sticky", top: 0, zIndex: 3, padding: "10px 16px", display: "flex", alignItems: "center", gap: 10 }}
         >
-          <h1 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "var(--heading)", flex: 1 }}>
+          <h1 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "var(--heading)", flex: 1, display: "flex", alignItems: "center", gap: 8 }}>
             {t("nav_ask")}
+            <span style={{ color: "var(--accent)", fontSize: 11 }}>●</span>
+            <span style={{ color: "var(--fg-subtle)", fontSize: 11, fontWeight: 500 }}>embedding + RRF</span>
           </h1>
           {messages.length > 0 && (
             <Btn
@@ -268,12 +269,19 @@ export default function AskPage() {
             >
               <span
                 style={{
-                  fontSize: 36,
-                  color: "var(--accent)",
+                  width: 54,
+                  height: 54,
+                  borderRadius: "50%",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 26,
+                  color: "var(--accent-fg)",
+                  background: "var(--accent)",
+                  border: "8px solid color-mix(in srgb, var(--surface) 82%, transparent)",
                   marginBottom: 10,
-                  filter: "drop-shadow(0 0 8px var(--ring))",
+                  boxShadow: "0 4px 16px var(--ring)",
                   animation: "sparkleFloat 3s ease-in-out infinite",
-                  display: "inline-block",
                 }}
               >
                 ✦
@@ -323,7 +331,7 @@ export default function AskPage() {
         </div>
 
         {/* 输入框 */}
-        <div style={{ padding: "10px 16px 14px" }}>
+        <div style={{ padding: "10px 16px 14px", width: "100%", maxWidth: 900, margin: "0 auto" }}>
           <form onSubmit={handleSend}>
             <div
               style={{

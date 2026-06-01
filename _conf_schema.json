@@ -26,7 +26,7 @@
   "r2_sync": {
     "description": "Cloudflare R2 备份（崩溃恢复）",
     "type": "object",
-    "hint": "S3 兼容对象存储，备份原件 + manifest + kb.db 快照。免费额度 10GB，出口免费",
+    "hint": "S3 兼容对象存储：增量备份插件托管原件，并保存本插件 knowledge_repository.db 快照。免费额度 10GB，出口免费",
     "items": {
       "enabled": {
         "description": "启用 R2 同步备份",
@@ -58,7 +58,7 @@
         "description": "自定义 CDN 域名（可选）",
         "type": "string",
         "default": "",
-        "hint": "例如 https://cdn.yourdomain.com；用于生成 Notion 引用大文件的公开链接"
+        "hint": "例如 https://cdn.yourdomain.com；保留供后续公开链接能力使用"
       },
       "free_tier_gb": {
         "description": "免费额度上限（GB）",
@@ -114,13 +114,13 @@
         "description": "单文件上传上限（MiB）",
         "type": "int",
         "default": 5,
-        "hint": "免费工作区 API 上传上限 5MiB；超过则改为链接到 R2"
+        "hint": "免费工作区 API 上传上限 5MiB；超过则仅同步元数据并显示跳过说明"
       },
       "link_large_to_r2": {
-        "description": "大文件改用 R2 链接而非上传",
+        "description": "预留：大文件改用 R2 链接",
         "type": "bool",
         "default": true,
-        "hint": "需同时启用 r2_sync 才能生成链接"
+        "hint": "当前版本尚未生成公开链接；大文件会仅同步 Notion 元数据"
       },
       "rate_limit_rps": {
         "description": "API 限流（请求/秒）",
@@ -188,9 +188,10 @@
         "default": true
       },
       "reuse_kb_embedding": {
-        "description": "实体归并复用 AstrBot KB 的 embedding provider",
+        "description": "图谱检索复用 AstrBot KB 的 embedding 召回",
         "type": "bool",
-        "default": true
+        "default": true,
+        "hint": "当前用于复用 KB chunk 向量召回；实体 embedding 持久化保留为后续能力"
       },
       "merge_similarity_threshold": {
         "description": "实体归并相似度阈值（0~1）",

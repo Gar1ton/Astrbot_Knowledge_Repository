@@ -17,13 +17,13 @@ export function Atmosphere({ variant = "default", sun = false, follow = true }: 
   
   // Mouse target and current LERP positions
   const mouseRef = useRef({ tx: 0.5, ty: 0.5, cx: 0.5, cy: 0.5 });
-  const [reducedMotion, setReducedMotion] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
 
   useEffect(() => {
     // Check prefers-reduced-motion
     const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-    setReducedMotion(mediaQuery.matches);
-    
     const handleMediaChange = (e: MediaQueryListEvent) => {
       setReducedMotion(e.matches);
     };

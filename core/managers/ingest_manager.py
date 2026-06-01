@@ -61,35 +61,45 @@ class IngestManager(BaseIngestManager):
 
         # 2) 物理拷贝至插件管理的原件库目录，防止外部临时文件被删
         dest_path = self._docs_dir / f"{doc_id}.pdf"
-        if source_path.resolve() != dest_path.resolve():
-            shutil.copy2(source_path, dest_path)
+        copied = source_path.resolve() != dest_path.resolve()
+        document_added = False
+        try:
+            if copied:
+                shutil.copy2(source_path, dest_path)
 
-        # 3) 计算文件内容哈希 (SHA-256)
-        with open(dest_path, "rb") as f:
-            content_bytes = f.read()
-        file_hash = hashlib.sha256(content_bytes).hexdigest()
+            # 3) 计算文件内容哈希 (SHA-256)
+            with open(dest_path, "rb") as f:
+                content_bytes = f.read()
+            file_hash = hashlib.sha256(content_bytes).hexdigest()
 
-        # 4) 抽取文本与分块
-        chunks = self._extract_and_chunk(dest_path, doc_id)
+            # 4) 抽取文本与分块
+            chunks = self._extract_and_chunk(dest_path, doc_id)
 
-        # 5) 创建文档领域实体
-        now = datetime.now(timezone.utc)
-        doc = SourceDocument(
-            doc_id=doc_id,
-            title=title,
-            file_path=str(dest_path),
-            content_type=content_type,
-            size_bytes=size_bytes,
-            content_hash=file_hash,
-            collection=collection,
-            tags=list(tags or []),
-            created_at=now,
-            updated_at=now,
-        )
+            # 5) 创建文档领域实体
+            now = datetime.now(timezone.utc)
+            doc = SourceDocument(
+                doc_id=doc_id,
+                title=title,
+                file_path=str(dest_path),
+                content_type=content_type,
+                size_bytes=size_bytes,
+                content_hash=file_hash,
+                collection=collection,
+                tags=list(tags or []),
+                created_at=now,
+                updated_at=now,
+            )
 
-        # 6) 写入仓储 (事务级，先加文档元数据，再写入分块)
-        await self._source_store.add_document(doc)
-        await self._source_store.replace_chunks(doc_id, chunks)
+            # 6) 写入仓储 (事务级，先加文档元数据，再写入分块)
+            await self._source_store.add_document(doc)
+            document_added = True
+            await self._source_store.replace_chunks(doc_id, chunks)
+        except Exception:
+            if document_added:
+                await self._source_store.delete_document(doc_id)
+            if copied:
+                dest_path.unlink(missing_ok=True)
+            raise
 
         self.logger.info(
             f"Successfully ingested document {title} (ID: {doc_id}) with {len(chunks)} chunks."

@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -68,13 +69,15 @@ async def pipeline(
 
     # 初始化 R2 Target 与 QuotaManager
     r2_config = R2SyncConfig(enabled=True, bucket="test-bucket", free_tier_gb=10)
-    # limit_bytes 设置为 100 字节，足够通过测试
-    target = InMemorySyncTarget(kind=SyncTargetKind.R2, limit_bytes=100)
+    # limit_bytes 需容纳真实 SQLite 快照字节，避免快照自身触发测试额度阻断
+    target = InMemorySyncTarget(kind=SyncTargetKind.R2, limit_bytes=100_000)
     quota_mgr = QuotaManager(sync_targets={SyncTargetKind.R2: target}, r2_config=r2_config)
 
     # 虚拟一个 db 文件作为备份快照
     db_file = tmp_path / "knowledge_repository.db"
-    db_file.write_bytes(b"mock-sqlite-db-data")
+    with sqlite3.connect(db_file) as db:
+        db.execute("CREATE TABLE snapshot_test (id INTEGER PRIMARY KEY)")
+        db.execute("INSERT INTO snapshot_test (id) VALUES (1)")
 
     return SyncPipeline(
         source_store=store,
@@ -105,7 +108,11 @@ async def test_full_pipeline_sync_success(
     # 3) 检查数据库快照是否成功备份到 backups/ 槽
     target = pipeline._sync_targets[SyncTargetKind.R2]
     db_bytes = target._objects.get("backups/knowledge_repository.db")
-    assert db_bytes == b"mock-sqlite-db-data"
+    assert db_bytes is not None
+    restored = pipeline._db_path.with_name("restored-check.db")
+    restored.write_bytes(db_bytes)
+    with sqlite3.connect(restored) as db:
+        assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
 async def test_incremental_indexing_efficiency(
@@ -177,13 +184,30 @@ async def test_restore_from_backup(pipeline: SyncPipeline) -> None:
         mock_boto.return_value = mock_s3
         # Mock s3.get_object returning a body stream
         mock_body = MagicMock()
-        mock_body.read.return_value = b"cloud-backup-db-content"
+        cloud_db = pipeline._db_path.with_name("cloud.db")
+        with sqlite3.connect(cloud_db) as db:
+            db.execute("CREATE TABLE cloud_test (id INTEGER PRIMARY KEY)")
+        mock_body.read.return_value = cloud_db.read_bytes()
         mock_s3.get_object.return_value = {"Body": mock_body}
 
         result = await pipeline.restore(SyncTargetKind.R2)
         assert result["status"] == "success"
-        assert "数据库成功恢复" in result["message"]
+        assert result["restart_required"] is True
 
         # 验证本地 db 确实被改写为云端下载的内容
-        assert pipeline._db_path.read_bytes() == b"cloud-backup-db-content"
+        with sqlite3.connect(pipeline._db_path) as db:
+            assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+            assert db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='cloud_test'"
+            ).fetchone() == ("cloud_test",)
 
+
+async def test_restore_rejects_invalid_sqlite_snapshot(pipeline: SyncPipeline) -> None:
+    target = pipeline._sync_targets[SyncTargetKind.R2]
+    target._objects["backups/knowledge_repository.db"] = b"not-a-sqlite-db"
+    original = pipeline._db_path.read_bytes()
+
+    result = await pipeline.restore(SyncTargetKind.R2)
+
+    assert result["status"] == "error"
+    assert pipeline._db_path.read_bytes() == original

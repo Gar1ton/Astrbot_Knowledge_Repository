@@ -4,7 +4,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { Rail } from "@/components/rail/Rail";
 import { GrainOverlay } from "@/components/fx/GrainOverlay";
 import { Atmosphere } from "@/components/fx/Atmosphere";
-import { ToastProvider, useToast } from "@/components/ui/Toast";
+import { ToastProvider } from "@/components/ui/Toast";
 import { I18nContext, Lang, makeT } from "@/lib/i18n";
 import { initPalette } from "@/lib/theme";
 import { getAuth, login, logout } from "@/lib/api";
@@ -16,7 +16,6 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const { toast } = useToast();
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -122,7 +121,11 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
 // ─── I18n Provider ────────────────────────────────────────────
 
 function I18nProvider({ children }: { children: React.ReactNode }) {
-  const [lang, setLangState] = useState<Lang>("zh");
+  const [lang, setLangState] = useState<Lang>(() => {
+    if (typeof localStorage === "undefined") return "zh";
+    const saved = localStorage.getItem("kr-lang");
+    return saved === "en" ? "en" : "zh";
+  });
 
   const setLang = useCallback((l: Lang) => {
     setLangState(l);
@@ -135,8 +138,6 @@ function I18nProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const saved = (typeof localStorage !== "undefined" && localStorage.getItem("kr-lang")) as Lang | null;
-    if (saved === "zh" || saved === "en") setLangState(saved);
     initPalette();
   }, []);
 

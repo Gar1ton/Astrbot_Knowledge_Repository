@@ -1,8 +1,7 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { DotField } from "@/components/fx/DotField";
 import { Btn } from "@/components/ui/Btn";
 import { Tag } from "@/components/ui/Tag";
 import { useToast } from "@/components/ui/Toast";
@@ -18,6 +17,7 @@ import {
   uploadDocument,
   patchDocument,
   deleteDocument,
+  downloadDocument,
 } from "@/lib/api";
 
 // ─── 工具函数 ─────────────────────────────────────────────────
@@ -189,6 +189,8 @@ function Inspector({ doc, collections, onUpdate, onDelete }: InspectorProps) {
 
   useEffect(() => {
     if (doc) {
+      // Inspector draft follows the newly selected document.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setEditCollection(doc.collection);
       setEditTags([...doc.tags]);
     }
@@ -243,7 +245,10 @@ function Inspector({ doc, collections, onUpdate, onDelete }: InspectorProps) {
           textAlign: "center",
         }}
       >
-        选择文档查看详情
+        <div>
+          <div style={{ fontSize: 28, color: "var(--border-strong)", marginBottom: 6 }}>♧</div>
+          选择文档查看详情
+        </div>
       </div>
     );
   }
@@ -337,8 +342,7 @@ function Inspector({ doc, collections, onUpdate, onDelete }: InspectorProps) {
           {dirty && (
             <Btn size="sm" loading={saving} onClick={handleSave}>{t("btn_save")}</Btn>
           )}
-          {/* 下载按钮（待后端实现 GET /api/documents/{id}/raw，见 TODO） */}
-          <Btn size="sm" variant="ghost" disabled title={t("docs_download")}>
+          <Btn size="sm" variant="ghost" title={t("docs_download")} onClick={() => downloadDocument(doc.doc_id)}>
             ↓ 下载
           </Btn>
           <Btn size="sm" variant="danger" onClick={handleDelete}>
@@ -360,7 +364,7 @@ interface BatchBarProps {
   onClear: () => void;
 }
 
-function BatchBar({ selected, docs, collections, onDone, onClear }: BatchBarProps) {
+function BatchBar({ selected, collections, onDone, onClear }: BatchBarProps) {
   const { t } = useI18n();
   const { toast } = useToast();
   const [moving, setMoving] = useState(false);
@@ -495,6 +499,18 @@ export default function DocumentsPage() {
     }
   }
 
+  async function handleDeleteCollection() {
+    if (!activeCollection) return;
+    try {
+      await deleteCollection(activeCollection);
+      setCollections((prev) => prev.filter((col) => col.name !== activeCollection));
+      setActiveCollection(null);
+      toast(`已删除集合 ${activeCollection}`, "ok");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
+    }
+  }
+
   function toggleSelect(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -526,17 +542,6 @@ export default function DocumentsPage() {
 
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", position: "relative" }}>
-      {/* Aurora 背景 */}
-      <div
-        aria-hidden
-        style={{
-          position: "absolute", inset: 0, pointerEvents: "none",
-          background: "radial-gradient(ellipse at 0% 0%, var(--accent-soft) 0%, transparent 40%)",
-          opacity: 0.5,
-        }}
-      />
-      <DotField />
-
       {/* 左列：集合/标签 */}
       <div
         style={{
@@ -562,7 +567,7 @@ export default function DocumentsPage() {
               transition: "all .15s",
             }}
           >
-            <span>{t("docs_all")}</span>
+            <span>▢&nbsp; {t("docs_all")}</span>
             <span style={{ fontSize: 11 }}>{docs.length}</span>
           </button>
 
@@ -580,7 +585,7 @@ export default function DocumentsPage() {
                 transition: "all .15s",
               }}
             >
-              <span className="truncate" style={{ maxWidth: 110 }}>{col.name}</span>
+              <span className="truncate" style={{ maxWidth: 110 }}>▢&nbsp; {col.name}</span>
               <span style={{ fontSize: 11 }}>{collectionCount(col.name)}</span>
             </button>
           ))}
@@ -655,19 +660,25 @@ export default function DocumentsPage() {
               padding: "10px 16px",
             }}
           >
-            <span style={{ flex: 1, fontSize: 13, color: "var(--fg-muted)" }}>
+            <span style={{ flex: 1, display: "flex", alignItems: "baseline", gap: 6 }}>
+              <strong style={{ fontSize: 16, color: "var(--heading)" }}>文档</strong>
+              <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>
               {activeCollection
                 ? `集合：${activeCollection}`
                 : activeTag
                 ? `标签：${activeTag}`
                 : t("docs_all")}
-              <span style={{ marginLeft: 6, color: "var(--fg-subtle)", fontSize: 12 }}>
-                ({filteredDocs.length})
+              · {filteredDocs.length}
               </span>
             </span>
             <Btn size="sm" onClick={() => setShowUpload(true)}>
               {t("btn_upload")}
             </Btn>
+            {activeCollection && collectionCount(activeCollection) === 0 && (
+              <Btn size="sm" variant="danger" onClick={handleDeleteCollection}>
+                删除集合
+              </Btn>
+            )}
           </div>
         )}
 

@@ -51,10 +51,14 @@ def _iter_files(root: Path) -> list[Path]:
 def _check() -> int:
     src = _resolve_src()
     mismatched = []
+    src_relatives = {s.relative_to(src) for s in _iter_files(src)}
     for s in _iter_files(src):
         d = _DST / s.relative_to(src)
         if not d.exists() or not filecmp.cmp(s, d, shallow=False):
             mismatched.append(str(s.relative_to(_ROOT)))
+    for d in _iter_files(_DST):
+        if d.relative_to(_DST) not in src_relatives:
+            mismatched.append(str(d.relative_to(_ROOT)))
     if mismatched:
         print(f"pages/ 与 {src.relative_to(_ROOT)} 不一致，需运行 sync_frontend：")
         for m in mismatched:
@@ -67,6 +71,16 @@ def _check() -> int:
 def _sync() -> int:
     src = _resolve_src()
     print(f"同步源：{src.relative_to(_ROOT)} → pages/")
+    preserved = {}
+    if _DST.exists():
+        for name in _SKIP_NAMES:
+            path = _DST / name
+            if path.is_file():
+                preserved[name] = path.read_bytes()
+        shutil.rmtree(_DST)
+    _DST.mkdir(parents=True)
+    for name, content in preserved.items():
+        (_DST / name).write_bytes(content)
     count = 0
     for s in _iter_files(src):
         d = _DST / s.relative_to(src)

@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS graph_entities (
     description TEXT NOT NULL DEFAULT '',
     source_chunk_ids TEXT NOT NULL DEFAULT '[]', -- JSON 格式的 chunk_id 数组
     degree INTEGER NOT NULL DEFAULT 0,
-    embedding BLOB                               -- 存储浮点数向量二进制，供高层检索使用
+    embedding BLOB                               -- 预留：实体向量持久化尚未接入
 );
 
 CREATE INDEX IF NOT EXISTS idx_graph_entities_name ON graph_entities(name);

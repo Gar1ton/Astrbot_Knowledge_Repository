@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useI18n } from "@/lib/i18n";
-import { getQuota, logout } from "@/lib/api";
+import { getQuota } from "@/lib/api";
 
 // ─── 图标（内联 SVG，避免额外依赖） ──────────────────────────
 
@@ -30,6 +30,40 @@ function SearchIcon() {
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
     </svg>
+  );
+}
+
+function ShortcutSearch() {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 7,
+        margin: "4px 0 6px",
+        padding: "7px 10px",
+        borderRadius: 999,
+        background: "var(--bg-inset)",
+        border: "1px solid var(--border)",
+        color: "var(--fg-subtle)",
+        fontSize: 12,
+      }}
+    >
+      <SearchIcon />
+      <span style={{ flex: 1 }}>搜索 / 跳转</span>
+      <span
+        style={{
+          padding: "0 4px",
+          borderRadius: 4,
+          border: "1px solid var(--border)",
+          background: "var(--surface)",
+          fontSize: 10,
+          lineHeight: "16px",
+        }}
+      >
+        ⌘K
+      </span>
+    </div>
   );
 }
 
@@ -145,8 +179,37 @@ function NavItem({ href, icon, label, badge, featured }: NavItemProps) {
         animation: featured ? "sparkleFloat 4.5s ease-in-out infinite" : "none",
       }}
     >
+      {isActive && (
+        <span
+          style={{
+            position: "absolute",
+            left: -11,
+            top: "50%",
+            width: 3,
+            height: 18,
+            borderRadius: 999,
+            background: "var(--accent)",
+            transform: "translateY(-50%)",
+          }}
+        />
+      )}
       <span style={{ opacity: isActive ? 1 : 0.7 }}>{icon}</span>
       <span style={{ flex: 1 }}>{label}</span>
+      {featured && (
+        <span
+          style={{
+            background: "var(--accent-soft)",
+            color: "var(--accent)",
+            borderRadius: 999,
+            fontSize: 9,
+            fontWeight: 700,
+            padding: "0 5px",
+            lineHeight: "16px",
+          }}
+        >
+          AI
+        </span>
+      )}
       {badge !== undefined && badge > 0 && (
         <span
           style={{
@@ -230,7 +293,7 @@ export function Rail({ onLogout }: RailProps) {
       {/* 品牌区 */}
       <div
         style={{
-          padding: "16px 10px 12px",
+          padding: "16px 10px 10px",
           borderBottom: "1px solid var(--border)",
           marginBottom: 6,
         }}
@@ -238,7 +301,16 @@ export function Rail({ onLogout }: RailProps) {
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span
             style={{
-              color: "var(--accent)",
+              width: 28,
+              height: 28,
+              borderRadius: 8,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "var(--accent)",
+              color: "var(--accent-fg)",
+              boxShadow: "var(--shadow)",
+              flexShrink: 0,
               animation: "sparkleFloat 4.5s ease-in-out infinite",
             }}
           >
@@ -246,17 +318,36 @@ export function Rail({ onLogout }: RailProps) {
           </span>
           <span
             style={{
-              fontSize: 13,
-              fontWeight: 700,
-              color: "var(--heading)",
-              letterSpacing: "-0.02em",
-              lineHeight: 1.2,
+              display: "flex",
+              flexDirection: "column",
+              minWidth: 0,
             }}
           >
-            Knowledge Repo
+            <span
+              style={{
+                fontSize: 13,
+                fontWeight: 700,
+                color: "var(--heading)",
+                letterSpacing: "-0.02em",
+                lineHeight: 1.2,
+              }}
+            >
+              Knowledge Repo
+            </span>
+            <span
+              style={{
+                fontSize: 10,
+                color: "var(--fg-subtle)",
+                lineHeight: 1.25,
+              }}
+            >
+              知识库控制台
+            </span>
           </span>
         </div>
       </div>
+
+      <ShortcutSearch />
 
       {/* Ask Agent（featured） */}
       <div style={{ padding: "6px 0" }}>
@@ -348,8 +439,11 @@ export function Rail({ onLogout }: RailProps) {
             padding: "6px 10px",
           }}
         >
-          <span style={{ fontSize: 12, color: "var(--fg-muted)", fontWeight: 500 }}>
+          <span style={{ display: "flex", flexDirection: "column", fontSize: 12, color: "var(--fg)", fontWeight: 600, lineHeight: 1.25 }}>
             admin
+            <span style={{ color: "var(--ok)", fontSize: 10, fontWeight: 500 }}>
+              ● 在线演示
+            </span>
           </span>
           <button
             onClick={onLogout}

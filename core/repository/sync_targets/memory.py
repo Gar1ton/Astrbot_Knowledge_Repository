@@ -40,6 +40,13 @@ class InMemorySyncTarget(SyncTarget):
     async def delete(self, remote_ref: str) -> bool:
         return self._objects.pop(remote_ref, None) is not None
 
+    async def push_backup(self, key: str, payload: bytes, content_type: str) -> str:
+        self._objects[key] = payload
+        return key
+
+    async def pull_backup(self, key: str) -> bytes:
+        return self._objects[key]
+
     async def check_quota(self, pending_bytes: int = 0) -> QuotaUsage:
         used = self._base_used_bytes + sum(len(b) for b in self._objects.values())
         return QuotaUsage(

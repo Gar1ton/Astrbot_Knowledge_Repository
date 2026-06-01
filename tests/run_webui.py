@@ -164,9 +164,12 @@ async def _make_app(args: argparse.Namespace) -> web.Application:
         config=config,
     )
     upload_dir = Path(tempfile.gettempdir()) / "kr_webui_uploads"
+    static_dir = _ROOT / "web" / "frontend" / "out"
+    if not static_dir.exists():
+        static_dir = _ROOT / "pages"
     return build_app(
         api=api,
-        static_dir=_ROOT / "web" / "frontend",
+        static_dir=static_dir,
         upload_dir=upload_dir,
         auth_required=not args.no_auth,
         username="admin",

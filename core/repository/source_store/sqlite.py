@@ -244,23 +244,27 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     async def replace_chunks(self, doc_id: str, chunks: list[DocumentChunk]) -> None:
         # 整体替换语义：先删该 doc 旧 chunks -> 再插入新 chunks。包裹在同一个事务内。
-        await self._db.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+        try:
+            await self._db.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
 
-        for chunk in chunks:
-            await self._db.execute(
-                """
-                INSERT INTO chunks (chunk_id, doc_id, ordinal, text, content_hash)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    chunk.chunk_id,
-                    doc_id,
-                    chunk.ordinal,
-                    chunk.text,
-                    chunk.content_hash,
-                ),
-            )
-        await self._db.commit()
+            for chunk in chunks:
+                await self._db.execute(
+                    """
+                    INSERT INTO chunks (chunk_id, doc_id, ordinal, text, content_hash)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chunk.chunk_id,
+                        doc_id,
+                        chunk.ordinal,
+                        chunk.text,
+                        chunk.content_hash,
+                    ),
+                )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
 
     async def list_chunks(self, doc_id: str) -> list[DocumentChunk]:
         async with self._db.execute(

@@ -91,6 +91,7 @@ async def test_list_and_create_collection(tmp_path: Path) -> None:
 
         resp = await client.post("/api/collections", json={"name": "manuals", "description": "m"})
         assert resp.status == 200
+        assert await resp.json() == {"name": "manuals", "description": "m"}
         names = [c["name"] for c in await (await client.get("/api/collections")).json()]
         assert set(names) == {"papers", "manuals"}
     finally:
@@ -109,7 +110,12 @@ async def test_list_documents_and_filter(tmp_path: Path) -> None:
     client = await _client(tmp_path)
     try:
         resp = await client.get("/api/documents")
-        assert [d["doc_id"] for d in await resp.json()] == ["d1"]
+        docs = await resp.json()
+        assert [d["doc_id"] for d in docs] == ["d1"]
+        assert docs[0]["size"] == docs[0]["size_bytes"] == 100
+        assert docs[0]["filename"] == "d1.pdf"
+        assert docs[0]["ext"] == "pdf"
+        assert docs[0]["chunks"] == 0
         resp = await client.get("/api/documents?collection=none")
         assert await resp.json() == []
     finally:
@@ -125,7 +131,10 @@ async def test_upload_classify_delete_document(tmp_path: Path) -> None:
         form.add_field("tags", "x, y")
         resp = await client.post("/api/documents", data=form)
         assert resp.status == 200
-        doc_id = (await resp.json())["doc_id"]
+        uploaded_resource = await resp.json()
+        doc_id = uploaded_resource["doc_id"]
+        assert uploaded_resource["title"] == "new.pdf"
+        assert uploaded_resource["size"] == len(b"%PDF-1.4 demo")
 
         # 上传后列表 +1，且标签生效
         docs = await (await client.get("/api/documents")).json()
@@ -136,6 +145,7 @@ async def test_upload_classify_delete_document(tmp_path: Path) -> None:
         # 分类
         resp = await client.patch(f"/api/documents/{doc_id}", json={"collection": "manuals"})
         assert resp.status == 200
+        assert (await resp.json())["collection"] == "manuals"
         moved = next(
             d for d in await (await client.get("/api/documents")).json() if d["doc_id"] == doc_id
         )
@@ -253,6 +263,7 @@ async def test_reserved_endpoints_return_501(
         assert resp.status == 501
         body = await resp.json()
         assert body["status"] == "reserved"
+        assert body["reserved"] is True
         assert body["available_in"] == version
     finally:
         await client.close()
@@ -290,8 +301,10 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         "status": "success",
         "query": "Transformer",
         "chunks": [],
-        "entities": [],
-        "relations": [],
+        "entities": [GraphEntity("transformer", "Transformer", "Method", "desc", ["c2"])],
+        "relations": [
+            GraphRelation("r1", "transformer", "attention", "uses", "desc", 1.0, ["c2"])
+        ],
         "context": "Context text",
         "debug": {
             "vector_chunk_ids": ["c2"],
@@ -332,6 +345,11 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         assert body2["status"] == "success"
         assert body2["context"] == "Context text"
         assert body2["debug"]["vector_chunk_ids"] == ["c2"]
+        assert body2["entities"][0]["id"] == "transformer"
+        assert body2["entities"][0]["type"] == "Method"
+        assert body2["relations"][0]["id"] == "r1"
+        assert body2["relations"][0]["source"] == "transformer"
+        assert body2["relations"][0]["target"] == "attention"
     finally:
         await client.close()
 

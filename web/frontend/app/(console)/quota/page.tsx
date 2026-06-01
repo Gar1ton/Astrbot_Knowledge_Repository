@@ -4,7 +4,6 @@ import React, { useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { useToast } from "@/components/ui/Toast";
 import { Btn } from "@/components/ui/Btn";
-import { DotField } from "@/components/fx/DotField";
 import { QuotaItem, ApiError, getQuota } from "@/lib/api";
 
 function fmtBytes(b: number): string {
@@ -126,11 +125,14 @@ export default function QuotaPage() {
     }
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    // Initial remote fetch intentionally seeds the page state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+  }, []);
 
   return (
     <div style={{ position: "relative", minHeight: "100vh" }}>
-      <DotField />
       <div style={{ padding: "24px", maxWidth: 720, position: "relative", zIndex: 1 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
           <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "var(--heading)", letterSpacing: "-0.02em" }}>

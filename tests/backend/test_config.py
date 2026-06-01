@@ -1,9 +1,13 @@
 """Config 解析契约测试：默认值、字段覆盖、机密环境变量优先、派生量。"""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from core.config import ENV_R2_SECRET_ACCESS_KEY, ENV_WEB_PASSWORD, Config
+from core.runtime_config import RuntimeConfigStore
 
 
 def test_defaults_when_empty() -> None:
@@ -77,3 +81,29 @@ def test_public_config_masks_secrets() -> None:
     assert public["r2_sync"]["secret_access_key"] == "se****23"
     assert public["web_console"]["password"] == "pa****23"
     assert public["notion_sync"]["database_id"] == "db1"
+
+
+def test_enabled_config_diagnostics_report_missing_values() -> None:
+    cfg = Config({"r2_sync": {"enabled": True}, "notion_sync": {"enabled": True}})
+    diagnostics = cfg.get_diagnostics()
+    assert "r2_sync.account_id is required when r2_sync.enabled=true" in diagnostics
+    assert (
+        "notion_sync.database_id or notion_sync.parent_page_id is required "
+        "when notion_sync.enabled=true"
+    ) in diagnostics
+
+
+def test_runtime_config_store_only_persists_generated_notion_values(tmp_path: Path) -> None:
+    path = tmp_path / "runtime_config.json"
+    persisted = []
+    store = RuntimeConfigStore(path, framework_persist_cb=persisted.append)
+
+    store.save({
+        "notion_sync": {"database_id": "db1", "secret": "drop-me"},
+        "r2_sync": {"secret_access_key": "drop-me"},
+    })
+
+    assert json.loads(path.read_text()) == {"notion_sync": {"database_id": "db1"}}
+    assert persisted == [{"notion_sync": {"database_id": "db1"}}]
+    with pytest.raises(ValueError, match="runtime config key is not allowed"):
+        store.set_value("r2_sync", "secret_access_key", "forbidden")

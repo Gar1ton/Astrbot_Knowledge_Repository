@@ -1,44 +1,14 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Btn } from "@/components/ui/Btn";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
   ApiError, isReserved,
-  notionInit, syncNotionPull, backupNow, restoreBackup,
+  SyncRecord, notionInit, syncNotionPull, syncDocuments, getSyncStatus,
+  backupNow, restoreBackup,
 } from "@/lib/api";
-import { DotField } from "@/components/fx/DotField";
-
-function ReservedCard({ title, availableIn, description }: { title: string; availableIn: string; description?: string }) {
-  return (
-    <div
-      style={{
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
-        borderRadius: 14, padding: "18px 20px",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: description ? 8 : 0 }}>
-        <span style={{ fontSize: 14, fontWeight: 600, color: "var(--heading)" }}>{title}</span>
-        <span
-          style={{
-            background: "var(--warn-soft)",
-            color: "var(--warn)",
-            border: "1px solid var(--warn)",
-            borderRadius: 999, fontSize: 10, fontWeight: 700,
-            padding: "2px 8px",
-          }}
-        >
-          {availableIn}
-        </span>
-      </div>
-      {description && (
-        <p style={{ margin: 0, fontSize: 12, color: "var(--fg-muted)" }}>{description}</p>
-      )}
-    </div>
-  );
-}
 
 interface ActionCardProps {
   title: string;
@@ -65,7 +35,7 @@ function ActionCard({ title, description, actionLabel, onAction, danger }: Actio
       style={{
         background: "var(--surface)",
         border: "1px solid var(--border)",
-        borderRadius: 14, padding: "18px 20px",
+        borderRadius: 14, padding: "14px 18px",
         display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16,
       }}
     >
@@ -89,6 +59,30 @@ function ActionCard({ title, description, actionLabel, onAction, danger }: Actio
 export default function SyncPage() {
   const { t } = useI18n();
   const { toast } = useToast();
+  const [records, setRecords] = useState<SyncRecord[]>([]);
+
+  useEffect(() => {
+    getSyncStatus()
+      .then((res) => {
+        if (!isReserved(res)) setRecords(res);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handlePush(target: "r2" | "notion") {
+    try {
+      const res = await syncDocuments(target);
+      if (isReserved(res)) {
+        toast(`${target.toUpperCase()} 同步即将上线（${res.available_in}）`, "info");
+      } else {
+        toast(`${target.toUpperCase()} 同步完成，成功 ${res.synced_count ?? 0} 条`, "ok");
+        const status = await getSyncStatus();
+        if (!isReserved(status)) setRecords(status);
+      }
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
+    }
+  }
 
   async function handleNotionInit() {
     try {
@@ -144,9 +138,9 @@ export default function SyncPage() {
 
   return (
     <div style={{ position: "relative", minHeight: "100vh" }}>
-      <DotField />
-      <div style={{ padding: "24px", maxWidth: 640, position: "relative", zIndex: 1 }}>
-        <h1 style={{ margin: "0 0 20px", fontSize: 18, fontWeight: 700, color: "var(--heading)", letterSpacing: "-0.02em" }}>
+      <div style={{ padding: "30px 24px", maxWidth: 720, margin: "0 auto", position: "relative", zIndex: 1 }}>
+        <div style={{ color: "var(--fg-subtle)", fontSize: 11, fontWeight: 700, marginBottom: 4 }}>运维</div>
+        <h1 style={{ margin: "0 0 20px", fontSize: 24, fontWeight: 700, color: "var(--heading)", letterSpacing: "-0.04em" }}>
           {t("nav_sync")}
         </h1>
 
@@ -168,6 +162,12 @@ export default function SyncPage() {
               actionLabel="拉取"
               onAction={handleNotionPull}
             />
+            <ActionCard
+              title="推送本地镜像"
+              description="将本地文档元数据与摘要增量推送至 Notion"
+              actionLabel="推送"
+              onAction={() => handlePush("notion")}
+            />
           </div>
         </div>
 
@@ -177,15 +177,11 @@ export default function SyncPage() {
             R2 同步
           </h2>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <ReservedCard
+            <ActionCard
               title={t("sync_r2")}
-              availableIn="v0.4.0"
-              description="将原件、Manifest 和 KB 快照增量备份至 Cloudflare R2"
-            />
-            <ReservedCard
-              title={t("sync_backup")}
-              availableIn="v0.3.0"
-              description="立即完整备份至 R2"
+              description="将插件托管原件与 knowledge_repository.db 快照增量备份至 Cloudflare R2"
+              actionLabel="同步"
+              onAction={() => handlePush("r2")}
             />
           </div>
         </div>
@@ -211,6 +207,22 @@ export default function SyncPage() {
             />
           </div>
         </div>
+
+        {records.length > 0 && (
+          <div>
+            <h2 style={{ margin: "0 0 12px", fontSize: 13, fontWeight: 700, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              最近同步状态
+            </h2>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {records.slice(-8).reverse().map((record) => (
+                <div key={`${record.doc_id}:${record.target}`} style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", fontSize: 12 }}>
+                  <strong>{record.target.toUpperCase()}</strong> · {record.doc_id} · {record.status}
+                  {record.message ? <div style={{ marginTop: 3, color: "var(--fg-muted)" }}>{record.message}</div> : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

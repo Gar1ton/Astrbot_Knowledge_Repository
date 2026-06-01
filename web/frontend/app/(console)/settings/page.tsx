@@ -111,6 +111,8 @@ export default function SettingsPage() {
     const savedSat = localStorage.getItem("kr-sat");
     const savedLight = localStorage.getItem("kr-light");
 
+    // Theme changes intentionally reset the editor to persisted or themed defaults.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHue(savedHue ? parseInt(savedHue) : defaultH);
     setSat(savedSat ? parseInt(savedSat) : defaultS);
     setLight(savedLight ? parseInt(savedLight) : defaultL);
@@ -399,4 +401,3 @@ export default function SettingsPage() {
     </div>
   );
 }
-

@@ -85,6 +85,29 @@ class R2SyncTarget(SyncTarget):
             logger.error(f"Failed to delete object from R2: {e}")
             return False
 
+    async def push_backup(self, key: str, payload: bytes, content_type: str) -> str:
+        """上传灾备对象，不套用普通文档的 `.pdf` key 规则。"""
+        s3 = self._get_client()
+        try:
+            s3.put_object(
+                Bucket=self._config.bucket,
+                Key=key,
+                Body=payload,
+                ContentType=content_type,
+            )
+            return key
+        except ClientError as e:
+            raise RuntimeError(f"R2 backup upload failed: {e}") from e
+
+    async def pull_backup(self, key: str) -> bytes:
+        """读取灾备对象字节。"""
+        s3 = self._get_client()
+        try:
+            response = s3.get_object(Bucket=self._config.bucket, Key=key)
+            return response["Body"].read()
+        except ClientError as e:
+            raise RuntimeError(f"R2 backup download failed: {e}") from e
+
     async def check_quota(self, pending_bytes: int = 0) -> QuotaUsage:
         if not self._config.enabled:
             return QuotaUsage(

@@ -85,6 +85,24 @@ async def test_r2_delete_success(r2_config: R2SyncConfig) -> None:
         mock_s3.delete_object.assert_called_once_with(Bucket="mock-bucket", Key="papers/d1.pdf")
 
 
+async def test_r2_backup_preserves_explicit_key(r2_config: R2SyncConfig) -> None:
+    mock_s3 = MagicMock()
+    with patch("boto3.client", return_value=mock_s3):
+        target = R2SyncTarget(r2_config)
+        ref = await target.push_backup(
+            "backups/knowledge_repository.db",
+            b"sqlite-bytes",
+            "application/x-sqlite3",
+        )
+        assert ref == "backups/knowledge_repository.db"
+        mock_s3.put_object.assert_called_once_with(
+            Bucket="mock-bucket",
+            Key="backups/knowledge_repository.db",
+            Body=b"sqlite-bytes",
+            ContentType="application/x-sqlite3",
+        )
+
+
 async def test_r2_check_quota_lists_objects(r2_config: R2SyncConfig) -> None:
     mock_s3 = MagicMock()
     # 模拟 S3 paginator

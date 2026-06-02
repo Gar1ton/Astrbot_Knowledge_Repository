@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Btn } from "@/components/ui/Btn";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
@@ -8,6 +8,7 @@ import {
   GraphData, GraphNode, GraphEdge, KbChunk, ApiError,
   getGraph, queryGraph, buildGraph, isReserved, listCollections,
 } from "@/lib/api";
+import { Select } from "@/components/ui/Select";
 
 // ─── 类型配色 ─────────────────────────────────────────────────
 
@@ -19,8 +20,6 @@ function getNodeTypeColor(type?: string): string {
   return "var(--accent)";
 }
 
-// ─── 混合式扁平毛玻璃图谱（HTML + SVG Hybrid） ────────────────────
-
 interface HybridGraphProps {
   data: GraphData;
   onSelectNode: (n: GraphNode) => void;
@@ -29,6 +28,115 @@ interface HybridGraphProps {
   selectedEdge: GraphEdge | null;
   onClearSelection: () => void;
 }
+
+// ─── 力导向布局 Hook ──────────────────────────────────────────
+
+interface Vec2 { x: number; y: number; }
+
+function useForceLayout(data: GraphData, W: number, H: number): Record<string, Vec2> {
+  const [positions, setPositions] = useState<Record<string, Vec2>>(() =>
+    initPositions(data.nodes, W, H)
+  );
+  const simRef = useRef<{ nodes: string[]; pos: Record<string, Vec2>; vel: Record<string, Vec2> } | null>(null);
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const initPos = initPositions(data.nodes, W, H);
+    const vel: Record<string, Vec2> = {};
+    data.nodes.forEach((n) => { vel[n.id] = { x: 0, y: 0 }; });
+    simRef.current = { nodes: data.nodes.map((n) => n.id), pos: { ...initPos }, vel };
+    setPositions({ ...initPos });
+
+    let frame = 0;
+    const MAX_FRAMES = 120;
+
+    function tick() {
+      const sim = simRef.current!;
+      const REPEL = 3500;
+      const ATTRACT = 0.04;
+      const DAMP = 0.78;
+      const ids = sim.nodes;
+
+      // 计算力
+      const force: Record<string, Vec2> = {};
+      ids.forEach((id) => { force[id] = { x: 0, y: 0 }; });
+
+      // 斥力（节点间）
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          const a = sim.pos[ids[i]];
+          const b = sim.pos[ids[j]];
+          const dx = b.x - a.x || 0.01;
+          const dy = b.y - a.y || 0.01;
+          const dist2 = Math.max(dx * dx + dy * dy, 1);
+          const f = REPEL / dist2;
+          const fx = f * dx / Math.sqrt(dist2);
+          const fy = f * dy / Math.sqrt(dist2);
+          force[ids[i]].x -= fx; force[ids[i]].y -= fy;
+          force[ids[j]].x += fx; force[ids[j]].y += fy;
+        }
+      }
+
+      // 引力（有边的节点对）
+      data.edges.forEach((e) => {
+        const a = sim.pos[e.source];
+        const b = sim.pos[e.target];
+        if (!a || !b) return;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        force[e.source].x += dx * ATTRACT;
+        force[e.source].y += dy * ATTRACT;
+        force[e.target].x -= dx * ATTRACT;
+        force[e.target].y -= dy * ATTRACT;
+      });
+
+      // 向中心的弱引力（防止节点飘出边界）
+      ids.forEach((id) => {
+        force[id].x += (W / 2 - sim.pos[id].x) * 0.005;
+        force[id].y += (H / 2 - sim.pos[id].y) * 0.005;
+      });
+
+      // 更新速度 + 位置
+      ids.forEach((id) => {
+        sim.vel[id].x = (sim.vel[id].x + force[id].x) * DAMP;
+        sim.vel[id].y = (sim.vel[id].y + force[id].y) * DAMP;
+        sim.pos[id] = {
+          x: Math.max(30, Math.min(W - 30, sim.pos[id].x + sim.vel[id].x)),
+          y: Math.max(30, Math.min(H - 30, sim.pos[id].y + sim.vel[id].y)),
+        };
+      });
+
+      setPositions({ ...sim.pos });
+      frame++;
+      if (frame < MAX_FRAMES) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
+    }
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => { if (rafRef.current !== null) cancelAnimationFrame(rafRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  return positions;
+}
+
+function initPositions(nodes: GraphNode[], W: number, H: number): Record<string, Vec2> {
+  const pos: Record<string, Vec2> = {};
+  nodes.forEach((n, i) => {
+    const angle = (2 * Math.PI * i) / nodes.length - Math.PI / 2;
+    const rx = W * 0.32;
+    const ry = H * 0.30;
+    // 加入少量随机抖动，避免节点完全重叠
+    pos[n.id] = {
+      x: W / 2 + rx * Math.cos(angle) + (Math.random() - 0.5) * 20,
+      y: H / 2 + ry * Math.sin(angle) + (Math.random() - 0.5) * 20,
+    };
+  });
+  return pos;
+}
+
+// ─── 混合式扁平毛玻璃图谱（HTML + SVG Hybrid，力导向布局） ──────
 
 function HybridGraph({
   data,
@@ -39,7 +147,7 @@ function HybridGraph({
   onClearSelection,
 }: HybridGraphProps) {
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
-  
+
   // Calculate focused node
   const focusedNodeId = hoveredNodeId || selectedNode?.id || null;
 
@@ -54,22 +162,10 @@ function HybridGraph({
     return map;
   }, [data]);
 
-  // Ellipse positioning on a 560x440 canvas
+  // 力导向布局
   const W = 560;
   const H = 440;
-  const positions = React.useMemo(() => {
-    const pos: Record<string, { x: number; y: number }> = {};
-    data.nodes.forEach((n, i) => {
-      const angle = (2 * Math.PI * i) / data.nodes.length - Math.PI / 2;
-      const rx = W * 0.36;
-      const ry = H * 0.34;
-      pos[n.id] = {
-        x: W / 2 + rx * Math.cos(angle),
-        y: H / 2 + ry * Math.sin(angle),
-      };
-    });
-    return pos;
-  }, [data]);
+  const positions = useForceLayout(data, W, H);
 
   // Neighborhood helper
   const isNodeHighlighted = (nodeId: string) => {
@@ -337,6 +433,7 @@ export default function GraphPage() {
   const [graphReserved, setGraphReserved] = useState<string | null>(null);
   const [collections, setCollections] = useState<string[]>([]);
   const [collection, setCollection] = useState("");
+  const [showDetailPanel, setShowDetailPanel] = useState(true);
 
   useEffect(() => {
     listCollections()
@@ -414,27 +511,31 @@ export default function GraphPage() {
         {/* 工具条 */}
         <div
           className="fx-glass"
-          style={{ position: "sticky", top: 0, zIndex: 3, padding: "10px 16px", display: "flex", alignItems: "center", gap: 8 }}
+          style={{
+            position: "sticky",
+            top: 0,
+            zIndex: 3,
+            height: "var(--topbar-h)",
+            boxSizing: "border-box",
+            padding: "0 22px",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
         >
-          <h1 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "var(--heading)", flex: 1 }}>
+          <h1 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "var(--heading)", flex: 1, lineHeight: 1 }}>
             {t("nav_graph")}
             {graphData && (
-              <span style={{ marginLeft: 8, fontSize: 11, color: "var(--fg-muted)", fontWeight: 500 }}>
+              <span style={{ marginLeft: 8, fontSize: 11, color: "var(--fg-muted)", fontWeight: 500, lineHeight: 1 }}>
                 {graphData.nodes.length} 实体 · {graphData.edges.length} 关系
               </span>
             )}
           </h1>
-          <select
+          <Select
             value={collection}
-            onChange={(event) => {
-              const next = event.target.value;
-              setCollection(next);
-              loadGraph(next);
-            }}
-            style={{ height: 30, fontSize: 12, padding: "0 8px", borderRadius: 8 }}
-          >
-            {collections.map((name) => <option key={name} value={name}>{name}</option>)}
-          </select>
+            onChange={(next) => { setCollection(next); loadGraph(next); }}
+            options={collections.map((name) => ({ value: name, label: name }))}
+          />
           {buildReserved ? (
             <ReservedBanner availableIn={buildReserved} />
           ) : (
@@ -442,6 +543,21 @@ export default function GraphPage() {
               {t("graph_build")}
             </Btn>
           )}
+          <button
+            onClick={() => setShowDetailPanel(v => !v)}
+            title={showDetailPanel ? "收起详情面板" : "展开详情面板"}
+            style={{
+              width: 28, height: 28, borderRadius: 7, border: "1px solid var(--border)",
+              background: showDetailPanel ? "var(--accent-soft)" : "var(--bg-inset)",
+              color: showDetailPanel ? "var(--accent)" : "var(--fg-subtle)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              cursor: "pointer", transition: "all .15s", flexShrink: 0,
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/>
+            </svg>
+          </button>
         </div>
 
         {/* 图谱画布 */}
@@ -456,16 +572,20 @@ export default function GraphPage() {
             <div style={{ width: "100%", height: "100%", borderRadius: 14, overflow: "hidden", border: "1px solid var(--border)", boxShadow: "inset 0 0 26px color-mix(in srgb, var(--border) 70%, transparent), var(--shadow)" }}>
               <HybridGraph
                 data={graphData}
-                onSelectNode={(n) => { setSelectedNode(n); setSelectedEdge(null); }}
-                onSelectEdge={(e) => { setSelectedEdge(e); setSelectedNode(null); }}
+                onSelectNode={(n) => { setSelectedNode(n); setSelectedEdge(null); setShowDetailPanel(true); }}
+                onSelectEdge={(e) => { setSelectedEdge(e); setSelectedNode(null); setShowDetailPanel(true); }}
                 selectedNode={selectedNode}
                 selectedEdge={selectedEdge}
                 onClearSelection={handleClearSelection}
               />
             </div>
           ) : (
-            <div style={{ padding: 40, textAlign: "center", color: "var(--fg-muted)", fontSize: 13 }}>
-              暂无图谱数据，点击「{t("graph_build")}」开始构建
+            <div style={{ padding: 40, textAlign: "center", color: "var(--fg-muted)", fontSize: 13, lineHeight: 1.7 }}>
+              知识图谱为空
+              <br />
+              <span style={{ fontSize: 11, color: "var(--fg-subtle)" }}>
+                请先上传文档，再点击顶部「{t("graph_build")}」按钮构建实体关系图
+              </span>
             </div>
           )}
         </div>
@@ -484,14 +604,42 @@ export default function GraphPage() {
         </div>
       </div>
 
-      {/* 右侧详情面板 */}
+      {/* 右侧详情面板（可折叠） */}
+      {showDetailPanel && (
       <div
         style={{
           width: 280, flexShrink: 0, borderLeft: "1px solid var(--border)",
-          overflowY: "auto", padding: "12px 14px",
+          display: "flex", flexDirection: "column", overflow: "hidden",
         }}
         className="fx-glass-edge"
       >
+        {/* 面板标题 + 关闭 */}
+        <div
+          className="fx-glass"
+          style={{
+            position: "sticky", top: 0, zIndex: 2,
+            height: "var(--topbar-h)", boxSizing: "border-box",
+            padding: "0 10px 0 14px",
+            display: "flex", alignItems: "center", gap: 8,
+            borderBottom: "1px solid var(--border)", flexShrink: 0,
+          }}
+        >
+          <span style={{ flex: 1, fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)" }}>
+            详情
+          </span>
+          <button
+            onClick={() => setShowDetailPanel(false)}
+            title="收起详情面板"
+            style={{ width: 24, height: 24, borderRadius: 6, border: "none", background: "transparent", color: "var(--fg-subtle)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", transition: "all .15s" }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-inset)"; e.currentTarget.style.color = "var(--fg)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--fg-subtle)"; }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px" }}>
         {/* 节点/边详情 */}
         {selectedNode && (
           <div style={{ marginBottom: 16 }}>
@@ -559,7 +707,9 @@ export default function GraphPage() {
             或在下方做图谱增强查询
           </div>
         )}
+        </div>
       </div>
+      )}
     </div>
   );
 }

@@ -259,9 +259,7 @@ async def test_auth_probe_endpoint_is_public(tmp_path: Path) -> None:
         ("post", "/api/sync/all", "v0.3.0 / v0.4.0"),
         ("post", "/api/backup", "v0.3.0"),
         ("post", "/api/restore", "v0.3.0"),
-        ("post", "/api/graph/build", "v0.6.0"),
-        ("get", "/api/graph/query?q=x", "v0.6.0"),
-        ("get", "/api/graph?collection=papers", "v0.7.0"),
+        # /api/graph/build 与 /api/graph 已在 v0.15.1 移除 _reserved() 包裹，不再测 501
     ],
 )
 async def test_reserved_endpoints_return_501(
@@ -680,6 +678,153 @@ async def test_ask_route_sources_contain_locator_fields(tmp_path: Path) -> None:
         assert src["doc_id"] == "d1"
         assert src["metadata"]["page_number"] == 3
         assert src["metadata"]["locator"] == "page_3_p2"
+    finally:
+        await client.close()
+
+
+async def test_metrics_route(tmp_path: Path) -> None:
+    """GET /api/metrics 应返回 ops + total_records 结构。"""
+    from core.ask_progress import ProgressStore
+    from core.metrics import PerformanceTracker
+
+    tracker = PerformanceTracker()
+    tracker.record("embed_query", 100.0)
+    tracker.record("ask_total", 1500.0)
+
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        metrics=tracker,
+        progress_store=ProgressStore(),
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/metrics")
+        assert resp.status == 200
+        body = await resp.json()
+        assert "ops" in body
+        assert "total_records" in body
+        assert body["total_records"] == 2
+        assert "embed_query" in body["ops"]
+        assert body["ops"]["embed_query"]["count"] == 1
+    finally:
+        await client.close()
+
+
+async def test_ask_progress_route_not_found(tmp_path: Path) -> None:
+    """GET /api/ask/progress/{cid} — 不存在的 cid 应返回 404。"""
+    from core.ask_progress import ProgressStore
+    from core.metrics import PerformanceTracker
+
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        metrics=PerformanceTracker(),
+        progress_store=ProgressStore(),
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/ask/progress/nonexistent-cid")
+        assert resp.status == 404
+    finally:
+        await client.close()
+
+
+async def test_ask_progress_route_found(tmp_path: Path) -> None:
+    """GET /api/ask/progress/{cid} — 已设置进度时应返回 stage + pct。"""
+    from core.ask_progress import ProgressStore
+    from core.metrics import PerformanceTracker
+
+    progress_store = ProgressStore()
+    progress_store.set("test-cid-123", "vector_search", 20)
+
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        metrics=PerformanceTracker(),
+        progress_store=progress_store,
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/ask/progress/test-cid-123")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["stage"] == "vector_search"
+        assert body["pct"] == 20
+    finally:
+        await client.close()
+
+
+async def test_graph_data_not_reserved(tmp_path: Path) -> None:
+    """GET /api/graph 不应再返回 reserved 响应（已移除 _reserved() 包裹）。"""
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        graph_store=InMemoryGraphStore(),
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/graph")
+        assert resp.status == 200
+        body = await resp.json()
+        assert "reserved" not in body
+        assert "nodes" in body
+        assert "edges" in body
+    finally:
+        await client.close()
+
+
+async def test_graph_stats_route(tmp_path: Path) -> None:
+    """GET /api/graph/stats 应返回 entities_count / relations_count / collections_covered。"""
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        graph_store=InMemoryGraphStore(),
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/graph/stats")
+        assert resp.status == 200
+        body = await resp.json()
+        assert "entities_count" in body
+        assert "relations_count" in body
+        assert "collections_covered" in body
+        assert isinstance(body["entities_count"], int)
     finally:
         await client.close()
 

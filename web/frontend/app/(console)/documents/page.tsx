@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Btn } from "@/components/ui/Btn";
+import { Select } from "@/components/ui/Select";
 import { Tag } from "@/components/ui/Tag";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
@@ -18,6 +19,10 @@ import {
   patchDocument,
   deleteDocument,
   downloadDocument,
+  getEffectiveConfig,
+  updateConfigValue,
+  rebuildIndexPending,
+  getPendingReindexCount,
 } from "@/lib/api";
 
 // ─── 工具函数 ─────────────────────────────────────────────────
@@ -50,6 +55,61 @@ function docTitle(doc: KrDocument): string {
   return doc.title || doc.filename || doc.doc_id;
 }
 
+const SYSTEM_COLLECTION = "_uncategorized";
+
+// ─── 删除集合确认弹窗 ─────────────────────────────────────────
+
+interface DeleteCollectionModalProps {
+  collectionName: string;
+  docCount: number;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+function DeleteCollectionModal({ collectionName, docCount, onConfirm, onCancel }: DeleteCollectionModalProps) {
+  const { t } = useI18n();
+  const [input, setInput] = useState("");
+  const canDelete = input === collectionName;
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,.35)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300,
+      }}
+      onClick={(e) => e.target === e.currentTarget && onCancel()}
+    >
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24, width: 380, boxShadow: "var(--shadow-pop)" }}>
+        <h3 style={{ margin: "0 0 12px", fontSize: 15, fontWeight: 700, color: "var(--heading)" }}>
+          {t("docs_delete_collection_title")}：<span style={{ color: "var(--accent)" }}>{collectionName}</span>
+        </h3>
+        {docCount > 0 && (
+          <div style={{ background: "color-mix(in srgb, #e05b5b 10%, transparent)", border: "1px solid #e05b5b44", borderRadius: 8, padding: "8px 12px", fontSize: 12, color: "#e05b5b", marginBottom: 14, lineHeight: 1.5 }}>
+            {t("docs_delete_collection_warn").replace("{n}", String(docCount))}
+          </div>
+        )}
+        <div style={{ fontSize: 12, color: "var(--fg-muted)", marginBottom: 6 }}>
+          {t("docs_delete_collection_confirm_hint")}
+        </div>
+        <input
+          autoFocus
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && canDelete) onConfirm(); if (e.key === "Escape") onCancel(); }}
+          placeholder={collectionName}
+          style={{ width: "100%", marginBottom: 16, fontFamily: "var(--font-geist-mono)", fontSize: 13 }}
+        />
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <Btn variant="ghost" size="sm" onClick={onCancel}>{t("btn_cancel")}</Btn>
+          <Btn size="sm" variant="danger" disabled={!canDelete} onClick={onConfirm}>
+            {t("docs_delete_collection_btn")}
+          </Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── 上传对话框 ───────────────────────────────────────────────
 
 interface UploadModalProps {
@@ -63,7 +123,8 @@ function UploadModal({ collections, onClose, onUploaded }: UploadModalProps) {
   const { toast } = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
-  const [collection, setCollection] = useState(collections[0]?.name ?? "default");
+  const uploadableCollections = collections.filter((c) => !c.is_system);
+  const [collection, setCollection] = useState(uploadableCollections[0]?.name ?? collections[0]?.name ?? "default");
   const [tagsInput, setTagsInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -138,15 +199,12 @@ function UploadModal({ collections, onClose, onUploaded }: UploadModalProps) {
         <label style={{ fontSize: 12, color: "var(--fg-muted)", display: "block", marginBottom: 4 }}>
           {t("docs_upload_collection_label")}
         </label>
-        <select
+        <Select
           value={collection}
-          onChange={(e) => setCollection(e.target.value)}
+          onChange={setCollection}
+          options={collections.map((c) => ({ value: c.name, label: c.name }))}
           style={{ width: "100%", marginBottom: 10 }}
-        >
-          {collections.map((c) => (
-            <option key={c.name} value={c.name}>{c.name}</option>
-          ))}
-        </select>
+        />
 
         {/* 标签 */}
         <label style={{ fontSize: 12, color: "var(--fg-muted)", display: "block", marginBottom: 4 }}>
@@ -175,11 +233,12 @@ function UploadModal({ collections, onClose, onUploaded }: UploadModalProps) {
 interface InspectorProps {
   doc: KrDocument | null;
   collections: Collection[];
+  onClose: () => void;
   onUpdate: (updated: KrDocument) => void;
   onDelete: (id: string) => void;
 }
 
-function Inspector({ doc, collections, onUpdate, onDelete }: InspectorProps) {
+function Inspector({ doc, collections, onClose, onUpdate, onDelete }: InspectorProps) {
   const { t } = useI18n();
   const { toast } = useToast();
   const [editCollection, setEditCollection] = useState("");
@@ -269,22 +328,49 @@ function Inspector({ doc, collections, onUpdate, onDelete }: InspectorProps) {
       <div
         className="fx-glass"
         style={{
-          position: "sticky", top: 0, zIndex: 2,
-          padding: "12px 16px 10px",
+          position: "sticky",
+          top: 0,
+          zIndex: 2,
+          height: "var(--topbar-h)",
+          boxSizing: "border-box",
+          padding: "0 10px 0 16px",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
         }}
       >
-        <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)", marginBottom: 4 }}>
-          {t("docs_inspector_title")}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)", lineHeight: 1, marginBottom: 3 }}>
+            {t("docs_inspector_title")}
+          </div>
+          {doc && (
+            <div
+              style={{
+                fontSize: 13, fontWeight: 600, color: "var(--heading)", lineHeight: 1,
+                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}
+              title={docTitle(doc)}
+            >
+              {docTitle(doc)}
+            </div>
+          )}
         </div>
-        <div
+        <button
+          onClick={onClose}
+          title="收起详情"
           style={{
-            fontSize: 13, fontWeight: 600, color: "var(--heading)",
-            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            width: 24, height: 24, borderRadius: 6, border: "none",
+            background: "transparent", color: "var(--fg-subtle)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            cursor: "pointer", flexShrink: 0, transition: "all .15s",
           }}
-          title={docTitle(doc)}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-inset)"; e.currentTarget.style.color = "var(--fg)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--fg-subtle)"; }}
         >
-          {docTitle(doc)}
-        </div>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
       </div>
 
       {/* 滚动内容 */}
@@ -310,15 +396,12 @@ function Inspector({ doc, collections, onUpdate, onDelete }: InspectorProps) {
         <label style={{ fontSize: 12, color: "var(--fg-muted)", display: "block", marginBottom: 4 }}>
           {t("docs_collection")}
         </label>
-        <select
+        <Select
           value={editCollection}
-          onChange={(e) => setEditCollection(e.target.value)}
+          onChange={setEditCollection}
+          options={collections.map((c) => ({ value: c.name, label: c.name }))}
           style={{ width: "100%", marginBottom: 12 }}
-        >
-          {collections.map((c) => (
-            <option key={c.name} value={c.name}>{c.name}</option>
-          ))}
-        </select>
+        />
 
         {/* 标签编辑 */}
         <label style={{ fontSize: 12, color: "var(--fg-muted)", display: "block", marginBottom: 6 }}>
@@ -402,24 +485,26 @@ function BatchBar({ selected, collections, onDone, onClear }: BatchBarProps) {
     <div
       className="fx-glass"
       style={{
-        position: "sticky", top: 0, zIndex: 5,
-        display: "flex", alignItems: "center", gap: 10,
-        padding: "8px 16px", flexWrap: "wrap",
+        position: "sticky",
+        top: 0,
+        zIndex: 5,
+        height: "var(--topbar-h)",
+        boxSizing: "border-box",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "0 22px",
       }}
     >
-      <span style={{ fontSize: 13, color: "var(--fg-muted)", marginRight: 4 }}>
+      <span style={{ fontSize: 13, color: "var(--fg-muted)", marginRight: 4, lineHeight: 1 }}>
         {t("docs_batch_bar").replace("{n}", String(selected.size))}
       </span>
 
-      <select
+      <Select
         value={targetCollection}
-        onChange={(e) => setTargetCollection(e.target.value)}
-        style={{ height: 30, fontSize: 12, padding: "0 8px", borderRadius: 8 }}
-      >
-        {collections.map((c) => (
-          <option key={c.name} value={c.name}>{c.name}</option>
-        ))}
-      </select>
+        onChange={setTargetCollection}
+        options={collections.map((c) => ({ value: c.name, label: c.name }))}
+      />
       <Btn size="sm" variant="outline" loading={moving} onClick={handleMove}>
         {t("docs_batch_move")}
       </Btn>
@@ -445,9 +530,16 @@ export default function DocumentsPage() {
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [inspecting, setInspecting] = useState<KrDocument | null>(null);
+  const [showInspector, setShowInspector] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [newColName, setNewColName] = useState("");
   const [showNewCol, setShowNewCol] = useState(false);
+  const [sortKey, setSortKey] = useState<"title" | "tags" | "size" | "updated" | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [deleteTarget, setDeleteTarget] = useState<Collection | null>(null);
+  const [autoIndexEnabled, setAutoIndexEnabled] = useState(true);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [rebuilding, setRebuilding] = useState(false);
 
   // 初始化并监听 ?doc_id 跳转（来自 Ask Agent）
   useEffect(() => {
@@ -455,9 +547,18 @@ export default function DocumentsPage() {
     async function load() {
       setLoading(true);
       try {
-        const [cols, allDocs] = await Promise.all([listCollections(), listDocuments()]);
+        const [cols, allDocs, cfg, pending] = await Promise.all([
+          listCollections(),
+          listDocuments(),
+          getEffectiveConfig(),
+          getPendingReindexCount(),
+        ]);
         setCollections(cols);
         setDocs(allDocs);
+        setPendingCount(pending.count);
+        if (cfg.vector_db?.auto_index_enabled !== undefined) {
+          setAutoIndexEnabled(Boolean(cfg.vector_db.auto_index_enabled));
+        }
         if (docId) {
           const target = allDocs.find((d) => d.doc_id === docId);
           if (target) setInspecting(target);
@@ -477,6 +578,23 @@ export default function DocumentsPage() {
     if (activeTag && !d.tags.includes(activeTag)) return false;
     return true;
   });
+
+  // 排序后的文档列表
+  const sortedDocs = sortKey
+    ? [...filteredDocs].sort((a, b) => {
+        let diff = 0;
+        if (sortKey === "title") diff = docTitle(a).localeCompare(docTitle(b), "zh");
+        else if (sortKey === "size") diff = (a.size ?? 0) - (b.size ?? 0);
+        else if (sortKey === "updated") diff = (a.updated ?? "").localeCompare(b.updated ?? "");
+        else if (sortKey === "tags") diff = a.tags.length - b.tags.length;
+        return sortDir === "asc" ? diff : -diff;
+      })
+    : filteredDocs;
+
+  function handleSort(key: typeof sortKey) {
+    if (sortKey === key) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortKey(key); setSortDir("asc"); }
+  }
 
   // 集合计数
   const collectionCount = (name: string) => docs.filter((d) => d.collection === name).length;
@@ -499,15 +617,43 @@ export default function DocumentsPage() {
     }
   }
 
-  async function handleDeleteCollection() {
-    if (!activeCollection) return;
+  async function handleDeleteCollection(name: string) {
     try {
-      await deleteCollection(activeCollection);
-      setCollections((prev) => prev.filter((col) => col.name !== activeCollection));
-      setActiveCollection(null);
-      toast(`已删除集合 ${activeCollection}`, "ok");
+      await deleteCollection(name);
+      setCollections((prev) => prev.filter((col) => col.name !== name));
+      if (activeCollection === name) setActiveCollection(null);
+      const updatedDocs = await listDocuments();
+      setDocs(updatedDocs);
+      setDeleteTarget(null);
+      toast(`已删除集合 ${name}`, "ok");
     } catch (err) {
       toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
+      setDeleteTarget(null);
+    }
+  }
+
+  async function handleToggleAutoIndex() {
+    const next = !autoIndexEnabled;
+    try {
+      await updateConfigValue("vector_db", "auto_index_enabled", next);
+      setAutoIndexEnabled(next);
+    } catch {
+      toast(t("error_generic"), "error");
+    }
+  }
+
+  async function handleRebuildIndex() {
+    setRebuilding(true);
+    try {
+      const result = await rebuildIndexPending();
+      const fresh = await getPendingReindexCount();
+      setPendingCount(fresh.count);
+      setDocs(await listDocuments());
+      toast(`已重建 ${result.rebuilt_docs} 个文档的索引`, "ok");
+    } catch {
+      toast(t("error_generic"), "error");
+    } finally {
+      setRebuilding(false);
     }
   }
 
@@ -544,16 +690,31 @@ export default function DocumentsPage() {
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", position: "relative" }}>
       {/* 左列：集合/标签 */}
       <div
+        data-panel="left"
         style={{
-          width: 198, flexShrink: 0, borderRight: "1px solid var(--border)",
+          width: "var(--sidebar-left-w)", flexShrink: 0, borderRight: "1px solid var(--border)",
           display: "flex", flexDirection: "column", overflowY: "auto",
           background: "var(--surface)", position: "relative", zIndex: 1,
         }}
       >
-        <div style={{ padding: "12px 12px 8px" }}>
-          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)", marginBottom: 8 }}>
-            集合
-          </div>
+        {/* topbar 对齐头部 */}
+        <div
+          className="fx-glass"
+          style={{
+            position: "sticky", top: 0, zIndex: 2,
+            height: "var(--topbar-h)", boxSizing: "border-box",
+            padding: "0 12px",
+            display: "flex", alignItems: "center",
+            borderBottom: "1px solid var(--border)",
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)" }}>
+            文档库
+          </span>
+        </div>
+
+        <div style={{ padding: "8px 12px 8px" }}>
 
           {/* 全部 */}
           <button
@@ -567,12 +728,18 @@ export default function DocumentsPage() {
               transition: "all .15s",
             }}
           >
-            <span>▢&nbsp; {t("docs_all")}</span>
-            <span style={{ fontSize: 11 }}>{docs.length}</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="3" width="20" height="5" rx="2"/>
+                <path d="M2 10h20M2 17h20"/>
+              </svg>
+              {t("docs_all")}
+            </span>
+            <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.7 }}>{docs.length}</span>
           </button>
 
-          {/* 集合列表 */}
-          {collections.map((col) => (
+          {/* 未归档系统集合（置顶，仅在存在时显示） */}
+          {collections.filter((c) => c.is_system).map((col) => (
             <button
               key={col.name}
               onClick={() => { setActiveCollection(col.name); setActiveTag(null); }}
@@ -580,14 +747,74 @@ export default function DocumentsPage() {
                 display: "flex", alignItems: "center", justifyContent: "space-between",
                 width: "100%", padding: "5px 8px", borderRadius: 8,
                 background: activeCollection === col.name ? "var(--accent-soft)" : "transparent",
-                color: activeCollection === col.name ? "var(--accent)" : "var(--fg-muted)",
+                color: activeCollection === col.name ? "var(--accent)" : "var(--fg-subtle)",
                 border: "none", cursor: "pointer", fontSize: 13, fontFamily: "inherit",
                 transition: "all .15s",
               }}
             >
-              <span className="truncate" style={{ maxWidth: 110 }}>▢&nbsp; {col.name}</span>
-              <span style={{ fontSize: 11 }}>{collectionCount(col.name)}</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+                </svg>
+                <span className="truncate" style={{ maxWidth: 100 }}>{t("docs_uncategorized")}</span>
+              </span>
+              <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.7, flexShrink: 0 }}>{collectionCount(col.name)}</span>
             </button>
+          ))}
+
+          {/* 集合分节标签 */}
+          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)", padding: "8px 8px 3px", marginTop: 2 }}>
+            集合
+          </div>
+
+          {/* 集合列表 */}
+          {collections.filter((c) => !c.is_system).map((col) => (
+            <div
+              key={col.name}
+              style={{ position: "relative" }}
+              onMouseEnter={(e) => { const btn = e.currentTarget.querySelector<HTMLElement>(".del-btn"); if (btn) btn.style.opacity = "1"; }}
+              onMouseLeave={(e) => { const btn = e.currentTarget.querySelector<HTMLElement>(".del-btn"); if (btn) btn.style.opacity = "0"; }}
+            >
+              <button
+                onClick={() => { setActiveCollection(col.name); setActiveTag(null); }}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  width: "100%", padding: "5px 8px", paddingRight: 28, borderRadius: 8,
+                  background: activeCollection === col.name ? "var(--accent-soft)" : "transparent",
+                  color: activeCollection === col.name ? "var(--accent)" : "var(--fg-muted)",
+                  border: "none", cursor: "pointer", fontSize: 13, fontFamily: "inherit",
+                  transition: "all .15s",
+                }}
+              >
+                <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                  </svg>
+                  <span className="truncate" style={{ maxWidth: 90 }}>{col.name}</span>
+                </span>
+                <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.7, flexShrink: 0 }}>{collectionCount(col.name)}</span>
+              </button>
+              {/* 删除按钮（悬浮显示） */}
+              <button
+                className="del-btn"
+                title={`删除集合 ${col.name}`}
+                onClick={(e) => { e.stopPropagation(); setDeleteTarget(col); }}
+                style={{
+                  position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)",
+                  width: 20, height: 20, borderRadius: 5, border: "none",
+                  background: "var(--bg-inset)", color: "var(--fg-subtle)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  cursor: "pointer", opacity: 0, transition: "opacity .15s",
+                  padding: 0,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = "#e05b5b"; e.currentTarget.style.background = "color-mix(in srgb, #e05b5b 12%, transparent)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = "var(--fg-subtle)"; e.currentTarget.style.background = "var(--bg-inset)"; }}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                </svg>
+              </button>
+            </div>
           ))}
 
           {/* 新建集合 */}
@@ -641,7 +868,7 @@ export default function DocumentsPage() {
       </div>
 
       {/* 中列：文档表 */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", zIndex: 1 }}>
+      <div style={{ flex: 1, minWidth: 200, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", zIndex: 1 }}>
         {/* 工具条（含批量操作）*/}
         {selected.size > 0 ? (
           <BatchBar
@@ -655,14 +882,20 @@ export default function DocumentsPage() {
           <div
             className="fx-glass"
             style={{
-              position: "sticky", top: 0, zIndex: 4,
-              display: "flex", alignItems: "center", gap: 8,
-              padding: "10px 16px",
+              position: "sticky",
+              top: 0,
+              zIndex: 4,
+              height: "var(--topbar-h)",
+              boxSizing: "border-box",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "0 22px",
             }}
           >
-            <span style={{ flex: 1, display: "flex", alignItems: "baseline", gap: 6 }}>
-              <strong style={{ fontSize: 16, color: "var(--heading)" }}>文档</strong>
-              <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+            <span style={{ flex: 1, display: "flex", alignItems: "baseline", gap: 6, lineHeight: 1 }}>
+              <strong style={{ fontSize: 16, color: "var(--heading)", lineHeight: 1 }}>文档</strong>
+              <span style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1 }}>
               {activeCollection
                 ? `集合：${activeCollection}`
                 : activeTag
@@ -674,11 +907,70 @@ export default function DocumentsPage() {
             <Btn size="sm" onClick={() => setShowUpload(true)}>
               {t("btn_upload")}
             </Btn>
-            {activeCollection && collectionCount(activeCollection) === 0 && (
-              <Btn size="sm" variant="danger" onClick={handleDeleteCollection}>
-                删除集合
-              </Btn>
+            {/* 索引模式 toggle */}
+            <button
+              onClick={handleToggleAutoIndex}
+              title={autoIndexEnabled ? "点击暂停自动索引" : "点击恢复自动索引"}
+              style={{
+                height: 28, borderRadius: 7, border: "1px solid var(--border)",
+                padding: "0 8px", gap: 4,
+                background: autoIndexEnabled ? "var(--bg-inset)" : "color-mix(in srgb, var(--warn, #e09a5b) 12%, transparent)",
+                color: autoIndexEnabled ? "var(--fg-subtle)" : "#e09a5b",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", transition: "all .15s", flexShrink: 0, fontSize: 11, fontFamily: "inherit",
+              }}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                {autoIndexEnabled
+                  ? <><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></>
+                  : <><circle cx="12" cy="12" r="10"/><line x1="10" y1="15" x2="10" y2="9"/><line x1="14" y1="15" x2="14" y2="9"/></>}
+              </svg>
+              <span>{autoIndexEnabled ? t("docs_index_mode_auto") : t("docs_index_mode_paused")}</span>
+            </button>
+            {/* 重建索引按钮 */}
+            {(!autoIndexEnabled || pendingCount > 0) && (
+              <button
+                onClick={handleRebuildIndex}
+                disabled={rebuilding}
+                title={t("docs_rebuild_index")}
+                style={{
+                  height: 28, borderRadius: 7, border: "1px solid var(--border)",
+                  padding: "0 8px", gap: 4,
+                  background: "var(--bg-inset)", color: rebuilding ? "var(--fg-subtle)" : "var(--fg)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  cursor: rebuilding ? "default" : "pointer", transition: "all .15s", flexShrink: 0, fontSize: 11, fontFamily: "inherit",
+                }}
+              >
+                {rebuilding ? (
+                  <span style={{ width: 10, height: 10, borderRadius: "50%", border: "2px solid var(--fg-subtle)", borderTopColor: "transparent", display: "inline-block", animation: "spin 0.6s linear infinite" }} />
+                ) : (
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                  </svg>
+                )}
+                <span>{t("docs_rebuild_index")}</span>
+                {pendingCount > 0 && (
+                  <span style={{ background: "var(--accent)", color: "var(--accent-fg)", borderRadius: 999, fontSize: 9, fontWeight: 700, padding: "1px 5px", lineHeight: "14px" }}>
+                    {pendingCount}
+                  </span>
+                )}
+              </button>
             )}
+            <button
+              onClick={() => setShowInspector(v => !v)}
+              title={showInspector ? "收起详情" : "展开详情"}
+              style={{
+                width: 28, height: 28, borderRadius: 7, border: "1px solid var(--border)",
+                background: showInspector ? "var(--accent-soft)" : "var(--bg-inset)",
+                color: showInspector ? "var(--accent)" : "var(--fg-subtle)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", transition: "all .15s", flexShrink: 0,
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/>
+              </svg>
+            </button>
           </div>
         )}
 
@@ -704,29 +996,49 @@ export default function DocumentsPage() {
                       style={{ accentColor: "var(--accent)" }}
                     />
                   </th>
-                  {["标题", "标签", "大小", "更新时间"].map((h) => (
+                  {([
+                    { label: "标题", key: "title" },
+                    { label: "标签", key: "tags" },
+                    { label: "大小", key: "size" },
+                    { label: "更新时间", key: "updated" },
+                  ] as { label: string; key: typeof sortKey }[]).map(({ label, key }) => (
                     <th
-                      key={h}
+                      key={label}
                       style={{
                         padding: "8px 10px", textAlign: "left",
-                        fontSize: 11, fontWeight: 700, letterSpacing: "0.05em",
-                        textTransform: "uppercase", color: "var(--fg-subtle)",
                         borderBottom: "1px solid var(--border)",
                       }}
                     >
-                      {h}
+                      <button
+                        onClick={() => handleSort(key)}
+                        style={{
+                          background: "none", border: "none", cursor: "pointer",
+                          padding: 0, fontFamily: "inherit",
+                          display: "flex", alignItems: "center", gap: 3,
+                          fontSize: 11, fontWeight: 700, letterSpacing: "0.05em",
+                          textTransform: "uppercase",
+                          color: sortKey === key ? "var(--accent)" : "var(--fg-subtle)",
+                          transition: "color .15s",
+                        }}
+                      >
+                        {label}
+                        {sortKey === key
+                          ? <span style={{ fontSize: 10, lineHeight: 1 }}>{sortDir === "asc" ? "↑" : "↓"}</span>
+                          : <span style={{ fontSize: 10, lineHeight: 1, opacity: 0.3 }}>↕</span>
+                        }
+                      </button>
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {filteredDocs.map((doc, idx) => {
+                {sortedDocs.map((doc, idx) => {
                   const isSelected = selected.has(doc.doc_id);
                   const isInspecting = inspecting?.doc_id === doc.doc_id;
                   return (
                     <tr
                       key={doc.doc_id}
-                      onClick={() => setInspecting(isInspecting ? null : doc)}
+                      onClick={() => { setInspecting(isInspecting ? null : doc); if (!isInspecting) setShowInspector(true); }}
                       style={{
                         background: isInspecting
                           ? "var(--accent-soft)"
@@ -796,19 +1108,25 @@ export default function DocumentsPage() {
         </div>
       </div>
 
-      {/* 右列：检查器 */}
-      <Inspector
-        doc={inspecting}
-        collections={collections}
-        onUpdate={(updated) => {
-          setDocs((prev) => prev.map((d) => (d.doc_id === updated.doc_id ? updated : d)));
-          setInspecting(updated);
-        }}
-        onDelete={(id) => {
-          setDocs((prev) => prev.filter((d) => d.doc_id !== id));
-          setInspecting(null);
-        }}
-      />
+      {/* 右列：检查器（可收起） */}
+      {showInspector && (
+        <div data-panel="inspector" style={{ display: "contents" }}>
+        <Inspector
+          doc={inspecting}
+          collections={collections}
+          onClose={() => { setShowInspector(false); setInspecting(null); }}
+          onUpdate={(updated) => {
+            setDocs((prev) => prev.map((d) => (d.doc_id === updated.doc_id ? updated : d)));
+            setInspecting(updated);
+          }}
+          onDelete={(id) => {
+            setDocs((prev) => prev.filter((d) => d.doc_id !== id));
+            setInspecting(null);
+            setShowInspector(false);
+          }}
+        />
+        </div>
+      )}
 
       {/* 上传对话框 */}
       {showUpload && (
@@ -816,6 +1134,16 @@ export default function DocumentsPage() {
           collections={collections}
           onClose={() => setShowUpload(false)}
           onUploaded={(doc) => setDocs((prev) => [doc, ...prev])}
+        />
+      )}
+
+      {/* 删除集合确认弹窗 */}
+      {deleteTarget && (
+        <DeleteCollectionModal
+          collectionName={deleteTarget.name}
+          docCount={collectionCount(deleteTarget.name)}
+          onConfirm={() => handleDeleteCollection(deleteTarget.name)}
+          onCancel={() => setDeleteTarget(null)}
         />
       )}
     </div>

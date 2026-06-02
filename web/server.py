@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ from aiohttp import web
 
 if TYPE_CHECKING:
     from core.api import KnowledgeRepositoryApi
+    from core.log_capture import MemoryLogHandler
 
 # ── 常量 ────────────────────────────────────────────────────────
 
@@ -96,7 +98,10 @@ async def handle_create_collection(request: web.Request) -> web.Response:
 
 
 async def handle_delete_collection(request: web.Request) -> web.Response:
-    ok = await _api(request).delete_collection(request.match_info["name"])
+    try:
+        ok = await _api(request).delete_collection(request.match_info["name"])
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
     return web.json_response({"ok": ok}, status=200 if ok else 404)
 
 
@@ -277,6 +282,28 @@ async def handle_update_config(request: web.Request) -> web.Response:
 
 
 
+async def handle_rebuild_index_pending(request: web.Request) -> web.Response:
+    try:
+        result = await _api(request).rebuild_index_pending()
+        return web.json_response({"status": "ok", **result})
+    except RuntimeError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=503)
+
+
+async def handle_pending_reindex_count(request: web.Request) -> web.Response:
+    count = await _api(request).get_pending_reindex_count()
+    return web.json_response({"count": count})
+
+
+async def handle_test_embedding(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    api_key = body.get("api_key", "")
+    base_url = body.get("base_url", "https://api.openai.com/v1")
+    model_name = body.get("model_name", "")
+    result = await _api(request).test_embedding_connection(api_key, base_url, model_name)
+    return web.json_response(result)
+
+
 async def handle_sync_status(request: web.Request) -> web.Response:
     return await _reserved(_api(request).get_sync_status(), "v0.3.0")
 
@@ -294,7 +321,13 @@ async def handle_restore(request: web.Request) -> web.Response:
 async def handle_graph_build(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     collection = body.get("collection") if isinstance(body, dict) else None
-    return await _reserved(_api(request).build_graph(collection), "v0.6.0")
+    try:
+        result = await _api(request).build_graph(collection)
+        return web.json_response(result)
+    except NotImplementedError as exc:
+        return web.json_response({"status": "reserved", "message": str(exc)}, status=501)
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
 
 
 async def handle_graph_query(request: web.Request) -> web.Response:
@@ -313,7 +346,96 @@ async def handle_graph_query(request: web.Request) -> web.Response:
 
 async def handle_graph_data(request: web.Request) -> web.Response:
     collection = request.query.get("collection") or None
-    return await _reserved(_api(request).get_graph(collection), "v0.7.0")
+    try:
+        result = await _api(request).get_graph(collection)
+        return web.json_response(result)
+    except NotImplementedError as exc:
+        return web.json_response({"status": "reserved", "message": str(exc)}, status=501)
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_graph_stats(request: web.Request) -> web.Response:
+    """GET /api/graph/stats — 图谱摘要统计（实体数、关系数、涉及集合数）。"""
+    try:
+        result = await _api(request).get_graph_stats()
+        return web.json_response(result)
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_metrics(request: web.Request) -> web.Response:
+    """GET /api/metrics — 近期操作延迟聚合（供性能监控面板使用）。"""
+    summary = _api(request).get_metrics_summary()
+    return web.json_response(summary)
+
+
+async def handle_ask_progress(request: web.Request) -> web.Response:
+    """GET /api/ask/progress/{cid} — 轮询指定对话的召回进度。"""
+    cid = request.match_info.get("cid", "")
+    progress = _api(request).get_ask_progress(cid)
+    if progress is None:
+        return web.json_response({"error": "not found"}, status=404)
+    return web.json_response(progress)
+
+
+async def handle_system_info(request: web.Request) -> web.Response:
+    """GET /api/system/info — 返回后端运行环境信息（调试面板用）。"""
+    try:
+        return web.json_response(_api(request).get_system_info())
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def handle_files_list(request: web.Request) -> web.Response:
+    """GET /api/files/list?dir=<subdir> — 列出 data_dir 内文件（路径穿越防护）。"""
+    subdir = request.query.get("dir", "")
+    try:
+        return web.json_response(_api(request).list_data_files(subdir))
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except FileNotFoundError as exc:
+        return web.json_response({"error": str(exc)}, status=404)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def handle_list_local_models(request: web.Request) -> web.Response:
+    """GET /api/models/local — 列出 HuggingFace 缓存中的本地模型。"""
+    try:
+        return web.json_response(_api(request).list_local_embedding_models())
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def handle_delete_local_model(request: web.Request) -> web.Response:
+    """DELETE /api/models/local/{name} — 删除本地缓存模型（name 经 URL 编码）。"""
+    from urllib.parse import unquote
+    raw = request.match_info.get("name", "")
+    model_name = unquote(raw)
+    try:
+        result = _api(request).delete_local_embedding_model(model_name)
+        return web.json_response(result)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except FileNotFoundError as exc:
+        return web.json_response({"error": str(exc)}, status=404)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def handle_logs(request: web.Request) -> web.Response:
+    """GET /api/logs?after=<float>&limit=<int> — 返回内存日志缓冲区中的最新日志行。"""
+    handler: MemoryLogHandler | None = request.app.get("log_handler")
+    if handler is None:
+        return web.json_response({"lines": [], "server_ts": time.time()})
+    try:
+        after_ts = float(request.query.get("after", "0"))
+        limit = min(int(request.query.get("limit", "200")), 500)
+    except ValueError:
+        return web.json_response({"error": "invalid params"}, status=400)
+    lines = handler.get_lines(after_ts=after_ts, limit=limit)
+    return web.json_response({"lines": lines, "server_ts": time.time()})
 
 
 async def handle_ask(request: web.Request) -> web.Response:
@@ -343,7 +465,12 @@ async def handle_ask(request: web.Request) -> web.Response:
 
 
 def _collection_dict(c: object) -> dict:
-    return {"name": c.name, "description": c.description}  # type: ignore[attr-defined]
+    from core.api import SYSTEM_COLLECTION_UNCATEGORIZED
+    return {
+        "name": c.name,  # type: ignore[attr-defined]
+        "description": c.description,  # type: ignore[attr-defined]
+        "is_system": c.name == SYSTEM_COLLECTION_UNCATEGORIZED,  # type: ignore[attr-defined]
+    }
 
 
 async def _document_dict(api: KnowledgeRepositoryApi, d: object) -> dict:
@@ -365,6 +492,7 @@ async def _document_dict(api: KnowledgeRepositoryApi, d: object) -> dict:
         "updated_at": updated_at,
         "updated": updated_at,
         "ext": ext,
+        "needs_reindex": getattr(d, "needs_reindex", False),
     }
 
 
@@ -464,6 +592,9 @@ def build_app(
     app.router.add_get("/api/quota", handle_quota)
     app.router.add_get("/api/config/effective", handle_effective_config)
     app.router.add_post("/api/config/update", handle_update_config)
+    app.router.add_post("/api/config/test-embedding", handle_test_embedding)
+    app.router.add_post("/api/documents/rebuild-index", handle_rebuild_index_pending)
+    app.router.add_get("/api/documents/pending-reindex-count", handle_pending_reindex_count)
     # 预留端口（reserved，未实现回 501 + available_in）
     app.router.add_post("/api/sync/{target}", handle_sync)
     app.router.add_post("/api/notion/init", handle_notion_init)
@@ -473,8 +604,20 @@ def build_app(
     app.router.add_post("/api/restore", handle_restore)
     app.router.add_post("/api/graph/build", handle_graph_build)
     app.router.add_get("/api/graph/query", handle_graph_query)
+    app.router.add_get("/api/graph/stats", handle_graph_stats)
     app.router.add_get("/api/graph", handle_graph_data)
+    app.router.add_get("/api/metrics", handle_metrics)
+    app.router.add_get("/api/ask/progress/{cid}", handle_ask_progress)
+    app.router.add_get("/api/system/info", handle_system_info)
+    app.router.add_get("/api/files/list", handle_files_list)
+    app.router.add_get("/api/models/local", handle_list_local_models)
+    app.router.add_delete("/api/models/local/{name}", handle_delete_local_model)
+    app.router.add_get("/api/logs", handle_logs)
     app.router.add_post("/api/ask", handle_ask)
+
+    # 安装内存日志 handler（幂等，重复调用安全）
+    from core.log_capture import install as _install_log_handler
+    app["log_handler"] = _install_log_handler(maxlen=500)
 
     # 静态文件服务：兼容 Next.js export 产物（pages/ 下存在子目录 index.html）
     # 和旧的单文件 HTML 产物。

@@ -42,6 +42,16 @@ class SourceDocumentStore(ABC):
         """删除集合本身（不级联删其文档）。返回 False 表示 name 不存在。"""
         ...
 
+    @abstractmethod
+    async def move_documents_to_collection(self, from_name: str, to_name: str) -> int:
+        """将所有属于 from_name 的文档批量迁移到 to_name。返回迁移文档数量。"""
+        ...
+
+    @abstractmethod
+    async def list_pending_reindex_documents(self) -> list[SourceDocument]:
+        """列出所有标记为待重建索引（needs_reindex=True）的文档。"""
+        ...
+
     # ── 文档 ────────────────────────────────────────────────────
 
     @abstractmethod

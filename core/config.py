@@ -138,7 +138,8 @@ class VectorDbConfig:
 
     backend: str = "astr"
     embedding_provider: str = "local"
-    db_filename: str = "milvus_lite.db"
+    db_filename: str = "vector_store.db"
+    auto_index_enabled: bool = True
 
 
 @dataclass
@@ -227,6 +228,7 @@ class Config:
                 "backend": vector_db.backend,
                 "embedding_provider": vector_db.embedding_provider,
                 "db_filename": vector_db.db_filename,
+                "auto_index_enabled": vector_db.auto_index_enabled,
             },
             "ask": {
                 "conversation_enhancement_mode": ask.conversation_enhancement_mode,
@@ -332,10 +334,13 @@ class Config:
 
     def get_vector_db_config(self) -> VectorDbConfig:
         s = _section(self.raw, "vector_db")
+        raw_auto = s.get("auto_index_enabled", VectorDbConfig.auto_index_enabled)
+        auto_index = bool(raw_auto) if not isinstance(raw_auto, bool) else raw_auto
         return VectorDbConfig(
             backend=s.get("backend", VectorDbConfig.backend),
             embedding_provider=s.get("embedding_provider", VectorDbConfig.embedding_provider),
             db_filename=s.get("db_filename", VectorDbConfig.db_filename),
+            auto_index_enabled=auto_index,
         )
 
     def get_ask_agent_config(self) -> AskAgentConfig:

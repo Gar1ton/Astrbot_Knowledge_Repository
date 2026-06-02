@@ -4,6 +4,22 @@
  * Dark mode via `.dark` class (aligned with fumadocs-ui / Tailwind v4 convention)
  */
 
+/* ─── 响应式面板宽度 ─────────────────────────────────────────── */
+:root {
+  --sidebar-left-w: 198px;
+  --inspector-w: 286px;
+}
+@media (max-width: 1100px) {
+  :root {
+    --sidebar-left-w: 160px;
+    --inspector-w: 240px;
+  }
+}
+@media (max-width: 860px) {
+  [data-panel="left"] { display: none !important; }
+  [data-panel="inspector"] { display: none !important; }
+}
+
 /* ─── 浅色主题（默认 · cream） ─────────────────────────────── */
 :root {
   /* 背景层 */
@@ -54,9 +70,11 @@
   --shadow: 0 1px 2px rgba(60, 50, 30, 0.05), 0 6px 22px rgba(60, 50, 30, 0.07);
   --shadow-pop: 0 12px 36px rgba(60, 50, 30, 0.16);
 
-  /* 导航栏宽度 */
+  /* 导航栏宽度与高度 */
   --rail-w: 220px;
   --rail-w-collapsed: 60px;
+  --topbar-h: 56px;
+
 
   /* fumadocs-ui 颜色覆盖 → 暖色系对齐 */
   --color-fd-background: #f7f4ed;
@@ -170,6 +188,12 @@
 }
 .fx-glass-edge {
   box-shadow: inset 1px 0 0 color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.kr-topbar {
+  height: var(--topbar-h);
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
 }
 
 /* ─── 动画 keyframes ──────────────────────────────────────────── */

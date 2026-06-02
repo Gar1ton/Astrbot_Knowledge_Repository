@@ -10,6 +10,7 @@ managers/pipelines（ingest/category/sync/quota）后，对应写操作改为委
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,13 +20,17 @@ from core.domain.models import Collection, SourceDocument, SyncTargetKind
 
 logger = logging.getLogger("KnowledgeRepositoryApi")
 
+SYSTEM_COLLECTION_UNCATEGORIZED = "_uncategorized"
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from core.adapters.llm import LLMAdapter
+    from core.ask_progress import ProgressStore
     from core.config import Config
     from core.domain.models import DocumentChunk, QuotaUsage
     from core.managers.base import BaseCategoryManager, BaseIngestManager, BaseQuotaManager
+    from core.metrics import PerformanceTracker
     from core.pipelines.graph_build_pipeline import GraphBuildPipeline
     from core.pipelines.graph_search_pipeline import GraphSearchPipeline
     from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
@@ -102,6 +107,8 @@ class KnowledgeRepositoryApi:
         vector_store: VectorStore | None = None,
         embedding_provider: EmbeddingProvider | None = None,
         retrieval_orchestrator: RetrievalOrchestrator | None = None,
+        metrics: PerformanceTracker | None = None,
+        progress_store: ProgressStore | None = None,
     ) -> None:
         self._source_store = source_store
         self._kb_reader = kb_reader
@@ -120,6 +127,8 @@ class KnowledgeRepositoryApi:
         self._config_persist = config_persist
         self._llm_adapter = llm_adapter
         self._managed_documents_dir = managed_documents_dir
+        self._metrics = metrics
+        self._progress_store = progress_store
 
     # ── 集合（分类）────────────────────────────────────────────
 
@@ -136,8 +145,24 @@ class KnowledgeRepositoryApi:
                 Collection(name=name, description=description, created_at=_now())
             )
 
+    async def _ensure_system_collections(self) -> None:
+        """确保系统集合（_uncategorized 等）存在，幂等。"""
+        await self._source_store.upsert_collection(
+            Collection(
+                name=SYSTEM_COLLECTION_UNCATEGORIZED,
+                description="未归档文档（系统集合，不可删除）",
+                created_at=_now(),
+            )
+        )
+
     async def delete_collection(self, name: str) -> bool:
-        """删除集合本身（不级联删其文档）。返回 False 表示 name 不存在。"""
+        """删除集合。非空集合的文档将迁入 _uncategorized 系统集合。返回 False 表示 name 不存在。"""
+        if name == SYSTEM_COLLECTION_UNCATEGORIZED:
+            raise ValueError(f"系统集合 '{SYSTEM_COLLECTION_UNCATEGORIZED}' 不可删除。")
+
+        await self._ensure_system_collections()
+        await self._source_store.move_documents_to_collection(name, SYSTEM_COLLECTION_UNCATEGORIZED)
+
         if self._config:
             vdb = self._config.get_vector_db_config()
             if vdb.backend == "milvus" and self._vector_store:
@@ -178,6 +203,10 @@ class KnowledgeRepositoryApi:
 
         预览级登记：仅写入源库元数据。v0.3.0 起本操作委派 ingest_manager（含 PyMuPDF 抽取/分块）。
         """
+        auto_index = True
+        if self._config:
+            auto_index = self._config.get_vector_db_config().auto_index_enabled
+
         if self._ingest_manager:
             doc_id = await self._ingest_manager.ingest(
                 title=title,
@@ -187,8 +216,8 @@ class KnowledgeRepositoryApi:
                 collection=collection,
                 tags=tags,
             )
-            # 同步写入 Milvus 向量库
-            if self._config:
+            # 同步写入 Milvus 向量库（仅在 auto_index_enabled=True 时执行）
+            if auto_index and self._config:
                 vdb = self._config.get_vector_db_config()
                 if vdb.backend == "milvus" and self._vector_store and self._embedding_provider:
                     if hasattr(self._vector_store, "set_doc_collection_mapping"):
@@ -198,6 +227,11 @@ class KnowledgeRepositoryApi:
                         texts = [c.text for c in chunks]
                         embeddings = await self._embedding_provider.embed_documents(texts)
                         await self._vector_store.upsert_chunks(chunks, embeddings)
+            elif not auto_index:
+                doc = await self._source_store.get_document(doc_id)
+                if doc:
+                    doc.needs_reindex = True
+                    await self._source_store.update_document(doc)
             return doc_id
 
         doc_id = uuid.uuid4().hex
@@ -316,6 +350,35 @@ class KnowledgeRepositoryApi:
         logger.info("Successfully rebuilt vector store index: %d chunks", total_chunks)
         return {"rebuilt_chunks": total_chunks}
 
+    async def rebuild_index_pending(self) -> dict[str, int]:
+        """仅对 needs_reindex=True 的文档进行增量索引重建，完成后清除标记。"""
+        if not self._vector_store or not self._embedding_provider:
+            raise RuntimeError("VectorStore or EmbeddingProvider is not configured.")
+
+        docs = await self._source_store.list_pending_reindex_documents()
+        total_chunks = 0
+
+        for doc in docs:
+            chunks = await self._source_store.list_chunks(doc.doc_id)
+            if chunks:
+                if hasattr(self._vector_store, "set_doc_collection_mapping"):
+                    self._vector_store.set_doc_collection_mapping(doc.doc_id, doc.collection)
+                texts = [c.text for c in chunks]
+                embeddings = await self._embedding_provider.embed_documents(texts)
+                await self._vector_store.upsert_chunks(chunks, embeddings)
+                total_chunks += len(chunks)
+            doc.needs_reindex = False
+            doc.updated_at = _now()
+            await self._source_store.update_document(doc)
+
+        logger.info("Rebuilt pending index: %d docs, %d chunks", len(docs), total_chunks)
+        return {"rebuilt_docs": len(docs), "rebuilt_chunks": total_chunks}
+
+    async def get_pending_reindex_count(self) -> int:
+        """返回待重建索引的文档数量。"""
+        docs = await self._source_store.list_pending_reindex_documents()
+        return len(docs)
+
     async def ask(
         self,
         question: str,
@@ -325,16 +388,36 @@ class KnowledgeRepositoryApi:
         persona_enabled: bool = False,
     ) -> dict:
         """基于知识库检索 + LLM 生成答案，返回 answer + sources（Ask Agent 端口）。"""
+        cid = conversation_id or uuid.uuid4().hex
+        ask_start = time.monotonic()
+
+        def _progress(stage: str, pct: int) -> None:
+            if self._progress_store is not None:
+                self._progress_store.set(cid, stage, pct)
+
+        def _record(op: str, t0: float, **meta: object) -> None:
+            if self._metrics is not None:
+                self._metrics.record(op, (time.monotonic() - t0) * 1000, meta or None)
+
+        # 阶段 1：向量嵌入 / 准备检索
+        _progress("embed_query", 0)
+        t0 = time.monotonic()
+
         # 1. 检索相关 chunks
         chunks: list[DocumentChunk] = []
         if collection:
+            _progress("vector_search", 20)
+            t_vs = time.monotonic()
             chunks = await self.search_kb(collection, question, top_k)
+            _record("vector_search", t_vs, hits=len(chunks))
         else:
             # 优先从本地源库获取集合列表，如果没有再回退到 AstrBot 知识库列表
             cols = await self.list_collections()
             all_cols = [c.name for c in cols]
             if not all_cols:
                 all_cols = await self.list_kb_collections()
+            _progress("vector_search", 20)
+            t_vs = time.monotonic()
             seen_ids: set[str] = set()
             for col in all_cols[:5]:
                 for ch in await self.search_kb(col, question, top_k):
@@ -345,6 +428,15 @@ class KnowledgeRepositoryApi:
                         break
                 if len(chunks) >= top_k:
                     break
+            _record("vector_search", t_vs, hits=len(chunks))
+
+        _record("embed_query", t0)
+
+        # 阶段 2：图谱扩展（此处已在 retrieval_orchestrator 内完成，记录占位进度）
+        _progress("graph_expand", 50)
+
+        # 阶段 3：RRF 融合（同上）
+        _progress("rrf_fusion", 65)
 
         # 2. 构造来源列表 + LLM 上下文
         sources = []
@@ -369,6 +461,10 @@ class KnowledgeRepositoryApi:
                 else ""
             )
             context_parts.append(f"[{n}] {title}{page_info}\n{chunk.text}")
+
+        # 阶段 4：LLM 生成答案
+        _progress("llm_generate", 80)
+        t_llm = time.monotonic()
 
         # 3. 调用 LLM 生成答案（无 LLM 时降级为摘要回答）
         if self._llm_adapter is not None and context_parts:
@@ -398,8 +494,12 @@ class KnowledgeRepositoryApi:
         else:
             answer = "未在知识库中找到与该问题相关的内容。请尝试其他关键词或上传相关文档。"
 
+        _record("llm_generate", t_llm)
+        _record("ask_total", ask_start, sources=len(sources))
+        _progress("done", 100)
+
         return {
-            "conversation_id": conversation_id or uuid.uuid4().hex,
+            "conversation_id": cid,
             "answer": answer,
             "sources": sources,
         }
@@ -527,6 +627,22 @@ class KnowledgeRepositoryApi:
                 self._retrieval_orchestrator._embedding_provider = self._embedding_provider
                 self._retrieval_orchestrator._vector_store = self._vector_store
 
+
+    async def test_embedding_connection(
+        self, api_key: str, base_url: str, model_name: str
+    ) -> dict:
+        """临时创建一个 ExternalEmbeddingProvider 并发送测试请求，验证云端 API 可连通性。"""
+        from core.repository.embedding.external import ExternalEmbeddingProvider
+        provider = ExternalEmbeddingProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model_name=model_name,
+        )
+        try:
+            vec = await provider.embed_query("ping")
+            return {"status": "ok", "dimension": len(vec), "model": model_name}
+        except Exception as exc:
+            return {"status": "error", "message": str(exc)}
 
     async def get_sync_status(self) -> list[dict]:
         """列出各文档在各目标的同步状态（SyncRecord 视图）。
@@ -708,6 +824,150 @@ class KnowledgeRepositoryApi:
             }
 
         raise NotImplementedError("get_graph: available in v0.7.0")
+
+    # ── 性能指标与进度（供 WebUI 监控面板使用）─────────────────────
+
+    def get_metrics_summary(self) -> dict:
+        """返回近期操作延迟聚合统计。无 metrics 时返回空结构。"""
+        if self._metrics is not None:
+            return self._metrics.summary()
+        return {"ops": {}, "total_records": 0}
+
+    def get_ask_progress(self, conversation_id: str) -> dict | None:
+        """返回指定对话的召回进度，不存在或已过期时返回 None。"""
+        if self._progress_store is not None:
+            return self._progress_store.get(conversation_id)
+        return None
+
+    async def get_graph_stats(self) -> dict:
+        """返回图谱摘要统计（实体数、关系数、涉及集合数）。"""
+        if self._graph_store is None:
+            return {"entities_count": 0, "relations_count": 0, "collections_covered": 0}
+        entities = await self._graph_store.list_entities()
+        relations = await self._graph_store.list_relations()
+        chunk_ids: set[str] = set()
+        for ent in entities:
+            chunk_ids.update(ent.source_chunk_ids)
+        collections: set[str] = set()
+        for cid in chunk_ids:
+            # 通过 doc_id 映射集合（best-effort）
+            chunk_rows = await self._source_store.list_chunks_by_id([cid]) if hasattr(
+                self._source_store, "list_chunks_by_id"
+            ) else []
+            for chunk in chunk_rows:
+                doc = await self._source_store.get_document(chunk.doc_id)
+                if doc:
+                    collections.add(doc.collection)
+        return {
+            "entities_count": len(entities),
+            "relations_count": len(relations),
+            "collections_covered": len(collections),
+        }
+
+    # ── 调试：系统信息 & 文件列表 ─────────────────────────────────
+
+    def get_system_info(self) -> dict:
+        """返回后端运行环境基础信息，供调试面板使用。"""
+        import sys
+        data_dir = (
+            self._managed_documents_dir.parent
+            if self._managed_documents_dir else Path("data")
+        )
+        source_cfg = self._config.get_source_store_config() if self._config else None
+        db_file = source_cfg.db_filename if source_cfg else "knowledge_repository.db"
+        return {
+            "cwd": str(Path.cwd()),
+            "data_dir": str(data_dir.resolve()),
+            "db_file": db_file,
+            "docs_dir": str((data_dir / "documents").resolve()),
+            "python_version": sys.version.split()[0],
+            "platform": sys.platform,
+        }
+
+    def list_data_files(self, subdir: str = "") -> dict:
+        """列出 data_dir 或其子目录的文件，路径严格限制在 data_dir 内。"""
+        data_dir = (
+            self._managed_documents_dir.parent if self._managed_documents_dir else Path("data")
+        ).resolve()
+
+        # 路径安全：拒绝包含 .. 的路径
+        if ".." in subdir.replace("\\", "/").split("/"):
+            raise ValueError("Path traversal not allowed")
+
+        target = (data_dir / subdir).resolve()
+        try:
+            target.relative_to(data_dir)
+        except ValueError:
+            raise ValueError("Path is outside data directory")
+
+        if not target.exists():
+            raise FileNotFoundError(f"Directory not found: {subdir!r}")
+
+        entries = []
+        for item in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name)):
+            stat = item.stat()
+            entries.append({
+                "name": item.name,
+                "type": "file" if item.is_file() else "dir",
+                "size_bytes": stat.st_size if item.is_file() else None,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            })
+        return {
+            "path": str(target.relative_to(data_dir)),
+            "entries": entries,
+        }
+
+    # ── HuggingFace 本地模型管理 ──────────────────────────────────
+
+    def list_local_embedding_models(self) -> list[dict]:
+        """列出 HuggingFace hub 缓存中的本地 embedding 模型目录。"""
+        import os
+        hf_cache = Path(
+            os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+        ) / "hub"
+        if not hf_cache.is_dir():
+            return []
+        models = []
+        for entry in sorted(hf_cache.iterdir()):
+            if not entry.is_dir() or not entry.name.startswith("models--"):
+                continue
+            raw_name = entry.name[len("models--"):]
+            display_name = raw_name.replace("--", "/")
+            size_bytes = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+            try:
+                mtime = max(f.stat().st_mtime for f in entry.rglob("*") if f.is_file())
+                last_modified = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+            except ValueError:
+                last_modified = None
+            models.append({
+                "name": display_name,
+                "dir_name": entry.name,
+                "size_bytes": size_bytes,
+                "last_modified": last_modified,
+                "path": str(entry),
+            })
+        return models
+
+    def delete_local_embedding_model(self, model_name: str) -> dict:
+        """删除指定本地 embedding 模型缓存目录（不可逆）。
+
+        model_name 格式为 org/model 或 model，只允许字母/数字/-/_/./ 。
+        """
+        import os
+        import re
+        import shutil
+        if not re.fullmatch(r"[A-Za-z0-9\-_./]+", model_name) or ".." in model_name:
+            raise ValueError("Invalid model name")
+        hf_cache = Path(
+            os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+        ) / "hub"
+        dir_name = "models--" + model_name.replace("/", "--")
+        target = hf_cache / dir_name
+        if not target.exists():
+            raise FileNotFoundError(f"Model not found: {model_name!r}")
+        target.relative_to(hf_cache)  # 二次路径安全确认
+        shutil.rmtree(target)
+        return {"deleted": model_name}
 
     def _persist_config_value(self, section: str, key: str, value: object) -> None:
         if self._config is not None:

@@ -155,6 +155,7 @@ function I18nProvider({ children }: { children: React.ReactNode }) {
 function ConsoleShell({ children }: { children: React.ReactNode }) {
   const [authChecked, setAuthChecked] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
+  const [railCollapsed, setRailCollapsed] = useState(false);
 
   useEffect(() => {
     getAuth()
@@ -198,7 +199,7 @@ function ConsoleShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
-      <Rail onLogout={handleLogout} />
+      <Rail onLogout={handleLogout} collapsed={railCollapsed} onToggle={() => setRailCollapsed(v => !v)} />
       <main
         style={{
           flex: 1,

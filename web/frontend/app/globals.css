@@ -36,7 +36,6 @@ a {
 
 /* ─── 表单元素重置 ──────────────────────────────────────────── */
 input,
-select,
 textarea {
   background-color: var(--bg);
   border: 1px solid var(--border);
@@ -49,15 +48,62 @@ textarea {
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-input:focus,
-select:focus,
-textarea:focus {
+input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--ring);
 }
 
+/* textarea: 只改边框颜色，不加 box-shadow（避免透明 textarea 卡片内漏光） */
+textarea:focus {
+  border-color: var(--accent);
+}
+
 input::placeholder {
   color: var(--fg-subtle);
+}
+
+/* ─── Select：统一毛玻璃风格 ───────────────────────────────── */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 9px;
+  padding: 0 32px 0 11px;
+  height: 32px;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 500;
+  outline: none;
+  cursor: pointer;
+  /* 自定义下拉箭头（accent 色） */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239c9580' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px 12px;
+  transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
+  box-shadow: var(--shadow);
+}
+
+select:hover {
+  border-color: var(--border-strong);
+  background-color: var(--surface-hover);
+}
+
+select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23df7a18' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+}
+
+/* dark 模式：箭头换亮色 */
+.dark select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b6759' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+}
+
+.dark select:focus {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23e8842a' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
 }
 
 /* ─── 滚动条 ────────────────────────────────────────────────── */
@@ -96,3 +142,24 @@ input::placeholder {
   overflow: hidden;
   clip: rect(0 0 0 0);
 }
+
+/* ─── Ask 输入卡片：正常态低调，focus-within 亮橙描边 ──────── */
+.ask-card {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.ask-card:focus-within {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--ring), var(--shadow);
+}
+
+/* ─── C7：图标基线对齐修复 ────────────────────────────────────── */
+svg {
+  display: inline-block;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+

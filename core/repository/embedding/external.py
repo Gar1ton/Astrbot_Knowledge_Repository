@@ -36,11 +36,17 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
         # 剥离可能多余的 /embeddings 或 /v1 路径
         self._base_url = self._base_url.rstrip("/")
         
-        # 维度识别
+        # 维度识别（动态更新覆盖）
         self._dimension_mapping = {
             "text-embedding-3-small": 1536,
             "text-embedding-3-large": 3072,
             "text-embedding-ada-002": 1536,
+            "BAAI/bge-m3": 1024,
+            "BAAI/bge-large-en-v1.5": 1024,
+            "BAAI/bge-base-en-v1.5": 768,
+            "BAAI/bge-small-en-v1.5": 384,
+            "BAAI/bge-large-zh-v1.5": 1024,
+            "BAAI/bge-base-zh-v1.5": 768,
         }
         self._dimension = self._dimension_mapping.get(self._model_name, 1536)
 

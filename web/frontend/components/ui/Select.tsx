@@ -1,0 +1,168 @@
+"use client";
+
+import React, { useEffect, useRef, useState } from "react";
+
+export interface SelectOption {
+  value: string;
+  label: string;
+}
+
+interface SelectProps {
+  value: string;
+  onChange: (value: string) => void;
+  options: SelectOption[];
+  placeholder?: string;
+  style?: React.CSSProperties;
+  size?: "sm" | "md";
+}
+
+export function Select({ value, onChange, options, placeholder, style, size = "sm" }: SelectProps) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const height = size === "sm" ? 32 : 36;
+  const fontSize = size === "sm" ? 12 : 13;
+
+  const selected = options.find((o) => o.value === value);
+  const label = selected?.label ?? placeholder ?? value;
+
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent) {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position: "relative", display: "inline-block", ...style }}>
+      {/* 触发按钮 */}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          height,
+          paddingLeft: 11,
+          paddingRight: 30,
+          background: open ? "var(--surface-hover)" : "var(--surface)",
+          border: `1px solid ${open ? "var(--accent)" : "var(--border)"}`,
+          borderRadius: 9,
+          color: "var(--fg)",
+          fontSize,
+          fontWeight: 500,
+          fontFamily: "inherit",
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          whiteSpace: "nowrap",
+          width: "100%",
+          textAlign: "left",
+          gap: 6,
+          boxShadow: open ? `0 0 0 3px var(--ring)` : "var(--shadow)",
+          transition: "border-color .15s, box-shadow .15s, background .15s",
+          position: "relative",
+        }}
+      >
+        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+        {/* 下拉箭头 */}
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="var(--fg-subtle)"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{
+            position: "absolute",
+            right: 9,
+            top: "50%",
+            transform: `translateY(-50%) rotate(${open ? 180 : 0}deg)`,
+            transition: "transform .2s",
+            flexShrink: 0,
+            pointerEvents: "none",
+          }}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+
+      {/* 下拉菜单 */}
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            left: 0,
+            minWidth: "100%",
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            boxShadow: "var(--shadow-pop)",
+            padding: "4px",
+            zIndex: 600,
+            animation: "selectIn .12s cubic-bezier(0.4,0,0.2,1) both",
+          }}
+        >
+          {options.map((opt) => {
+            const isActive = opt.value === value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => { onChange(opt.value); setOpen(false); }}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  width: "100%",
+                  padding: "6px 9px",
+                  borderRadius: 7,
+                  background: isActive ? "var(--accent-soft)" : "transparent",
+                  color: isActive ? "var(--accent)" : "var(--fg)",
+                  border: "none",
+                  cursor: "pointer",
+                  fontSize,
+                  fontWeight: isActive ? 600 : 400,
+                  fontFamily: "inherit",
+                  textAlign: "left",
+                  transition: "background .1s",
+                  whiteSpace: "nowrap",
+                }}
+                onMouseEnter={(e) => {
+                  if (!isActive) e.currentTarget.style.background = "var(--bg-inset)";
+                }}
+                onMouseLeave={(e) => {
+                  if (!isActive) e.currentTarget.style.background = "transparent";
+                }}
+              >
+                {isActive && (
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                )}
+                {!isActive && <span style={{ width: 10, flexShrink: 0 }} />}
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <style>{`
+        @keyframes selectIn {
+          from { opacity: 0; transform: translateY(-4px) scale(0.97); }
+          to   { opacity: 1; transform: translateY(0) scale(1); }
+        }
+      `}</style>
+    </div>
+  );
+}

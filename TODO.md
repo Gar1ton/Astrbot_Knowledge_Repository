@@ -57,15 +57,15 @@
 
 ### Technical implementation path
 
-- [x] **Phase 0 — Milvus Lite 可行性 spike 与基准**：用隔离原型验证 `pymilvus[milvus-lite]` 本地文件 URI、Linux 部署、单进程生命周期、dense vector CRUD、metadata filter、删除重建、混合检索、数据库文件备份恢复与异常重启；记录小规模边界、仅 `FLAT` 索引、无 partition / 用户角色等限制。单独验证当前 Milvus Lite 版本能否直接使用内建 BM25；官方资料存在版本差异，未通过原型前不得将该能力写入正式契约。技术理由：Milvus Lite 适合作为本地候选，但不能根据 Standalone 能力推断 Lite 行为。(Spike completed successfully: string primary key schema required, FLOAT_VECTOR missing dim error solved, dynamic field metadata supported, clean graceful close lock-release verified.)
-- [x] **Phase 1 — 定义本地检索端口与数据所有权**：新增独立 `retrieval` / `vector_store` ABC，明确 SQLite `source_store` 仍是文档与 chunk 的事实源，Milvus Lite 只是可重建索引；AstrBot KB reader 降为兼容 adapter，不再作为 Ask Agent 的唯一检索源。索引行至少保存 `chunk_id`、`doc_id`、`collection`、文本、内容哈希和可定位引用元数据。技术理由：避免把可丢弃索引与原始文档生命周期混为一体，并允许后续切换 Standalone。(Phase 1 completed: base VectorStore interface defined, InMemoryVectorStore implementation built, Web UI configuration cards and multi-language keys successfully added and integrated, 100% test green.)
-- [x] **Phase 2 — 明确本地 embedding 策略与按需懒加载**：实现 EmbeddingProvider 多路由适配器，支持用户在配置中自定义选择本地（如 BAAI/bge-large-en-v1.5, bge-m3）或云端 API 提供商；贯彻「按需懒加载（Lazy Load）」与「动态下载（On-demand Download）」原则，只有当用户显式选择本地模型部署时，才动态加载 `sentence-transformers` 依赖并触发模型下载，保证默认状态的轻量与零开销。技术理由：避免在不使用本地 Embedding 时霸占磁盘与内存，且保障英文文献库的精准匹配表征。(Phase 2 completed: base, local, external, cached and factory Embedding modules successfully built, SQLite cache layer achieved, 100% test coverage with zero-unnecessary-download lazy loading.)
-- [x] **Phase 3 — 收敛索引生命周期与灾备**：上传、更新、删除文档时同步 upsert / delete 本地索引；提供按 chunk 哈希增量补建、全量 rebuild、健康检查与版本迁移；将 Milvus Lite 文件纳入 R2 快照范围，恢复后支持校验或从 SQLite 重建。技术理由：当前本地上传文档不会写入 AstrBot KB，改用本地索引后必须补齐一致性闭环。(Phase 3 completed: document synchronization triggers, collection-level removal, and a full rebuild API successfully integrated in core/api.py with 100% Single-File database disaster recovery test passing.)
-- [x] **Phase 4 — 统一 Ask retrieval orchestrator**：让 WebUI Ask、AstrBot 普通对话增强和后续外部工具调用共享一条检索管线；候选召回包含 local dense、可验证后再启用的 lexical / sparse 检索、实体召回和图邻域扩展，并统一去重、RRF、来源编号与引用结构；明确在 API 生成端支持复用主框架已配置的 LLM，但必须使用独立的上下文与 RA Persona，确保 Standalone Ask 100% 独立并隔离于 AstrBot 当前会话 of 闲聊历史与角色扮演污染。(Phase 4 completed: Milvus Lite vector store successfully built with custom string PK schema, unified RetrievalOrchestrator and local embedding/vector components integrated into core/api.py and PluginInitializer assembly root, fully passing E2E integrated rank fusion and lexical fallback test cases.)
-- [x] **Phase 5 — 接入 AstrBot 普通对话增强（非侵入式 Hook 打通）**：在真实 AstrBot SDK 薄壳注册普通消息 Hook 骨架；**目前先打通 Hook 信号通路，但采取旁路 Dry-Run/透传（Pass-through）机制，绝对不干预或修改 AstrBot 的原生原有对话回答**；预留清晰的、热插拔式的「插槽接口（Slot Hook）」，待用户思考并设计好具体的交互影响形式后再行代码填充，保障系统过渡期的非侵入稳定性。(Phase 5 completed: on_message and on_agent callbacks successfully integrated into core/main.py and core/event_handler.py, providing 100% dry-run safe pass-through hooking with slot logic fully tested via E2E lifecycle suites.)
-- [x] **Phase 6 — 增加 Persona 控制与普通对话记忆检索增强**：内部 `ask()` 接口/Web UI 中的 Ask Agent 对话支持 `persona_enabled` 开关，在 Web UI 的输入框底部集合选择器右侧添加对应的“启用 Persona / 角色设定”开关；当 `persona_enabled` 为 `True` 时，动态提取 AstrBot 当前运行态设定的 Persona Prompt 并融入系统提示词以指导 Standalone Ask 答复；`/kr agent on` 和 `off` 目前阶段**仅且只**决定了 AstrBot 的回答是否可以调用插件的记忆召回功能，当为 `on` 时通过 handler 将召回片段（Grounded Context）动态注入传回至 AstrBot 普通消息的 `system_prompt` 中；当为 `off` 时则完全不进行检索，实现 100% 零开销 pass-through。(Phase 6 completed: Standalone Ask persona-enabled option fully implemented on both Web UI and core engine, Agent message hook zero-overhead pass-through fully optimized with all backend unit/integration tests passing 100% green.)
-- [x] **Phase 7 — 实现双模式对话增强与 Agent 工具契约**：新增 `ask.conversation_enhancement_mode` 配置项（支持 WebUI Settings 切换），分类处理两种逻辑：一是原生召回注入 (`inject`)；二是内部代理询问 (`query_agent`)，强制关闭内部 Ask Persona 防止过拟合，并通过 `conversation_id` 绑定打通 WebUI Ask 历史大一统，以指令级注入实现完美代理。(Phase 7 completed: ask schema registered in _conf_schema.json, dual-mode conversation enhancement routing fully implemented inside core/event_handler.py, comprehensive unit/integration test coverage achieved, and Next.js frontend compiled and synchronized with 100% test pass.)
-- [x] **Phase 8 — NotebookLM 风格在线检阅与引用定位**：为每个 chunk 持久化页码、段落或字符范围、原件引用 and 可展示预览；回答引用返回稳定 `doc_id + chunk_id + locator`，WebUI 支持从来源面板打开原件并定位到证据附近。评估 PDF.js 在线阅读器；Notion MCP 继续承担同步镜像，不作为本地检索或引用定位的必需依赖。技术理由：Milvus Lite 能提高召回，但在线阅览、证据定位和连续阅读属于应用层能力。(Phase 8 completed: metadata dict field added to DocumentChunk, SQLite replace/list chunks updated with JSON serialization, IngestManager page/para/locator parsing fully implemented and tested with 100% test green.)
+- [x] **Phase 0 — Milvus Lite 可行性 spike 与基准**：用隔离原型验证 `pymilvus[milvus-lite]` 本地文件 URI、Linux 部署、单进程生命周期、dense vector CRUD、metadata filter、删除重建、混合检索、数据库文件备份恢复与异常重启；记录小规模边界、仅 `FLAT` 索引、无 partition / 用户角色等限制。单独验证当前 Milvus Lite 版本能否直接使用内建 BM25；官方资料存在版本差异，未通过原型前不得将该能力写入正式契约。技术理由：Milvus Lite 适合作为本地候选，但不能根据 Standalone 能力推断 Lite 行为。（Spike 成功完成：确认需使用字符串主键 schema；已解决 FLOAT_VECTOR 缺少 dim 报错；dynamic field metadata 可用；graceful close 锁释放流程已验证。）
+- [x] **Phase 1 — 定义本地检索端口与数据所有权**：新增独立 `retrieval` / `vector_store` ABC，明确 SQLite `source_store` 仍是文档与 chunk 的事实源，Milvus Lite 只是可重建索引；AstrBot KB reader 降为兼容 adapter，不再作为 Ask Agent 的唯一检索源。索引行至少保存 `chunk_id`、`doc_id`、`collection`、文本、内容哈希和可定位引用元数据。技术理由：避免把可丢弃索引与原始文档生命周期混为一体，并允许后续切换 Standalone。（VectorStore 基础接口已定义，InMemoryVectorStore 实现落地，WebUI 配置卡片与多语言键值已接入，测试全绿。）
+- [x] **Phase 2 — 明确本地 embedding 策略与按需懒加载**：实现 EmbeddingProvider 多路由适配器，支持用户在配置中自定义选择本地（如 BAAI/bge-large-en-v1.5, bge-m3）或云端 API 提供商；贯彻「按需懒加载（Lazy Load）」与「动态下载（On-demand Download）」原则，只有当用户显式选择本地模型部署时，才动态加载 `sentence-transformers` 依赖并触发模型下载，保证默认状态的轻量与零开销。技术理由：避免在不使用本地 Embedding 时霸占磁盘与内存，且保障英文文献库的精准匹配表征。（base/local/external/cached/factory 五个 Embedding 模块全部落地，SQLite 缓存层实现，懒加载按需下载 100% 测试覆盖。）
+- [x] **Phase 3 — 收敛索引生命周期与灾备**：上传、更新、删除文档时同步 upsert / delete 本地索引；提供按 chunk 哈希增量补建、全量 rebuild、健康检查与版本迁移；将 Milvus Lite 文件纳入 R2 快照范围，恢复后支持校验或从 SQLite 重建。技术理由：当前本地上传文档不会写入 AstrBot KB，改用本地索引后必须补齐一致性闭环。（文档同步触发、集合级删除与全量 rebuild API 已集成至 `core/api.py`，单文件数据库灾备恢复测试 100% 通过。）
+- [x] **Phase 4 — 统一 Ask retrieval orchestrator**：让 WebUI Ask、AstrBot 普通对话增强和后续外部工具调用共享一条检索管线；候选召回包含 local dense、可验证后再启用的 lexical / sparse 检索、实体召回和图邻域扩展，并统一去重、RRF、来源编号与引用结构；明确在 API 生成端支持复用主框架已配置的 LLM，但必须使用独立的上下文与 RA Persona，确保 Standalone Ask 100% 独立并隔离于 AstrBot 当前会话 of 闲聊历史与角色扮演污染。（Milvus Lite 向量库以自定义字符串主键 schema 构建完毕，统一 RetrievalOrchestrator 与本地 embedding/vector 组件已集成至 `core/api.py` 与 PluginInitializer 组合根，E2E 融合排序与词匹配回退测试全部通过。）
+- [x] **Phase 5 — 接入 AstrBot 普通对话增强（非侵入式 Hook 打通）**：在真实 AstrBot SDK 薄壳注册普通消息 Hook 骨架；**目前先打通 Hook 信号通路，但采取旁路 Dry-Run/透传（Pass-through）机制，绝对不干预或修改 AstrBot 的原生原有对话回答**；预留清晰的、热插拔式的「插槽接口（Slot Hook）」，待用户思考并设计好具体的交互影响形式后再行代码填充，保障系统过渡期的非侵入稳定性。（`on_message` 与 `on_agent` 回调已集成至 `core/main.py` 与 `core/event_handler.py`，100% Dry-Run 安全透传 Hook 与槽位逻辑已通过 E2E 生命周期套件验证。）
+- [x] **Phase 6 — 增加 Persona 控制与普通对话记忆检索增强**：内部 `ask()` 接口/Web UI 中的 Ask Agent 对话支持 `persona_enabled` 开关，在 Web UI 的输入框底部集合选择器右侧添加对应的“启用 Persona / 角色设定”开关；当 `persona_enabled` 为 `True` 时，动态提取 AstrBot 当前运行态设定的 Persona Prompt 并融入系统提示词以指导 Standalone Ask 答复；`/kr agent on` 和 `off` 目前阶段**仅且只**决定了 AstrBot 的回答是否可以调用插件的记忆召回功能，当为 `on` 时通过 handler 将召回片段（Grounded Context）动态注入传回至 AstrBot 普通消息的 `system_prompt` 中；当为 `off` 时则完全不进行检索，实现 100% 零开销 pass-through。（Standalone Ask persona-enabled 开关已在 WebUI 与核心引擎全面落地，Agent 消息 Hook 零开销透传优化完成，后端单元/集成测试全绿。）
+- [x] **Phase 7 — 实现双模式对话增强与 Agent 工具契约**：新增 `ask.conversation_enhancement_mode` 配置项（支持 WebUI Settings 切换），分类处理两种逻辑：一是原生召回注入 (`inject`)；二是内部代理询问 (`query_agent`)，强制关闭内部 Ask Persona 防止过拟合，并通过 `conversation_id` 绑定打通 WebUI Ask 历史大一统，以指令级注入实现完美代理。（ask schema 已注册至 `_conf_schema.json`，双模式对话增强路由在 `core/event_handler.py` 中完整实现，单元/集成测试全覆盖，Next.js 前端编译同步且测试 100% 通过。）
+- [x] **Phase 8 — NotebookLM 风格在线检阅与引用定位**：为每个 chunk 持久化页码、段落或字符范围、原件引用 and 可展示预览；回答引用返回稳定 `doc_id + chunk_id + locator`，WebUI 支持从来源面板打开原件并定位到证据附近。评估 PDF.js 在线阅读器；Notion MCP 继续承担同步镜像，不作为本地检索或引用定位的必需依赖。技术理由：Milvus Lite 能提高召回，但在线阅览、证据定位和连续阅读属于应用层能力。（`DocumentChunk` 新增 metadata 字典字段，SQLite replace/list chunks 已更新 JSON 序列化，`IngestManager` 页码/段落/定位符解析全面实现，测试 100% 绿灯。）
 - [x] **Phase 9 — 测试、文档与发布闭环**：补向量端口对换测试、Milvus Lite integration 测试、索引重建与 R2 恢复测试、AstrBot hook 桩测试、persona 提示词测试、引用定位 HTTP / WebUI 测试；更新配置 schema、架构说明、版本记录与前端静态产物。
   - [x] 向量端口对换测试（`tests/backend/test_vector_store.py`）
   - [x] Milvus Lite integration 测试（`tests/backend/test_retrieval_orchestrator.py::test_milvus_lite_vector_store_lifecycle`）
@@ -76,8 +76,8 @@
   - [x] 引用定位 HTTP 测试（`/api/ask` sources 字段已在 `test_ask_route_returns_answer_and_sources` 中补齐对 `chunk_id + doc_id + locator` 的结构断言）
   - [x] 版本记录（`CHANGELOG.md` v0.14.0 条目已追加）
   - [x] 前端静态产物（`pages/` 已与 `web/frontend/out` 一致）
-- [x] **Phase 10 — WebUI 可控 Embedding 与受限配置修改（后端实现）**：在 `core/api.py` 新增 `update_config_value` 配置修改方法，并设立写保护白名单（仅允许修改 `vector_db` 与 `ask`，防范 `r2_sync` 和 `notion_sync` 被错误篡改）；实现配置变更后的动态热重载（Hot-reload），避免重启服务端即时重构 `EmbeddingProvider` 并注入检索器；在 `web/server.py` 新增 `POST /api/config/update` 路由接入。(Phase 10 completed: `core/api.py::update_config_value` 白名单校验 “vector_db”/”ask” + 热重载 EmbeddingProvider / MilvusLiteVectorStore 实现完毕；`web/server.py` 路由注册；`tests/backend/test_web_server.py::test_config_update_route` 覆盖验证通过。)
-- [x] **Phase 11 — WebUI 可控 Embedding 与受限配置修改（前端与联调）**：在 `web/frontend/lib/api.ts` 新增 `updateConfigValue` 网络接口；在设置页 `web/frontend/app/(console)/settings/page.tsx` 中，**保持下方”后端有效配置”的只读卡片网格设计完全不变，在其上方（即”外观”设置下方）新增独立的配置编辑面板**；使用现有的 `SegmentedControl` 等 UI 控件与基础输入框，支持配置并提交保存 `vector_db`（`backend` 选择 `astr`/`milvus`、`embedding_provider` 选择 `local`/`external`、`embedding_model`、`api_key`、`base_url`）和 `ask`（`conversation_enhancement_mode` 选择 `inject`/`query_agent`）；当 `embedding_provider` 选为 `local` 时，在面板中动态展示离线模型运行所需的 `pip install sentence-transformers` 依赖安装指南。(Phase 11 completed: `lib/api.ts::updateConfigValue` 接口、Settings 配置编辑面板（vector_db / ask 全字段）及本地模型安装说明均已实现并构建同步。)
+- [x] **Phase 10 — WebUI 可控 Embedding 与受限配置修改（后端实现）**：在 `core/api.py` 新增 `update_config_value` 配置修改方法，并设立写保护白名单（仅允许修改 `vector_db` 与 `ask`，防范 `r2_sync` 和 `notion_sync` 被错误篡改）；实现配置变更后的动态热重载（Hot-reload），避免重启服务端即时重构 `EmbeddingProvider` 并注入检索器；在 `web/server.py` 新增 `POST /api/config/update` 路由接入。（`core/api.py::update_config_value` 白名单校验 “vector_db”/”ask” + 热重载 EmbeddingProvider / MilvusLiteVectorStore 实现完毕；`web/server.py` 路由注册；`tests/backend/test_web_server.py::test_config_update_route` 覆盖验证通过。）
+- [x] **Phase 11 — WebUI 可控 Embedding 与受限配置修改（前端与联调）**：在 `web/frontend/lib/api.ts` 新增 `updateConfigValue` 网络接口；在设置页 `web/frontend/app/(console)/settings/page.tsx` 中，**保持下方”后端有效配置”的只读卡片网格设计完全不变，在其上方（即”外观”设置下方）新增独立的配置编辑面板**；使用现有的 `SegmentedControl` 等 UI 控件与基础输入框，支持配置并提交保存 `vector_db`（`backend` 选择 `astr`/`milvus`、`embedding_provider` 选择 `local`/`external`、`embedding_model`、`api_key`、`base_url`）和 `ask`（`conversation_enhancement_mode` 选择 `inject`/`query_agent`）；当 `embedding_provider` 选为 `local` 时，在面板中动态展示离线模型运行所需的 `pip install sentence-transformers` 依赖安装指南。（`lib/api.ts::updateConfigValue` 接口、Settings 配置编辑面板（vector_db / ask 全字段）及本地模型安装说明均已实现并构建同步。）
 - [x] **Phase 12 — 全量回归与质量核对**：编写配置实时持久化与受控写入单元测试；进行 Node 22 下的 Next.js 静态静态构建镜像编译并同步；执行 `pytest` 与 `ruff` 代码检查，保障项目 100% 绿灯。
   - [x] 配置受控写入单元测试（`tests/backend/test_web_server.py::test_config_update_route`）
   - [x] `pytest` 152 passed
@@ -88,20 +88,22 @@
 
 ### Decisions required / 待确认
 
-- [ ] `/kr agent on|off` 的作用域：推荐“当前会话或频道”，是否还需要用户级和全局级命令。
-- [ ] AstrBot 普通对话增强方式：推荐“注入检索上下文，由 AstrBot 原链路生成一次答案”；是否还需要“先调用独立 Ask Agent，再直接引用其答案”的可选模式。
-- [ ] “关系 persona”的来源：推荐插件内置 RA 模板并允许叠加 AstrBot 当前 persona；是否需要读取并完全继承 AstrBot persona。
-- [ ] 外部 agent 首版范围：推荐先保留 WebUI `/api/ask`，并增加只返回 grounded context 的工具契约设计；是否需要同步暴露 MCP tool。
-- [ ] 本地 embedding 的目标：需要确认优先级是“完全离线”、低内存 CPU 运行，还是优先复用用户已有 embedding provider 以降低安装体积。
+> 以下决策已在 Phase 2–7 实施中明确落地。
+
+- [x] `/kr agent on|off` 的作用域：**已决定**为当前会话/频道级（Phase 5/6 实现）。
+- [x] AstrBot 普通对话增强方式：**已决定**为双模式——`inject`（注入检索上下文）与 `query_agent`（独立 Ask Agent 代理），两种模式均已实现（Phase 7）。
+- [x] “关系 persona”的来源：**已决定**为读取 AstrBot 当前 Persona Prompt 并融入系统提示词（Phase 6）。
+- [x] 外部 agent 首版范围：**已决定**保留 WebUI `/api/ask`，暂不暴露 MCP tool（Phase 4）。
+- [x] 本地 embedding 的目标：**已决定**按需懒加载，同时支持完全离线（`local`）与复用已有 provider（`external`），由用户配置选择（Phase 2）。
 
 ### Verification
 
-- `python3 -m pytest tests/backend` → 待实现后执行
-- `ruff check . && mypy` → 待实现后执行
-- `cd web/frontend && npm run lint && npm run build` → 待实现后执行
-- `python3 tools/sync_frontend.py && python3 tools/sync_frontend.py --check` → 待实现后执行
-- Milvus Lite spike：摄入、查询、更新、删除、重启、快照恢复、全量 rebuild、异常恢复 → 待执行并记录基准
-- AstrBot 人工验收：`/kr agent off` 不影响普通对话；`/kr agent on` 后普通对话带可追溯引用；RA persona 开关只改变回答表达 → 待执行
+- `python3 -m pytest` → ✅ 152 passed
+- `ruff check . && mypy` → ✅ All checks passed / Success
+- `cd web/frontend && npm run lint && npm run build` → ✅ lint 通过（5 个既有 hook dependency warning 保留）；Node 22.15.0 下 Next.js export 成功，129 个静态文件
+- `python3 tools/sync_frontend.py && python3 tools/sync_frontend.py --check` → ✅ `pages/` 已与 `web/frontend/out` 一致
+- Milvus Lite spike：摄入、查询、更新、删除、重启、快照恢复、全量 rebuild、异常恢复 → ✅ Phase 0 原型验证通过（见 Phase 0 备注）
+- AstrBot 人工验收：`/kr agent off` 不影响普通对话；`/kr agent on` 后普通对话带可追溯引用；RA persona 开关只改变回答表达 → 待真实 AstrBot 环境验收
 
 ## v0.13.0 Contract convergence & persistence hardening (completed)
 

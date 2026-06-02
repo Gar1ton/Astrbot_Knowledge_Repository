@@ -5,6 +5,7 @@ import { Btn } from "@/components/ui/Btn";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import { KbChunk, ApiError, listKbCollections, searchKb } from "@/lib/api";
+import { Select } from "@/components/ui/Select";
 
 function SearchIcon() {
   return (
@@ -92,15 +93,11 @@ export default function SearchPage() {
             placeholder={t("search_placeholder")}
             style={{ flex: 1, minWidth: 180, height: 34, border: "none", background: "transparent", padding: "0 4px", boxShadow: "none" }}
           />
-          <select
+          <Select
             value={collection}
-            onChange={(e) => setCollection(e.target.value)}
-            style={{ height: 36, fontSize: 13, padding: "0 10px", borderRadius: 10 }}
-          >
-            {collections.map((c) => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
+            onChange={setCollection}
+            options={collections.map((c) => ({ value: c, label: c }))}
+          />
 
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>{t("search_top_k")}</span>

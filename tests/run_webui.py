@@ -27,6 +27,7 @@ if str(_ROOT) not in sys.path:
 from aiohttp import web  # noqa: E402
 
 from core.api import KnowledgeRepositoryApi  # noqa: E402
+from core.ask_progress import ProgressStore  # noqa: E402
 from core.config import Config  # noqa: E402
 from core.domain.models import (  # noqa: E402
     Collection,
@@ -34,6 +35,8 @@ from core.domain.models import (  # noqa: E402
     SourceDocument,
     SyncTargetKind,
 )
+from core.metrics import PerformanceTracker  # noqa: E402
+from core.repository.graph_store.memory import InMemoryGraphStore  # noqa: E402
 from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader  # noqa: E402
 from core.repository.source_store.memory import InMemorySourceDocumentStore  # noqa: E402
 from core.repository.sync_targets.memory import InMemorySyncTarget  # noqa: E402
@@ -162,6 +165,9 @@ async def _make_app(args: argparse.Namespace) -> web.Application:
         sync_targets=targets,
         sync_pipeline=_DebugSyncPipeline(),  # type: ignore[arg-type]
         config=config,
+        graph_store=InMemoryGraphStore(),
+        metrics=PerformanceTracker(),
+        progress_store=ProgressStore(),
     )
     upload_dir = Path(tempfile.gettempdir()) / "kr_webui_uploads"
     static_dir = _ROOT / "web" / "frontend" / "out"

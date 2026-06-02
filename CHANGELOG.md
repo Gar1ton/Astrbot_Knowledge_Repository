@@ -21,6 +21,28 @@
 
 ---
 
+## [v0.15.0] — 2026-06-02
+
+### 新增功能 (Added)
+
+- **集合删除确认弹窗与文档安全迁移**：删除集合时弹出模态框，要求用户手动输入集合名称才可确认；非空集合删除前自动将文档迁入系统集合 `_uncategorized`，防止数据丢失。涉及 `web/frontend/app/(console)/documents/page.tsx`（`DeleteCollectionModal` 组件、侧边栏悬停删除按钮）。
+
+- **`_uncategorized` 系统集合（未归档）**：新增受保护的系统集合，集合删除时文档自动迁入；前端侧边栏以收件箱图标+「未归档」标签区别展示，置于普通集合之上；不可通过 UI 删除。涉及 `core/api.py`（`SYSTEM_COLLECTION_UNCATEGORIZED` 常量、`_ensure_system_collections()`、改写 `delete_collection()`）、`core/repository/source_store/base.py`（新增 `move_documents_to_collection` 抽象方法）、`sqlite.py`、`memory.py`、`web/server.py`（`_collection_dict` 增加 `is_system` 字段、`handle_delete_collection` 返回 400 拦截系统集合）、`web/frontend/lib/api.ts`（`Collection.is_system`）。
+
+- **延迟索引模式（索引维护模式）**：新增 `auto_index_enabled` 配置项；关闭后文档上传仅写入 SQLite，跳过 embedding 步骤，并标记 `needs_reindex=True`；工具栏新增「自动索引/索引暂停」toggle 与「重建索引」按钮（附待索引数 badge）；手动触发后批量 embedding 并清除标记。涉及 `migrations/005_needs_reindex.sql`（新文件）、`core/domain/models.py`（`needs_reindex` 字段）、`core/config.py`（`auto_index_enabled` 字段）、`core/runtime_config.py`（白名单扩展）、`core/repository/source_store/sqlite.py`（全量 SQL 适配、`list_pending_reindex_documents()`）、`core/api.py`（`register_document` 检查开关、`rebuild_index_pending()`、`get_pending_reindex_count()`）、`web/server.py`（两条新路由）、`web/frontend/lib/api.ts`（`rebuildIndexPending()`、`getPendingReindexCount()`）、`web/frontend/app/(console)/documents/page.tsx`。
+
+- **响应式面板布局**：为文档页左侧边栏和右侧检查器面板引入 CSS 自定义属性 `--sidebar-left-w` / `--inspector-w`，在 ≤1100px 时收窄、≤860px 时自动隐藏，中列加 `minWidth: 200` 防止内容区过度压缩。涉及 `web/frontend/styles/tokens.css`、`web/frontend/app/(console)/documents/page.tsx`（`data-panel` 属性）。
+
+### 修复 (Fixed)
+
+- **`VectorDbConfig.db_filename` 默认值语义错误**：新安装的默认向量库文件名由 `milvus_lite.db` 更正为 `vector_store.db`，更具通用性；存量安装的已持久化配置不受影响。涉及 `core/config.py`。
+
+### 架构健康 (Refactor)
+
+- `web/frontend/lib/i18n.ts` 新增 12 个国际化键（集合删除、索引模式系列），保持中英双语对齐。
+
+---
+
 ## [v0.14.0] — 2026-06-01
 
 ### 新增功能 (Added)
@@ -154,7 +176,7 @@
 - `web/frontend/next.config.ts`：`output: 'export'`（生产）/ dev rewrite → `:6520`（开发），`images.unoptimized: true`。
 - `metadata.yaml`：version 升至 `v0.10.0`。
 
-## [Unreleased]
+## [v0.8.0] — 2026-05-30
 
 ### 新增功能 (Added)
 
@@ -165,7 +187,16 @@
 - 设置核对与前后端接线验证 (`core/api.py`, `web/server.py`, `web/frontend/index.html`, `pages/index.html`):
   - 新增 `GET /api/config/effective`、`POST /api/notion/init`、`POST /api/sync/notion/pull`。
   - 新增 `/kr notion init` 与 `/kr sync notion --pull` CLI 薄壳。
-  - Web 控制台新增“设置核对”页、前后端能力矩阵、Notion 初始化按钮和 Notion 反向拉取按钮。
+  - Web 控制台新增”设置核对”页、前后端能力矩阵、Notion 初始化按钮和 Notion 反向拉取按钮。
+
+### 测试 (Tests)
+
+- 增强 `tests/backend/test_config.py`、`tests/backend/test_notion_target.py`、`tests/backend/test_web_server.py`、`tests/backend/test_lifecycle_and_cli.py`，覆盖 Notion 自动建库、pull 合并策略、配置脱敏、HTTP 路由和 CLI 入口。
+
+## [v0.7.0] — 2026-05-30
+
+### 新增功能 (Added)
+
 - 图谱可视化与检索预览进阶 (`core/api.py`, `web/server.py`, `web/frontend/index.html`, `pages/index.html`):
   - `GraphStore` 正式扩展 `list_entities()` / `list_relations()` 读取契约，并在 SQLite / 内存实现中保持一致，供图谱前端通过 API 门面读取。
   - `core/api.py::get_graph()` 落地 collection 级图谱数据接口，返回 nodes / edges 与 `source_previews` 来源片段预览，不直读前端侧数据库细节。
@@ -174,7 +205,6 @@
 
 ### 测试 (Tests)
 
-- 增强 `tests/backend/test_config.py`、`tests/backend/test_notion_target.py`、`tests/backend/test_web_server.py`、`tests/backend/test_lifecycle_and_cli.py`，覆盖 Notion 自动建库、pull 合并策略、配置脱敏、HTTP 路由和 CLI 入口。
 - 增强 `tests/backend/test_graph_store.py`、`tests/backend/test_api.py`、`tests/backend/test_graph_search_pipeline.py`、`tests/backend/test_web_server.py`，覆盖图谱读取契约、collection 过滤、source preview、HTTP graph data 与 debug 查询。
 
 ## [v0.6.0] — 2026-05-30
@@ -292,18 +322,6 @@
   - `_conf_schema.json`：定义 5 组配置 source_store / r2_sync / notion_sync / web_console / graph（含 R2 10GB 额度预警字段、Notion 5MiB 限制、Web 独立端口、LightRAG 增量参数）。
   - `requirements.txt`：aiosqlite/PyMuPDF/boto3/aiohttp/numpy + 测试链（检索与 Notion 复用 AstrBot 既有能力，故不引入向量库/notion-sdk）。
   - `CLAUDE.md §5`：填入 install/test/lint 真实命令。
-
-<!--
-发布时：把上面的 [Unreleased] 整体改写为：
-
-## [vX.Y.Z] — YYYY-MM-DD
-
-### 新增功能 (Added)
-- ...
-
-### 修复 (Fixed)
-- ...
--->
 
 ---
 

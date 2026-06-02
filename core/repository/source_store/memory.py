@@ -39,6 +39,22 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
     async def delete_collection(self, name: str) -> bool:
         return self._collections.pop(name, None) is not None
 
+    async def move_documents_to_collection(self, from_name: str, to_name: str) -> int:
+        count = 0
+        for doc in self._documents.values():
+            if doc.collection == from_name:
+                doc.collection = to_name
+                count += 1
+        return count
+
+    async def list_pending_reindex_documents(self) -> list[SourceDocument]:
+        import copy
+        pending = [d for d in self._documents.values() if d.needs_reindex]
+        return [
+            copy.deepcopy(d)
+            for d in sorted(pending, key=lambda d: (d.created_at is None, d.created_at, d.doc_id))
+        ]
+
     # ── 文档 ────────────────────────────────────────────────────
 
     async def add_document(self, document: SourceDocument) -> None:

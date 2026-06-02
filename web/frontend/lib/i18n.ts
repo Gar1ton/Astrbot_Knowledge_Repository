@@ -6,7 +6,7 @@ export type Lang = "zh" | "en";
 
 const zh = {
   // 导航
-  nav_ask: "Ask Agent",
+  nav_ask: "Research Agent",
   nav_knowledge: "知识库",
   nav_documents: "文档",
   nav_search: "知识库检索",
@@ -55,6 +55,15 @@ const zh = {
   docs_upload_hint: "拖放文件到此处，或点击上传",
   docs_upload_collection_label: "目标集合",
   docs_upload_tags_label: "标签（逗号分隔）",
+  docs_uncategorized: "未归档",
+  docs_delete_collection_title: "删除集合",
+  docs_delete_collection_warn: "此集合包含 {n} 个文档，删除后将自动移入「未归档」",
+  docs_delete_collection_confirm_hint: "输入集合名称以确认删除",
+  docs_delete_collection_btn: "确认删除",
+  docs_index_mode_auto: "自动索引",
+  docs_index_mode_paused: "索引暂停",
+  docs_rebuild_index: "重建索引",
+  docs_pending_reindex: "{n} 待索引",
 
   // 检索
   search_placeholder: "输入关键词检索知识库...",
@@ -64,14 +73,14 @@ const zh = {
   search_no_results: "未找到匹配片段",
   search_chunk_title: "片段 #{ordinal}",
 
-  // Ask Agent
+  // Research Agent
   ask_placeholder: "向知识库提问...",
   ask_send: "发送",
   ask_sources: "引用来源",
   ask_open_doc: "在文档中打开",
   ask_thinking: "正在检索知识库...",
   ask_empty: "开始一段对话",
-  ask_empty_title: "开始与 Ask Agent 对话",
+  ask_empty_title: "开始与 Research Agent 对话",
   ask_empty_sub: "您可以提问任何关于当前知识库中存储文档的问题，支持混合检索与智能生成。",
   ask_collection_all: "全部集合",
   ask_persona_toggle: "启用 Persona 角色设定",
@@ -122,7 +131,7 @@ const zh = {
   settings_config_notion: "Notion 镜像",
   settings_config_web: "Web 控制台",
   settings_config_graph: "知识图谱",
-  settings_config_ask: "Ask Agent",
+  settings_config_ask: "Research Agent",
   settings_config_vector_db: "向量数据库与检索后端",
 
   // 配置修改
@@ -145,7 +154,7 @@ const zh = {
 } as const;
 
 const en: Record<keyof typeof zh, string> = {
-  nav_ask: "Ask Agent",
+  nav_ask: "Research Agent",
   nav_knowledge: "Knowledge",
   nav_documents: "Documents",
   nav_search: "KB Search",
@@ -191,6 +200,15 @@ const en: Record<keyof typeof zh, string> = {
   docs_upload_hint: "Drop files here, or click to upload",
   docs_upload_collection_label: "Target Collection",
   docs_upload_tags_label: "Tags (comma-separated)",
+  docs_uncategorized: "Unfiled",
+  docs_delete_collection_title: "Delete Collection",
+  docs_delete_collection_warn: "This collection has {n} document(s). They will be moved to Unfiled.",
+  docs_delete_collection_confirm_hint: "Type the collection name to confirm",
+  docs_delete_collection_btn: "Confirm Delete",
+  docs_index_mode_auto: "Auto Index",
+  docs_index_mode_paused: "Index Paused",
+  docs_rebuild_index: "Rebuild Index",
+  docs_pending_reindex: "{n} pending",
 
   search_placeholder: "Search knowledge base...",
   search_collection: "Collection",
@@ -205,7 +223,7 @@ const en: Record<keyof typeof zh, string> = {
   ask_open_doc: "Open in Documents",
   ask_thinking: "Searching knowledge base...",
   ask_empty: "Start a conversation",
-  ask_empty_title: "Start a conversation with Ask Agent",
+  ask_empty_title: "Start a conversation with Research Agent",
   ask_empty_sub: "Ask any question about the documents in the knowledge base. Powered by hybrid search and generation.",
   ask_collection_all: "All Collections",
   ask_persona_toggle: "Enable Persona constraints",
@@ -252,7 +270,7 @@ const en: Record<keyof typeof zh, string> = {
   settings_config_notion: "Notion Mirror",
   settings_config_web: "Web Console",
   settings_config_graph: "Knowledge Graph",
-  settings_config_ask: "Ask Agent",
+  settings_config_ask: "Research Agent",
   settings_config_vector_db: "Vector Database & Backend",
 
   settings_edit_title: "Core Parameters Configuration",

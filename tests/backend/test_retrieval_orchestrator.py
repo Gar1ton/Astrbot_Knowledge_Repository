@@ -52,7 +52,8 @@ async def sqlite_store(temp_dir):
         collection TEXT,
         tags TEXT,
         created_at TEXT,
-        updated_at TEXT
+        updated_at TEXT,
+        needs_reindex INTEGER NOT NULL DEFAULT 0
     )
     """)
     await db.execute("""

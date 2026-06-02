@@ -25,6 +25,7 @@ _ALLOWED_RUNTIME_KEYS = {
         "api_key",
         "base_url",
         "db_filename",
+        "auto_index_enabled",
     }),
     "ask": frozenset({"conversation_enhancement_mode", "persona_enabled"}),
 }

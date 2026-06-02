@@ -85,6 +85,15 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             await self._db.commit()
             return cursor.rowcount > 0
 
+    async def move_documents_to_collection(self, from_name: str, to_name: str) -> int:
+        now_str = _format_dt(datetime.now(timezone.utc))
+        async with self._db.execute(
+            "UPDATE documents SET collection = ?, updated_at = ? WHERE collection = ?",
+            (to_name, now_str, from_name),
+        ) as cursor:
+            await self._db.commit()
+            return cursor.rowcount
+
     # ── 文档 ────────────────────────────────────────────────────
 
     async def add_document(self, document: SourceDocument) -> None:
@@ -97,8 +106,8 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 """
                 INSERT INTO documents (
                     doc_id, title, file_path, content_type, size_bytes,
-                    content_hash, collection, tags, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    content_hash, collection, tags, created_at, updated_at, needs_reindex
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document.doc_id,
@@ -111,6 +120,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                     tags_str,
                     created_at_str,
                     updated_at_str,
+                    int(document.needs_reindex),
                 ),
             )
             await self._db.commit()
@@ -123,7 +133,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         async with self._db.execute(
             """
             SELECT title, file_path, content_type, size_bytes, content_hash,
-                   collection, tags, created_at, updated_at
+                   collection, tags, created_at, updated_at, needs_reindex
               FROM documents WHERE doc_id = ?
             """,
             (doc_id,),
@@ -150,6 +160,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 tags=tags,
                 created_at=_parse_dt(row[7]),
                 updated_at=_parse_dt(row[8]),
+                needs_reindex=bool(row[9]),
             )
 
     async def list_documents(
@@ -157,7 +168,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
     ) -> list[SourceDocument]:
         query = """
             SELECT doc_id, title, file_path, content_type, size_bytes,
-                   content_hash, collection, tags, created_at, updated_at
+                   content_hash, collection, tags, created_at, updated_at, needs_reindex
               FROM documents
         """
         params = []
@@ -201,8 +212,37 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                         tags=tags,
                         created_at=_parse_dt(row[8]),
                         updated_at=_parse_dt(row[9]),
+                        needs_reindex=bool(row[10]),
                     )
                 )
+            return results
+
+    async def list_pending_reindex_documents(self) -> list[SourceDocument]:
+        """列出所有标记为待重建索引的文档。"""
+        async with self._db.execute(
+            """
+            SELECT doc_id, title, file_path, content_type, size_bytes,
+                   content_hash, collection, tags, created_at, updated_at, needs_reindex
+              FROM documents WHERE needs_reindex = 1
+             ORDER BY created_at ASC, doc_id ASC
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+            results = []
+            for row in rows:
+                try:
+                    tags = json.loads(row[7])
+                    if not isinstance(tags, list):
+                        tags = []
+                except (json.JSONDecodeError, TypeError):
+                    tags = []
+                results.append(SourceDocument(
+                    doc_id=row[0], title=row[1], file_path=row[2],
+                    content_type=row[3], size_bytes=row[4], content_hash=row[5],
+                    collection=row[6], tags=tags,
+                    created_at=_parse_dt(row[8]), updated_at=_parse_dt(row[9]),
+                    needs_reindex=bool(row[10]),
+                ))
             return results
 
     async def update_document(self, document: SourceDocument) -> bool:
@@ -213,7 +253,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             """
             UPDATE documents SET
                 title = ?, file_path = ?, content_type = ?, size_bytes = ?,
-                content_hash = ?, collection = ?, tags = ?, updated_at = ?
+                content_hash = ?, collection = ?, tags = ?, updated_at = ?, needs_reindex = ?
             WHERE doc_id = ?
             """,
             (
@@ -225,6 +265,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 document.collection,
                 tags_str,
                 updated_at_str,
+                int(document.needs_reindex),
                 document.doc_id,
             ),
         ) as cursor:

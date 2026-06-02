@@ -16,11 +16,13 @@ from typing import TYPE_CHECKING, Any
 import aiosqlite
 
 from core.api import KnowledgeRepositoryApi
+from core.ask_progress import ProgressStore
 from core.config import Config, merge_config_dicts
 from core.domain.models import SyncTargetKind
 from core.managers.category_manager import CategoryManager
 from core.managers.ingest_manager import IngestManager
 from core.managers.quota_manager import QuotaManager
+from core.metrics import PerformanceTracker
 from core.pipelines.sync_pipeline import SyncPipeline
 from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
 from core.repository.sync_targets.r2 import R2SyncTarget
@@ -66,6 +68,8 @@ class PluginInitializer:
         self.embedding_provider: EmbeddingProvider | None = None
         self.retrieval_orchestrator: RetrievalOrchestrator | None = None
         self.agent_enabled: bool = False
+        self.metrics: PerformanceTracker = PerformanceTracker()
+        self.progress_store: ProgressStore = ProgressStore()
 
         # 依赖句柄
         self.ingest_manager: IngestManager | None = None
@@ -194,6 +198,8 @@ class PluginInitializer:
             vector_store=self.vector_store,
             embedding_provider=self.embedding_provider,
             retrieval_orchestrator=self.retrieval_orchestrator,
+            metrics=self.metrics,
+            progress_store=self.progress_store,
         )
 
         # 6) 周期任务（如 R2 周期备份，v0.3.0 起注册）。

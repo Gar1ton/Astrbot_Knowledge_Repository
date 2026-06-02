@@ -9,6 +9,7 @@
 export interface Collection {
   name: string;
   description?: string;
+  is_system?: boolean;
 }
 
 export interface KrDocument {
@@ -21,6 +22,7 @@ export interface KrDocument {
   chunks?: number;
   updated?: string;
   ext?: string;
+  needs_reindex?: boolean;
 }
 
 export interface KbChunk {
@@ -329,7 +331,14 @@ export async function login(username: string, password: string): Promise<void> {
 
 export async function logout(): Promise<void> {
   if (isMock()) return;
-  await apiFetch<{ ok: boolean }>("/api/logout", { method: "POST" });
+  try {
+    await apiFetch<{ ok: boolean }>("/api/logout", { method: "POST" });
+  } catch (e) {
+    // Fallback: clear session cookie locally if backend logout endpoint doesn't exist
+    if (typeof document !== "undefined") {
+      document.cookie = "kr_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -495,6 +504,36 @@ export async function updateConfigValue(
 }
 
 
+export async function rebuildIndexPending(): Promise<{ rebuilt_docs: number; rebuilt_chunks: number }> {
+  if (isMock()) return { rebuilt_docs: 0, rebuilt_chunks: 0 };
+  return apiFetch("/api/documents/rebuild-index", { method: "POST" });
+}
+
+export async function getPendingReindexCount(): Promise<{ count: number }> {
+  if (isMock()) return { count: 0 };
+  return apiFetch("/api/documents/pending-reindex-count");
+}
+
+export interface EmbeddingTestResult {
+  status: "ok" | "error";
+  dimension?: number;
+  model?: string;
+  message?: string;
+}
+
+export async function testEmbeddingConnection(
+  apiKey: string,
+  baseUrl: string,
+  modelName: string
+): Promise<EmbeddingTestResult> {
+  if (isMock()) return { status: "ok", dimension: 1024, model: modelName };
+  return apiFetch<EmbeddingTestResult>("/api/config/test-embedding", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: apiKey, base_url: baseUrl, model_name: modelName }),
+  });
+}
+
 // ─────────────────────────────────────────────────────────────
 // 知识图谱 Graph
 // ─────────────────────────────────────────────────────────────
@@ -617,4 +656,68 @@ export async function ask(opts: {
       persona_enabled: opts.persona_enabled ?? false,
     }),
   });
+}
+
+// ─────────────────────────────────────────────────────────────
+// 图谱统计 & 性能指标
+// ─────────────────────────────────────────────────────────────
+
+export interface GraphStats {
+  entities_count: number;
+  relations_count: number;
+  collections_covered: number;
+}
+
+export async function getGraphStats(): Promise<GraphStats> {
+  if (isMock()) {
+    return { entities_count: 12, relations_count: 18, collections_covered: 2 };
+  }
+  return apiFetch<GraphStats>("/api/graph/stats");
+}
+
+// ─────────────────────────────────────────────────────────────
+// 系统信息 & 文件列表 & 本地模型管理
+// ─────────────────────────────────────────────────────────────
+
+export interface SystemInfo {
+  cwd: string; data_dir: string; db_file: string; docs_dir: string;
+  python_version: string; platform: string;
+}
+export interface FileEntry { name: string; type: "file" | "dir"; size_bytes: number | null; modified_at: string | null; }
+export interface FileList  { path: string; entries: FileEntry[]; }
+export interface LocalModel { name: string; dir_name: string; size_bytes: number; last_modified: string | null; }
+
+export async function getSystemInfo(): Promise<SystemInfo> {
+  if (isMock()) return { cwd: "/mock/cwd", data_dir: "/mock/data", db_file: "knowledge_repository.db", docs_dir: "/mock/data/documents", python_version: "3.12.0", platform: "linux" };
+  return apiFetch<SystemInfo>("/api/system/info");
+}
+
+export async function listDataFiles(subdir?: string): Promise<FileList> {
+  const qs = subdir ? `?dir=${encodeURIComponent(subdir)}` : "";
+  if (isMock()) return { path: subdir ?? "", entries: [] };
+  return apiFetch<FileList>(`/api/files/list${qs}`);
+}
+
+export async function listLocalModels(): Promise<LocalModel[]> {
+  if (isMock()) return [
+    { name: "BAAI/bge-m3", dir_name: "models--BAAI--bge-m3", size_bytes: 2_100_000_000, last_modified: null },
+  ];
+  return apiFetch<LocalModel[]>("/api/models/local");
+}
+
+export async function deleteLocalModel(name: string): Promise<void> {
+  if (isMock()) return;
+  await apiFetch<{ deleted: string }>(`/api/models/local/${encodeURIComponent(name.replace("/", "--"))}`, { method: "DELETE" });
+}
+
+// ─────────────────────────────────────────────────────────────
+// 日志流
+// ─────────────────────────────────────────────────────────────
+
+export interface LogLine { ts: number; level: string; name: string; msg: string; }
+export interface LogsResponse { lines: LogLine[]; server_ts: number; }
+
+export async function getLogs(after = 0, limit = 200): Promise<LogsResponse> {
+  if (isMock()) return { lines: [], server_ts: Date.now() / 1000 };
+  return apiFetch<LogsResponse>(`/api/logs?after=${after}&limit=${limit}`);
 }

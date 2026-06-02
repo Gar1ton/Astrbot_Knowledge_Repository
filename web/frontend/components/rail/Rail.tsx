@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useI18n } from "@/lib/i18n";
 import { getQuota } from "@/lib/api";
+import { PerfPanel } from "@/components/ui/PerfPanel";
 
 // ─── 图标（内联 SVG，避免额外依赖） ──────────────────────────
 
@@ -60,6 +61,14 @@ function QuotaIcon() {
   );
 }
 
+function TerminalIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+    </svg>
+  );
+}
+
 function SettingsIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -105,33 +114,28 @@ interface NavItemProps {
   label: string;
   badge?: number;
   featured?: boolean;
+  collapsed?: boolean;
 }
 
-function NavItem({ href, icon, label, badge, featured }: NavItemProps) {
+function NavItem({ href, icon, label, badge, featured, collapsed }: NavItemProps) {
   const pathname = usePathname();
   const isActive = pathname === href || pathname.startsWith(href + "/");
 
   return (
     <Link
       href={href}
+      title={collapsed ? label : undefined}
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 8,
-        padding: "7px 10px",
+        justifyContent: collapsed ? "center" : undefined,
+        gap: collapsed ? 0 : 8,
+        padding: collapsed ? "8px" : "7px 10px",
         borderRadius: 10,
         fontSize: 13,
         fontWeight: isActive ? 600 : 450,
-        color: isActive
-          ? "var(--accent)"
-          : featured
-          ? "var(--fg)"
-          : "var(--fg-muted)",
-        background: isActive
-          ? "var(--accent-soft)"
-          : featured && !isActive
-          ? "transparent"
-          : "transparent",
+        color: isActive ? "var(--accent)" : featured ? "var(--fg)" : "var(--fg-muted)",
+        background: isActive ? "var(--accent-soft)" : "transparent",
         border: featured && !isActive
           ? "1px solid var(--accent-border)"
           : isActive
@@ -146,7 +150,7 @@ function NavItem({ href, icon, label, badge, featured }: NavItemProps) {
         animation: featured ? "sparkleFloat 4.5s ease-in-out infinite" : "none",
       }}
     >
-      {isActive && (
+      {isActive && !collapsed && (
         <span
           style={{
             position: "absolute",
@@ -161,36 +165,14 @@ function NavItem({ href, icon, label, badge, featured }: NavItemProps) {
         />
       )}
       <span style={{ opacity: isActive ? 1 : 0.7 }}>{icon}</span>
-      <span style={{ flex: 1 }}>{label}</span>
-      {featured && (
-        <span
-          style={{
-            background: "var(--accent-soft)",
-            color: "var(--accent)",
-            borderRadius: 999,
-            fontSize: 9,
-            fontWeight: 700,
-            padding: "0 5px",
-            lineHeight: "16px",
-          }}
-        >
+      {!collapsed && <span style={{ flex: 1 }}>{label}</span>}
+      {!collapsed && featured && (
+        <span style={{ background: "var(--accent-soft)", color: "var(--accent)", borderRadius: 999, fontSize: 9, fontWeight: 700, padding: "0 5px", lineHeight: "16px" }}>
           AI
         </span>
       )}
-      {badge !== undefined && badge > 0 && (
-        <span
-          style={{
-            background: "var(--warn)",
-            color: "#fff",
-            borderRadius: 999,
-            fontSize: 10,
-            fontWeight: 700,
-            padding: "0 5px",
-            lineHeight: "16px",
-            minWidth: 16,
-            textAlign: "center",
-          }}
-        >
+      {!collapsed && badge !== undefined && badge > 0 && (
+        <span style={{ background: "var(--warn)", color: "#fff", borderRadius: 999, fontSize: 10, fontWeight: 700, padding: "0 5px", lineHeight: "16px", minWidth: 16, textAlign: "center" }}>
           {badge > 99 ? "99+" : badge}
         </span>
       )}
@@ -220,9 +202,11 @@ function SectionLabel({ label }: { label: string }) {
 
 interface RailProps {
   onLogout?: () => void;
+  collapsed?: boolean;
+  onToggle?: () => void;
 }
 
-export function Rail({ onLogout }: RailProps) {
+export function Rail({ onLogout, collapsed = false, onToggle }: RailProps) {
   const { t } = useI18n();
   const { resolvedTheme, setTheme } = useTheme();
   const [quotaRatio, setQuotaRatio] = useState<number | null>(null);
@@ -239,201 +223,157 @@ export function Rail({ onLogout }: RailProps) {
   const quotaWarning =
     quotaRatio !== null && quotaRatio >= 0.8 ? Math.round(quotaRatio * 100) : undefined;
 
+  const w = collapsed ? 52 : "var(--rail-w, 220px)";
+
   return (
     <nav
       style={{
-        width: "var(--rail-w, 220px)",
+        width: w,
         minHeight: "100vh",
         background: "var(--surface)",
         borderRight: "1px solid var(--border)",
         display: "flex",
         flexDirection: "column",
-        padding: "0 10px",
+        padding: collapsed ? "0 6px" : "0 10px",
         flexShrink: 0,
         position: "sticky",
         top: 0,
         overflowY: "auto",
         overflowX: "hidden",
+        transition: "width .2s ease, padding .2s ease",
       }}
       className="fx-glass-edge"
     >
-      {/* 品牌区 */}
-      <div
-        style={{
-          padding: "16px 10px 10px",
-          borderBottom: "1px solid var(--border)",
-          marginBottom: 6,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span
-            style={{
-              width: 28,
-              height: 28,
-              borderRadius: 8,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "var(--accent)",
-              color: "var(--accent-fg)",
-              boxShadow: "var(--shadow)",
-              flexShrink: 0,
-              animation: "sparkleFloat 4.5s ease-in-out infinite",
-            }}
-          >
-            <SparkleIcon />
-          </span>
-          <span
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              minWidth: 0,
-            }}
-          >
-            <span
-              style={{
-                fontSize: 13,
-                fontWeight: 700,
-                color: "var(--heading)",
-                letterSpacing: "-0.02em",
-                lineHeight: 1.2,
-              }}
-            >
-              Knowledge Repo
+      {/* 品牌区 + 收起按钮 */}
+      {collapsed ? (
+        /* 折叠态：整个 header 就是展开按钮 */
+        <button
+          onClick={onToggle}
+          title="展开侧边栏"
+          style={{
+            height: "var(--topbar-h)", boxSizing: "border-box",
+            margin: "0 -6px 6px", width: "calc(100% + 12px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            borderBottom: "1px solid var(--border)", borderLeft: "none",
+            borderRight: "none", borderTop: "none",
+            background: "transparent", color: "var(--fg-subtle)",
+            cursor: "pointer", transition: "all .15s",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-inset)"; e.currentTarget.style.color = "var(--fg)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--fg-subtle)"; }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="9 18 15 12 9 6"/>
+          </svg>
+        </button>
+      ) : (
+        /* 展开态：品牌 + 收起按钮 */
+        <div
+          style={{
+            height: "var(--topbar-h)", boxSizing: "border-box",
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            borderBottom: "1px solid var(--border)",
+            margin: "0 -10px 6px", padding: "0 12px 0 20px", gap: 6,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+            <span style={{ width: 28, height: 28, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--accent)", color: "var(--accent-fg)", boxShadow: "var(--shadow)", flexShrink: 0, animation: "sparkleFloat 4.5s ease-in-out infinite" }}>
+              <SparkleIcon />
             </span>
-            <span
-              style={{
-                fontSize: 10,
-                color: "var(--fg-subtle)",
-                lineHeight: 1.25,
-              }}
-            >
-              知识库控制台
+            <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--heading)", letterSpacing: "-0.02em", lineHeight: 1.2 }}>Knowledge Repo</span>
+              <span style={{ fontSize: 10, color: "var(--fg-subtle)", lineHeight: 1.25 }}>知识库控制台</span>
             </span>
-          </span>
+          </div>
+          <button
+            onClick={onToggle}
+            title="收起侧边栏"
+            style={{
+              width: 24, height: 24, borderRadius: 6, border: "none",
+              background: "transparent", color: "var(--fg-subtle)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              cursor: "pointer", flexShrink: 0, transition: "all .15s",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-inset)"; e.currentTarget.style.color = "var(--fg)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--fg-subtle)"; }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="15 18 9 12 15 6"/>
+            </svg>
+          </button>
         </div>
-      </div>
+      )}
 
       {/* Ask Agent（featured） */}
       <div style={{ padding: "6px 0" }}>
-        <NavItem
-          href="/ask"
-          icon={<SparkleIcon />}
-          label={t("nav_ask")}
-          featured
-        />
+        <NavItem href="/ask" icon={<SparkleIcon />} label={t("nav_ask")} featured collapsed={collapsed} />
       </div>
 
       {/* 知识库分组 */}
-      <SectionLabel label={t("nav_knowledge")} />
+      {!collapsed && <SectionLabel label={t("nav_knowledge")} />}
+      {collapsed && <div style={{ height: 8 }} />}
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <NavItem href="/documents" icon={<DocIcon />} label={t("nav_documents")} />
-        <NavItem href="/search" icon={<SearchIcon />} label={t("nav_search")} />
-        <NavItem href="/graph" icon={<GraphIcon />} label={t("nav_graph")} />
+        <NavItem href="/documents" icon={<DocIcon />} label={t("nav_documents")} collapsed={collapsed} />
+        <NavItem href="/search" icon={<SearchIcon />} label={t("nav_search")} collapsed={collapsed} />
+        <NavItem href="/graph" icon={<GraphIcon />} label={t("nav_graph")} collapsed={collapsed} />
       </div>
 
       {/* 运维分组 */}
-      <SectionLabel label={t("nav_ops")} />
+      {!collapsed && <SectionLabel label={t("nav_ops")} />}
+      {collapsed && <div style={{ height: 8 }} />}
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-        <NavItem href="/sync" icon={<SyncIcon />} label={t("nav_sync")} />
-        <NavItem
-          href="/quota"
-          icon={<QuotaIcon />}
-          label={t("nav_quota")}
-          badge={quotaWarning}
-        />
+        <NavItem href="/sync" icon={<SyncIcon />} label={t("nav_sync")} collapsed={collapsed} />
+        <NavItem href="/quota" icon={<QuotaIcon />} label={t("nav_quota")} badge={quotaWarning} collapsed={collapsed} />
+        <NavItem href="/terminal" icon={<TerminalIcon />} label="终端日志" collapsed={collapsed} />
       </div>
 
       {/* 弹性间隔 */}
       <div style={{ flex: 1 }} />
 
-      {/* 底部：设置 + 主题切换 + 用户区 */}
-      <div
-        style={{
-          borderTop: "1px solid var(--border)",
-          paddingTop: 8,
-          paddingBottom: 12,
-          display: "flex",
-          flexDirection: "column",
-          gap: 2,
-        }}
-      >
-        <NavItem href="/settings" icon={<SettingsIcon />} label={t("nav_settings")} />
+      {/* 底部：性能监控 + 设置 + 主题切换 + 用户区 */}
+      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, paddingBottom: 12, display: "flex", flexDirection: "column", gap: 2 }}>
+        <PerfPanel collapsed={collapsed} />
+        <NavItem href="/settings" icon={<SettingsIcon />} label={t("nav_settings")} collapsed={collapsed} />
 
         {/* 主题切换 */}
         <button
           onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
           title={resolvedTheme === "dark" ? t("settings_theme_light") : t("settings_theme_dark")}
           style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            width: "100%",
-            padding: "7px 10px",
-            borderRadius: 10,
-            fontSize: 13,
-            color: "var(--fg-muted)",
-            background: "none",
-            border: "1px solid transparent",
-            cursor: "pointer",
-            transition: "all 0.15s",
-            textAlign: "left",
-            fontFamily: "inherit",
+            display: "flex", alignItems: "center", justifyContent: collapsed ? "center" : undefined,
+            gap: collapsed ? 0 : 8, width: "100%",
+            padding: collapsed ? "8px" : "7px 10px",
+            borderRadius: 10, fontSize: 13, color: "var(--fg-muted)",
+            background: "none", border: "1px solid transparent",
+            cursor: "pointer", transition: "all 0.15s", textAlign: "left", fontFamily: "inherit",
           }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = "var(--surface-hover)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = "none";
-          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--surface-hover)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
         >
-          <span style={{ opacity: 0.7 }}>
-            {resolvedTheme === "dark" ? <SunIcon /> : <MoonIcon />}
-          </span>
-          <span>
-            {resolvedTheme === "dark" ? t("settings_theme_light") : t("settings_theme_dark")}
-          </span>
+          <span style={{ opacity: 0.7 }}>{resolvedTheme === "dark" ? <SunIcon /> : <MoonIcon />}</span>
+          {!collapsed && <span>{resolvedTheme === "dark" ? t("settings_theme_light") : t("settings_theme_dark")}</span>}
         </button>
 
         {/* 用户区 + 登出 */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "6px 10px",
-          }}
-        >
-          <span style={{ display: "flex", flexDirection: "column", fontSize: 12, color: "var(--fg)", fontWeight: 600, lineHeight: 1.25 }}>
-            admin
-            <span style={{ color: "var(--ok)", fontSize: 10, fontWeight: 500 }}>
-              ● 在线演示
+        {!collapsed ? (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 10px" }}>
+            <span style={{ display: "flex", flexDirection: "column", fontSize: 12, color: "var(--fg)", fontWeight: 600, lineHeight: 1.25 }}>
+              admin
+              <span style={{ color: "var(--ok)", fontSize: 10, fontWeight: 500 }}>● 在线演示</span>
             </span>
-          </span>
-          <button
-            onClick={onLogout}
-            title={t("nav_logout")}
-            style={{
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              color: "var(--fg-subtle)",
-              padding: 4,
-              borderRadius: 6,
-              display: "flex",
-              alignItems: "center",
-              transition: "color 0.15s",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.color = "var(--danger)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.color = "var(--fg-subtle)";
-            }}
-          >
+            <button onClick={onLogout} title={t("nav_logout")} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--fg-subtle)", padding: 4, borderRadius: 6, display: "flex", alignItems: "center", transition: "color 0.15s" }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--danger)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--fg-subtle)"; }}>
+              <LogoutIcon />
+            </button>
+          </div>
+        ) : (
+          <button onClick={onLogout} title={t("nav_logout")} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--fg-subtle)", padding: "8px", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", width: "100%", transition: "color 0.15s" }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--danger)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--fg-subtle)"; }}>
             <LogoutIcon />
           </button>
-        </div>
+        )}
       </div>
     </nav>
   );

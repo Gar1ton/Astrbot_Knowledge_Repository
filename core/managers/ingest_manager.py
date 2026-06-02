@@ -13,8 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import fitz  # PyMuPDF
-
 from core.domain.models import DocumentChunk, SourceDocument
 from core.managers.base import BaseIngestManager
 
@@ -116,6 +114,13 @@ class IngestManager(BaseIngestManager):
                 "OCR/LLM extraction is enabled which may incur substantial computation/API costs.",
                 UserWarning,
             )
+
+        try:
+            import fitz  # PyMuPDF
+        except ImportError as exc:
+            raise RuntimeError(
+                "PDF 文本抽取需要 PyMuPDF，请在运行环境中执行：pip install PyMuPDF"
+            ) from exc
 
         doc = fitz.open(pdf_path)
         pages_text: list[str] = []

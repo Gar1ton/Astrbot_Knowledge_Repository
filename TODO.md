@@ -44,6 +44,30 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.15.1 Pre-release bug fixes & CI repair (completed)
+
+### User constraints / 约束
+
+- 测试阶段发现的 bug 修复；不引入新功能；不改动前端构建产物。
+- CI `pytest` 必须全量通过后才算完成。
+
+### Technical implementation path
+
+- [x] **Phase 1 — CI 测试修复**：`test_milvus_lite_vector_store_lifecycle` 在无 `pymilvus` 环境下抛 `ModuleNotFoundError`；用 `importlib.util.find_spec` 检测并加 `pytest.mark.skipif`。技术理由：pymilvus 是可选依赖，CI 环境不装，测试应优雅跳过而非失败。
+- [x] **Phase 2 — fitz 懒加载**：`core/managers/ingest_manager.py:16` 的 `import fitz` 移入 `_extract_and_chunk()` 方法体内，用 `try/except ImportError` 包裹并抛出带安装指引的友好错误。技术理由：模块顶层 import 会在 PyMuPDF 安装失败时导致整个插件无法加载。
+- [x] **Phase 3 — Schema 同步**：`_conf_schema.json` 中 `vector_db.db_filename` 默认值改为 `"vector_store.db"`；新增 `auto_index_enabled` 字段（bool, default true）。技术理由：v0.15.0 修改了 `core/config.py` 的默认值但未同步 schema，AstrBot UI 显示旧值。
+- [x] **Phase 4 — Sync 状态语义修正**：`core/pipelines/sync_pipeline.py` 当所有文档同步失败（`failed_count == len(pending_docs) > 0`）时返回 `status: "error"`；部分失败返回 `status: "partial_failure"`。技术理由：当前 disabled 目标被调用时返回 `status: "success"` 伴随 `failed_count > 0`，语义误导。
+- [x] **Phase 5 — 回归与版本收尾**：`python -m pytest` → 168 passed；`ruff check .` → All checks passed；`metadata.yaml` → `v0.15.1`；`CHANGELOG.md` 追加条目。
+
+### Verification
+
+- `python -m pytest` → 全量通过（含 milvus test skipif）
+- `ruff check . && mypy` → 零错误
+- `python -c "from core.plugin_initializer import PluginInitializer"` → 无 ImportError（即使 PyMuPDF 未装）
+- sync disabled R2 test → `status: "error"` 或 `status: "partial_failure"`
+
+---
+
 ## v0.14.0 Local retrieval & Ask Agent integration (completed)
 
 ### User constraints / 约束

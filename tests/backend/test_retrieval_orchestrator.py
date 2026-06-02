@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import shutil
 import tempfile
@@ -11,6 +12,8 @@ from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
 from core.repository.kb_reader.base import KnowledgeBaseReader
 from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
 from core.repository.vector_store.milvus_lite import MilvusLiteVectorStore
+
+_pymilvus_available = importlib.util.find_spec("pymilvus") is not None
 
 
 class MockKnowledgeBaseReader(KnowledgeBaseReader):
@@ -73,6 +76,7 @@ async def sqlite_store(temp_dir):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not _pymilvus_available, reason="pymilvus not installed")
 async def test_milvus_lite_vector_store_lifecycle(temp_dir):
     db_path = os.path.join(temp_dir, "milvus_lite_test.db")
     store = MilvusLiteVectorStore(db_path=db_path, dim=4)

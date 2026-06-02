@@ -153,8 +153,15 @@ class SyncPipeline:
         # 5) 推送完毕后，做一次本地 SQLite 数据库的云端快照备份（崩溃恢复）
         await self._backup_db_snapshot(target_kind)
 
+        if failed_count > 0 and synced_count == 0:
+            summary_status = "error"
+        elif failed_count > 0:
+            summary_status = "partial_failure"
+        else:
+            summary_status = "success"
+
         result = {
-            "status": "success",
+            "status": summary_status,
             "synced_count": synced_count,
             "failed_count": failed_count,
         }

@@ -245,9 +245,15 @@
         "hint": "astr 表示复用 AstrBot 主框架已配置的 Embedding 模型，无需额外安装依赖或填写 API Key（待完整接口对接后生效）；local 表示使用本地离线模型（如 BAAI/bge-large-en-v1.5），首次启用需手动执行 pip install sentence-transformers；external 为云端 API 转换（如 OpenAI，需自行配置 api_key 与 base_url）"
       },
       "db_filename": {
-        "description": "Milvus Lite 本地数据库文件名",
+        "description": "本地向量数据库文件名",
         "type": "string",
-        "default": "milvus_lite.db"
+        "default": "vector_store.db"
+      },
+      "auto_index_enabled": {
+        "description": "自动索引开关",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后文档上传仅写入 SQLite，跳过 embedding 步骤并标记 needs_reindex=True；可在 WebUI 工具栏手动触发批量重建索引"
       }
     }
   },

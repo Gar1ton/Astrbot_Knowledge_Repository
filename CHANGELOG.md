@@ -21,6 +21,24 @@
 
 ---
 
+## [v0.15.1] — 2026-06-02
+
+### 修复 (Fixed)
+
+- **`fitz`（PyMuPDF）模块顶层无条件 import 消除**：将 `import fitz` 从 `core/managers/ingest_manager.py` 顶层移入 `_extract_and_chunk()` 方法体，用 `try/except ImportError` 包裹并抛出带安装指引的友好 `RuntimeError`。修复后即使 PyMuPDF 安装失败，插件主体仍可正常加载，仅在实际调用文档摄入时才触发错误。涉及 `core/managers/ingest_manager.py`。
+
+- **`_conf_schema.json` `vector_db.db_filename` 默认值同步**：将 schema 中该字段的默认值由遗留的 `"milvus_lite.db"` 更新为 `"vector_store.db"`，与 v0.15.0 对 `core/config.py` 的修正保持一致，消除 AstrBot 原生插件配置 UI 显示旧默认值的混淆。涉及 `_conf_schema.json`。
+
+- **`_conf_schema.json` 补充 `auto_index_enabled` 字段**：v0.15.0 在 `core/config.py` 新增了 `vector_db.auto_index_enabled` 配置项，但未在 `_conf_schema.json` 中声明，导致该字段在 AstrBot 原生插件配置 UI 中不可见。本版本补充该字段（bool，default `true`）至 `vector_db` section。涉及 `_conf_schema.json`。
+
+- **同步目标 disabled 时返回状态语义修正**：当所有文档同步均失败（如同步目标 R2/Notion 未启用）时，`SyncPipeline.sync()` 之前错误地返回 `{"status": "success", "failed_count": N}`，语义误导。现在全部失败时返回 `status: "error"`，部分失败时返回 `status: "partial_failure"`。涉及 `core/pipelines/sync_pipeline.py`。
+
+### 测试 (Tests)
+
+- **Milvus Lite 集成测试 CI 修复**：`test_milvus_lite_vector_store_lifecycle` 在 CI 环境（未安装 `pymilvus`）下因 `ModuleNotFoundError` 失败。为该测试添加 `pytest.mark.skipif(not pymilvus_available, ...)` 检测，使其在无 `pymilvus` 的环境中优雅跳过。涉及 `tests/backend/test_retrieval_orchestrator.py`。
+
+---
+
 ## [v0.15.0] — 2026-06-02
 
 ### 新增功能 (Added)

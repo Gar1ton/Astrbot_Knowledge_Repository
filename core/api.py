@@ -588,10 +588,16 @@ class KnowledgeRepositoryApi:
             raise NotImplementedError("get_effective_config: available in v0.8.0")
         return self._config.to_public_dict()
 
+    _SECRET_KEYS: frozenset[str] = frozenset({
+        "api_key", "secret_access_key", "access_key_id", "password",
+    })
+
     async def update_config_value(self, section: str, key: str, value: Any) -> None:
         """更新受限配置项，并进行写保护校验与运行时热重载。"""
         if section not in ("vector_db", "ask"):
             raise ValueError(f"Section '{section}' is write-protected or read-only.")
+        if key in self._SECRET_KEYS:
+            raise ValueError(f"'{key}' 为机密字段，必须通过环境变量注入，不可经此接口写入。")
 
         # 保存配置到内存与物理存储
         self._persist_config_value(section, key, value)

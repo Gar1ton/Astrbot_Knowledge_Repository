@@ -22,7 +22,6 @@ _ALLOWED_RUNTIME_KEYS = {
         "backend",
         "embedding_provider",
         "embedding_model",
-        "api_key",
         "base_url",
         "db_filename",
         "auto_index_enabled",

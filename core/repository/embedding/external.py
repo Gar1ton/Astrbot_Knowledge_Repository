@@ -78,7 +78,7 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
                 async with session.post(url, headers=headers, json=payload) as resp:
                     if resp.status != 200:
                         err_text = await resp.text()
-                        logger.error(f"Embedding API failed with status {resp.status}: {err_text}")
+                        logger.error(f"Embedding API failed with status {resp.status}")
                         msg = f"Embedding API 响应异常，HTTP {resp.status}: {err_text}"
                         raise RuntimeError(msg)
                     

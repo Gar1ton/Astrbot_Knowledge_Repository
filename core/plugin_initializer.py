@@ -56,6 +56,7 @@ class PluginInitializer:
         self._config = Config(self._runtime_config.merged_with(raw_config))
         self._exit_stack: AsyncExitStack | None = None
         self._backup_task: asyncio.Task[Any] | None = None
+        self._web_runner: Any | None = None
 
         # 子系统句柄 —— 在 initialize() 中按依赖顺序赋值，供 event_handler / web 引用。
         self.source_store: SourceDocumentStore | None = None
@@ -208,6 +209,11 @@ class PluginInitializer:
                 self._periodic_backup(r2_cfg.backup_interval_sec)
             )
 
+        # 7) 独立 Web 控制台（enabled=true 时自动启动，端口/认证由 web_console 配置管辖）。
+        web_cfg = self._config.get_web_console_config()
+        if web_cfg.enabled:
+            await self._start_web_console(web_cfg)
+
     def _persist_config_value(self, section: str, key: str, value: object) -> None:
         self._runtime_config.set_value(section, key, value)
 
@@ -230,6 +236,43 @@ class PluginInitializer:
                     return
                 except Exception as e:
                     logger.debug(f"Attempt via context.{method_name} failed: {e}")
+
+    async def _start_web_console(self, web_cfg: Any) -> None:
+        """启动插件独立 Web 控制台（aiohttp + Next.js 静态文件）。"""
+        from aiohttp import web as aiohttp_web
+        from web.server import build_app
+
+        if not web_cfg.password:
+            logger.error(
+                "web_console.password 为空，Web 控制台未启动。"
+                "请在配置中设置密码后重启插件。"
+            )
+            return
+
+        plugin_root = Path(__file__).parent.parent
+        static_dir = plugin_root / "pages"
+        upload_dir = self._data_dir / "documents"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            app = build_app(
+                api=self.api,
+                static_dir=static_dir,
+                upload_dir=upload_dir,
+                auth_required=True,
+                username=web_cfg.username,
+                password=web_cfg.password,
+            )
+            runner = aiohttp_web.AppRunner(app)
+            await runner.setup()
+            site = aiohttp_web.TCPSite(runner, web_cfg.host, web_cfg.port)
+            await site.start()
+            self._web_runner = runner
+            logger.info(f"Web 控制台已启动：http://{web_cfg.host}:{web_cfg.port}")
+        except OSError as e:
+            logger.error(f"Web 控制台启动失败（端口 {web_cfg.port} 可能被占用）：{e}")
+        except Exception as e:
+            logger.error(f"Web 控制台启动异常：{e}")
 
     async def _periodic_backup(self, interval_sec: int) -> None:
         """周期性触发 R2 同步备份任务的后台循环。"""
@@ -256,6 +299,13 @@ class PluginInitializer:
             except Exception:
                 pass
             self._backup_task = None
+
+        if self._web_runner is not None:
+            try:
+                await self._web_runner.cleanup()
+            except Exception as e:
+                logger.warning(f"Web 控制台关闭异常：{e}")
+            self._web_runner = None
 
         if self.vector_store is not None:
             try:

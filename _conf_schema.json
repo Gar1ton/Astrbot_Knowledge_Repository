@@ -54,22 +54,11 @@
         "type": "string",
         "default": ""
       },
-      "cdn_domain": {
-        "description": "自定义 CDN 域名（可选）",
-        "type": "string",
-        "default": "",
-        "hint": "例如 https://cdn.yourdomain.com；保留供后续公开链接能力使用"
-      },
-      "free_tier_gb": {
-        "description": "免费额度上限（GB）",
-        "type": "int",
-        "default": 10
-      },
       "warn_threshold": {
         "description": "用量预警比例（0~1）",
         "type": "float",
         "default": 0.8,
-        "hint": "用量达到 free_tier_gb × 该比例时警告；将超额时硬警告并要求确认"
+        "hint": "用量达到免费额度 × 该比例时警告；将超额时硬警告并要求确认"
       },
       "backup_interval_sec": {
         "description": "周期备份间隔（秒）",
@@ -110,18 +99,6 @@
         "type": "string",
         "default": "Knowledge Repository"
       },
-      "max_upload_mib": {
-        "description": "单文件上传上限（MiB）",
-        "type": "int",
-        "default": 5,
-        "hint": "免费工作区 API 上传上限 5MiB；超过则仅同步元数据并显示跳过说明"
-      },
-      "link_large_to_r2": {
-        "description": "预留：大文件改用 R2 链接",
-        "type": "bool",
-        "default": true,
-        "hint": "当前版本尚未生成公开链接；大文件会仅同步 Notion 元数据"
-      },
       "rate_limit_rps": {
         "description": "API 限流（请求/秒）",
         "type": "int",
@@ -132,7 +109,7 @@
   },
 
   "web_console": {
-    "description": "独立 Web 控制台（v0.5.0 起）",
+    "description": "独立 Web 控制台",
     "type": "object",
     "hint": "独立端口的管理控制台：上传/管理/分类/同步/配额仪表盘，自带登录鉴权",
     "items": {
@@ -167,7 +144,7 @@
   },
 
   "graph": {
-    "description": "LightRAG 知识图谱（v0.6.0 起）",
+    "description": "LightRAG 知识图谱",
     "type": "object",
     "hint": "增量式知识图谱：仅对内容变化的 chunk 抽取实体/关系，复用 KB 既有 embedding",
     "items": {
@@ -176,27 +153,10 @@
         "type": "bool",
         "default": false
       },
-      "llm_extraction": {
-        "description": "用 LLM 抽取实体/关系",
-        "type": "bool",
-        "default": true,
-        "hint": "增量抽取（仅变化 chunk）成本远低于 GraphRAG 全量重建"
-      },
       "incremental": {
         "description": "增量索引（按内容哈希跳过未变 chunk）",
         "type": "bool",
         "default": true
-      },
-      "reuse_kb_embedding": {
-        "description": "图谱检索复用 AstrBot KB 的 embedding 召回",
-        "type": "bool",
-        "default": true,
-        "hint": "当前用于复用 KB chunk 向量召回；实体 embedding 持久化保留为后续能力"
-      },
-      "merge_similarity_threshold": {
-        "description": "实体归并相似度阈值（0~1）",
-        "type": "float",
-        "default": 0.9
       },
       "rrf_k": {
         "description": "向量召回与图召回 RRF 融合常数",
@@ -225,7 +185,7 @@
   },
 
   "vector_db": {
-    "description": "向量数据库与检索后端（v0.14.0 起）",
+    "description": "向量数据库与检索后端",
     "type": "object",
     "hint": "选择基于主框架内置的 AstrBot 检索，或是基于本地高性能嵌入式 Milvus Lite 向量引擎",
     "items": {
@@ -233,12 +193,14 @@
         "description": "检索后端",
         "type": "string",
         "default": "astr",
+        "options": ["astr", "milvus"],
         "hint": "astr 表示复用 AstrBot 自带检索（FAISS+FTS5+RRF）；milvus 表示开启插件本地 Milvus Lite 向量引擎"
       },
       "embedding_provider": {
         "description": "Embedding 提供商（仅 milvus 后端有效）",
         "type": "string",
         "default": "local",
+        "options": ["local", "external", "astr"],
         "hint": "astr 表示复用 AstrBot 主框架已配置的 Embedding 模型，无需额外安装依赖或填写 API Key（待完整接口对接后生效）；local 表示使用本地离线模型（如 BAAI/bge-large-en-v1.5），首次启用需手动执行 pip install sentence-transformers；external 为云端 API 转换（如 OpenAI，需自行配置 api_key 与 base_url）"
       },
       "db_filename": {
@@ -264,6 +226,7 @@
         "description": "普通对话增强模式",
         "type": "string",
         "default": "inject",
+        "options": ["inject", "query_agent"],
         "hint": "inject: 召回注入模式（将片段作为 Grounded Context 注入 system prompt，由原生 LLM 组织作答）；query_agent: 代理问答模式（直接由 Standalone Ask Agent 闭环生成纯学术级严谨回答并进行指令级绝对代理代理输出，强制关闭 persona 防止过拟合）"
       }
     }

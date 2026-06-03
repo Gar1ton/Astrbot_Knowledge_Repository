@@ -51,7 +51,7 @@ class R2SyncConfig:
     """Cloudflare R2 备份配置。
 
     secret_access_key 仅经环境变量注入（见模块 docstring）。endpoint 由 account_id 推导，
-    无需用户单独配置。free_tier_gb / warn_threshold 驱动配额预警（见 quota_manager）。
+    无需用户单独配置。free_tier_gb 固定为 R2 免费额度（10 GB），不暴露给用户配置。
     """
 
     enabled: bool = False
@@ -59,7 +59,6 @@ class R2SyncConfig:
     access_key_id: str = ""
     secret_access_key: str = ""
     bucket: str = ""
-    cdn_domain: str = ""
     free_tier_gb: int = 10
     warn_threshold: float = 0.8
     backup_interval_sec: int = 86400
@@ -81,7 +80,7 @@ class R2SyncConfig:
 class NotionSyncConfig:
     """Notion 单向镜像配置。经 mcp_server_name 指向的 MCP server 调用，本侧不持 token。
 
-    link_large_to_r2 为向后兼容的预留配置；当前大文件仅同步元数据，不生成公开链接。
+    max_upload_mib 固定为 Notion API 限制（5 MiB），不暴露给用户配置。
     """
 
     enabled: bool = False
@@ -90,12 +89,11 @@ class NotionSyncConfig:
     parent_page_id: str = ""
     database_title: str = "Knowledge Repository"
     max_upload_mib: int = 5
-    link_large_to_r2: bool = True
     rate_limit_rps: int = 3
 
     @property
     def max_upload_bytes(self) -> int:
-        """单文件上传上限的字节数（超过则改走 R2 链接）。"""
+        """单文件上传上限的字节数。"""
         return self.max_upload_mib * 1024 * 1024
 
 
@@ -115,10 +113,7 @@ class GraphConfig:
     """LightRAG 图谱配置。向量召回复用 KB chunk 检索；实体 embedding 持久化尚未接入。"""
 
     enabled: bool = False
-    llm_extraction: bool = True
     incremental: bool = True
-    reuse_kb_embedding: bool = True
-    merge_similarity_threshold: float = 0.9
     rrf_k: int = 60
     query_top_k: int = 5
     entity_types: list[str] = field(
@@ -191,8 +186,6 @@ class Config:
                 "access_key_id": _mask(r2.access_key_id),
                 "secret_access_key": _mask(r2.secret_access_key),
                 "bucket": r2.bucket,
-                "cdn_domain": r2.cdn_domain,
-                "free_tier_gb": r2.free_tier_gb,
                 "warn_threshold": r2.warn_threshold,
                 "backup_interval_sec": r2.backup_interval_sec,
                 "endpoint": r2.endpoint,
@@ -203,8 +196,6 @@ class Config:
                 "database_id": notion.database_id,
                 "parent_page_id": notion.parent_page_id,
                 "database_title": notion.database_title,
-                "max_upload_mib": notion.max_upload_mib,
-                "link_large_to_r2": notion.link_large_to_r2,
                 "rate_limit_rps": notion.rate_limit_rps,
             },
             "web_console": {
@@ -216,10 +207,7 @@ class Config:
             },
             "graph": {
                 "enabled": graph.enabled,
-                "llm_extraction": graph.llm_extraction,
                 "incremental": graph.incremental,
-                "reuse_kb_embedding": graph.reuse_kb_embedding,
-                "merge_similarity_threshold": graph.merge_similarity_threshold,
                 "rrf_k": graph.rrf_k,
                 "query_top_k": graph.query_top_k,
                 "entity_types": graph.entity_types,
@@ -282,8 +270,6 @@ class Config:
             access_key_id=s.get("access_key_id", R2SyncConfig.access_key_id),
             secret_access_key=_secret(s.get("secret_access_key"), ENV_R2_SECRET_ACCESS_KEY),
             bucket=s.get("bucket", R2SyncConfig.bucket),
-            cdn_domain=s.get("cdn_domain", R2SyncConfig.cdn_domain),
-            free_tier_gb=int(s.get("free_tier_gb", R2SyncConfig.free_tier_gb)),
             warn_threshold=float(s.get("warn_threshold", R2SyncConfig.warn_threshold)),
             backup_interval_sec=int(s.get("backup_interval_sec", R2SyncConfig.backup_interval_sec)),
         )
@@ -296,8 +282,6 @@ class Config:
             database_id=s.get("database_id", NotionSyncConfig.database_id),
             parent_page_id=s.get("parent_page_id", NotionSyncConfig.parent_page_id),
             database_title=s.get("database_title", NotionSyncConfig.database_title),
-            max_upload_mib=int(s.get("max_upload_mib", NotionSyncConfig.max_upload_mib)),
-            link_large_to_r2=bool(s.get("link_large_to_r2", NotionSyncConfig.link_large_to_r2)),
             rate_limit_rps=int(s.get("rate_limit_rps", NotionSyncConfig.rate_limit_rps)),
         )
 
@@ -315,12 +299,7 @@ class Config:
         s = _section(self.raw, "graph")
         return GraphConfig(
             enabled=bool(s.get("enabled", GraphConfig.enabled)),
-            llm_extraction=bool(s.get("llm_extraction", GraphConfig.llm_extraction)),
             incremental=bool(s.get("incremental", GraphConfig.incremental)),
-            reuse_kb_embedding=bool(s.get("reuse_kb_embedding", GraphConfig.reuse_kb_embedding)),
-            merge_similarity_threshold=float(
-                s.get("merge_similarity_threshold", GraphConfig.merge_similarity_threshold)
-            ),
             rrf_k=int(s.get("rrf_k", GraphConfig.rrf_k)),
             query_top_k=int(s.get("query_top_k", GraphConfig.query_top_k)),
             entity_types=s.get("entity_types") if isinstance(s.get("entity_types"), list) else [

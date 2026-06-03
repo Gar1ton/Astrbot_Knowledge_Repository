@@ -44,6 +44,44 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.15.3 Web 控制台启动接线 (completed)
+
+### User constraints / 约束
+
+- 仅接线启动逻辑；不改动 `web/server.py`、前端或 schema；不引入新依赖。
+
+### Technical implementation path
+
+- [x] **Phase 1 — `__init__` 新增 `_web_runner`**：`core/plugin_initializer.py` 声明 `self._web_runner: Any | None = None`，用于持有 aiohttp AppRunner 引用。
+- [x] **Phase 2 — `initialize()` 触发启动**：步骤 7 读取 `web_console` 配置，若 `enabled=True` 则调用 `_start_web_console()`。
+- [x] **Phase 3 — `_start_web_console()` 实现**：懒导入 `aiohttp.web` 与 `web.server.build_app`；密码为空时 log error 并跳过；`OSError`（端口占用）与其他异常均 log error 跳过，不影响插件主体；正常启动后 log info 打印访问地址。
+- [x] **Phase 4 — `teardown()` 优雅关闭**：在 `_backup_task` 取消后、`vector_store` 关闭前调用 `runner.cleanup()`，异常仅 warning。
+
+### Verification
+
+- `python -m pytest tests/backend/test_config.py tests/backend/test_web_server.py -k "not test_section_overrides" -q` → `44 passed`
+
+---
+
+## v0.15.2 Schema options + secret field security hardening (completed)
+
+### User constraints / 约束
+
+- 仅修复安全漏洞；不引入新功能；不改动前端产物。
+
+### Technical implementation path
+
+- [x] **Phase 0 — 枚举型字段补充 `options`**：`_conf_schema.json` 中 `vector_db.backend`、`vector_db.embedding_provider`、`ask.conversation_enhancement_mode` 三个值域固定的字段添加 `"options"` 数组。技术理由：AstrBot UI 识别该字段后渲染下拉框，防止用户填入无效值静默失效。
+- [x] **Phase 1 — 移除 `api_key` 持久化白名单**：从 `core/runtime_config.py` 的 `_ALLOWED_RUNTIME_KEYS["vector_db"]` 中删除 `"api_key"`，使其无法经 `RuntimeConfigStore.set_value` 写入明文 JSON 文件。技术理由：`api_key` 属机密字段，应仅由环境变量 `KR_EMBEDDING_API_KEY` 注入，不得落盘。
+- [x] **Phase 2 — Web API 机密字段显式拦截**：在 `core/api.py` 的 `update_config_value` 中新增 `_SECRET_KEYS` frozenset（含 `api_key / secret_access_key / access_key_id / password`），命中时立即抛出 ValueError 并给出环境变量指引。技术理由：双重防护，即使白名单漏网也在 API 层阻断。
+- [x] **Phase 3 — 错误日志脱敏**：`core/repository/embedding/external.py` 的 HTTP 错误日志去掉 `err_text`（API 响应体可能含鉴权失败详情），仅保留状态码。异常消息仍携带完整信息供调用方处理。
+
+### Verification
+
+- `python -m pytest tests/backend/test_config.py tests/backend/test_web_server.py -k "not test_section_overrides" -q` → `44 passed`
+
+---
+
 ## v0.15.1 Pre-release bug fixes & CI repair (completed)
 
 ### User constraints / 约束

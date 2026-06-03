@@ -21,6 +21,24 @@
 
 ---
 
+## [Unreleased]
+
+### 新增功能 (Added)
+
+- **Web 控制台自动启动接线**：`core/plugin_initializer.py` 新增 `_start_web_console()` 私有方法与 `_web_runner` 实例变量；`initialize()` 步骤 7 读取 `web_console` 配置，若 `enabled=true` 且 `password` 非空则自动以 aiohttp `AppRunner` + `TCPSite` 启动 Web 控制台服务器（静态文件指向插件 `pages/` 目录，上传目录复用 `data_dir/documents`）；`teardown()` 补充 `runner.cleanup()` 优雅关闭。密码为空或端口占用时仅 log error，不影响插件主体运行。涉及 `core/plugin_initializer.py`。
+
+### 架构健康 (Refactor)
+
+- **枚举型配置字段改为选项**：`_conf_schema.json` 中三个值域固定的字段补充 `options` 数组，AstrBot 配置 UI 将渲染为下拉框，防止拼写错误静默失效。涉及字段：`vector_db.backend`（`astr` / `milvus`）、`vector_db.embedding_provider`（`local` / `external` / `astr`）、`ask.conversation_enhancement_mode`（`inject` / `query_agent`）。涉及 `_conf_schema.json`。
+
+### 修复 (Fixed)
+
+- **`api_key` 可经 Web API 明文持久化漏洞修复**：`core/runtime_config.py` 的 `_ALLOWED_RUNTIME_KEYS["vector_db"]` 中移除 `"api_key"`，切断通过 `RuntimeConfigStore.set_value` 将 embedding API Key 写入明文 JSON 文件的路径；同时在 `core/api.py` 的 `update_config_value` 新增 `_SECRET_KEYS` 显式拦截层（含 `api_key / secret_access_key / access_key_id / password`），命中后返回 400 并提示改用环境变量，形成双重防护。涉及 `core/runtime_config.py`、`core/api.py`。
+
+- **Embedding 错误日志脱敏**：`core/repository/embedding/external.py` HTTP 错误日志不再记录 API 响应体（`err_text` 可能含鉴权失败详情），仅保留 HTTP 状态码；异常对象仍携带完整信息供上层处理。涉及 `core/repository/embedding/external.py`。
+
+---
+
 ## [v0.15.1] — 2026-06-02
 
 ### 修复 (Fixed)

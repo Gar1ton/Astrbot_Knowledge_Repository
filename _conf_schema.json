@@ -211,10 +211,7 @@
       },
       "entity_types": {
         "description": "自定义实体类型定义（支持不同学术领域的本体自定义）",
-        "type": "array",
-        "items": {
-          "type": "string"
-        },
+        "type": "list",
         "default": [
           "Method/Algorithm",
           "Scientific Problem/Task",

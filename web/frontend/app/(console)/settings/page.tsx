@@ -1,10 +1,16 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect */
 
 import React, { useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
-import { useI18n, Lang } from "@/lib/i18n";
+import { useI18n, I18nKey, Lang } from "@/lib/i18n";
 import { getEffectiveConfig, EffectiveConfig, updateConfigValue, testEmbeddingConnection, EmbeddingTestResult, listLocalModels, deleteLocalModel, LocalModel } from "@/lib/api";
 import { Select } from "@/components/ui/Select";
+import { HelpTip } from "@/components/ui/HelpTip";
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 // ─── 外观控件 ─────────────────────────────────────────────────
 
@@ -99,16 +105,15 @@ export default function SettingsPage() {
   const [loadingConfig, setLoadingConfig] = useState(true);
 
   // Form states for editable config
-  const [vectorBackend, setVectorBackend] = useState<"astr" | "milvus">("astr");
+  const [vectorBackend, setVectorBackend] = useState<"astr" | "milvus">("milvus");
   const [embedProvider, setEmbedProvider] = useState<"local" | "external" | "astr">("local");
   const [embedModel, setEmbedModel] = useState("");
-  const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
+  const [embedMaxTokenSize, setEmbedMaxTokenSize] = useState(512);
+  const [autoIndexEnabled, setAutoIndexEnabled] = useState(true);
   const [askEnhancementMode, setAskEnhancementMode] = useState<"inject" | "query_agent">("inject");
   const [graphEnabled, setGraphEnabled] = useState(false);
   const [graphQueryMode, setGraphQueryMode] = useState("mix");
-  const [graphEmbeddingDim, setGraphEmbeddingDim] = useState(1024);
-  const [graphMaxTokenSize, setGraphMaxTokenSize] = useState(8192);
   const [graphLlmMaxAsync, setGraphLlmMaxAsync] = useState(4);
   const [graphEmbeddingMaxAsync, setGraphEmbeddingMaxAsync] = useState(8);
   const [saving, setSaving] = useState(false);
@@ -126,11 +131,14 @@ export default function SettingsPage() {
       // 首次加载：全量同步
       initializedRef.current = true;
       if (config.vector_db) {
-        setVectorBackend((config.vector_db.backend as "astr" | "milvus") || "astr");
-        setEmbedProvider((config.vector_db.embedding_provider as "local" | "external" | "astr") || "local");
-        setEmbedModel((config.vector_db.embedding_model as string) || "");
-        setApiKey((config.vector_db.api_key as string) || "");
-        setBaseUrl((config.vector_db.base_url as string) || "");
+        setVectorBackend((config.vector_db.backend as "astr" | "milvus") || "milvus");
+        setAutoIndexEnabled(Boolean(config.vector_db.auto_index_enabled ?? true));
+      }
+      if (config.embedding) {
+        setEmbedProvider((config.embedding.provider as "local" | "external" | "astr") || "local");
+        setEmbedModel((config.embedding.model as string) || "");
+        setBaseUrl((config.embedding.base_url as string) || "");
+        setEmbedMaxTokenSize(Number(config.embedding.max_token_size) || 512);
       }
       if (config.ask) {
         setAskEnhancementMode((config.ask.conversation_enhancement_mode as "inject" | "query_agent") || "inject");
@@ -138,16 +146,17 @@ export default function SettingsPage() {
       if (config.graph) {
         setGraphEnabled(Boolean(config.graph.enabled));
         setGraphQueryMode((config.graph.query_mode as string) || "mix");
-        setGraphEmbeddingDim(Number(config.graph.embedding_dim) || 1024);
-        setGraphMaxTokenSize(Number(config.graph.max_token_size) || 8192);
         setGraphLlmMaxAsync(Number(config.graph.llm_max_async) || 4);
         setGraphEmbeddingMaxAsync(Number(config.graph.embedding_max_async) || 8);
       }
     } else {
       // 保存后重拉：只更新枚举型选择项，不覆盖用户已编辑的文本框
       if (config.vector_db) {
-        setVectorBackend((config.vector_db.backend as "astr" | "milvus") || "astr");
-        setEmbedProvider((config.vector_db.embedding_provider as "local" | "external" | "astr") || "local");
+        setVectorBackend((config.vector_db.backend as "astr" | "milvus") || "milvus");
+        setAutoIndexEnabled(Boolean(config.vector_db.auto_index_enabled ?? true));
+      }
+      if (config.embedding) {
+        setEmbedProvider((config.embedding.provider as "local" | "external" | "astr") || "local");
       }
       if (config.ask) {
         setAskEnhancementMode((config.ask.conversation_enhancement_mode as "inject" | "query_agent") || "inject");
@@ -159,25 +168,35 @@ export default function SettingsPage() {
     setSaving(true);
     setSaveMessage("");
     try {
-      await updateConfigValue("vector_db", "backend", vectorBackend);
-      await updateConfigValue("vector_db", "embedding_provider", embedProvider);
-      await updateConfigValue("vector_db", "embedding_model", embedModel);
-      await updateConfigValue("vector_db", "api_key", apiKey);
-      await updateConfigValue("vector_db", "base_url", baseUrl);
-      await updateConfigValue("ask", "conversation_enhancement_mode", askEnhancementMode);
-      await updateConfigValue("graph", "enabled", graphEnabled);
-      await updateConfigValue("graph", "query_mode", graphQueryMode);
-      await updateConfigValue("graph", "embedding_dim", graphEmbeddingDim);
-      await updateConfigValue("graph", "max_token_size", graphMaxTokenSize);
-      await updateConfigValue("graph", "llm_max_async", graphLlmMaxAsync);
-      await updateConfigValue("graph", "embedding_max_async", graphEmbeddingMaxAsync);
-
-      setSaveMessage(lang === "zh" ? "配置更新成功并已成功重载！" : "Configuration updated and reloaded successfully!");
+      const updates: [string, string, unknown][] = [
+        ["vector_db", "backend", vectorBackend],
+        ["vector_db", "auto_index_enabled", autoIndexEnabled],
+        ["embedding", "provider", embedProvider],
+        ["embedding", "model", embedModel],
+        ["embedding", "base_url", baseUrl],
+        ["embedding", "max_token_size", embedMaxTokenSize],
+        ["ask", "conversation_enhancement_mode", askEnhancementMode],
+        ["graph", "enabled", graphEnabled],
+        ["graph", "query_mode", graphQueryMode],
+        ["graph", "llm_max_async", graphLlmMaxAsync],
+        ["graph", "embedding_max_async", graphEmbeddingMaxAsync],
+      ];
+      const results: Awaited<ReturnType<typeof updateConfigValue>>[] = [];
+      for (const [section, key, value] of updates) {
+        results.push(await updateConfigValue(section, key, value));
+      }
+      const restart = results.some((result) => result.restart_required);
+      const rebuild = results.some((result) => result.rebuild_required);
+      setSaveMessage(
+        lang === "zh"
+          ? `配置已保存。${restart ? "需要重启插件。" : ""}${rebuild ? "需要重建 Milvus 与 LightRAG 索引。" : ""}`
+          : `Configuration saved.${restart ? " Restart required." : ""}${rebuild ? " Rebuild Milvus and LightRAG indexes." : ""}`
+      );
       
       const freshConfig = await getEffectiveConfig();
       setConfig(freshConfig);
-    } catch (err: any) {
-      setSaveMessage(`${lang === "zh" ? "保存失败" : "Save failed"}: ${err.message || err}`);
+    } catch (err: unknown) {
+      setSaveMessage(`${lang === "zh" ? "保存失败" : "Save failed"}: ${errorMessage(err)}`);
     } finally {
       setSaving(false);
     }
@@ -204,10 +223,10 @@ export default function SettingsPage() {
     setTesting(true);
     setTestResult(null);
     try {
-      const result = await testEmbeddingConnection(apiKey, baseUrl, embedModel);
+      const result = await testEmbeddingConnection(baseUrl, embedModel);
       setTestResult(result);
-    } catch (err: any) {
-      setTestResult({ status: "error", message: err.message || String(err) });
+    } catch (err: unknown) {
+      setTestResult({ status: "error", message: errorMessage(err) });
     } finally {
       setTesting(false);
     }
@@ -228,7 +247,6 @@ export default function SettingsPage() {
     const savedLight = localStorage.getItem("kr-light");
 
     // Theme changes intentionally reset the editor to persisted or themed defaults.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setHue(savedHue ? parseInt(savedHue) : defaultH);
     setSat(savedSat ? parseInt(savedSat) : defaultS);
     setLight(savedLight ? parseInt(savedLight) : defaultL);
@@ -262,6 +280,17 @@ export default function SettingsPage() {
     setLight(l);
     updateAccentColor(h, s, l);
   }
+
+  const diagnostics = config?.diagnostics ?? [];
+  const actualDimension = Number(config?.embedding?.actual_dimension ?? 0);
+  const milvusDegraded = diagnostics.some((item) =>
+    item.includes("Milvus") || item.includes("Embedding dimension probe failed")
+  );
+  const defaultRecallStatus = vectorBackend === "milvus" && actualDimension > 0 && !milvusDegraded
+    ? `Milvus + SQLite RRF · ${actualDimension}d`
+    : vectorBackend === "milvus"
+      ? (lang === "zh" ? "SQLite / AstrBot 受控回退" : "SQLite / AstrBot fallback")
+      : (lang === "zh" ? "AstrBot KB + SQLite RRF" : "AstrBot KB + SQLite RRF");
 
   return (
     <div
@@ -515,6 +544,54 @@ export default function SettingsPage() {
             gap: 20,
           }}
         >
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 10 }}>
+            {[
+              {
+                title: lang === "zh" ? "PDF 源库" : "PDF source store",
+                value: lang === "zh" ? "本地原件 + SQLite 分块" : "Local originals + SQLite chunks",
+                detail: lang === "zh" ? "首次安装即可上传与词汇召回" : "Upload and lexical retrieval work after install",
+              },
+              {
+                title: lang === "zh" ? "默认召回" : "Default retrieval",
+                value: defaultRecallStatus,
+                detail: autoIndexEnabled
+                  ? (lang === "zh" ? "上传后自动构建向量索引" : "Vector index builds on upload")
+                  : (lang === "zh" ? "自动索引已暂停" : "Automatic indexing is paused"),
+              },
+              {
+                title: "LightRAG",
+                value: graphEnabled
+                  ? (lang === "zh" ? "已启用 · 手动构建" : "Enabled · manual build")
+                  : (lang === "zh" ? "默认关闭 · 可选高精度" : "Off by default · optional precision"),
+                detail: lang === "zh" ? "不影响基础上传与默认召回" : "Does not gate upload or default retrieval",
+              },
+            ].map((item) => (
+              <div key={item.title} style={{ background: "var(--bg-inset)", border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px" }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: "var(--fg-subtle)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>{item.title}</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--heading)", marginBottom: 2 }}>{item.value}</div>
+                <div style={{ fontSize: 10, color: "var(--fg-muted)", lineHeight: 1.45 }}>{item.detail}</div>
+              </div>
+            ))}
+          </div>
+
+          {diagnostics.length > 0 && (
+            <div style={{ background: "color-mix(in srgb, var(--warn, #e09a5b) 10%, transparent)", border: "1px solid color-mix(in srgb, var(--warn, #e09a5b) 35%, transparent)", borderRadius: 10, padding: "10px 12px", color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.55 }}>
+              <strong style={{ color: "var(--warn, #e09a5b)" }}>{lang === "zh" ? "运行时提示：" : "Runtime diagnostics: "}</strong>
+              {diagnostics.join(" · ")}
+            </div>
+          )}
+
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 18 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--heading)", marginBottom: 4 }}>
+              {lang === "zh" ? "基础召回（默认路径）" : "Base retrieval (default path)"}
+            </div>
+            <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.55 }}>
+              {lang === "zh"
+                ? "新安装默认使用 Milvus Lite + 本地多语言 Embedding，并始终保留 SQLite 词汇召回；LightRAG 不参与此路径。"
+                : "New installs use Milvus Lite with local multilingual embeddings and always retain SQLite lexical retrieval. LightRAG is not part of this path."}
+            </div>
+          </div>
+
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 24 }}>
             {/* Left Column: Backend and Provider selectors */}
             <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -532,13 +609,29 @@ export default function SettingsPage() {
                 />
               </div>
 
+              <label style={{ fontSize: 12, color: "var(--fg-muted)", display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={autoIndexEnabled}
+                  disabled={vectorBackend !== "milvus"}
+                  onChange={(e) => setAutoIndexEnabled(e.target.checked)}
+                />
+                <span style={{ opacity: vectorBackend === "milvus" ? 1 : .5 }}>
+                  <strong style={{ display: "block", color: "var(--fg)", fontSize: 12 }}>
+                    {lang === "zh" ? "上传后自动建立 Milvus 索引" : "Build Milvus index after upload"}
+                  </strong>
+                  <span style={{ display: "block", marginTop: 2, fontSize: 10, color: "var(--fg-subtle)" }}>
+                    {lang === "zh" ? "关闭后 PDF 与 SQLite 分块仍会保存并可词汇召回" : "PDFs and SQLite chunks remain available for lexical retrieval when off"}
+                  </span>
+                </span>
+              </label>
+
               <div>
                 <div style={{ fontSize: 12, fontWeight: 600, color: "var(--fg-muted)", marginBottom: 6 }}>
                   {t("settings_embed_provider")}
                 </div>
                 <SegmentedControl
                   options={[
-                    { value: "astr", label: lang === "zh" ? "AstrBot 内置" : "AstrBot" },
                     { value: "local", label: lang === "zh" ? "本地离线" : "Local" },
                     { value: "external", label: lang === "zh" ? "云端 API" : "Cloud API" },
                   ]}
@@ -577,11 +670,11 @@ export default function SettingsPage() {
                   }}
                 >
                   <div style={{ fontWeight: 700, marginBottom: 4 }}>
-                    {lang === "zh" ? "复用 AstrBot 内置 Embedding" : "Reuse AstrBot Embedding"}
+                    {lang === "zh" ? "AstrBot Embedding 尚未接入" : "AstrBot Embedding is not implemented"}
                   </div>
                   {lang === "zh"
-                    ? "将直接调用 AstrBot 主框架已配置的 Embedding 模型，无需单独安装依赖或填写 API Key。模型名称与参数由 AstrBot 自身管理。"
-                    : "Uses the embedding model already configured in AstrBot. No extra dependencies or API keys required — model settings are managed by AstrBot."}
+                    ? "该旧配置会禁用 Milvus 与 LightRAG。请选择“本地离线”或“云端 API”后保存并重启。"
+                    : "This legacy value disables Milvus and LightRAG. Choose Local or Cloud API, save, and restart."}
                 </div>
               ) : (
                 <>
@@ -595,7 +688,7 @@ export default function SettingsPage() {
                       type="text"
                       value={embedModel}
                       onChange={(e) => setEmbedModel(e.target.value)}
-                      placeholder={embedProvider === "local" ? "BAAI/bge-m3" : "text-embedding-3-small"}
+                      placeholder={embedProvider === "local" ? "intfloat/multilingual-e5-small" : "text-embedding-3-small"}
                       style={{
                         background: "var(--bg-inset)", border: "1px solid var(--border)",
                         borderRadius: 8, padding: "8px 12px", fontSize: 13,
@@ -607,9 +700,9 @@ export default function SettingsPage() {
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
                       {(embedProvider === "local"
                         ? [
-                            { value: "BAAI/bge-m3", hint: lang === "zh" ? "多语言·推荐" : "Multilingual" },
-                            { value: "BAAI/bge-large-en-v1.5", hint: lang === "zh" ? "英文·大" : "EN·Large" },
-                            { value: "BAAI/bge-base-en-v1.5", hint: lang === "zh" ? "英文·基础" : "EN·Base" },
+                            { value: "intfloat/multilingual-e5-small", hint: lang === "zh" ? "多语言·轻量默认" : "Multilingual·Default" },
+                            { value: "BAAI/bge-m3", hint: lang === "zh" ? "多语言·长文本" : "Multilingual·Long" },
+                            { value: "BAAI/bge-small-zh-v1.5", hint: lang === "zh" ? "中文·轻量" : "ZH·Small" },
                           ]
                         : [
                             { value: "text-embedding-3-small", hint: "OpenAI" },
@@ -620,7 +713,12 @@ export default function SettingsPage() {
                         <button
                           key={p.value}
                           type="button"
-                          onClick={() => setEmbedModel(p.value)}
+                          onClick={() => {
+                            setEmbedModel(p.value);
+                            if (embedProvider === "local") {
+                              setEmbedMaxTokenSize(p.value === "BAAI/bge-m3" ? 8192 : 512);
+                            }
+                          }}
                           style={{
                             padding: "3px 9px", borderRadius: 999, fontSize: 11, fontFamily: "inherit",
                             border: "1px solid var(--border)", cursor: "pointer", transition: "all .1s",
@@ -637,33 +735,10 @@ export default function SettingsPage() {
 
                   {embedProvider === "external" ? (
                     <>
-                      <div>
-                        <div style={{ fontSize: 12, fontWeight: 600, color: "var(--fg-muted)", marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>
-                          {t("settings_api_key")}
-                          <span title={lang === "zh" ? "已加密输入，页面重载后不回填（安全设计）" : "Encrypted input — not pre-filled on reload for security"} style={{ cursor: "help", color: "var(--fg-subtle)", display: "flex", alignItems: "center" }}>
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                              <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-                            </svg>
-                          </span>
-                        </div>
-                        <input
-                          type="password"
-                          value={apiKey}
-                          onChange={(e) => setApiKey(e.target.value)}
-                          placeholder="sk-..."
-                          autoComplete="new-password"
-                          style={{
-                            background: "var(--bg-inset)",
-                            border: "1px solid var(--border)",
-                            borderRadius: 8,
-                            padding: "8px 12px",
-                            fontSize: 13,
-                            color: "var(--fg)",
-                            outline: "none",
-                            width: "100%",
-                            fontFamily: "inherit",
-                          }}
-                        />
+                      <div style={{ background: "var(--accent-soft)", border: "1px solid var(--accent-border)", borderRadius: 10, padding: "10px 12px", fontSize: 11, lineHeight: 1.6, color: "var(--accent)" }}>
+                        {lang === "zh"
+                          ? "API Key 仅从环境变量 KR_EMBEDDING_API_KEY 读取，Web 设置页不会接收或持久化密钥。"
+                          : "The API key is read only from KR_EMBEDDING_API_KEY. The Web settings page never accepts or persists it."}
                       </div>
 
                       <div>
@@ -694,14 +769,14 @@ export default function SettingsPage() {
                         <button
                           type="button"
                           onClick={handleTestEmbedding}
-                          disabled={testing || !apiKey || !baseUrl || !embedModel}
+                          disabled={testing || !baseUrl || !embedModel}
                           style={{
                             padding: "7px 14px", fontSize: 12, fontWeight: 600,
                             borderRadius: 8, border: "1px solid var(--border)",
                             background: testing ? "var(--bg-inset)" : "var(--surface)",
                             color: testing ? "var(--fg-muted)" : "var(--fg)",
-                            cursor: testing || !apiKey || !baseUrl || !embedModel ? "not-allowed" : "pointer",
-                            opacity: !apiKey || !baseUrl || !embedModel ? 0.5 : 1,
+                            cursor: testing || !baseUrl || !embedModel ? "not-allowed" : "pointer",
+                            opacity: !baseUrl || !embedModel ? 0.5 : 1,
                             fontFamily: "inherit", transition: "all .15s",
                           }}
                         >
@@ -755,8 +830,8 @@ export default function SettingsPage() {
                       </div>
                       <div style={{ marginBottom: 10, color: "var(--fg-muted)", fontSize: 11 }}>
                         {lang === "zh"
-                          ? "推荐 BAAI/bge-m3（约 570 MB，支持中英文），对内存要求 ≥ 2 GB RAM。点击上方 chip 快速填入，或手动输入 HuggingFace 模型 ID。"
-                          : "Recommended: BAAI/bge-m3 (~570 MB, Chinese + English). Requires ≥ 2 GB RAM. Click a chip above to fill in, or type any HuggingFace model ID."}
+                          ? "默认 intfloat/multilingual-e5-small 支持多语言并降低首次启动资源占用；需要更长上下文时可切换 BAAI/bge-m3。"
+                          : "The default intfloat/multilingual-e5-small supports multilingual retrieval with a lighter first startup; use BAAI/bge-m3 when longer context is required."}
                       </div>
                       <div style={{ fontWeight: 600, marginBottom: 4, color: "var(--accent)" }}>
                         {lang === "zh" ? "国内网络加速（可选）" : "China mirror (optional)"}
@@ -822,45 +897,59 @@ export default function SettingsPage() {
           </div>
 
           <div style={{ borderTop: "1px solid var(--border)", paddingTop: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--heading)", marginBottom: 12 }}>{t("graph_config_section_title")}</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "var(--heading)" }}>{t("graph_config_section_title")}</div>
+              <span style={{ borderRadius: 999, padding: "2px 7px", background: graphEnabled ? "var(--accent-soft)" : "var(--bg-inset)", border: `1px solid ${graphEnabled ? "var(--accent-border)" : "var(--border)"}`, color: graphEnabled ? "var(--accent)" : "var(--fg-subtle)", fontSize: 9, fontWeight: 700 }}>
+                {graphEnabled ? (lang === "zh" ? "已启用" : "Enabled") : (lang === "zh" ? "可选 / 默认关闭" : "Optional / Off by default")}
+              </span>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.55, marginBottom: 12 }}>
+              {lang === "zh"
+                ? "仅供 Web Research Agent 的指定 Collection 高精度召回；上传不会自动构建，也不会影响默认 Milvus 召回。"
+                : "Used only for high-precision retrieval on a selected collection in Web Research Agent. Uploads never auto-build it and default Milvus retrieval remains independent."}
+            </div>
+            <label style={{ fontSize: 12, color: "var(--fg-muted)", display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
+              <input type="checkbox" checked={graphEnabled} onChange={(e) => setGraphEnabled(e.target.checked)} />
+              {t("graph_config_enabled")}
+              <HelpTip text={t("graph_config_enabled_help")} />
+            </label>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, opacity: graphEnabled ? 1 : .45, pointerEvents: graphEnabled ? "auto" : "none" }}>
               <label style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-                {t("graph_config_enabled")}
-                <input type="checkbox" checked={graphEnabled} onChange={(e) => setGraphEnabled(e.target.checked)} style={{ marginLeft: 8 }} />
+                {t("graph_config_max_token_size")}
+                <input
+                  type="number"
+                  min={1}
+                  value={embedMaxTokenSize}
+                  onChange={(e) => setEmbedMaxTokenSize(Number(e.target.value))}
+                  style={{ display: "block", width: "100%", marginTop: 5 }}
+                />
               </label>
               <label style={{ fontSize: 12, color: "var(--fg-muted)" }}>
                 {t("graph_config_query_mode")}
+                <HelpTip text={t("graph_config_query_mode_help")} />
                 <Select
                   value={graphQueryMode}
                   onChange={setGraphQueryMode}
                   options={(["mix", "local", "global", "hybrid", "naive", "bypass"] as const).map((mode) => ({
                     value: mode,
-                    label: t(`graph_mode_${mode}` as any),
+                    label: t(`graph_mode_${mode}` as I18nKey),
                   }))}
                   style={{ display: "block", width: "100%", marginTop: 5 }}
                 />
               </label>
-              <label style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-                {t("graph_config_embedding_dim")}
-                <input
-                  readOnly
-                  value={graphEmbeddingDim}
-                  title={lang === "zh" ? "向量维度与 Embedding 模型绑定，修改需删除所有 workspace 重建索引，请联系管理员操作。" : "Embedding dim is tied to the model. Changing it destroys all workspaces — contact an admin to reconfigure."}
-                  style={{ display: "block", width: "100%", marginTop: 5, opacity: 0.7, cursor: "not-allowed" }}
-                />
-              </label>
               {([
-                [t("graph_config_max_token_size"), graphMaxTokenSize, setGraphMaxTokenSize],
-                [t("graph_config_llm_max_async"), graphLlmMaxAsync, setGraphLlmMaxAsync],
-                [t("graph_config_embedding_max_async"), graphEmbeddingMaxAsync, setGraphEmbeddingMaxAsync],
-              ] as [string, number, React.Dispatch<React.SetStateAction<number>>][]).map(([label, value, setter]) => (
+                [t("graph_config_llm_max_async"), t("graph_config_llm_max_async_help"), graphLlmMaxAsync, setGraphLlmMaxAsync],
+                [t("graph_config_embedding_max_async"), t("graph_config_embedding_max_async_help"), graphEmbeddingMaxAsync, setGraphEmbeddingMaxAsync],
+              ] as [string, string, number, React.Dispatch<React.SetStateAction<number>>][]).map(([label, help, value, setter]) => (
                 <label key={label} style={{ fontSize: 12, color: "var(--fg-muted)" }}>
                   {label}
+                  <HelpTip text={help} />
                   <input type="number" min={1} value={value} onChange={(e) => setter(Number(e.target.value))} style={{ display: "block", width: "100%", marginTop: 5 }} />
                 </label>
               ))}
               <label style={{ fontSize: 12, color: "var(--fg-muted)" }}>
                 {t("graph_config_working_dir")}
+                <HelpTip text={t("graph_config_working_dir_help")} />
                 <input readOnly value={String(config?.graph?.working_dir ?? "lightrag_workspaces")} style={{ display: "block", width: "100%", marginTop: 5, opacity: .7 }} />
               </label>
             </div>
@@ -912,6 +1001,7 @@ export default function SettingsPage() {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
             <ConfigCard title={t("settings_config_source")} data={config?.source_store as Record<string, unknown>} />
             <ConfigCard title={t("settings_config_vector_db")} data={config?.vector_db as Record<string, unknown>} />
+            <ConfigCard title={t("settings_config_embedding")} data={config?.embedding as Record<string, unknown>} />
             <ConfigCard title={t("settings_config_r2")} data={config?.r2_sync as Record<string, unknown>} />
             <ConfigCard title={t("settings_config_notion")} data={config?.notion_sync as Record<string, unknown>} />
             <ConfigCard title={t("settings_config_web")} data={config?.web_console as Record<string, unknown>} />

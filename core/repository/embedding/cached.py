@@ -20,10 +20,14 @@ class CachedEmbeddingProvider(EmbeddingProvider):
     """具有本地 SQLite 缓存机制 of Embedding 计算装饰器。"""
 
     def __init__(
-        self, inner: EmbeddingProvider, db_path: str = "./data/embedding_cache.db"
+        self,
+        inner: EmbeddingProvider,
+        db_path: str = "./data/embedding_cache.db",
+        namespace: str = "default",
     ) -> None:
         self._inner = inner
         self._db_path = db_path
+        self._namespace = namespace
         self._initialized = False
 
     async def _lazy_init_db(self) -> None:
@@ -51,9 +55,10 @@ class CachedEmbeddingProvider(EmbeddingProvider):
         logger.info(f"Initialized SQLite embedding cache at {self._db_path}")
 
     def _get_hash(self, text: str) -> str:
-        """根据文本生成高精度 SHA-256 唯一哈希。"""
+        """Hash the provider/model namespace and text into one cache key."""
         import hashlib
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+        return hashlib.sha256(f"{self._namespace}\0{text}".encode()).hexdigest()
 
     async def embed_query(self, text: str) -> list[float]:
         # 查询通常不缓存（因为高频提问且变动大，防止缓存无限膨胀），直接穿透
@@ -82,10 +87,13 @@ class CachedEmbeddingProvider(EmbeddingProvider):
                 async for row in cursor:
                     cache_hits[row[0]] = json.loads(row[1])
 
+        expected_dim = self._inner.get_dimension()
+
         # 2. 分拣命中与缺失
         for i, h in enumerate(hashes):
-            if h in cache_hits:
-                results[i] = cache_hits[h]
+            cached = cache_hits.get(h)
+            if cached is not None and len(cached) == expected_dim:
+                results[i] = cached
             else:
                 missing_indices.append(i)
                 missing_texts.append(texts[i])
@@ -94,6 +102,17 @@ class CachedEmbeddingProvider(EmbeddingProvider):
         if missing_texts:
             logger.info(f"Embedding cache miss. Calculating {len(missing_texts)} new texts...")
             calculated = await self._inner.embed_documents(missing_texts)
+            if len(calculated) != len(missing_texts):
+                raise ValueError(
+                    f"Embedding batch mismatch: expected {len(missing_texts)} vectors, "
+                    f"got {len(calculated)}."
+                )
+            for vector in calculated:
+                if len(vector) != expected_dim:
+                    raise ValueError(
+                        f"Embedding dimension mismatch: expected {expected_dim}, "
+                        f"got {len(vector)}."
+                    )
             
             async with aiosqlite.connect(self._db_path) as db:
                 for idx, text_idx in enumerate(missing_indices):

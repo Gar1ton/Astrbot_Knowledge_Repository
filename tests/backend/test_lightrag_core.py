@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+from core.config import GraphConfig
 from core.domain.models import DocumentChunk, SourceDocument
 from core.lightrag_core import (
+    LightRAGCoreRegistry,
     LightRAGEmbeddingAdapter,
     LightRAGLLMAdapter,
     estimate_lightrag_build,
@@ -91,3 +95,63 @@ async def test_lightrag_embedding_adapter_returns_numpy_batch() -> None:
 
     assert result.shape == (2, 2)
     assert result.tolist() == [[0.0, 1.0], [1.0, 2.0]]
+
+
+async def test_registry_query_only_need_context_skips_final_answer(
+    monkeypatch,
+) -> None:
+    class QueryParam:
+        def __init__(self, *, mode: str, only_need_context: bool) -> None:
+            self.mode = mode
+            self.only_need_context = only_need_context
+
+    class Rag:
+        async def aquery(self, query: str, *, param: QueryParam) -> str:
+            self.call = (query, param)
+            return "context only"
+
+    rag = Rag()
+    registry = object.__new__(LightRAGCoreRegistry)
+    registry._config = GraphConfig(enabled=True, query_mode="mix")
+    registry.has_workspace = lambda collection: collection == "papers"  # type: ignore[method-assign]
+
+    async def get(collection: str):
+        assert collection == "papers"
+        return rag
+
+    registry.get = get  # type: ignore[method-assign]
+    monkeypatch.setitem(sys.modules, "lightrag", SimpleNamespace(QueryParam=QueryParam))
+
+    result = await registry.query("papers", "question", only_need_context=True)
+
+    assert result["answer"] == ""
+    assert result["context"] == "context only"
+    assert rag.call[1].only_need_context is True
+
+
+async def test_registry_reset_workspace_finalizes_and_deletes_derived_data(
+    tmp_path: Path,
+) -> None:
+    class Rag:
+        finalized = False
+
+        async def finalize_storages(self) -> None:
+            self.finalized = True
+
+    root = tmp_path / "lightrag"
+    workspace = root / "papers_safe"
+    workspace.mkdir(parents=True)
+    (workspace / "data.json").write_text("{}", encoding="utf-8")
+    rag = Rag()
+    registry = object.__new__(LightRAGCoreRegistry)
+    registry._root = root
+    registry._map_path = root / "workspace_map.json"
+    registry._workspace_map = {"papers": "papers_safe"}
+    registry._instances = {"papers": rag}
+
+    await registry.reset_workspace("papers")
+
+    assert rag.finalized is True
+    assert not workspace.exists()
+    assert registry._workspace_map == {}
+    assert registry._instances == {}

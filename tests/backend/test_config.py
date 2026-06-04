@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from core.config import ENV_R2_SECRET_ACCESS_KEY, ENV_WEB_PASSWORD, Config
+from core.config import ENV_EMBEDDING_API_KEY, ENV_R2_SECRET_ACCESS_KEY, ENV_WEB_PASSWORD, Config
 from core.runtime_config import RuntimeConfigStore
 
 
@@ -17,6 +17,9 @@ def test_defaults_when_empty() -> None:
     assert cfg.get_notion_sync_config().mcp_server_name == "notion"
     assert cfg.get_web_console_config().port == 6520
     assert cfg.get_graph_config().query_mode == "mix"
+    assert cfg.get_vector_db_config().backend == "milvus"
+    assert cfg.get_embedding_config().model == "intfloat/multilingual-e5-small"
+    assert cfg.get_embedding_config().max_token_size == 512
 
 
 def test_section_overrides() -> None:
@@ -83,6 +86,31 @@ def test_public_config_masks_secrets() -> None:
     assert public["notion_sync"]["database_id"] == "db1"
 
 
+def test_embedding_config_new_values_override_legacy_and_api_key_is_env_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ENV_EMBEDDING_API_KEY, "embedding-secret")
+    cfg = Config(
+        {
+            "embedding": {"provider": "external", "model": "new", "base_url": "https://new"},
+            "vector_db": {
+                "embedding_provider": "local",
+                "embedding_model": "legacy",
+                "base_url": "https://legacy",
+            },
+        }
+    )
+
+    embedding = cfg.get_embedding_config()
+    assert (embedding.provider, embedding.model, embedding.base_url) == (
+        "external",
+        "new",
+        "https://new",
+    )
+    assert cfg.to_public_dict()["embedding"]["api_key"] == "em****et"
+    assert any("Legacy embedding settings" in item for item in cfg.get_diagnostics())
+
+
 def test_enabled_config_diagnostics_report_missing_values() -> None:
     cfg = Config({"r2_sync": {"enabled": True}, "notion_sync": {"enabled": True}})
     diagnostics = cfg.get_diagnostics()
@@ -91,6 +119,21 @@ def test_enabled_config_diagnostics_report_missing_values() -> None:
         "notion_sync.database_id or notion_sync.parent_page_id is required "
         "when notion_sync.enabled=true"
     ) in diagnostics
+
+
+def test_embedding_diagnostics_report_unsupported_or_unconfigured_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(ENV_EMBEDDING_API_KEY, raising=False)
+
+    assert (
+        "embedding.provider=astr is not implemented; choose local or external."
+        in Config({"embedding": {"provider": "astr"}}).get_diagnostics()
+    )
+    assert (
+        "KR_EMBEDDING_API_KEY is required when embedding.provider=external."
+        in Config({"embedding": {"provider": "external"}}).get_diagnostics()
+    )
 
 
 def test_runtime_config_store_only_persists_generated_notion_values(tmp_path: Path) -> None:
@@ -115,13 +158,12 @@ def test_runtime_config_store_permits_vector_db_and_ask_keys(tmp_path: Path) -> 
 
     # These should pass successfully without raising ValueError
     store.set_value("vector_db", "backend", "milvus")
-    store.set_value("vector_db", "embedding_provider", "local")
-    store.set_value("vector_db", "embedding_model", "BAAI/bge-m3")
+    store.set_value("embedding", "provider", "local")
+    store.set_value("embedding", "model", "BAAI/bge-m3")
     store.set_value("ask", "conversation_enhancement_mode", "query_agent")
 
     data = store.load()
     assert data["vector_db"]["backend"] == "milvus"
-    assert data["vector_db"]["embedding_provider"] == "local"
-    assert data["vector_db"]["embedding_model"] == "BAAI/bge-m3"
+    assert data["embedding"]["provider"] == "local"
+    assert data["embedding"]["model"] == "BAAI/bge-m3"
     assert data["ask"]["conversation_enhancement_mode"] == "query_agent"
-

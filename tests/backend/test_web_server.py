@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import fitz  # type: ignore[import-untyped]
 import pytest
 from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
@@ -15,12 +16,11 @@ from core.config import Config
 from core.domain.models import (
     Collection,
     DocumentChunk,
-    GraphEntity,
-    GraphRelation,
     SourceDocument,
     SyncTargetKind,
 )
-from core.repository.graph_store.memory import InMemoryGraphStore
+from core.index_compatibility import IndexCompatibilityStore
+from core.plugin_initializer import PluginInitializer
 from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
 from core.repository.source_store.memory import InMemorySourceDocumentStore
 from core.repository.sync_targets.memory import InMemorySyncTarget
@@ -180,6 +180,49 @@ async def test_upload_empty_file_rejected(tmp_path: Path) -> None:
         await client.close()
 
 
+async def test_upload_moves_staging_file_into_managed_pdf_repository(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    initializer = PluginInitializer(object(), {"vector_db": {"backend": "astr"}}, data_dir)
+    await initializer.initialize()
+    assert initializer.api is not None
+
+    app = build_app(
+        api=initializer.api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=data_dir / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        pdf_path = tmp_path / "managed.pdf"
+        pdf = fitz.open()
+        page = pdf.new_page()
+        page.insert_textbox(fitz.Rect(50, 50, 550, 750), "managed repository upload")
+        pdf.save(pdf_path)
+        pdf.close()
+
+        form = FormData()
+        form.add_field(
+            "file",
+            pdf_path.read_bytes(),
+            filename=pdf_path.name,
+            content_type="application/pdf",
+        )
+        response = await client.post("/api/documents", data=form)
+        assert response.status == 200
+        doc_id = (await response.json())["doc_id"]
+
+        stored = await initializer.api.get_document(doc_id)
+        assert stored is not None
+        assert Path(stored.file_path) == data_dir / "documents" / f"{doc_id}.pdf"
+        assert Path(stored.file_path).exists()
+        assert list((data_dir / "uploads").iterdir()) == []
+    finally:
+        await client.close()
+        await initializer.teardown()
+
+
 # ── KB 检索 / 配额 ─────────────────────────────────────────────
 
 
@@ -291,6 +334,9 @@ async def test_sync_status_endpoint_returns_200(tmp_path: Path) -> None:
 
 async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
     class StubLightRAGRegistry:
+        def has_workspace(self, collection: str) -> bool:
+            return collection == "papers"
+
         async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
             self.inserted = (collection, doc_id, text)
 
@@ -309,10 +355,15 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         SourceDocument("d1", "Doc 1", "/p/d1.pdf", "application/pdf", 100, "h1", "papers")
     )
     await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "source text", "ch1")])
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
     api = KnowledgeRepositoryApi(
         source_store=store,
         kb_reader=InMemoryKnowledgeBaseReader({}),
         lightrag_registry=StubLightRAGRegistry(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
     )
 
     app = build_app(
@@ -345,7 +396,9 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         assert job_resp.status == 200
         assert (await job_resp.json())["engine"] == "lightrag_core"
 
-        resp2 = await client.get("/api/graph/query?q=Transformer&top_k=3&debug=true&collection=papers")
+        resp2 = await client.get(
+            "/api/graph/query?q=Transformer&top_k=3&debug=true&collection=papers"
+        )
         assert resp2.status == 200
         body2 = await resp2.json()
         assert body2["status"] == "success"
@@ -358,24 +411,33 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
 
 
 async def test_graph_data_endpoint_returns_200(tmp_path: Path) -> None:
+    class StubLightRAGRegistry:
+        def has_workspace(self, collection: str) -> bool:
+            return collection == "papers"
+
+        async def export_graph(self, collection: str) -> dict:
+            return {
+                "status": "success",
+                "collection": collection,
+                "nodes": [{"id": "transformer"}, {"id": "attention"}],
+                "edges": [{"id": "r1", "source": "transformer", "target": "attention"}],
+            }
+
     store = InMemorySourceDocumentStore()
     await store.upsert_collection(Collection(name="papers", description="d"))
     await store.add_document(
         SourceDocument("d1", "Doc 1", "/p/d1.pdf", "application/pdf", 100, "h1", "papers", ["t"])
     )
     await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "source text", "ch1")])
-    graph = InMemoryGraphStore()
-    await graph.upsert_entities([
-        GraphEntity("transformer", "Transformer", "Method", "desc", ["c1"]),
-        GraphEntity("attention", "Attention", "Method", "desc", ["c1"]),
-    ])
-    await graph.upsert_relations([
-        GraphRelation("r1", "transformer", "attention", "uses", "desc", 2.0, ["c1"])
-    ])
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
     api = KnowledgeRepositoryApi(
         source_store=store,
         kb_reader=InMemoryKnowledgeBaseReader({}),
-        graph_store=graph,
+        lightrag_registry=StubLightRAGRegistry(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
     )
     app = build_app(
         api=api,
@@ -393,7 +455,6 @@ async def test_graph_data_endpoint_returns_200(tmp_path: Path) -> None:
         assert body["status"] == "success"
         assert {n["id"] for n in body["nodes"]} == {"transformer", "attention"}
         assert body["edges"][0]["id"] == "r1"
-        assert body["nodes"][0]["source_previews"][0]["text"] == "source text"
     finally:
         await client.close()
 
@@ -613,12 +674,27 @@ async def test_config_update_route(tmp_path: Path) -> None:
         # 1. 成功更新允许的配置键
         resp = await client.post(
             "/api/config/update",
-            json={"section": "vector_db", "key": "embedding_provider", "value": "local"}
+            json={"section": "embedding", "key": "provider", "value": "external"}
         )
         assert resp.status == 200
-        assert (await resp.json()) == {"status": "success"}
+        assert await resp.json() == {
+            "status": "success",
+            "restart_required": True,
+            "rebuild_required": True,
+            "message": "Configuration saved. Restart and rebuild indexes.",
+        }
 
-        # 2. 拒绝非白名单配置节的更新
+        # 2. 拒绝尚未实现的 AstrBot Embedding 配置，避免保存后静默禁用召回。
+        resp_invalid_provider = await client.post(
+            "/api/config/update",
+            json={"section": "embedding", "key": "provider", "value": "astr"},
+        )
+        assert resp_invalid_provider.status == 400
+        assert "must be 'local' or 'external'" in (
+            await resp_invalid_provider.json()
+        )["message"]
+
+        # 3. 拒绝非白名单配置节的更新
         resp_blocked = await client.post(
             "/api/config/update",
             json={"section": "r2_sync", "key": "secret_access_key", "value": "hack"}
@@ -672,6 +748,48 @@ async def test_ask_route_sources_contain_locator_fields(tmp_path: Path) -> None:
         assert src["doc_id"] == "d1"
         assert src["metadata"]["page_number"] == 3
         assert src["metadata"]["locator"] == "page_3_p2"
+    finally:
+        await client.close()
+
+
+async def test_high_precision_ask_returns_structured_not_ready(tmp_path: Path) -> None:
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return False
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(
+        SourceDocument("d1", "Doc 1", "/d1.pdf", "application/pdf", 1, "h", "papers")
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/ask",
+            json={
+                "question": "q",
+                "collection": "papers",
+                "retrieval_mode": "high_precision",
+            },
+        )
+        assert resp.status == 409
+        assert await resp.json() == {
+            "status": "lightrag_not_ready",
+            "message": "LightRAG workspace has not been built.",
+            "collection": "papers",
+            "build_available": True,
+        }
     finally:
         await client.close()
 
@@ -770,12 +888,11 @@ async def test_ask_progress_route_found(tmp_path: Path) -> None:
         await client.close()
 
 
-async def test_graph_data_not_reserved(tmp_path: Path) -> None:
-    """GET /api/graph 不应再返回 reserved 响应（已移除 _reserved() 包裹）。"""
+async def test_graph_data_requires_lightrag(tmp_path: Path) -> None:
+    """GET /api/graph 在未配置 LightRAG 时返回保留能力提示。"""
     api = KnowledgeRepositoryApi(
         source_store=InMemorySourceDocumentStore(),
         kb_reader=InMemoryKnowledgeBaseReader({}),
-        graph_store=InMemoryGraphStore(),
     )
     app = build_app(
         api=api,
@@ -787,11 +904,9 @@ async def test_graph_data_not_reserved(tmp_path: Path) -> None:
     await client.start_server()
     try:
         resp = await client.get("/api/graph")
-        assert resp.status == 200
+        assert resp.status == 501
         body = await resp.json()
-        assert "reserved" not in body
-        assert "nodes" in body
-        assert "edges" in body
+        assert body["reserved"] is True
     finally:
         await client.close()
 
@@ -801,7 +916,6 @@ async def test_graph_stats_route(tmp_path: Path) -> None:
     api = KnowledgeRepositoryApi(
         source_store=InMemorySourceDocumentStore(),
         kb_reader=InMemoryKnowledgeBaseReader({}),
-        graph_store=InMemoryGraphStore(),
     )
     app = build_app(
         api=api,
@@ -821,4 +935,3 @@ async def test_graph_stats_route(tmp_path: Path) -> None:
         assert isinstance(body["entities_count"], int)
     finally:
         await client.close()
-

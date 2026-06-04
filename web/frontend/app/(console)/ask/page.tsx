@@ -3,10 +3,29 @@
 import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Btn } from "@/components/ui/Btn";
+import { Tag } from "@/components/ui/Tag";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
-import { AskResult, AskSource, ApiError, EffectiveConfig, ask, listKbCollections, getEffectiveConfig } from "@/lib/api";
+import {
+  AskResult, AskSource, ApiError, EffectiveConfig, GraphBuildEstimate, GraphBuildJob,
+  ask, buildGraph, estimateGraphBuild, getEffectiveConfig, getGraphBuildJob, listCollections,
+  listKbCollections,
+} from "@/lib/api";
 import { RetrievalProgress } from "@/components/fx/RetrievalProgress";
+
+type RetrievalMode = "default" | "high_precision";
+
+function retrievalModeLabel(mode?: string): string {
+  if (mode === "milvus_lightrag") return "高精度 · Milvus + LightRAG";
+  if (mode === "astrbot_lightrag") return "高精度 · AstrBot + LightRAG";
+  if (mode === "lexical_lightrag") return "高精度 · 词汇召回 + LightRAG";
+  if (mode === "lightrag") return "高精度 · 仅 LightRAG";
+  if (mode === "astrbot_fallback") return "已回退 · AstrBot";
+  if (mode === "astrbot") return "AstrBot";
+  if (mode === "sqlite_lexical") return "SQLite 词汇召回";
+  if (mode === "none") return "未完成召回";
+  return "Milvus";
+}
 
 // ─── Markdown 渲染（轻量：仅处理 **bold**、[n] 角标、换行） ──
 
@@ -157,6 +176,7 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   sources?: AskSource[];
+  actualRetrievalMode?: string;
 }
 
 function MessageBubble({ msg, activeN, setActiveN }: { msg: Message; activeN: number | null; setActiveN: (n: number | null) => void }) {
@@ -182,9 +202,101 @@ function MessageBubble({ msg, activeN, setActiveN }: { msg: Message; activeN: nu
           boxShadow: "var(--shadow)",
         }}
       >
-        {isUser
-          ? msg.content
-          : renderAnswer(msg.content, msg.sources ?? [], activeN, setActiveN)}
+        {isUser ? msg.content : (
+          <>
+            <div style={{ marginBottom: 7 }}>
+              <Tag
+                label={retrievalModeLabel(msg.actualRetrievalMode)}
+                accent={Boolean(msg.actualRetrievalMode?.includes("lightrag"))}
+              />
+            </div>
+            {renderAnswer(msg.content, msg.sources ?? [], activeN, setActiveN)}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface PrecisionDialogState {
+  question: string;
+  collection: string;
+  reason: string;
+  estimate?: GraphBuildEstimate;
+  canBuild: boolean;
+  building?: boolean;
+  job?: GraphBuildJob;
+}
+
+function PrecisionDialog({
+  state,
+  onBuild,
+  onFallback,
+  onCancel,
+}: {
+  state: PrecisionDialogState;
+  onBuild: () => void;
+  onFallback: () => void;
+  onCancel: () => void;
+}) {
+  const rows: [string, string][] = state.estimate ? [
+    ["集合", state.estimate.collection],
+    ["文档数", String(state.estimate.docs_count)],
+    ["分块数", String(state.estimate.chunks_count)],
+    ["估算 LLM 调用", `${state.estimate.estimated_llm_calls_min} – ${state.estimate.estimated_llm_calls_max}`],
+    ["估算耗时（秒）", `${state.estimate.estimated_duration_seconds_min} – ${state.estimate.estimated_duration_seconds_max}`],
+  ] : [["集合", state.collection]];
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,.35)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 600,
+      }}
+      onClick={(e) => e.target === e.currentTarget && !state.building && onCancel()}
+    >
+      <div style={{
+        background: "var(--surface)", border: "1px solid var(--border)",
+        borderRadius: 14, padding: 24, width: 410, boxShadow: "var(--shadow-pop)",
+        display: "flex", flexDirection: "column", gap: 16,
+      }}>
+        <div>
+          <h3 style={{ margin: "0 0 5px", fontSize: 15, fontWeight: 700, color: "var(--heading)" }}>
+            高精度召回尚未就绪
+          </h3>
+          <p style={{ margin: 0, fontSize: 11, lineHeight: 1.6, color: "var(--fg-muted)" }}>
+            {state.reason}
+          </p>
+        </div>
+
+        <div style={{ background: "var(--bg-inset)", border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+          {rows.map(([label, value], i) => (
+            <div key={label} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "8px 14px", borderTop: i > 0 ? "1px solid var(--border)" : undefined }}>
+              <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>{label}</span>
+              <span style={{ fontSize: 12, fontFamily: "var(--font-geist-mono)", color: "var(--fg)", fontWeight: 600 }}>{value}</span>
+            </div>
+          ))}
+        </div>
+
+        {state.estimate && (
+          <div style={{ fontSize: 11, lineHeight: 1.6, color: "var(--warn)", background: "color-mix(in srgb, var(--warn, #d97706) 10%, transparent)", border: "1px solid color-mix(in srgb, var(--warn, #d97706) 30%, transparent)", borderRadius: 8, padding: "8px 12px" }}>
+            {state.estimate.estimate_notice}
+          </div>
+        )}
+
+        {state.job && (
+          <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.6 }}>
+            LightRAG 索引：{state.job.status} · {state.job.processed_docs ?? 0}/{state.job.total_docs ?? 0} 文档
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+          <Btn variant="ghost" size="sm" disabled={state.building} onClick={onCancel}>取消</Btn>
+          <Btn variant="outline" size="sm" disabled={state.building} onClick={onFallback}>本次使用 Milvus</Btn>
+          {state.canBuild && state.estimate && (
+            <Btn size="sm" loading={state.building} onClick={onBuild}>构建并自动继续</Btn>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -197,7 +309,8 @@ export default function AskPage() {
   const { toast } = useToast();
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const [collections, setCollections] = useState<string[]>([]);
+  const [localCollections, setLocalCollections] = useState<string[]>([]);
+  const [defaultCollections, setDefaultCollections] = useState<string[]>([]);
   const [collection, setCollection] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -207,24 +320,40 @@ export default function AskPage() {
   const [loading, setLoading] = useState(false);
   const [retrievalActive, setRetrievalActive] = useState(false);
   const [modeInfo, setModeInfo] = useState<string>("embedding + RRF");
+  const [defaultRetrievalLabel, setDefaultRetrievalLabel] = useState("Milvus");
+  const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("default");
   const [personaEnabled, setPersonaEnabled] = useState(false);
   const [showCollectionPicker, setShowCollectionPicker] = useState(false);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [showSources, setShowSources] = useState(true);
+  const [precisionDialog, setPrecisionDialog] = useState<PrecisionDialogState | null>(null);
+  const highPrecisionCollectionReady = Boolean(
+    collection && localCollections.includes(collection)
+  );
 
   useEffect(() => {
-    listKbCollections().then(setCollections).catch(() => {});
+    Promise.all([
+      listCollections().catch(() => []),
+      listKbCollections().catch(() => []),
+    ])
+      .then(([localItems, kbItems]) => {
+        const localNames = localItems.map((item) => item.name);
+        setLocalCollections(localNames);
+        setDefaultCollections([...new Set([...localNames, ...kbItems])]);
+      });
     // 拉取一次配置，组合显示向量后端 + embedding + 增强模式
     getEffectiveConfig().then((cfg: EffectiveConfig) => {
       const vdb = cfg.vector_db as Record<string, string> | undefined;
+      const embedding = cfg.embedding as Record<string, string> | undefined;
       const ask = cfg.ask as Record<string, string> | undefined;
-      const backend = vdb?.backend ?? "astr";
-      const provider = vdb?.embedding_provider ?? "external";
+      const backend = vdb?.backend ?? "milvus";
+      const provider = embedding?.provider ?? "local";
       const mode = ask?.conversation_enhancement_mode ?? "inject";
       const backendLabel = backend === "milvus" ? "Milvus" : "AstrBot KB";
       const providerLabel = provider === "local" ? "本地 Embedding" : "API Embedding";
       const modeLabel = mode === "inject" ? "注入增强" : "代理增强";
       setModeInfo(`${backendLabel} · ${providerLabel} · ${modeLabel}`);
+      setDefaultRetrievalLabel(backend === "milvus" ? "Milvus" : "AstrBot");
     }).catch(() => {});
   }, []);
 
@@ -247,13 +376,21 @@ export default function AskPage() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
-  async function handleSend(e: React.FormEvent) {
-    e.preventDefault();
-    if (!input.trim() || loading) return;
-
-    const question = input.trim();
-    setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: question }]);
+  async function submitQuestion(
+    question: string,
+    mode: RetrievalMode,
+    appendUser: boolean,
+  ) {
+    if (loading) return;
+    if (mode === "high_precision" && !highPrecisionCollectionReady) {
+      setShowCollectionPicker(true);
+      toast("高精度召回需要先选择一个集合。", "info");
+      return;
+    }
+    if (appendUser) {
+      setInput("");
+      setMessages((prev) => [...prev, { role: "user", content: question }]);
+    }
     setLoading(true);
     setRetrievalActive(true);
     setActiveN(null);
@@ -265,6 +402,7 @@ export default function AskPage() {
         top_k: 5,
         conversation_id: conversationId,
         persona_enabled: personaEnabled,
+        retrieval_mode: mode,
       });
 
       setConversationId(result.conversation_id);
@@ -272,18 +410,94 @@ export default function AskPage() {
       if (result.sources.length > 0) setShowSources(true);
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: result.answer, sources: result.sources },
+        {
+          role: "assistant",
+          content: result.answer,
+          sources: result.sources,
+          actualRetrievalMode: result.actual_retrieval_mode,
+        },
       ]);
     } catch (err) {
-      toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
+      if (
+        mode === "high_precision"
+        && err instanceof ApiError
+        && (err.body?.status === "lightrag_not_ready" || err.body?.status === "high_precision_failed")
+        && collection
+      ) {
+        let estimate: GraphBuildEstimate | undefined;
+        const canBuild = err.body.build_available === true;
+        if (canBuild) {
+          try {
+            estimate = await estimateGraphBuild(collection);
+          } catch {
+            estimate = undefined;
+          }
+        }
+        setPrecisionDialog({
+          question,
+          collection,
+          reason: err.message,
+          estimate,
+          canBuild,
+        });
+      } else {
+        toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
+      }
     } finally {
       setLoading(false);
       setRetrievalActive(false);
     }
   }
 
+  async function handleSend(e: React.FormEvent) {
+    e.preventDefault();
+    if (!input.trim() || loading) return;
+    await submitQuestion(input.trim(), retrievalMode, true);
+  }
+
+  async function handlePrecisionFallback() {
+    if (!precisionDialog) return;
+    const pending = precisionDialog;
+    setPrecisionDialog(null);
+    await submitQuestion(pending.question, "default", false);
+  }
+
+  async function handlePrecisionBuild() {
+    if (!precisionDialog?.estimate) return;
+    const pending = precisionDialog;
+    setPrecisionDialog({ ...pending, building: true });
+    try {
+      let job = await buildGraph(pending.collection);
+      setPrecisionDialog((current) => current ? { ...current, job } : current);
+      while (!["success", "partial_failure", "error"].includes(job.status)) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1200));
+        job = await getGraphBuildJob(job.job_id);
+        setPrecisionDialog((current) => current ? { ...current, job } : current);
+      }
+      if (job.status !== "success") {
+        throw new Error(job.recent_error || `LightRAG build ended with ${job.status}`);
+      }
+      setPrecisionDialog(null);
+      await submitQuestion(pending.question, "high_precision", false);
+    } catch (err) {
+      setPrecisionDialog((current) => current ? {
+        ...current,
+        building: false,
+        reason: err instanceof Error ? err.message : t("error_generic"),
+      } : current);
+    }
+  }
+
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", position: "relative" }}>
+      {precisionDialog && (
+        <PrecisionDialog
+          state={precisionDialog}
+          onBuild={handlePrecisionBuild}
+          onFallback={handlePrecisionFallback}
+          onCancel={() => setPrecisionDialog(null)}
+        />
+      )}
 
       {/* 对话区 */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", zIndex: 1 }}>
@@ -306,6 +520,7 @@ export default function AskPage() {
             {t("nav_ask")}
             <span style={{ color: "var(--accent)", fontSize: 11, lineHeight: 1 }}>●</span>
             <span style={{ color: "var(--fg-subtle)", fontSize: 11, fontWeight: 500, lineHeight: 1 }}>{modeInfo}</span>
+            <Tag label={retrievalMode === "high_precision" ? "高精度召回" : `${defaultRetrievalLabel} 默认召回`} accent={retrievalMode === "high_precision"} />
           </h1>
           {messages.length > 0 && (
             <Btn
@@ -490,7 +705,7 @@ export default function AskPage() {
                       <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)", padding: "2px 8px 6px" }}>
                         知识库集合
                       </div>
-                      {[null, ...collections].map((c) => (
+                      {(retrievalMode === "high_precision" ? localCollections : [null, ...defaultCollections]).map((c) => (
                         <button
                           key={c ?? "__all__"}
                           type="button"
@@ -523,8 +738,8 @@ export default function AskPage() {
                     onClick={() => { setShowSettingsMenu((v) => !v); setShowCollectionPicker(false); }}
                     style={{
                       width: 30, height: 30, borderRadius: 8,
-                      background: personaEnabled || showSettingsMenu ? "var(--accent-soft)" : "var(--bg-inset)",
-                      color: personaEnabled || showSettingsMenu ? "var(--accent)" : "var(--fg-subtle)",
+                      background: personaEnabled || retrievalMode === "high_precision" || showSettingsMenu ? "var(--accent-soft)" : "var(--bg-inset)",
+                      color: personaEnabled || retrievalMode === "high_precision" || showSettingsMenu ? "var(--accent)" : "var(--fg-subtle)",
                       border: "1px solid var(--border)", cursor: "pointer",
                       display: "flex", alignItems: "center", justifyContent: "center",
                       transition: "all .15s", flexShrink: 0,
@@ -569,8 +784,40 @@ export default function AskPage() {
                           style={{ accentColor: "var(--accent)", cursor: "pointer", width: 14, height: 14 }}
                         />
                       </label>
+                      <label
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          padding: "7px 8px", borderRadius: 8, cursor: "pointer",
+                          fontSize: 12, color: "var(--fg)", userSelect: "none",
+                          borderTop: "1px solid var(--border)",
+                        }}
+                      >
+                        <span>
+                          高精度召回
+                          <span style={{ display: "block", fontSize: 9, color: "var(--fg-subtle)", marginTop: 2 }}>
+                            Milvus + LightRAG · 需指定集合
+                          </span>
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={retrievalMode === "high_precision"}
+                          onChange={(e) => {
+                            const next = e.target.checked ? "high_precision" : "default";
+                            setRetrievalMode(next);
+                            if (
+                              next === "high_precision"
+                              && (!collection || !localCollections.includes(collection))
+                            ) {
+                              setCollection(null);
+                              setShowSettingsMenu(false);
+                              setShowCollectionPicker(true);
+                            }
+                          }}
+                          style={{ accentColor: "var(--accent)", cursor: "pointer", width: 14, height: 14 }}
+                        />
+                      </label>
                       <div style={{ fontSize: 10, color: "var(--fg-subtle)", padding: "2px 8px 4px", marginTop: 2, borderTop: "1px solid var(--border)" }}>
-                        embedding + RRF 检索
+                        {retrievalMode === "high_precision" ? "Milvus + LightRAG 上下文" : `${defaultRetrievalLabel} + RRF 默认召回`}
                       </div>
                     </div>
                   )}
@@ -580,11 +827,11 @@ export default function AskPage() {
                 {/* 圆形发送按钮 */}
                 <button
                   type="submit"
-                  disabled={!input.trim() || loading}
+                  disabled={!input.trim() || loading || (retrievalMode === "high_precision" && !highPrecisionCollectionReady)}
                   style={{
                     width: 36, height: 36, borderRadius: "50%",
-                    background: input.trim() && !loading ? "var(--accent)" : "var(--bg-inset)",
-                    border: "none", cursor: input.trim() && !loading ? "pointer" : "default",
+                    background: input.trim() && !loading && (retrievalMode === "default" || highPrecisionCollectionReady) ? "var(--accent)" : "var(--bg-inset)",
+                    border: "none", cursor: input.trim() && !loading && (retrievalMode === "default" || highPrecisionCollectionReady) ? "pointer" : "default",
                     display: "flex", alignItems: "center", justifyContent: "center",
                     transition: "background 0.15s, transform 0.1s",
                     flexShrink: 0,

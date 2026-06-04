@@ -13,6 +13,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger("MilvusLiteVectorStore")
 
 
+class MilvusSchemaMismatchError(RuntimeError):
+    """Existing Milvus collection cannot be used with the active embedding dimension."""
+
+
 class MilvusLiteVectorStore(VectorStore):
     """基于 Milvus Lite 的向量检索适配器。
 
@@ -26,10 +30,19 @@ class MilvusLiteVectorStore(VectorStore):
         self._doc_to_col: dict[str, str] = {}
         self._collection_name = "kb_chunks"
         self._initialized = False
+        self._created_collection = False
+
+    @property
+    def created_collection(self) -> bool:
+        return self._created_collection
 
     def set_doc_collection_mapping(self, doc_id: str, collection: str) -> None:
         """注册或更新文档与集合的关系。"""
         self._doc_to_col[doc_id] = collection
+
+    def validate_schema(self) -> None:
+        """Eagerly validate dependencies and the existing collection schema."""
+        self._init_client()
 
     def _init_client(self) -> None:
         if self._initialized:
@@ -45,6 +58,7 @@ class MilvusLiteVectorStore(VectorStore):
 
         # 如果集合不存在，则创建符合 VARCHAR 主键的 Collection Schema
         if not self._client.has_collection(self._collection_name):
+            self._created_collection = True
             schema = self._client.create_schema(
                 auto_id=False,
                 enable_dynamic_field=True,
@@ -69,16 +83,41 @@ class MilvusLiteVectorStore(VectorStore):
                 f"Created Milvus Lite collection '{self._collection_name}' "
                 f"with dimension {self._dim} successfully."
             )
+        else:
+            existing_dim = self._existing_dimension()
+            if existing_dim is not None and existing_dim != self._dim:
+                raise MilvusSchemaMismatchError(
+                    f"Milvus collection dimension is {existing_dim}, but the configured "
+                    f"embedding dimension is {self._dim}. Rebuild the Milvus index."
+                )
         self._initialized = True
+
+    def _existing_dimension(self) -> int | None:
+        description = self._client.describe_collection(self._collection_name)
+        for field in description.get("fields", []):
+            if (field.get("name") or field.get("field_name")) != "vector":
+                continue
+            params = field.get("params") or {}
+            value = params.get("dim") or field.get("dim")
+            return int(value) if value is not None else None
+        return None
+
+    def _validate_vector(self, vector: list[float]) -> None:
+        if len(vector) != self._dim:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected {self._dim}, got {len(vector)}."
+            )
 
     async def upsert_chunks(
         self, chunks: list[DocumentChunk], embeddings: list[list[float]]
     ) -> None:
         if not chunks or not embeddings:
             return
+        if len(chunks) != len(embeddings):
+            raise ValueError("chunks and embeddings must have the same length")
 
-        # 动态自适应首个插入的向量维度
-        self._dim = len(embeddings[0])
+        for embedding in embeddings:
+            self._validate_vector(embedding)
         self._init_client()
 
         data = []
@@ -111,6 +150,7 @@ class MilvusLiteVectorStore(VectorStore):
             self._client.delete(collection_name=self._collection_name, ids=chunk_ids)
         except Exception as e:
             logger.error(f"Failed to delete chunks: {e}")
+            raise RuntimeError(f"Failed to delete chunks: {e}") from e
 
     async def delete_collection(self, collection: str) -> None:
         self._init_client()
@@ -126,6 +166,7 @@ class MilvusLiteVectorStore(VectorStore):
             }
         except Exception as e:
             logger.error(f"Failed to delete collection {collection}: {e}")
+            raise RuntimeError(f"Failed to delete collection {collection}: {e}") from e
 
     async def search(
         self,
@@ -137,7 +178,7 @@ class MilvusLiteVectorStore(VectorStore):
         if top_k <= 0:
             return []
 
-        self._dim = len(query_vector)
+        self._validate_vector(query_vector)
         self._init_client()
 
         filter_expr = f"collection_tag == '{collection}'"
@@ -162,17 +203,24 @@ class MilvusLiteVectorStore(VectorStore):
             return res_list
         except Exception as e:
             logger.error(f"Milvus search failed: {e}")
-            return []
+            raise RuntimeError(f"Milvus search failed: {e}") from e
 
     async def clear(self) -> None:
-        self._init_client()
         try:
-            self._client.drop_collection(self._collection_name)
+            if self._client is None:
+                from pymilvus import MilvusClient
+
+                self._client = MilvusClient(self._db_path)
+            if self._client.has_collection(self._collection_name):
+                self._client.drop_collection(self._collection_name)
+            self._client.close()
+            self._client = None
             self._initialized = False
             self._doc_to_col.clear()
             self._init_client()
         except Exception as e:
             logger.error(f"Failed to clear vector store: {e}")
+            raise RuntimeError(f"Failed to clear vector store: {e}") from e
 
     async def close(self) -> None:
         if self._client:
@@ -184,4 +232,4 @@ class MilvusLiteVectorStore(VectorStore):
             self._initialized = False
 
 
-__all__ = ["MilvusLiteVectorStore"]
+__all__ = ["MilvusLiteVectorStore", "MilvusSchemaMismatchError"]

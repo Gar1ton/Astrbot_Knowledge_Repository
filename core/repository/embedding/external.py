@@ -14,9 +14,8 @@ from core.repository.embedding.base import EmbeddingProvider
 
 logger = logging.getLogger("ExternalEmbeddingProvider")
 
-# 优先级：环境变量优先，配置回退
+# API Key 仅由环境变量注入；Base URL 与模型来自顶层 embedding 配置。
 ENV_EMBEDDING_API_KEY = "KR_EMBEDDING_API_KEY"
-ENV_EMBEDDING_BASE_URL = "KR_EMBEDDING_BASE_URL"
 
 
 class ExternalEmbeddingProvider(EmbeddingProvider):
@@ -24,13 +23,11 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
 
     def __init__(
         self,
-        api_key: str = "",
         base_url: str = "https://api.openai.com/v1",
         model_name: str = "text-embedding-3-large",
     ) -> None:
-        # 环境变量注入
-        self._api_key = os.environ.get(ENV_EMBEDDING_API_KEY) or api_key
-        self._base_url = os.environ.get(ENV_EMBEDDING_BASE_URL) or base_url
+        self._api_key = os.environ.get(ENV_EMBEDDING_API_KEY) or ""
+        self._base_url = base_url
         self._model_name = model_name
 
         # 剥离可能多余的 /embeddings 或 /v1 路径
@@ -47,6 +44,8 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
             "BAAI/bge-small-en-v1.5": 384,
             "BAAI/bge-large-zh-v1.5": 1024,
             "BAAI/bge-base-zh-v1.5": 768,
+            "BAAI/bge-small-zh-v1.5": 512,
+            "intfloat/multilingual-e5-small": 384,
         }
         self._dimension = self._dimension_mapping.get(self._model_name, 1536)
 
@@ -77,9 +76,8 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, json=payload) as resp:
                     if resp.status != 200:
-                        err_text = await resp.text()
                         logger.error(f"Embedding API failed with status {resp.status}")
-                        msg = f"Embedding API 响应异常，HTTP {resp.status}: {err_text}"
+                        msg = f"Embedding API 响应异常，HTTP {resp.status}"
                         raise RuntimeError(msg)
                     
                     data = await resp.json()
@@ -99,7 +97,7 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
                         
                     return result
         except Exception as e:
-            logger.error(f"Network error in ExternalEmbedding: {e}")
+            logger.error("External embedding request failed: %s", type(e).__name__)
             raise RuntimeError(f"Embedding 接口通信错误: {e}") from e
 
     def get_dimension(self) -> int:

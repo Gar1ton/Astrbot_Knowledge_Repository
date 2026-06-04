@@ -16,19 +16,21 @@ logger = logging.getLogger("LocalEmbeddingProvider")
 class LocalEmbeddingProvider(EmbeddingProvider):
     """基于本地加载 HuggingFace 模型的 Embedding 计算适配器。"""
 
-    def __init__(self, model_name: str = "BAAI/bge-large-en-v1.5") -> None:
+    def __init__(self, model_name: str = "intfloat/multilingual-e5-small") -> None:
         self._model_name = model_name
         self._model: Any = None
         self._dimension: int = 0
         
         # 常见模型的维度映射字典，用于避免冷启动加载前获取维度的性能开销
         self._dimension_mapping = {
-            "BAAI/bge-small-zh-v1.5": 384,
+            "BAAI/bge-small-zh-v1.5": 512,
             "BAAI/bge-m3": 1024,
             "BAAI/bge-large-en-v1.5": 1024,
             "BAAI/bge-large-zh-v1.5": 1024,
             "thenlper/gte-large": 1024,
             "sentence-transformers/all-MiniLM-L6-v2": 384,
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2": 384,
+            "intfloat/multilingual-e5-small": 384,
         }
         self._dimension = self._dimension_mapping.get(self._model_name, 384)
 
@@ -76,7 +78,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
     def _embed_query_sync(self, text: str) -> list[float]:
         self._lazy_init()
         # model.encode 会返回 numpy array，转换为 python float list
-        res = self._model.encode(text, normalize_embeddings=True)
+        res = self._model.encode(self._prepare_query(text), normalize_embeddings=True)
         return [float(x) for x in res]
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
@@ -86,8 +88,18 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 
     def _embed_documents_sync(self, texts: list[str]) -> list[list[float]]:
         self._lazy_init()
-        res = self._model.encode(texts, normalize_embeddings=True)
+        res = self._model.encode(self._prepare_documents(texts), normalize_embeddings=True)
         return [[float(x) for x in row] for row in res]
+
+    def _prepare_query(self, text: str) -> str:
+        if self._model_name.startswith("intfloat/") and "e5" in self._model_name.lower():
+            return f"query: {text}"
+        return text
+
+    def _prepare_documents(self, texts: list[str]) -> list[str]:
+        if self._model_name.startswith("intfloat/") and "e5" in self._model_name.lower():
+            return [f"passage: {text}" for text in texts]
+        return texts
 
     def get_dimension(self) -> int:
         return self._dimension

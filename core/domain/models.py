@@ -167,45 +167,6 @@ class QuotaWarning:
     message: str = ""
 
 
-# ── 知识图谱（LightRAG 风格属性图）────────────────────────────────
-
-
-@dataclass
-class GraphEntity:
-    """图谱实体节点。
-
-    契约：
-        - entity_id 稳定唯一（通常由规范化 name 派生）；name 为展示名，entity_type 为类别。
-        - source_chunk_ids 记录支撑该实体的来源 chunk；归并别名时合并描述并取并集。
-        - degree 为关联边数，由 GraphStore 维护，非调用方手填。
-    """
-
-    entity_id: str
-    name: str
-    entity_type: str = ""
-    description: str = ""
-    source_chunk_ids: list[str] = field(default_factory=list)
-    degree: int = 0
-
-
-@dataclass
-class GraphRelation:
-    """图谱关系边（有向：src → dst）。
-
-    契约：
-        - relation_id 稳定唯一；relation 为关系词；weight 为强度，重复抽取时累加。
-        - source_chunk_ids 记录支撑该关系的来源 chunk。
-    """
-
-    relation_id: str
-    src_entity_id: str
-    dst_entity_id: str
-    relation: str = ""
-    description: str = ""
-    weight: float = 1.0
-    source_chunk_ids: list[str] = field(default_factory=list)
-
-
 __all__ = [
     "SyncTargetKind",
     "SyncStatus",
@@ -216,6 +177,4 @@ __all__ = [
     "SyncRecord",
     "QuotaUsage",
     "QuotaWarning",
-    "GraphEntity",
-    "GraphRelation",
 ]

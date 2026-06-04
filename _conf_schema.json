@@ -142,7 +142,7 @@
   "graph": {
     "description": "LightRAG Core 知识图谱",
     "type": "object",
-    "hint": "官方 lightrag-hku Core：上传后不自动构建；用户手动确认后才触发 LLM/Embedding 索引。每个 collection 使用独立 workspace。",
+    "hint": "可选高精度召回：默认关闭，上传后不自动构建；仅在用户手动确认后触发 LLM/Embedding 索引。每个 collection 使用独立 workspace。",
     "items": {
       "enabled": {
         "description": "启用 LightRAG Core 图谱",
@@ -161,17 +161,6 @@
           "naive",
           "bypass"
         ]
-      },
-      "embedding_dim": {
-        "description": "Embedding 向量维度",
-        "type": "int",
-        "default": 1024,
-        "hint": "必须与当前 EmbeddingProvider 真实输出维度一致，否则 LightRAG 会拒绝写入。"
-      },
-      "max_token_size": {
-        "description": "Embedding 最大 token 数",
-        "type": "int",
-        "default": 8192
       },
       "llm_max_async": {
         "description": "LLM 并发上限",
@@ -194,28 +183,17 @@
   "vector_db": {
     "description": "向量数据库与检索后端",
     "type": "object",
-    "hint": "选择基于主框架内置的 AstrBot 检索，或是基于本地高性能嵌入式 Milvus Lite 向量引擎",
+    "hint": "新安装默认使用 Milvus Lite；Milvus 暂不可用时仍保留 AstrBot KB 与插件 SQLite 词汇召回。",
     "items": {
       "backend": {
         "description": "检索后端",
         "type": "string",
-        "default": "astr",
+        "default": "milvus",
         "options": [
           "astr",
           "milvus"
         ],
-        "hint": "astr 表示复用 AstrBot 自带检索（FAISS+FTS5+RRF）；milvus 表示开启插件本地 Milvus Lite 向量引擎"
-      },
-      "embedding_provider": {
-        "description": "Embedding 提供商（仅 milvus 后端有效）",
-        "type": "string",
-        "default": "local",
-        "options": [
-          "local",
-          "external",
-          "astr"
-        ],
-        "hint": "astr 表示复用 AstrBot 主框架已配置的 Embedding 模型，无需额外安装依赖或填写 API Key（待完整接口对接后生效）；local 表示使用本地离线模型（如 BAAI/bge-large-en-v1.5），首次启用需手动执行 pip install sentence-transformers；external 为云端 API 转换（如 OpenAI，需自行配置 api_key 与 base_url）"
+        "hint": "milvus 为插件托管 PDF 的默认向量召回；astr 仅复用 AstrBot 自带知识库检索。两种模式均会融合插件 SQLite 词汇召回。"
       },
       "db_filename": {
         "description": "本地向量数据库文件名",
@@ -227,6 +205,41 @@
         "type": "bool",
         "default": true,
         "hint": "关闭后文档上传仅写入 SQLite，跳过 embedding 步骤并标记 needs_reindex=True；可在 WebUI 工具栏手动触发批量重建索引"
+      }
+    }
+  },
+  "embedding": {
+    "description": "默认召回与 LightRAG 共享 Embedding",
+    "type": "object",
+    "hint": "运行时会执行一次真实向量探针，并以实际返回维度作为 Milvus 与 LightRAG 的唯一维度真值。API Key 仅从 KR_EMBEDDING_API_KEY 读取。",
+    "items": {
+      "provider": {
+        "description": "Embedding 提供商",
+        "type": "string",
+        "default": "local",
+        "options": [
+          "local",
+          "external"
+        ],
+        "hint": "local 使用随插件依赖提供的本地运行时，首次启动自动下载模型；external 使用兼容 OpenAI Embeddings 的 API。"
+      },
+      "model": {
+        "description": "Embedding 模型",
+        "type": "string",
+        "default": "intfloat/multilingual-e5-small",
+        "hint": "默认模型体积和资源占用较低，支持多语言检索；可按需切换 BAAI/bge-m3 并重建索引。"
+      },
+      "base_url": {
+        "description": "Embedding API Base URL",
+        "type": "string",
+        "default": "https://api.openai.com/v1",
+        "hint": "仅 external provider 使用。"
+      },
+      "max_token_size": {
+        "description": "LightRAG Embedding 最大 token 数",
+        "type": "int",
+        "default": 512,
+        "hint": "仅 LightRAG Core 使用；应与当前 Embedding 模型的最大输入长度匹配。"
       }
     }
   },

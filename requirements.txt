@@ -1,17 +1,20 @@
 # 依赖按分区填写。运行时核心为必装；可选区按启用的功能安装。
 
 # ── 运行时核心依赖 ─────────────────────────────────────────────
-aiosqlite                  # 异步 SQLite（repository/source_store、graph_store）
+aiosqlite                  # 异步 SQLite（repository/source_store）
+PyMuPDF                    # 基础 PDF 上传、文本抽取与分块
 lightrag-hku>=1.5.0rc1,<2.0.0 # 官方 LightRAG Core（不启用 [api] extra）
+pymilvus[milvus_lite]      # 默认 Milvus Lite 向量检索后端
+sentence-transformers      # 默认本地 Embedding provider
 
 # ── 可选 / 按功能启用 ─────────────────────────────────────────
-PyMuPDF                    # 本地 PDF 文本抽取（无 LLM）；ingest_manager 使用
 boto3                      # S3 兼容客户端，访问 Cloudflare R2（sync_targets/r2）
 aiohttp                    # 独立 web 控制台服务（web/，v0.5.0 起需要）
-numpy                      # 实体/关系向量余弦相似度（graph_store，v0.6.0 起需要）
+numpy                      # LightRAG Embedding adapter
 
 # 说明：
-# - 检索/embedding 复用 AstrBot 自带能力，故不在此引入向量库或 embedding 包。
+# - 新安装默认使用 Milvus Lite + 轻量多语言本地 Embedding；首次启动会下载模型。
+# - 即使 Embedding/Milvus 暂不可用，插件托管 PDF 仍可上传并使用 SQLite 词汇召回。
 # - Notion 同步经 AstrBot 已配置的 notion MCP server，无需 notion-sdk。
 
 # ── 开发 / 测试 ───────────────────────────────────────────────

@@ -6,6 +6,7 @@
 机密约定：密钥/密码优先从环境变量读取，原始 dict 仅作回退，且密钥不应提交进仓库。
     - R2 Secret Access Key：env `KR_R2_SECRET_ACCESS_KEY`
     - Web 控制台密码：env `KR_WEB_PASSWORD`
+    - Embedding API Key：env `KR_EMBEDDING_API_KEY`
     Notion 不在此持有 token——同步经 AstrBot 已配置的 notion MCP server，token 由 MCP 侧管理。
 """
 
@@ -19,6 +20,7 @@ from typing import Any
 
 ENV_R2_SECRET_ACCESS_KEY = "KR_R2_SECRET_ACCESS_KEY"
 ENV_WEB_PASSWORD = "KR_WEB_PASSWORD"
+ENV_EMBEDDING_API_KEY = "KR_EMBEDDING_API_KEY"
 
 
 def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
@@ -116,8 +118,6 @@ class GraphConfig:
 
     enabled: bool = False
     query_mode: str = "mix"
-    embedding_dim: int = 1024
-    max_token_size: int = 8192
     llm_max_async: int = 4
     embedding_max_async: int = 8
     working_dir: str = "lightrag_workspaces"
@@ -127,10 +127,19 @@ class GraphConfig:
 class VectorDbConfig:
     """向量数据库与检索后端配置。"""
 
-    backend: str = "astr"
-    embedding_provider: str = "local"
+    backend: str = "milvus"
     db_filename: str = "vector_store.db"
     auto_index_enabled: bool = True
+
+
+@dataclass
+class EmbeddingConfig:
+    """Shared embedding configuration for Milvus and LightRAG."""
+
+    provider: str = "local"
+    model: str = "intfloat/multilingual-e5-small"
+    base_url: str = "https://api.openai.com/v1"
+    max_token_size: int = 512
 
 
 @dataclass
@@ -148,6 +157,8 @@ class Config:
     """原始配置的唯一解析入口。持有 raw dict，按需产出各子系统的 typed config。"""
 
     raw: dict[str, Any] = field(default_factory=dict)
+    runtime_diagnostics: list[str] = field(default_factory=list)
+    runtime_embedding_dimension: int | None = None
 
     def apply_override(self, override: dict[str, Any]) -> None:
         """合并运行时覆盖配置。用于自动建库后回填 database_id。"""
@@ -161,6 +172,13 @@ class Config:
             self.raw[section] = current
         current[key] = value
 
+    def add_diagnostic(self, message: str) -> None:
+        if message not in self.runtime_diagnostics:
+            self.runtime_diagnostics.append(message)
+
+    def set_embedding_dimension(self, dimension: int) -> None:
+        self.runtime_embedding_dimension = dimension
+
     def to_public_dict(self) -> dict[str, Any]:
         """返回前端可展示的有效配置；敏感字段脱敏。"""
         source = self.get_source_store_config()
@@ -169,6 +187,7 @@ class Config:
         web = self.get_web_console_config()
         graph = self.get_graph_config()
         vector_db = self.get_vector_db_config()
+        embedding = self.get_embedding_config()
         ask = self.get_ask_agent_config()
         return {
             "source_store": {
@@ -204,17 +223,22 @@ class Config:
             "graph": {
                 "enabled": graph.enabled,
                 "query_mode": graph.query_mode,
-                "embedding_dim": graph.embedding_dim,
-                "max_token_size": graph.max_token_size,
                 "llm_max_async": graph.llm_max_async,
                 "embedding_max_async": graph.embedding_max_async,
                 "working_dir": graph.working_dir,
             },
             "vector_db": {
                 "backend": vector_db.backend,
-                "embedding_provider": vector_db.embedding_provider,
                 "db_filename": vector_db.db_filename,
                 "auto_index_enabled": vector_db.auto_index_enabled,
+            },
+            "embedding": {
+                "provider": embedding.provider,
+                "model": embedding.model,
+                "base_url": embedding.base_url,
+                "max_token_size": embedding.max_token_size,
+                "actual_dimension": self.runtime_embedding_dimension,
+                "api_key": _mask(_secret("", ENV_EMBEDDING_API_KEY)),
             },
             "ask": {
                 "conversation_enhancement_mode": ask.conversation_enhancement_mode,
@@ -250,7 +274,29 @@ class Config:
                     "notion_sync.database_id or notion_sync.parent_page_id is required "
                     "when notion_sync.enabled=true"
                 )
-        return diagnostics
+        embedding_raw = _section(self.raw, "embedding")
+        vector_raw = _section(self.raw, "vector_db")
+        graph_raw = _section(self.raw, "graph")
+        legacy_keys = {"embedding_provider", "embedding_model", "base_url"}
+        uses_legacy_embedding = any(
+            key not in embedding_raw and key in vector_raw
+            for key in legacy_keys
+        ) or ("max_token_size" not in embedding_raw and "max_token_size" in graph_raw)
+        if uses_legacy_embedding:
+            diagnostics.append(
+                "Legacy embedding settings are active; migrate them to the top-level "
+                "embedding section."
+            )
+        embedding = self.get_embedding_config()
+        if embedding.provider == "astr":
+            diagnostics.append(
+                "embedding.provider=astr is not implemented; choose local or external."
+            )
+        elif embedding.provider == "external" and not _secret("", ENV_EMBEDDING_API_KEY):
+            diagnostics.append(
+                "KR_EMBEDDING_API_KEY is required when embedding.provider=external."
+            )
+        return diagnostics + list(self.runtime_diagnostics)
 
     def get_source_store_config(self) -> SourceStoreConfig:
         s = _section(self.raw, "source_store")
@@ -302,8 +348,6 @@ class Config:
         return GraphConfig(
             enabled=bool(s.get("enabled", GraphConfig.enabled)),
             query_mode=query_mode,
-            embedding_dim=int(s.get("embedding_dim", GraphConfig.embedding_dim)),
-            max_token_size=int(s.get("max_token_size", GraphConfig.max_token_size)),
             llm_max_async=int(s.get("llm_max_async", GraphConfig.llm_max_async)),
             embedding_max_async=int(s.get("embedding_max_async", GraphConfig.embedding_max_async)),
             working_dir=str(s.get("working_dir", GraphConfig.working_dir)),
@@ -315,9 +359,39 @@ class Config:
         auto_index = bool(raw_auto) if not isinstance(raw_auto, bool) else raw_auto
         return VectorDbConfig(
             backend=s.get("backend", VectorDbConfig.backend),
-            embedding_provider=s.get("embedding_provider", VectorDbConfig.embedding_provider),
             db_filename=s.get("db_filename", VectorDbConfig.db_filename),
             auto_index_enabled=auto_index,
+        )
+
+    def get_embedding_config(self) -> EmbeddingConfig:
+        current = _section(self.raw, "embedding")
+        legacy_vector = _section(self.raw, "vector_db")
+        legacy_graph = _section(self.raw, "graph")
+        return EmbeddingConfig(
+            provider=str(
+                current.get(
+                    "provider",
+                    legacy_vector.get("embedding_provider", EmbeddingConfig.provider),
+                )
+            ),
+            model=str(
+                current.get(
+                    "model",
+                    legacy_vector.get("embedding_model", EmbeddingConfig.model),
+                )
+            ),
+            base_url=str(
+                current.get(
+                    "base_url",
+                    legacy_vector.get("base_url", EmbeddingConfig.base_url),
+                )
+            ),
+            max_token_size=int(
+                current.get(
+                    "max_token_size",
+                    legacy_graph.get("max_token_size", EmbeddingConfig.max_token_size),
+                )
+            ),
         )
 
     def get_ask_agent_config(self) -> AskAgentConfig:
@@ -352,6 +426,7 @@ def _mask(value: str) -> str:
 __all__ = [
     "ENV_R2_SECRET_ACCESS_KEY",
     "ENV_WEB_PASSWORD",
+    "ENV_EMBEDDING_API_KEY",
     "merge_config_dicts",
     "SourceStoreConfig",
     "R2SyncConfig",
@@ -359,6 +434,7 @@ __all__ = [
     "WebConsoleConfig",
     "GraphConfig",
     "VectorDbConfig",
+    "EmbeddingConfig",
     "AskAgentConfig",
     "Config",
 ]

@@ -50,6 +50,9 @@ class IngestManager(BaseIngestManager):
         collection: str,
         tags: list[str] | None = None,
     ) -> str:
+        self.logger.info(
+            "Ingest start: title=%r collection=%r size=%d", title, collection, size_bytes
+        )
         source_path = Path(file_path)
         if not source_path.exists():
             raise FileNotFoundError(f"Source file not found: {file_path}")

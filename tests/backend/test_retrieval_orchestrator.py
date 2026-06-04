@@ -160,3 +160,75 @@ async def test_retrieval_orchestrator_lexical_fallback(sqlite_store):
     assert len(results) >= 1
     assert results[0].chunk_id == "c1"
     assert "attention" in results[0].text
+
+
+@pytest.mark.asyncio
+async def test_retrieval_orchestrator_lexical_fallback_supports_chinese_query(sqlite_store):
+    await sqlite_store.add_document(
+        SourceDocument(
+            "doc-zh",
+            "离线安装",
+            "offline.pdf",
+            "application/pdf",
+            100,
+            "hash-zh",
+            "papers",
+        )
+    )
+    await sqlite_store.replace_chunks(
+        "doc-zh",
+        [DocumentChunk("c-zh", "doc-zh", 0, "离线安装后仍然可以完成基础召回", "hc-zh")],
+    )
+    orchestrator = RetrievalOrchestrator(
+        source_store=sqlite_store,
+        kb_reader=MockKnowledgeBaseReader(),
+        config=Config({}),
+    )
+
+    result = await orchestrator.retrieve_with_outcome("papers", "离线环境如何召回", top_k=2)
+
+    assert [chunk.chunk_id for chunk in result.chunks] == ["c-zh"]
+    assert "sqlite_lexical" in result.engines
+
+
+@pytest.mark.asyncio
+async def test_lightrag_context_rejects_pending_collection(tmp_path):
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.source_store.memory import InMemorySourceDocumentStore
+
+    class Registry:
+        calls = 0
+
+        def has_workspace(self, collection: str) -> bool:
+            return True
+
+        async def query(
+            self, collection: str, query: str, *, only_need_context: bool = False
+        ) -> dict:
+            self.calls += 1
+            return {"context": "graph context"}
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(
+        SourceDocument("d1", "Doc", "/d1.pdf", "application/pdf", 1, "h", "papers")
+    )
+    await store.set_lightrag_index_status("d1", "papers", "pending")
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
+    registry = Registry()
+    orchestrator = RetrievalOrchestrator(
+        source_store=store,
+        kb_reader=MockKnowledgeBaseReader(),
+        config=Config({}),
+        lightrag_registry=registry,  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    with pytest.raises(RuntimeError, match="requires indexing"):
+        await orchestrator.retrieve_lightrag_context("papers", "q")
+    assert registry.calls == 0
+
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    assert await orchestrator.retrieve_lightrag_context("papers", "q") == "graph context"
+    assert registry.calls == 1

@@ -45,6 +45,9 @@ def raw_config() -> dict[str, Any]:
             "database_title": "KR Test",
             "rate_limit_rps": 100,
         },
+        # Existing installs may explicitly keep AstrBot retrieval; avoid loading a local
+        # embedding model in lifecycle tests that do not exercise Milvus.
+        "vector_db": {"backend": "astr"},
     }
 
 
@@ -86,6 +89,272 @@ async def test_plugin_initializer_lifecycle_periodic_disabled(
     await initializer.initialize()
     assert initializer._backup_task is None
     await initializer.teardown()
+
+
+async def test_initializer_creates_default_collection_without_overwriting_it(
+    temp_dir: Path, mock_context: object
+) -> None:
+    from core.domain.models import Collection
+
+    config = {"vector_db": {"backend": "astr"}}
+    first = PluginInitializer(mock_context, config, temp_dir)
+    await first.initialize()
+    assert first.source_store is not None
+    await first.source_store.upsert_collection(
+        Collection(name="default", description="User description")
+    )
+    await first.teardown()
+
+    second = PluginInitializer(mock_context, config, temp_dir)
+    await second.initialize()
+    assert second.source_store is not None
+    collections = await second.source_store.list_collections()
+    assert [(item.name, item.description) for item in collections] == [
+        ("default", "User description")
+    ]
+    await second.teardown()
+
+
+async def test_initializer_passes_probed_dimension_to_milvus_and_lightrag(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    captured: dict[str, int] = {}
+
+    class Provider:
+        async def embed_query(self, text: str) -> list[float]:
+            return [0.1] * 7
+
+        async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [[0.1] * 7 for _ in texts]
+
+    class Milvus:
+        def __init__(self, *, db_path: str, dim: int) -> None:
+            captured["milvus"] = dim
+
+        def validate_schema(self) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    class Registry:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["lightrag"] = kwargs["embedding_dim"]
+
+        def existing_collections(self) -> list[str]:
+            return []
+
+        async def close(self) -> None:
+            pass
+
+    config = {
+        **raw_config,
+        "vector_db": {"backend": "milvus"},
+        "graph": {"enabled": True},
+    }
+    with (
+        patch(
+            "core.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            return_value=Provider(),
+        ),
+        patch("core.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
+        patch("core.lightrag_core.LightRAGCoreRegistry", Registry),
+    ):
+        initializer = PluginInitializer(mock_context, config, temp_dir)
+        await initializer.initialize()
+        assert initializer.embedding_dimension == 7
+        assert initializer.config.runtime_embedding_dimension == 7
+        assert captured == {"milvus": 7, "lightrag": 7}
+        await initializer.teardown()
+
+
+async def test_initializer_probe_failure_disables_embedding_indexes(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    class Provider:
+        async def embed_query(self, text: str) -> list[float]:
+            raise RuntimeError("probe failed")
+
+    config = {
+        **raw_config,
+        "vector_db": {"backend": "milvus"},
+        "graph": {"enabled": True},
+    }
+    with patch(
+        "core.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+        return_value=Provider(),
+    ):
+        initializer = PluginInitializer(mock_context, config, temp_dir)
+        await initializer.initialize()
+        assert initializer.embedding_provider is None
+        assert initializer.vector_store is None
+        assert initializer.lightrag_registry is None
+        assert any(
+            "Embedding dimension probe failed" in item
+            for item in initializer.config.get_diagnostics()
+        )
+        await initializer.teardown()
+
+
+async def test_fresh_install_uploads_and_lexically_retrieves_when_embedding_probe_fails(
+    temp_dir: Path, mock_context: object
+) -> None:
+    class Provider:
+        async def embed_query(self, text: str) -> list[float]:
+            raise RuntimeError("offline first startup")
+
+    pdf_path = temp_dir / "fresh-install.pdf"
+    pdf = fitz.open()
+    page = pdf.new_page()
+    page.insert_textbox(
+        fitz.Rect(50, 50, 550, 750),
+        "Fresh install lexical baseline remains available without embeddings.",
+    )
+    pdf.save(pdf_path)
+    pdf.close()
+
+    with patch(
+        "core.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+        return_value=Provider(),
+    ):
+        initializer = PluginInitializer(mock_context, {}, temp_dir)
+        await initializer.initialize()
+
+        assert initializer.source_store is not None
+        assert initializer.api is not None
+        assert initializer.retrieval_orchestrator is not None
+        assert [item.name for item in await initializer.source_store.list_collections()] == [
+            "default"
+        ]
+
+        doc_id = await initializer.api.register_document(
+            title=pdf_path.name,
+            file_path=str(pdf_path),
+            content_type="application/pdf",
+            size_bytes=pdf_path.stat().st_size,
+            content_hash="",
+            collection="default",
+        )
+        stored = await initializer.source_store.get_document(doc_id)
+        assert stored is not None
+        assert Path(stored.file_path) == temp_dir / "documents" / f"{doc_id}.pdf"
+        assert Path(stored.file_path).exists()
+
+        result = await initializer.retrieval_orchestrator.retrieve_with_outcome(
+            "default", "lexical baseline", 5
+        )
+        assert [chunk.doc_id for chunk in result.chunks] == [doc_id]
+        assert "sqlite_lexical" in result.engines
+        assert result.fallback_reason == "milvus_unavailable"
+        await initializer.teardown()
+
+
+async def test_initializer_keeps_mismatched_milvus_available_for_manual_rebuild(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    from core.repository.vector_store.milvus_lite import MilvusSchemaMismatchError
+
+    class Provider:
+        async def embed_query(self, text: str) -> list[float]:
+            return [0.1] * 7
+
+    class Milvus:
+        def __init__(self, *, db_path: str, dim: int) -> None:
+            self.dim = dim
+
+        def validate_schema(self) -> None:
+            raise MilvusSchemaMismatchError("rebuild required")
+
+        async def close(self) -> None:
+            pass
+
+    config = {
+        **raw_config,
+        "vector_db": {"backend": "milvus"},
+        "graph": {"enabled": False},
+    }
+    with (
+        patch(
+            "core.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            return_value=Provider(),
+        ),
+        patch("core.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
+    ):
+        initializer = PluginInitializer(mock_context, config, temp_dir)
+        await initializer.initialize()
+
+        assert isinstance(initializer.vector_store, Milvus)
+        assert initializer.embedding_fingerprint is not None
+        assert initializer.index_compatibility is not None
+        assert not initializer.index_compatibility.is_milvus_compatible(
+            initializer.embedding_fingerprint
+        )
+        assert "rebuild required" in initializer.index_compatibility.reason("milvus")
+        await initializer.teardown()
+
+
+async def test_initializer_marks_recreated_empty_milvus_incompatible_when_docs_exist(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    from core.domain.models import Collection, SourceDocument
+
+    seed_config = {
+        **raw_config,
+        "vector_db": {"backend": "astr"},
+        "graph": {"enabled": False},
+    }
+    seed = PluginInitializer(mock_context, seed_config, temp_dir)
+    await seed.initialize()
+    assert seed.source_store is not None
+    await seed.source_store.upsert_collection(Collection(name="papers"))
+    await seed.source_store.add_document(
+        SourceDocument("d1", "Doc", "/d1.pdf", "application/pdf", 1, "h", "papers")
+    )
+    await seed.teardown()
+
+    class Provider:
+        async def embed_query(self, text: str) -> list[float]:
+            return [0.1] * 7
+
+    class Milvus:
+        created_collection = True
+
+        def __init__(self, *, db_path: str, dim: int) -> None:
+            pass
+
+        def validate_schema(self) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+    config = {
+        **raw_config,
+        "vector_db": {"backend": "milvus"},
+        "graph": {"enabled": False},
+    }
+    with (
+        patch(
+            "core.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            return_value=Provider(),
+        ),
+        patch("core.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
+    ):
+        initializer = PluginInitializer(mock_context, config, temp_dir)
+        await initializer.initialize()
+
+        assert initializer.embedding_fingerprint is not None
+        assert initializer.index_compatibility is not None
+        assert not initializer.index_compatibility.is_milvus_compatible(
+            initializer.embedding_fingerprint
+        )
+        assert "recreated" in initializer.index_compatibility.reason("milvus")
+        assert initializer.source_store is not None
+        assert [
+            doc.doc_id
+            for doc in await initializer.source_store.list_pending_reindex_documents()
+        ] == ["d1"]
+        await initializer.teardown()
 
 
 async def test_plugin_shell_lifecycle(
@@ -193,7 +462,10 @@ async def test_plugin_shell_lifecycle(
         plugin._initializer.retrieval_orchestrator, "retrieve", return_value=[mock_chunk]
     ) as mock_retrieve:
         await plugin._handler.on_llm_request(mock_event_on, mock_req)
-        mock_retrieve.assert_called_once()
+        assert mock_retrieve.await_count == 2
+        assert {
+            awaited.kwargs["collection"] for awaited in mock_retrieve.await_args_list
+        } == {"default", "papers"}
         assert "Knowledge Base Context" in mock_req.system_prompt
         assert "testing" in mock_req.system_prompt
 
@@ -224,6 +496,7 @@ async def test_plugin_shell_lifecycle(
             top_k=5,
             conversation_id="event-test-session-123",
             persona_enabled=False,
+            retrieval_mode="default",
         )
 
     # 11c) agent off 状态下完全旁路，on_message 返回 None

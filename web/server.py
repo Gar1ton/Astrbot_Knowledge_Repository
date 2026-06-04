@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging as _logging
 import secrets
 import time
 from pathlib import Path
@@ -29,7 +30,6 @@ _PUBLIC_PATHS = frozenset({"/api/login", "/api/auth"})
 
 # ── 中间件 ──────────────────────────────────────────────────────
 
-import logging as _logging
 _mw_logger = _logging.getLogger("KRWebServer")
 
 
@@ -41,7 +41,13 @@ async def _error_middleware(request: web.Request, handler: web.Handler) -> web.S
     except web.HTTPException:
         raise
     except Exception as exc:
-        _mw_logger.error("Unhandled error [%s %s]: %s", request.method, request.path, exc, exc_info=True)
+        _mw_logger.error(
+            "Unhandled error [%s %s]: %s",
+            request.method,
+            request.path,
+            exc,
+            exc_info=True,
+        )
         return web.json_response({"error": str(exc)}, status=500)
 
 
@@ -126,7 +132,7 @@ async def handle_list_documents(request: web.Request) -> web.Response:
 
 
 async def handle_upload_document(request: web.Request) -> web.Response:
-    """multipart 上传：保存原件 → 计算 sha256/大小 → 登记。预览级，真实抽取在 v0.3.0。"""
+    """multipart 上传：暂存 → 计算 sha256/大小 → 摄入插件托管原件库。"""
     reader = await request.multipart()
     collection = "default"
     tags: list[str] = []
@@ -145,6 +151,7 @@ async def handle_upload_document(request: web.Request) -> web.Response:
     if not payload:
         return web.json_response({"error": "empty file"}, status=400)
 
+    _mw_logger.info("Upload: file=%r size=%d collection=%r", filename, len(payload), collection)
     upload_dir: Path = request.app["upload_dir"]
     upload_dir.mkdir(parents=True, exist_ok=True)
     content_hash = hashlib.sha256(payload).hexdigest()
@@ -162,11 +169,18 @@ async def handle_upload_document(request: web.Request) -> web.Response:
             tags=tags,
         )
     except Exception as exc:
+        dest.unlink(missing_ok=True)
         _mw_logger.error("Upload failed for %r: %s", filename, exc, exc_info=True)
         return web.json_response({"error": str(exc)}, status=500)
     doc = await _api(request).get_document(doc_id)
     if doc is None:
+        dest.unlink(missing_ok=True)
         return web.json_response({"error": "document registration failed"}, status=500)
+    try:
+        if Path(doc.file_path).resolve() != dest.resolve():
+            dest.unlink(missing_ok=True)
+    except OSError as exc:
+        _mw_logger.warning("Failed to remove upload staging file %s: %s", dest, exc)
     return web.json_response(await _document_dict(_api(request), doc))
 
 
@@ -187,7 +201,9 @@ async def handle_classify_document(request: web.Request) -> web.Response:
 
 
 async def handle_delete_document(request: web.Request) -> web.Response:
-    ok = await _api(request).delete_document(request.match_info["doc_id"])
+    doc_id = request.match_info["doc_id"]
+    _mw_logger.info("Delete document: doc_id=%s", doc_id)
+    ok = await _api(request).delete_document(doc_id)
     return web.json_response({"ok": ok}, status=200 if ok else 404)
 
 
@@ -252,6 +268,7 @@ async def handle_sync(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     target = request.match_info.get("target", "all")
     doc_ids = body.get("doc_ids") if isinstance(body, dict) else None
+    _mw_logger.info("Sync requested: target=%s", target)
     return await _reserved(_api(request).sync_documents(target, doc_ids), "v0.3.0 / v0.4.0")
 
 
@@ -285,21 +302,28 @@ async def handle_update_config(request: web.Request) -> web.Response:
             {"status": "error", "message": "Missing section or key"}, status=400
         )
 
+    _mw_logger.info("Config update: section=%s key=%s", section, key)
+
     async def _update():
-        await _api(request).update_config_value(section, key, value)
-        return {"status": "success"}
+        return await _api(request).update_config_value(section, key, value)
 
     try:
-        return await _reserved(_update(), "v0.10.0")
+        resp = await _reserved(_update(), "v0.10.0")
+        _mw_logger.info("Config update success: %s.%s", section, key)
+        return resp
     except ValueError as exc:
+        _mw_logger.warning("Config update rejected [%s.%s]: %s", section, key, exc)
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
 
 
 async def handle_rebuild_index_pending(request: web.Request) -> web.Response:
+    _mw_logger.info("Index rebuild requested")
     try:
         result = await _api(request).rebuild_index_pending()
+        _mw_logger.info("Index rebuild completed: %s", result)
         return web.json_response({"status": "ok", **result})
     except RuntimeError as exc:
+        _mw_logger.error("Index rebuild failed: %s", exc)
         return web.json_response({"status": "error", "message": str(exc)}, status=503)
 
 
@@ -310,10 +334,9 @@ async def handle_pending_reindex_count(request: web.Request) -> web.Response:
 
 async def handle_test_embedding(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
-    api_key = body.get("api_key", "")
     base_url = body.get("base_url", "https://api.openai.com/v1")
     model_name = body.get("model_name", "")
-    result = await _api(request).test_embedding_connection(api_key, base_url, model_name)
+    result = await _api(request).test_embedding_connection(base_url, model_name)
     return web.json_response(result)
 
 
@@ -345,14 +368,25 @@ async def handle_graph_build(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     collection = body.get("collection") if isinstance(body, dict) else None
     confirmed = bool(body.get("confirmed")) if isinstance(body, dict) else False
+    _mw_logger.info("Graph build requested: collection=%r confirmed=%s", collection, confirmed)
     try:
         result = await _api(request).build_graph(collection, confirmed=confirmed)
         return web.json_response(result)
     except ValueError as exc:
+        _mw_logger.warning("Graph build rejected: %s", exc)
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
     except NotImplementedError as exc:
-        return web.json_response({"status": "reserved", "message": str(exc)}, status=501)
+        return web.json_response(
+            {
+                "status": "reserved",
+                "reserved": True,
+                "available_in": "v0.16.0+ LightRAG Core",
+                "detail": str(exc),
+            },
+            status=501,
+        )
     except Exception as exc:
+        _mw_logger.error("Graph build failed: %s", exc, exc_info=True)
         return web.json_response({"status": "error", "message": str(exc)}, status=500)
 
 
@@ -412,7 +446,15 @@ async def handle_graph_data(request: web.Request) -> web.Response:
         result = await _api(request).get_graph(collection)
         return web.json_response(result)
     except NotImplementedError as exc:
-        return web.json_response({"status": "reserved", "message": str(exc)}, status=501)
+        return web.json_response(
+            {
+                "status": "reserved",
+                "reserved": True,
+                "available_in": "v0.16.0+ LightRAG Core",
+                "detail": str(exc),
+            },
+            status=501,
+        )
     except Exception as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=500)
 
@@ -514,13 +556,39 @@ async def handle_ask(request: web.Request) -> web.Response:
     top_k = int(body.get("top_k") or 5)
     conversation_id = body.get("conversation_id") or None
     persona_enabled = bool(body.get("persona_enabled") or False)
-    result = await _api(request).ask(
-        question=question,
-        collection=collection,
-        top_k=max(1, min(top_k, 20)),
-        conversation_id=conversation_id,
-        persona_enabled=persona_enabled,
-    )
+    retrieval_mode = body.get("retrieval_mode") or "default"
+    from core.api import HighPrecisionQueryError, LightRAGNotReadyError
+
+    try:
+        result = await _api(request).ask(
+            question=question,
+            collection=collection,
+            top_k=max(1, min(top_k, 20)),
+            conversation_id=conversation_id,
+            persona_enabled=persona_enabled,
+            retrieval_mode=retrieval_mode,
+        )
+    except LightRAGNotReadyError as exc:
+        return web.json_response(
+            {
+                "status": "lightrag_not_ready",
+                "message": exc.reason,
+                "collection": exc.collection,
+                "build_available": exc.build_available,
+            },
+            status=409,
+        )
+    except HighPrecisionQueryError as exc:
+        return web.json_response(
+            {
+                "status": "high_precision_failed",
+                "message": exc.reason,
+                "collection": exc.collection,
+            },
+            status=502,
+        )
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
     return web.json_response(result)
 
 

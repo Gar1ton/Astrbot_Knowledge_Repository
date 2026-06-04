@@ -368,12 +368,19 @@ class EventHandler:
 
         enabled = action == "on"
         self._initializer.agent_enabled = enabled
-        return f"Ask Agent has been turned {action.upper()}."
+        if enabled:
+            return (
+                "Ask Agent has been turned ON. Discord uses the configured default retrieval "
+                "(Milvus by default, with controlled AstrBot fallback); enable high-precision "
+                "LightRAG in the Web Research Agent."
+            )
+        return "Ask Agent has been turned OFF."
 
     async def on_message(self, event: Any) -> str | None:
         """捕获 AstrBot 消息事件。
 
-        query_agent 模式：返回知识库答案字符串，由 main.py 通过 yield 接管回复，AstrBot LLM 不被调用。
+        query_agent 模式：返回知识库答案字符串，由 main.py 通过 yield 接管回复，
+        AstrBot LLM 不被调用。
         inject 模式：pass-through 返回 None，上下文注入由 on_llm_request hook 负责。
         """
         if not self._initializer.agent_enabled:
@@ -434,44 +441,19 @@ class EventHandler:
 
         conversation_id = f"event-{session_id}"
 
-        # 优先 LightRAG 图谱查询，fallback api.ask()
-        agent_answer = ""
-        graph_cfg = (
-            self._initializer.config.get_graph_config()
-            if self._initializer.config is not None
-            else None
-        )
-        if (
-            graph_cfg is not None
-            and graph_cfg.enabled
-            and self._initializer.lightrag_registry is not None
-        ):
-            try:
-                cols = await self._initializer.api.list_collections()
-                for col in ([c.name for c in cols] if cols else []):
-                    lg_result = await self._initializer.lightrag_registry.query(col, query)
-                    agent_answer = (lg_result.get("answer") or "").strip()
-                    if agent_answer:
-                        break
-            except Exception as _exc:
-                logger.warning(
-                    "LightRAG query_agent failed, falling back to api.ask: %s", _exc
-                )
-                agent_answer = ""
-
-        if not agent_answer:
-            try:
-                ask_res = await self._initializer.api.ask(
-                    question=query,
-                    collection=None,
-                    top_k=5,
-                    conversation_id=conversation_id,
-                    persona_enabled=False,
-                )
-                agent_answer = ask_res.get("answer") or ""
-            except Exception as exc:
-                logger.error("query_agent api.ask failed: %s", exc)
-                return None
+        try:
+            ask_res = await self._initializer.api.ask(
+                question=query,
+                collection=None,
+                top_k=5,
+                conversation_id=conversation_id,
+                persona_enabled=False,
+                retrieval_mode="default",
+            )
+            agent_answer = ask_res.get("answer") or ""
+        except Exception as exc:
+            logger.error("query_agent api.ask failed: %s", exc)
+            return None
 
         logger.info("query_agent mode: answer ready (%d chars).", len(agent_answer))
         return agent_answer or None
@@ -508,7 +490,7 @@ class EventHandler:
 
         try:
             cols = await self._initializer.api.list_collections()
-            all_cols = [c.name for c in cols] if cols else ["default"]
+            all_cols = [c.name for c in cols[:5]] if cols else ["default"]
 
             chunks = []
             seen_ids: set = set()

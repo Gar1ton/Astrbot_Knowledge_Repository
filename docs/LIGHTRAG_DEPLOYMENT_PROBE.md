@@ -5,7 +5,8 @@
 ## 前置配置
 
 - `graph.enabled = true`
-- `graph.embedding_dim` 与真实 Embedding 输出维度一致
+- `embedding.provider/model/base_url/max_token_size` 已配置
+- 启动日志未报告 Embedding 真实维度探针失败或索引指纹不兼容
 - AstrBot LLM Provider 可正常响应
 - 插件 Embedding Provider 可正常响应
 
@@ -35,6 +36,7 @@ AstrBot terminal 会按顺序输出易读行：
 ```text
 KR LightRAG initialize_storages collection='lightrag-probe'
 KR LightRAG ainsert collection='lightrag-probe' doc_id='kr-lightrag-probe-doc' ...
+KR LightRAG aquery collection='lightrag-probe' mode='mix' only_need_context=True ...
 KR LightRAG aquery collection='lightrag-probe' mode='mix' ...
 KR LightRAG export_data collection='lightrag-probe' ...
 KR LightRAG adelete_by_doc_id collection='lightrag-probe' doc_id='kr-lightrag-probe-doc'
@@ -47,6 +49,7 @@ KR LightRAG probe ... OK
 
 - `status = "success"`
 - 所有 `steps[].status = "ok"`
+- `aquery_context` 步骤成功，确认高精度 Ask 可只取 LightRAG context
 - `delete_strategy = "adelete_by_doc_id"`
 - `delete_stable = true`
 - `export_data_before_delete.result.nodes` 非空

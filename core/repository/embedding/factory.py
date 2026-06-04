@@ -22,8 +22,8 @@ class EmbeddingProviderFactory:
     @staticmethod
     def create_provider(config: Config, db_dir: str = "./data") -> EmbeddingProvider:
         """根据后端有效配置，自适应实例化对应的 Embedding 提供者。"""
-        vdb = config.get_vector_db_config()
-        provider_type = vdb.embedding_provider.lower()
+        embedding = config.get_embedding_config()
+        provider_type = embedding.provider.lower()
 
         logger.info(f"Assembling EmbeddingProvider for backend type: '{provider_type}'")
 
@@ -40,29 +40,30 @@ class EmbeddingProviderFactory:
             # 引入本地懒加载实现
             from core.repository.embedding.local import LocalEmbeddingProvider
 
-            vdb_raw = config.raw.get("vector_db", {})
-            model_name = vdb_raw.get("embedding_model") or "BAAI/bge-large-en-v1.5"
-
-            inner_provider = LocalEmbeddingProvider(model_name=model_name)
-        else:
-            # 云端 API 兼容接口（provider_type == "external" 或未知值）
+            inner_provider = LocalEmbeddingProvider(model_name=embedding.model)
+        elif provider_type == "external":
+            # 云端 API 兼容接口
             from core.repository.embedding.external import ExternalEmbeddingProvider
 
-            vdb_raw = config.raw.get("vector_db", {})
-            api_key = vdb_raw.get("api_key") or ""
-            base_url = vdb_raw.get("base_url") or "https://api.openai.com/v1"
-            model_name = vdb_raw.get("embedding_model") or "text-embedding-3-large"
-
             inner_provider = ExternalEmbeddingProvider(
-                api_key=api_key,
-                base_url=base_url,
-                model_name=model_name
+                base_url=embedding.base_url,
+                model_name=embedding.model,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported embedding provider: {embedding.provider!r}. "
+                "Choose 'local' or 'external'."
             )
 
         # 始终用 SQLite 缓存机制包装它以享受 0 网耗 0 算力的绝对性能
         cache_db_path = f"{db_dir}/embedding_cache.db"
         logger.info(f"Wrapping provider with cached persistence at {cache_db_path}")
-        return CachedEmbeddingProvider(inner=inner_provider, db_path=cache_db_path)
+        cache_namespace = f"{provider_type}:{embedding.model}:{embedding.base_url}"
+        return CachedEmbeddingProvider(
+            inner=inner_provider,
+            db_path=cache_db_path,
+            namespace=cache_namespace,
+        )
 
 
 __all__ = ["EmbeddingProviderFactory"]

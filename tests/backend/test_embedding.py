@@ -69,17 +69,56 @@ async def test_cached_embedding_flow(cache_db_dir: str) -> None:
     assert res3[1] == [0.0] * 4  # 新计算的 durian 值 (第一项)
 
 
+@pytest.mark.asyncio
+async def test_cached_embedding_namespace_and_dimension_prevent_stale_reuse(
+    cache_db_dir: str,
+) -> None:
+    db_path = f"{cache_db_dir}/cache.db"
+    first_inner = MockEmbeddingProvider(dimension=4)
+    first = CachedEmbeddingProvider(first_inner, db_path=db_path, namespace="model-a")
+    await first.embed_documents(["same text"])
+
+    other_model_inner = MockEmbeddingProvider(dimension=7)
+    other_model = CachedEmbeddingProvider(
+        other_model_inner,
+        db_path=db_path,
+        namespace="model-b",
+    )
+    other_model_result = await other_model.embed_documents(["same text"])
+
+    changed_dimension_inner = MockEmbeddingProvider(dimension=8)
+    changed_dimension = CachedEmbeddingProvider(
+        changed_dimension_inner,
+        db_path=db_path,
+        namespace="model-a",
+    )
+    changed_dimension_result = await changed_dimension.embed_documents(["same text"])
+
+    assert other_model_inner.call_count == 1
+    assert len(other_model_result[0]) == 7
+    assert changed_dimension_inner.call_count == 1
+    assert len(changed_dimension_result[0]) == 8
+
+
 def test_local_provider_lazy_dimension() -> None:
     # 不初始化模型时，应能通过映射字典获取默认维度，实现极速免加载零开销
     provider = LocalEmbeddingProvider(model_name="BAAI/bge-large-en-v1.5")
     assert provider.get_dimension() == 1024
 
 
+def test_local_provider_dimensions_and_e5_retrieval_prefixes() -> None:
+    assert LocalEmbeddingProvider(model_name="BAAI/bge-small-zh-v1.5").get_dimension() == 512
+
+    provider = LocalEmbeddingProvider(model_name="intfloat/multilingual-e5-small")
+    assert provider.get_dimension() == 384
+    assert provider._prepare_query("where is the answer") == "query: where is the answer"
+    assert provider._prepare_documents(["the answer"]) == ["passage: the answer"]
+
+
 @pytest.mark.asyncio
 async def test_external_provider_mock() -> None:
     # 验证 ExternalEmbeddingProvider 能正确解析配置
     provider = ExternalEmbeddingProvider(
-        api_key="mock_key",
         base_url="https://api.openai.com/v1",
         model_name="text-embedding-3-small"
     )

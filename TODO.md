@@ -44,6 +44,31 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.17.0 Milvus default retrieval and on-demand LightRAG precision mode (completed)
+
+### User constraints / 约束
+
+- 新安装默认使用 Milvus；旧安装显式配置 `astr` 时保持兼容，并在 Milvus 不可用时受控回退。
+- LightRAG 仅由 Web Research Agent 在指定 collection 中显式启用；默认问答与 Discord 均不自动调用。
+- 高精度问答使用 Milvus chunks + LightRAG context，由外层 LLM 单次生成最终答案。
+- LightRAG 未就绪时展示成本预估，允许构建后自动续问、本次退回 Milvus或取消。
+- 所有前端改动延续现有暖色、圆角、毛玻璃、药丸控件和中英文设计语言。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 后端数据流收敛**：删除旧 GraphStore/Pipeline，统一 Ask、query_agent 与 LightRAG context 路径，新增请求/实际召回模式契约。
+- [x] **Phase 2 — Embedding 与索引兼容性**：独立 embedding 配置、真实维度探针、Milvus schema 校验及 Milvus/LightRAG 指纹状态。
+- [x] **Phase 3 — Web 高精度交互**：在 Research Agent 设置浮层加入会话级开关、collection 约束、构建续问与实际模式标识。
+- [x] **Phase 4 — 发布与回归闭环**：更新 schema、文档、版本、测试和静态前端产物。
+- [x] **Phase 5 — 首次安装基础能力与设置页收敛**：启动时创建默认 collection，保证 PDF 上传与 SQLite 词汇召回始终可用；采用轻量多语言本地 Embedding 作为新安装默认值；设置页明确区分基础召回和可选 LightRAG 高精度参数，并清理 Web 上传暂存副本。
+
+### Verification
+
+- `python -m pytest -q` → `182 passed, 1 skipped`
+- `python -m ruff check . && python -m mypy` → `All checks passed / Success`
+- `cd web/frontend && npm run lint && npm run build` → `0 errors, 8 existing warnings / 12 static pages generated`
+- `python tools/sync_frontend.py --check` → `pages/ 已与 web/frontend/out 一致`
+
 ## v0.16.0 Official LightRAG Core replacement (in progress)
 
 ### User constraints / 约束

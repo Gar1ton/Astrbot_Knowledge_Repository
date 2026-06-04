@@ -1,8 +1,12 @@
 """VectorStore 契约测试（接口对换：内存向量检索库）。"""
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 from core.domain.models import DocumentChunk
 from core.repository.vector_store.memory import InMemoryVectorStore
+from core.repository.vector_store.milvus_lite import MilvusLiteVectorStore
 
 
 @pytest.fixture
@@ -125,3 +129,97 @@ async def test_metadata_filtering(vector_store: InMemoryVectorStore) -> None:
     )
     assert len(results) == 1
     assert results[0][0] == "c2"
+
+
+def test_milvus_rejects_existing_schema_dimension_mismatch(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Client:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def has_collection(self, name: str) -> bool:
+            return True
+
+        def describe_collection(self, name: str) -> dict:
+            return {"fields": [{"name": "vector", "params": {"dim": 3}}]}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pymilvus",
+        SimpleNamespace(DataType=SimpleNamespace(), MilvusClient=Client),
+    )
+    store = MilvusLiteVectorStore(str(tmp_path / "milvus.db"), dim=7)
+
+    with pytest.raises(RuntimeError, match="dimension is 3"):
+        store.validate_schema()
+
+
+@pytest.mark.asyncio
+async def test_milvus_clear_recreates_mismatched_schema(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = {"exists": True, "dim": 3, "drops": 0}
+
+    class Schema:
+        dim = 0
+
+        def add_field(self, **kwargs) -> None:
+            if kwargs.get("field_name") == "vector":
+                self.dim = kwargs["dim"]
+
+    class IndexParams:
+        def add_index(self, **kwargs) -> None:
+            pass
+
+    class Client:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def has_collection(self, name: str) -> bool:
+            return state["exists"]
+
+        def describe_collection(self, name: str) -> dict:
+            return {"fields": [{"name": "vector", "params": {"dim": state["dim"]}}]}
+
+        def drop_collection(self, name: str) -> None:
+            state["exists"] = False
+            state["drops"] += 1
+
+        def close(self) -> None:
+            pass
+
+        def create_schema(self, **kwargs) -> Schema:
+            return Schema()
+
+        def prepare_index_params(self) -> IndexParams:
+            return IndexParams()
+
+        def create_collection(self, *, schema: Schema, **kwargs) -> None:
+            state["exists"] = True
+            state["dim"] = schema.dim
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pymilvus",
+        SimpleNamespace(
+            DataType=SimpleNamespace(VARCHAR="varchar", FLOAT_VECTOR="float_vector"),
+            MilvusClient=Client,
+        ),
+    )
+    store = MilvusLiteVectorStore(str(tmp_path / "milvus.db"), dim=7)
+
+    with pytest.raises(RuntimeError, match="dimension is 3"):
+        store.validate_schema()
+
+    await store.clear()
+
+    assert state == {"exists": True, "dim": 7, "drops": 1}
+    store.validate_schema()
+
+
+def test_milvus_validates_every_vector_dimension(tmp_path) -> None:
+    store = MilvusLiteVectorStore(str(tmp_path / "milvus.db"), dim=7)
+
+    with pytest.raises(ValueError, match="expected 7, got 3"):
+        store._validate_vector([0.1, 0.2, 0.3])

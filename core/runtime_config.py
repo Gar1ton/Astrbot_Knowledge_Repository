@@ -20,17 +20,18 @@ _ALLOWED_RUNTIME_KEYS = {
     "notion_sync": frozenset({"database_id", "parent_page_id", "database_title"}),
     "vector_db": frozenset({
         "backend",
-        "embedding_provider",
-        "embedding_model",
-        "base_url",
         "db_filename",
         "auto_index_enabled",
+    }),
+    "embedding": frozenset({
+        "provider",
+        "model",
+        "base_url",
+        "max_token_size",
     }),
     "graph": frozenset({
         "enabled",
         "query_mode",
-        "embedding_dim",
-        "max_token_size",
         "llm_max_async",
         "embedding_max_async",
     }),

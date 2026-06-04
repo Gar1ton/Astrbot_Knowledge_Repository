@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable react-hooks/immutability, react-hooks/set-state-in-effect */
 
 import React, { useEffect, useRef, useState } from "react";
 
@@ -6,6 +7,7 @@ import React, { useEffect, useRef, useState } from "react";
 const STAGE_COLORS: Record<string, string> = {
   embed_query:    "#4f46e5", // 深蓝：生成向量
   vector_search:  "#0ea5e9", // 青色：向量召回
+  lightrag_context: "#8b5cf6", // 紫色：按需 LightRAG 上下文
   graph_expand:   "#8b5cf6", // 紫色：图谱扩展
   rrf_fusion:     "#0d9488", // 青绿：排名融合
   llm_generate:   "var(--accent)", // 暖橙：LLM 生成

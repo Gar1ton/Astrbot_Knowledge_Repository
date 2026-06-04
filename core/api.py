@@ -31,15 +31,13 @@ if TYPE_CHECKING:
     from core.ask_progress import ProgressStore
     from core.config import Config
     from core.domain.models import DocumentChunk, QuotaUsage
+    from core.index_compatibility import IndexCompatibilityStore
     from core.lightrag_core import BuildJob, LightRAGCoreRegistry
     from core.managers.base import BaseCategoryManager, BaseIngestManager, BaseQuotaManager
     from core.metrics import PerformanceTracker
-    from core.pipelines.graph_build_pipeline import GraphBuildPipeline
-    from core.pipelines.graph_search_pipeline import GraphSearchPipeline
     from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
     from core.pipelines.sync_pipeline import SyncPipeline
     from core.repository.embedding.base import EmbeddingProvider
-    from core.repository.graph_store.base import GraphStore
     from core.repository.kb_reader.base import KnowledgeBaseReader
     from core.repository.source_store.base import SourceDocumentStore
     from core.repository.sync_targets.base import SyncTarget
@@ -87,6 +85,21 @@ def _get_astrbot_persona_prompt(context: Any) -> str:
     return ""
 
 
+class LightRAGNotReadyError(RuntimeError):
+    def __init__(self, collection: str, reason: str, *, build_available: bool = False) -> None:
+        super().__init__(reason)
+        self.collection = collection
+        self.reason = reason
+        self.build_available = build_available
+
+
+class HighPrecisionQueryError(RuntimeError):
+    def __init__(self, collection: str, reason: str) -> None:
+        super().__init__(reason)
+        self.collection = collection
+        self.reason = reason
+
+
 class KnowledgeRepositoryApi:
     """知识库应用的业务门面。依赖经构造器注入，自身不创建依赖（装配在组合根）。"""
 
@@ -100,9 +113,6 @@ class KnowledgeRepositoryApi:
         category_manager: BaseCategoryManager | None = None,
         quota_manager: BaseQuotaManager | None = None,
         sync_pipeline: SyncPipeline | None = None,
-        graph_store: GraphStore | None = None,
-        graph_build_pipeline: GraphBuildPipeline | None = None,
-        graph_search_pipeline: GraphSearchPipeline | None = None,
         lightrag_registry: LightRAGCoreRegistry | None = None,
         config: Config | None = None,
         config_persist: Callable[[str, str, object], None] | None = None,
@@ -113,6 +123,8 @@ class KnowledgeRepositoryApi:
         retrieval_orchestrator: RetrievalOrchestrator | None = None,
         metrics: PerformanceTracker | None = None,
         progress_store: ProgressStore | None = None,
+        index_compatibility: IndexCompatibilityStore | None = None,
+        embedding_fingerprint: str | None = None,
     ) -> None:
         self._source_store = source_store
         self._kb_reader = kb_reader
@@ -124,9 +136,6 @@ class KnowledgeRepositoryApi:
         self._category_manager = category_manager
         self._quota_manager = quota_manager
         self._sync_pipeline = sync_pipeline
-        self._graph_store = graph_store
-        self._graph_build_pipeline = graph_build_pipeline
-        self._graph_search_pipeline = graph_search_pipeline
         self._lightrag_registry = lightrag_registry
         self._graph_build_jobs: dict[str, BuildJob] = {}
         self._config = config
@@ -135,6 +144,8 @@ class KnowledgeRepositoryApi:
         self._managed_documents_dir = managed_documents_dir
         self._metrics = metrics
         self._progress_store = progress_store
+        self._index_compatibility = index_compatibility
+        self._embedding_fingerprint = embedding_fingerprint
 
     # ── 集合（分类）────────────────────────────────────────────
 
@@ -168,19 +179,37 @@ class KnowledgeRepositoryApi:
 
         await self._ensure_system_collections()
         moving_docs = await self._source_store.list_documents(collection=name)
-        if self._lightrag_registry is not None:
-            for doc in moving_docs:
-                await self._lightrag_registry.delete_doc(name, doc.doc_id)
+        if self._lightrag_registry is not None and self._lightrag_registry.has_workspace(name):
+            try:
+                await self._lightrag_registry.reset_workspace(name)
+            except Exception as exc:
+                logger.error("Failed to remove LightRAG workspace %s: %s", name, exc)
+        if self._index_compatibility is not None:
+            self._index_compatibility.remove_lightrag_collection(name)
         await self._source_store.move_documents_to_collection(name, SYSTEM_COLLECTION_UNCATEGORIZED)
         for doc in moving_docs:
-            await self._source_store.set_lightrag_index_status(
-                doc.doc_id, SYSTEM_COLLECTION_UNCATEGORIZED, "pending"
-            )
+            await self._mark_lightrag_pending(doc.doc_id, SYSTEM_COLLECTION_UNCATEGORIZED)
 
         if self._config:
             vdb = self._config.get_vector_db_config()
-            if vdb.backend == "milvus" and self._vector_store:
-                await self._vector_store.delete_collection(name)
+            if vdb.backend == "milvus":
+                if self._milvus_index_is_compatible():
+                    try:
+                        assert self._vector_store is not None
+                        await self._vector_store.delete_collection(name)
+                        for doc in moving_docs:
+                            await self._sync_milvus_collection_move(
+                                doc.doc_id, SYSTEM_COLLECTION_UNCATEGORIZED
+                            )
+                    except Exception as exc:
+                        self._mark_milvus_incompatible(
+                            f"Milvus collection delete failed: {exc}"
+                        )
+                        for doc in moving_docs:
+                            await self._mark_document_needs_reindex(doc.doc_id)
+                else:
+                    for doc in moving_docs:
+                        await self._mark_document_needs_reindex(doc.doc_id)
 
         if self._category_manager:
             return await self._category_manager.delete_collection(name)
@@ -234,22 +263,26 @@ class KnowledgeRepositoryApi:
                 tags=tags,
             )
             # 同步写入 Milvus 向量库（仅在 auto_index_enabled=True 时执行）
-            if auto_index and self._config:
+            if auto_index and self._config and self._milvus_index_is_compatible():
                 vdb = self._config.get_vector_db_config()
                 if vdb.backend == "milvus" and self._vector_store and self._embedding_provider:
-                    if hasattr(self._vector_store, "set_doc_collection_mapping"):
-                        self._vector_store.set_doc_collection_mapping(doc_id, collection)
-                    chunks = await self._source_store.list_chunks(doc_id)
-                    if chunks:
-                        texts = [c.text for c in chunks]
-                        embeddings = await self._embedding_provider.embed_documents(texts)
-                        await self._vector_store.upsert_chunks(chunks, embeddings)
-            elif not auto_index:
-                doc = await self._source_store.get_document(doc_id)
-                if doc:
-                    doc.needs_reindex = True
-                    await self._source_store.update_document(doc)
-            await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
+                    try:
+                        if hasattr(self._vector_store, "set_doc_collection_mapping"):
+                            self._vector_store.set_doc_collection_mapping(doc_id, collection)
+                        chunks = await self._source_store.list_chunks(doc_id)
+                        if chunks:
+                            texts = [c.text for c in chunks]
+                            embeddings = await self._embedding_provider.embed_documents(texts)
+                            await self._vector_store.upsert_chunks(chunks, embeddings)
+                    except Exception as exc:
+                        logger.error("Milvus indexing failed for %s: %s", doc_id, exc)
+                        await self._mark_document_needs_reindex(doc_id)
+            elif not auto_index or (
+                self._config.get_vector_db_config().backend == "milvus"
+                and not self._milvus_index_is_compatible()
+            ):
+                await self._mark_document_needs_reindex(doc_id)
+            await self._mark_lightrag_pending(doc_id, collection)
             return doc_id
 
         doc_id = uuid.uuid4().hex
@@ -267,7 +300,7 @@ class KnowledgeRepositoryApi:
                 updated_at=_now(),
             )
         )
-        await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
+        await self._mark_lightrag_pending(doc_id, collection)
         return doc_id
 
     async def classify_document(
@@ -281,21 +314,31 @@ class KnowledgeRepositoryApi:
         if old_doc is None:
             return False
         old_collection = old_doc.collection
-        if collection is not None and collection != old_collection and self._lightrag_registry:
-            await self._lightrag_registry.delete_doc(old_doc.collection, doc_id)
-            logger.info(
-                "LightRAG old workspace delete completed before moving doc %s from %s to %s",
-                doc_id,
-                old_collection,
-                collection,
-            )
+        if (
+            collection is not None
+            and collection != old_collection
+            and self._lightrag_registry
+            and self._lightrag_index_is_compatible(old_collection)
+        ):
+            try:
+                await self._lightrag_registry.delete_doc(old_doc.collection, doc_id)
+                logger.info(
+                    "LightRAG old workspace delete completed before moving doc %s from %s to %s",
+                    doc_id,
+                    old_collection,
+                    collection,
+                )
+            except Exception as exc:
+                logger.error("LightRAG document move delete failed for %s: %s", doc_id, exc)
+                self._mark_lightrag_collection_incompatible(old_collection)
 
         if self._category_manager:
             updated = await self._category_manager.classify_document(
                 doc_id, collection=collection, tags=tags
             )
             if updated and collection is not None and collection != old_collection:
-                await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
+                await self._mark_lightrag_pending(doc_id, collection)
+                await self._sync_milvus_collection_move(doc_id, collection)
             return updated
 
         doc = old_doc
@@ -308,7 +351,8 @@ class KnowledgeRepositoryApi:
         doc.updated_at = _now()
         updated = await self._source_store.update_document(doc)
         if updated and collection is not None and collection != old_collection:
-            await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
+            await self._mark_lightrag_pending(doc_id, collection)
+            await self._sync_milvus_collection_move(doc_id, collection)
         return updated
 
     async def delete_document(self, doc_id: str) -> bool:
@@ -318,8 +362,14 @@ class KnowledgeRepositoryApi:
             return False
 
         chunks = await self._source_store.list_chunks(doc_id)
-        if self._lightrag_registry is not None:
-            await self._lightrag_registry.delete_doc(doc.collection, doc_id)
+        if self._lightrag_registry is not None and self._lightrag_index_is_compatible(
+            doc.collection
+        ):
+            try:
+                await self._lightrag_registry.delete_doc(doc.collection, doc_id)
+            except Exception as exc:
+                logger.error("LightRAG document delete failed for %s: %s", doc_id, exc)
+                self._mark_lightrag_collection_incompatible(doc.collection)
         records = [
             record
             for record in await self._source_store.list_sync_records()
@@ -334,16 +384,19 @@ class KnowledgeRepositoryApi:
             except Exception as exc:
                 logger.warning("Failed to delete remote mirror %s: %s", record.remote_ref, exc)
 
-        if self._graph_store is not None:
-            for chunk in chunks:
-                await self._graph_store.delete_by_chunk(chunk.chunk_id)
-
         if self._config:
             vdb = self._config.get_vector_db_config()
-            if vdb.backend == "milvus" and self._vector_store:
+            if vdb.backend == "milvus" and self._milvus_index_is_compatible():
                 chunk_ids = [c.chunk_id for c in chunks]
                 if chunk_ids:
-                    await self._vector_store.delete_chunks(chunk_ids)
+                    try:
+                        assert self._vector_store is not None
+                        await self._vector_store.delete_chunks(chunk_ids)
+                    except Exception as exc:
+                        logger.error("Milvus document delete failed for %s: %s", doc_id, exc)
+                        self._mark_milvus_incompatible(
+                            f"Milvus document delete failed: {exc}"
+                        )
 
         deleted = await self._source_store.delete_document(doc_id)
         if deleted:
@@ -367,6 +420,8 @@ class KnowledgeRepositoryApi:
         if not self._config or not self._vector_store or not self._embedding_provider:
             raise RuntimeError("VectorStore or EmbeddingProvider is not configured.")
 
+        self._mark_milvus_incompatible("Milvus full rebuild is in progress.")
+
         # 1. 清空向量库
         await self._vector_store.clear()
 
@@ -385,13 +440,33 @@ class KnowledgeRepositoryApi:
                 await self._vector_store.upsert_chunks(chunks, embeddings)
                 total_chunks += len(chunks)
 
+        for doc in docs:
+            if doc.needs_reindex:
+                doc.needs_reindex = False
+                await self._source_store.update_document(doc)
+
         logger.info("Successfully rebuilt vector store index: %d chunks", total_chunks)
+        if self._index_compatibility and self._embedding_fingerprint:
+            self._index_compatibility.mark_milvus_compatible(self._embedding_fingerprint)
         return {"rebuilt_chunks": total_chunks}
 
     async def rebuild_index_pending(self) -> dict[str, int]:
         """仅对 needs_reindex=True 的文档进行增量索引重建，完成后清除标记。"""
         if not self._vector_store or not self._embedding_provider:
             raise RuntimeError("VectorStore or EmbeddingProvider is not configured.")
+
+        if (
+            self._config
+            and self._config.get_vector_db_config().backend == "milvus"
+            and self._index_compatibility
+            and self._embedding_fingerprint
+            and not self._index_compatibility.is_milvus_compatible(
+                self._embedding_fingerprint
+            )
+        ):
+            docs = await self._source_store.list_documents()
+            result = await self.rebuild_vector_store()
+            return {"rebuilt_docs": len(docs), **result}
 
         docs = await self._source_store.list_pending_reindex_documents()
         total_chunks = 0
@@ -406,7 +481,6 @@ class KnowledgeRepositoryApi:
                 await self._vector_store.upsert_chunks(chunks, embeddings)
                 total_chunks += len(chunks)
             doc.needs_reindex = False
-            doc.updated_at = _now()
             await self._source_store.update_document(doc)
 
         logger.info("Rebuilt pending index: %d docs, %d chunks", len(docs), total_chunks)
@@ -424,8 +498,14 @@ class KnowledgeRepositoryApi:
         top_k: int = 5,
         conversation_id: str | None = None,
         persona_enabled: bool = False,
+        retrieval_mode: str = "default",
     ) -> dict:
-        """基于知识库检索 + LLM 生成答案，返回 answer + sources（Ask Agent 端口）。"""
+        """Retrieve evidence and generate one final answer."""
+        if retrieval_mode not in {"default", "high_precision"}:
+            raise ValueError("retrieval_mode must be 'default' or 'high_precision'")
+        if retrieval_mode == "high_precision" and not collection:
+            raise ValueError("high_precision retrieval requires a collection")
+
         cid = conversation_id or uuid.uuid4().hex
         ask_start = time.monotonic()
 
@@ -437,61 +517,67 @@ class KnowledgeRepositoryApi:
             if self._metrics is not None:
                 self._metrics.record(op, (time.monotonic() - t0) * 1000, meta or None)
 
-        # 阶段 1：向量嵌入 / 准备检索
         _progress("embed_query", 0)
         t0 = time.monotonic()
 
-        # 1. 检索相关 chunks
+        if retrieval_mode == "high_precision":
+            readiness = await self.get_lightrag_readiness(collection or "")
+            if not readiness["ready"]:
+                raise LightRAGNotReadyError(
+                    collection or "",
+                    readiness["reason"],
+                    build_available=readiness["build_available"],
+                )
+
         chunks: list[DocumentChunk] = []
-        if collection:
-            _progress("vector_search", 20)
-            t_vs = time.monotonic()
-            chunks = await self.search_kb(collection, question, top_k)
-            _record("vector_search", t_vs, hits=len(chunks))
-        else:
-            # 优先从本地源库获取集合列表，如果没有再回退到 AstrBot 知识库列表
-            cols = await self.list_collections()
-            all_cols = [c.name for c in cols]
-            if not all_cols:
-                all_cols = await self.list_kb_collections()
-            _progress("vector_search", 20)
-            t_vs = time.monotonic()
-            seen_ids: set[str] = set()
-            for col in all_cols[:5]:
-                for ch in await self.search_kb(col, question, top_k):
-                    if ch.chunk_id not in seen_ids:
-                        seen_ids.add(ch.chunk_id)
-                        chunks.append(ch)
-                    if len(chunks) >= top_k:
-                        break
+        engines: list[str] = []
+        fallback_reason: str | None = None
+        _progress("vector_search", 20)
+        t_vs = time.monotonic()
+        seen_ids: set[str] = set()
+        for col in await self._resolve_ask_collections(collection):
+            try:
+                if self._retrieval_orchestrator is not None:
+                    outcome = await self._retrieval_orchestrator.retrieve_with_outcome(
+                        col, question, top_k
+                    )
+                    current_chunks = outcome.chunks
+                    engines.extend(outcome.engines)
+                    fallback_reason = fallback_reason or outcome.fallback_reason
+                else:
+                    current_chunks = await self._kb_reader.search(col, question, top_k)
+                    engines.append("astrbot")
+            except Exception as exc:
+                logger.warning("Ask retrieval failed for collection %s: %s", col, exc)
+                fallback_reason = fallback_reason or f"collection_error:{col}"
+                continue
+            for chunk in current_chunks:
+                if chunk.chunk_id not in seen_ids:
+                    seen_ids.add(chunk.chunk_id)
+                    chunks.append(chunk)
                 if len(chunks) >= top_k:
                     break
-            _record("vector_search", t_vs, hits=len(chunks))
+            if len(chunks) >= top_k:
+                break
+        _record("vector_search", t_vs, hits=len(chunks))
 
         _record("embed_query", t0)
 
-        # 阶段 2：图谱扩展（此处已在 retrieval_orchestrator 内完成，记录占位进度）
-        _progress("graph_expand", 50)
-
-        # ── LightRAG 图谱补充上下文（graph.enabled=True 时启用） ───────────────
         lightrag_context = ""
-        graph_cfg = self._config.get_graph_config() if self._config is not None else None
-        if self._lightrag_registry is not None and graph_cfg is not None and graph_cfg.enabled:
+        if retrieval_mode == "high_precision":
+            _progress("lightrag_context", 50)
             try:
-                lg_col = collection
-                if not lg_col:
-                    cols = await self.list_collections()
-                    lg_col = cols[0].name if cols else None
-                if lg_col:
-                    lg_result = await self._lightrag_registry.query(lg_col, question)
-                    lightrag_context = (lg_result.get("answer") or "").strip()
-            except Exception as _e:
-                logger.warning("LightRAG context augmentation in ask() failed: %s", _e)
+                if self._retrieval_orchestrator is None:
+                    raise RuntimeError("RetrievalOrchestrator is not configured")
+                lightrag_context = await self._retrieval_orchestrator.retrieve_lightrag_context(
+                    collection or "", question
+                )
+                engines.append("lightrag")
+            except Exception as exc:
+                raise HighPrecisionQueryError(collection or "", str(exc)) from exc
 
-        # 阶段 3：RRF 融合（同上）
         _progress("rrf_fusion", 65)
 
-        # 2. 构造来源列表 + LLM 上下文
         sources = []
         context_parts = []
         for i, chunk in enumerate(chunks):
@@ -513,12 +599,11 @@ class KnowledgeRepositoryApi:
             page_info = f" (Page {chunk.metadata['page_number']})" if has_page else ""
             context_parts.append(f"[{n}] {title}{page_info}\n{chunk.text}")
 
-        # 阶段 4：LLM 生成答案
         _progress("llm_generate", 80)
         t_llm = time.monotonic()
 
-        # 3. 调用 LLM 生成答案（无 LLM 时降级为摘要回答）
-        if self._llm_adapter is not None and context_parts:
+        has_evidence = bool(context_parts or lightrag_context)
+        if self._llm_adapter is not None and has_evidence:
             system_prompt = (
                 "You are a helpful academic assistant. "
                 "Answer the question based solely on the provided context. "
@@ -531,7 +616,9 @@ class KnowledgeRepositoryApi:
                     system_prompt = f"{bot_persona}\n\n[RAG Constraints]\n{system_prompt}"
 
             graph_header = (
-                f"[图谱分析]\n{lightrag_context}\n\n---\n\n" if lightrag_context else ""
+                f"[LightRAG Context]\n{lightrag_context}\n\n---\n\n"
+                if lightrag_context
+                else ""
             )
             user_prompt = (
                 "Context:\n\n"
@@ -546,6 +633,8 @@ class KnowledgeRepositoryApi:
                 f"{s['text'][:300]}{'…' if len(s['text']) > 300 else ''}"
                 for s in sources
             )
+        elif lightrag_context:
+            answer = lightrag_context
         else:
             answer = "未在知识库中找到与该问题相关的内容。请尝试其他关键词或上传相关文档。"
 
@@ -553,11 +642,97 @@ class KnowledgeRepositoryApi:
         _record("ask_total", ask_start, sources=len(sources))
         _progress("done", 100)
 
+        engines = list(dict.fromkeys(engines))
+        if retrieval_mode == "high_precision":
+            if "astrbot" in engines:
+                actual_mode = "astrbot_lightrag"
+            elif "milvus" in engines:
+                actual_mode = "milvus_lightrag"
+            elif "sqlite_lexical" in engines:
+                actual_mode = "lexical_lightrag"
+            else:
+                actual_mode = "lightrag"
+        elif "astrbot" in engines:
+            actual_mode = "astrbot_fallback" if fallback_reason else "astrbot"
+        elif "milvus" in engines:
+            actual_mode = "milvus"
+        elif "sqlite_lexical" in engines:
+            actual_mode = "sqlite_lexical"
+        else:
+            actual_mode = "none"
+
         return {
             "conversation_id": cid,
             "answer": answer,
             "sources": sources,
+            "requested_retrieval_mode": retrieval_mode,
+            "actual_retrieval_mode": actual_mode,
+            "retrieval_engines": engines,
+            "fallback_reason": fallback_reason,
         }
+
+    async def _resolve_ask_collections(self, collection: str | None) -> list[str]:
+        if collection:
+            return [collection]
+        collections = [item.name for item in await self.list_collections()]
+        if not collections:
+            collections = await self.list_kb_collections()
+        return collections[:5]
+
+    async def get_lightrag_readiness(self, collection: str) -> dict[str, Any]:
+        if not collection:
+            return {
+                "ready": False,
+                "reason": "A collection is required.",
+                "build_available": False,
+            }
+        if self._lightrag_registry is None:
+            return {
+                "ready": False,
+                "reason": "LightRAG Core is not enabled or configured.",
+                "build_available": False,
+            }
+        docs = await self._source_store.list_documents(collection=collection)
+        if not docs:
+            return {
+                "ready": False,
+                "reason": "The collection has no documents.",
+                "build_available": False,
+            }
+        if not self._lightrag_registry.has_workspace(collection):
+            return {
+                "ready": False,
+                "reason": "LightRAG workspace has not been built.",
+                "build_available": True,
+            }
+        if (
+            not self._index_compatibility
+            or not self._embedding_fingerprint
+            or not self._index_compatibility.is_lightrag_compatible(
+                collection, self._embedding_fingerprint
+            )
+        ):
+            return {
+                "ready": False,
+                "reason": "LightRAG index is incompatible with the active embedding.",
+                "build_available": True,
+            }
+        invalid = 0
+        for doc in docs:
+            status = await self._source_store.get_lightrag_index_status(doc.doc_id)
+            if (
+                status is None
+                or status.get("collection") != collection
+                or status.get("status") != "indexed"
+            ):
+                invalid += 1
+        if invalid:
+            return {
+                "ready": False,
+                "reason": f"{invalid} document(s) require LightRAG indexing.",
+                "build_available": True,
+            }
+        return {"ready": True, "reason": "", "build_available": False}
 
     # ── 在线服务（配额）────────────────────────────────────────
 
@@ -652,14 +827,26 @@ class KnowledgeRepositoryApi:
 
     # 修改这些字段需要重建索引，运行时直接写入会静默破坏已有数据
     _STRUCTURAL_KEYS: dict[str, frozenset[str]] = {
-        "graph": frozenset({"embedding_dim", "max_token_size", "working_dir"}),
+        "graph": frozenset({"working_dir"}),
         "vector_db": frozenset({"db_filename"}),
     }
+    _CONFIG_UPDATE_KEYS: dict[str, frozenset[str]] = {
+        "vector_db": frozenset({"backend", "auto_index_enabled"}),
+        "embedding": frozenset({"provider", "model", "base_url", "max_token_size"}),
+        "ask": frozenset({"conversation_enhancement_mode"}),
+        "graph": frozenset(
+            {"enabled", "query_mode", "llm_max_async", "embedding_max_async"}
+        ),
+    }
+    _EMBEDDING_INDEX_KEYS = frozenset({"provider", "model", "base_url"})
 
-    async def update_config_value(self, section: str, key: str, value: Any) -> None:
-        """更新受限配置项，并进行写保护校验与运行时热重载。"""
-        if section not in ("vector_db", "ask", "graph"):
+    async def update_config_value(self, section: str, key: str, value: Any) -> dict[str, Any]:
+        """Persist a safe config value without hot-swapping embedding-backed runtime state."""
+        logger.info("update_config: %s.%s", section, key)
+        if section not in ("vector_db", "embedding", "ask", "graph"):
             raise ValueError(f"Section '{section}' is write-protected or read-only.")
+        if key not in self._CONFIG_UPDATE_KEYS.get(section, frozenset()):
+            raise ValueError(f"runtime config key is not allowed: {section}.{key}")
         if key in self._SECRET_KEYS and value:
             raise ValueError(f"'{key}' 为机密字段，必须通过环境变量注入，不可经此接口写入。")
         if key in self._STRUCTURAL_KEYS.get(section, frozenset()):
@@ -667,49 +854,43 @@ class KnowledgeRepositoryApi:
                 f"'{section}.{key}' 为结构性参数，修改后需手动重建索引。"
                 "请直接修改插件配置文件并重启插件，而非通过此接口写入。"
             )
+        if section == "embedding" and key == "provider" and value not in {"local", "external"}:
+            raise ValueError("embedding.provider must be 'local' or 'external'.")
+        if section == "vector_db" and key == "backend" and value not in {"milvus", "astr"}:
+            raise ValueError("vector_db.backend must be 'milvus' or 'astr'.")
 
-        # 保存配置到内存与物理存储
+        changed = self._current_config_value(section, key) != value
         self._persist_config_value(section, key, value)
-        if self._config:
-            self._config.set_value(section, key, value)
+        restart_required = changed and section in {"embedding", "vector_db", "graph"}
+        rebuild_required = (
+            changed and section == "embedding" and key in self._EMBEDDING_INDEX_KEYS
+        )
+        if rebuild_required:
+            await self._invalidate_embedding_indexes(
+                f"Configuration changed: {section}.{key}"
+            )
 
-        # 针对 vector_db 的改动，触发热重载 (Hot-reload)
-        if section == "vector_db" and self._config:
-            vdb = self._config.get_vector_db_config()
-
-            # 如果 vector_db 开启了 milvus，但 vector_store 尚未初始化，在此进行动态构建
-            if vdb.backend == "milvus" and not self._vector_store:
-                from core.repository.vector_store.milvus_lite import MilvusLiteVectorStore
-
-                db_dir_path = (
-                    self._managed_documents_dir.parent
-                    if self._managed_documents_dir
-                    else Path("./data")
+        logger.info("update_config ok: %s.%s persisted", section, key)
+        return {
+            "status": "success",
+            "restart_required": restart_required,
+            "rebuild_required": rebuild_required,
+            "message": (
+                "Configuration saved. Restart and rebuild indexes."
+                if rebuild_required
+                else (
+                    "Configuration saved. Restart required."
+                    if restart_required
+                    else "Configuration saved."
                 )
-                milvus_db_path = str(db_dir_path / vdb.db_filename)
-                self._vector_store = MilvusLiteVectorStore(db_path=milvus_db_path)
+            ),
+        }
 
-            # 重新实例化并构建 Embedding Provider 实例
-            from core.repository.embedding.factory import EmbeddingProviderFactory
-
-            db_dir_str = (
-                str(self._managed_documents_dir.parent) if self._managed_documents_dir else "./data"
-            )
-            self._embedding_provider = EmbeddingProviderFactory.create_provider(
-                self._config, db_dir=db_dir_str
-            )
-
-            # 将更新后的实例同步回统一检索编排器 (RetrievalOrchestrator) 内部
-            if self._retrieval_orchestrator:
-                self._retrieval_orchestrator._embedding_provider = self._embedding_provider
-                self._retrieval_orchestrator._vector_store = self._vector_store
-
-    async def test_embedding_connection(self, api_key: str, base_url: str, model_name: str) -> dict:
+    async def test_embedding_connection(self, base_url: str, model_name: str) -> dict:
         """临时创建一个 ExternalEmbeddingProvider 并发送测试请求，验证云端 API 可连通性。"""
         from core.repository.embedding.external import ExternalEmbeddingProvider
 
         provider = ExternalEmbeddingProvider(
-            api_key=api_key,
             base_url=base_url,
             model_name=model_name,
         )
@@ -762,7 +943,7 @@ class KnowledgeRepositoryApi:
         from core.lightrag_core import estimate_lightrag_build
 
         col = await self._resolve_collection(collection)
-        docs = await self._source_store.list_documents(collection=col)
+        docs = await self._lightrag_docs_for_build(col)
         chunks_by_doc = {
             doc.doc_id: await self._source_store.list_chunks(doc.doc_id) for doc in docs
         }
@@ -782,7 +963,7 @@ class KnowledgeRepositoryApi:
 
         col = await self._resolve_collection(collection)
         job_id = uuid.uuid4().hex
-        docs = await self._source_store.list_documents(collection=col)
+        docs = await self._lightrag_docs_for_build(col)
         job = BuildJob(job_id=job_id, collection=col, total_docs=len(docs))
         self._graph_build_jobs[job_id] = job
         asyncio.create_task(self._run_lightrag_build_job(job_id))
@@ -798,13 +979,26 @@ class KnowledgeRepositoryApi:
         job.status = "running"
         job.stage = "reading_documents"
         try:
-            docs = await self._source_store.list_documents(collection=job.collection)
+            docs = await self._lightrag_docs_for_build(job.collection)
             job.total_docs = len(docs)
+            if (
+                self._index_compatibility is not None
+                and self._embedding_fingerprint
+                and self._lightrag_registry.has_workspace(job.collection)
+                and not self._index_compatibility.is_lightrag_compatible(
+                    job.collection, self._embedding_fingerprint
+                )
+            ):
+                job.stage = "resetting_workspace"
+                await self._lightrag_registry.reset_workspace(job.collection)
             for doc in docs:
                 job.stage = "indexing"
                 chunks = await self._source_store.list_chunks(doc.doc_id)
                 text = "\n\n".join(chunk.text for chunk in chunks if chunk.text.strip())
                 if not text.strip():
+                    await self._source_store.set_lightrag_index_status(
+                        doc.doc_id, job.collection, "indexed"
+                    )
                     job.processed_docs += 1
                     continue
                 try:
@@ -822,6 +1016,14 @@ class KnowledgeRepositoryApi:
                     logger.error("LightRAG build failed for doc %s: %s", doc.doc_id, exc)
             job.stage = "done"
             job.status = "success" if job.failed_docs == 0 else "partial_failure"
+            if (
+                job.status == "success"
+                and self._index_compatibility is not None
+                and self._embedding_fingerprint
+            ):
+                self._index_compatibility.mark_lightrag_compatible(
+                    job.collection, self._embedding_fingerprint
+                )
         except Exception as exc:
             job.stage = "error"
             job.status = "error"
@@ -829,6 +1031,25 @@ class KnowledgeRepositoryApi:
             logger.error("LightRAG build job %s failed: %s", job_id, exc)
         finally:
             job.finished_at = time.time()
+
+    async def _lightrag_docs_for_build(self, collection: str) -> list[SourceDocument]:
+        docs = await self._source_store.list_documents(collection=collection)
+        if (
+            self._lightrag_registry is None
+            or not self._lightrag_registry.has_workspace(collection)
+            or not self._lightrag_index_is_compatible(collection)
+        ):
+            return docs
+        pending = []
+        for doc in docs:
+            status = await self._source_store.get_lightrag_index_status(doc.doc_id)
+            if (
+                status is None
+                or status.get("collection") != collection
+                or status.get("status") != "indexed"
+            ):
+                pending.append(doc)
+        return pending
 
     async def probe_lightrag_core(
         self, collection: str, text: str, doc_id: str, query: str
@@ -847,153 +1068,28 @@ class KnowledgeRepositoryApi:
         collection: str | None = None,
         debug: bool = False,
     ) -> dict:
-        """知识图谱查询（向量召回 + 图邻域扩展 + RRF 融合）。
-
-        Reserved（v0.6.0）：返回命中实体/关系与来源 chunk。
-        """
-        if self._lightrag_registry is not None:
-            col = await self._resolve_collection(collection)
-            payload = await self._lightrag_registry.query(col, query)
-            payload["status"] = "success"
-            payload["query"] = query
-            return payload
-
-        if self._graph_search_pipeline:
-            col = collection
-            if col is None:
-                cols = await self.list_collections()
-                col = cols[0].name if cols else "default"
-
-            res = await self._graph_search_pipeline.search(
-                collection=col,
-                query=query,
-                top_k=top_k,
-                debug=debug,
-            )
-
-            # 序列化为纯 dict 以确保 Web/JSON 兼容性
-            serialized_chunks = []
-            for ch in res.get("chunks", []):
-                serialized_chunks.append(
-                    {
-                        "chunk_id": ch.chunk_id,
-                        "doc_id": ch.doc_id,
-                        "ordinal": ch.ordinal,
-                        "text": ch.text,
-                        "content_hash": ch.content_hash,
-                    }
-                )
-
-            serialized_entities = []
-            for ent in res.get("entities", []):
-                serialized_entities.append(
-                    {
-                        "entity_id": ent.entity_id,
-                        "name": ent.name,
-                        "entity_type": ent.entity_type,
-                        "description": ent.description,
-                        "source_chunk_ids": ent.source_chunk_ids,
-                        "degree": ent.degree,
-                    }
-                )
-
-            serialized_relations = []
-            for rel in res.get("relations", []):
-                serialized_relations.append(
-                    {
-                        "relation_id": rel.relation_id,
-                        "src_entity_id": rel.src_entity_id,
-                        "dst_entity_id": rel.dst_entity_id,
-                        "relation": rel.relation,
-                        "description": rel.description,
-                        "weight": rel.weight,
-                        "source_chunk_ids": rel.source_chunk_ids,
-                    }
-                )
-
-            payload = {
-                "status": "success",
-                "query": res.get("query", query),
-                "collection": col,
-                "chunks": serialized_chunks,
-                "entities": serialized_entities,
-                "relations": serialized_relations,
-                "context": res.get("context", ""),
-            }
-            if debug:
-                payload["debug"] = res.get("debug", {})
-            return payload
-
-        raise NotImplementedError("query_graph: available in v0.6.0")
+        """Run the independent full-answer LightRAG query endpoint."""
+        del top_k, debug
+        if self._lightrag_registry is None:
+            raise NotImplementedError("query_graph requires LightRAG Core")
+        col = await self._resolve_collection(collection)
+        readiness = await self.get_lightrag_readiness(col)
+        if not readiness["ready"]:
+            raise RuntimeError(readiness["reason"])
+        payload = await self._lightrag_registry.query(col, query)
+        payload["status"] = "success"
+        payload["query"] = query
+        return payload
 
     async def get_graph(self, collection: str | None = None) -> dict:
-        """取图谱可视化数据（节点 + 边）。
-
-        Reserved（v0.7.0 图谱可视化）：返回 {nodes:[...], edges:[...]}。
-        """
-        if self._lightrag_registry is not None:
-            col = await self._resolve_collection(collection)
-            return await self._lightrag_registry.export_graph(col)
-
-        if self._graph_store:
-            col = collection
-            if col is None:
-                cols = await self.list_collections()
-                col = cols[0].name if cols else "default"
-
-            docs = await self._source_store.list_documents(collection=col)
-            chunk_by_id: dict[str, DocumentChunk] = {}
-            for doc in docs:
-                for chunk in await self._source_store.list_chunks(doc.doc_id):
-                    chunk_by_id[chunk.chunk_id] = chunk
-            scoped_chunk_ids = set(chunk_by_id)
-
-            nodes = []
-            for ent in await self._graph_store.list_entities():
-                source_ids = [cid for cid in ent.source_chunk_ids if cid in scoped_chunk_ids]
-                if not source_ids:
-                    continue
-                nodes.append(
-                    {
-                        "id": ent.entity_id,
-                        "name": ent.name,
-                        "type": ent.entity_type,
-                        "description": ent.description,
-                        "degree": ent.degree,
-                        "source_chunk_ids": source_ids,
-                        "source_previews": _chunk_previews(chunk_by_id, source_ids),
-                    }
-                )
-
-            node_ids = {node["id"] for node in nodes}
-            edges = []
-            for rel in await self._graph_store.list_relations():
-                source_ids = [cid for cid in rel.source_chunk_ids if cid in scoped_chunk_ids]
-                if not source_ids:
-                    continue
-                if rel.src_entity_id not in node_ids or rel.dst_entity_id not in node_ids:
-                    continue
-                edges.append(
-                    {
-                        "id": rel.relation_id,
-                        "source": rel.src_entity_id,
-                        "target": rel.dst_entity_id,
-                        "relation": rel.relation,
-                        "description": rel.description,
-                        "weight": rel.weight,
-                        "source_chunk_ids": source_ids,
-                        "source_previews": _chunk_previews(chunk_by_id, source_ids),
-                    }
-                )
-
-            return {
-                "status": "success",
-                "collection": col,
-                "nodes": nodes,
-                "edges": edges,
-            }
-
-        raise NotImplementedError("get_graph: available in v0.7.0")
+        """Export a valid existing LightRAG workspace for visualization."""
+        if self._lightrag_registry is None:
+            raise NotImplementedError("get_graph requires LightRAG Core")
+        col = await self._resolve_collection(collection)
+        readiness = await self.get_lightrag_readiness(col)
+        if not readiness["ready"]:
+            raise RuntimeError(readiness["reason"])
+        return await self._lightrag_registry.export_graph(col)
 
     async def _resolve_collection(self, collection: str | None) -> str:
         if collection:
@@ -1017,29 +1113,26 @@ class KnowledgeRepositoryApi:
 
     async def get_graph_stats(self) -> dict:
         """返回图谱摘要统计（实体数、关系数、涉及集合数）。"""
-        if self._graph_store is None:
+        if self._lightrag_registry is None:
             return {"entities_count": 0, "relations_count": 0, "collections_covered": 0}
-        entities = await self._graph_store.list_entities()
-        relations = await self._graph_store.list_relations()
-        chunk_ids: set[str] = set()
-        for ent in entities:
-            chunk_ids.update(ent.source_chunk_ids)
-        collections: set[str] = set()
-        for cid in chunk_ids:
-            # 通过 doc_id 映射集合（best-effort）
-            chunk_rows = (
-                await self._source_store.list_chunks_by_id([cid])
-                if hasattr(self._source_store, "list_chunks_by_id")
-                else []
-            )
-            for chunk in chunk_rows:
-                doc = await self._source_store.get_document(chunk.doc_id)
-                if doc:
-                    collections.add(doc.collection)
+        nodes: set[str] = set()
+        edges: set[str] = set()
+        collections = 0
+        for collection in self._lightrag_registry.existing_collections():
+            readiness = await self.get_lightrag_readiness(collection)
+            if not readiness["ready"]:
+                continue
+            try:
+                graph = await self._lightrag_registry.export_graph(collection)
+                nodes.update(f"{collection}:{item['id']}" for item in graph.get("nodes", []))
+                edges.update(f"{collection}:{item['id']}" for item in graph.get("edges", []))
+                collections += 1
+            except Exception as exc:
+                logger.warning("Skipping LightRAG stats for %s: %s", collection, exc)
         return {
-            "entities_count": len(entities),
-            "relations_count": len(relations),
-            "collections_covered": len(collections),
+            "entities_count": len(nodes),
+            "relations_count": len(edges),
+            "collections_covered": collections,
         }
 
     # ── 调试：系统信息 & 文件列表 ─────────────────────────────────
@@ -1161,6 +1254,93 @@ class KnowledgeRepositoryApi:
         if self._config_persist is not None:
             self._config_persist(section, key, value)
 
+    def _current_config_value(self, section: str, key: str) -> object | None:
+        if self._config is None:
+            return None
+        getters = {
+            "vector_db": self._config.get_vector_db_config,
+            "embedding": self._config.get_embedding_config,
+            "ask": self._config.get_ask_agent_config,
+            "graph": self._config.get_graph_config,
+        }
+        getter = getters.get(section)
+        return getattr(getter(), key, None) if getter else None
+
+    def _milvus_index_is_compatible(self) -> bool:
+        if not self._config or self._config.get_vector_db_config().backend != "milvus":
+            return False
+        return bool(
+            self._vector_store
+            and self._embedding_provider
+            and self._index_compatibility
+            and self._embedding_fingerprint
+            and self._index_compatibility.is_milvus_compatible(self._embedding_fingerprint)
+        )
+
+    def _lightrag_index_is_compatible(self, collection: str) -> bool:
+        return bool(
+            self._lightrag_registry
+            and self._index_compatibility
+            and self._embedding_fingerprint
+            and self._index_compatibility.is_lightrag_compatible(
+                collection, self._embedding_fingerprint
+            )
+        )
+
+    def _mark_milvus_incompatible(self, reason: str) -> None:
+        if self._index_compatibility:
+            self._index_compatibility.mark_milvus_incompatible(reason)
+
+    def _mark_lightrag_collection_incompatible(self, collection: str) -> None:
+        if self._index_compatibility:
+            self._index_compatibility.remove_lightrag_collection(collection)
+
+    async def _mark_document_needs_reindex(self, doc_id: str) -> None:
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return
+        doc.needs_reindex = True
+        await self._source_store.update_document(doc)
+
+    async def _mark_lightrag_pending(self, doc_id: str, collection: str) -> None:
+        await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
+
+    async def _sync_milvus_collection_move(self, doc_id: str, collection: str) -> None:
+        if not self._config or self._config.get_vector_db_config().backend != "milvus":
+            return
+        chunks = await self._source_store.list_chunks(doc_id)
+        if not chunks:
+            return
+        if not self._milvus_index_is_compatible():
+            await self._mark_document_needs_reindex(doc_id)
+            return
+        assert self._vector_store is not None
+        assert self._embedding_provider is not None
+        try:
+            await self._vector_store.delete_chunks([chunk.chunk_id for chunk in chunks])
+            if hasattr(self._vector_store, "set_doc_collection_mapping"):
+                self._vector_store.set_doc_collection_mapping(doc_id, collection)
+            embeddings = await self._embedding_provider.embed_documents(
+                [chunk.text for chunk in chunks]
+            )
+            await self._vector_store.upsert_chunks(chunks, embeddings)
+        except Exception as exc:
+            logger.error("Milvus collection move sync failed for %s: %s", doc_id, exc)
+            await self._mark_document_needs_reindex(doc_id)
+            self._mark_milvus_incompatible(f"Milvus collection move failed: {exc}")
+
+    async def _invalidate_embedding_indexes(self, reason: str) -> None:
+        if self._index_compatibility:
+            self._index_compatibility.mark_all_incompatible(reason)
+        for doc in await self._source_store.list_documents():
+            doc.needs_reindex = True
+            await self._source_store.update_document(doc)
+            await self._mark_lightrag_pending(doc.doc_id, doc.collection)
+        if self._config:
+            self._config.add_diagnostic(
+                "Embedding configuration changed; restart and rebuild Milvus/LightRAG indexes."
+            )
+
     def _unlink_managed_document(self, file_path: str) -> None:
         if self._managed_documents_dir is None:
             return
@@ -1177,27 +1357,4 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _chunk_previews(
-    chunk_by_id: dict[str, DocumentChunk],
-    chunk_ids: list[str],
-    limit: int = 360,
-) -> list[dict]:
-    previews = []
-    for chunk_id in chunk_ids[:5]:
-        chunk = chunk_by_id.get(chunk_id)
-        if chunk is None:
-            continue
-        text = chunk.text.strip()
-        previews.append(
-            {
-                "chunk_id": chunk.chunk_id,
-                "doc_id": chunk.doc_id,
-                "ordinal": chunk.ordinal,
-                "text": text[:limit],
-                "truncated": len(text) > limit,
-            }
-        )
-    return previews
-
-
-__all__ = ["KnowledgeRepositoryApi"]
+__all__ = ["HighPrecisionQueryError", "KnowledgeRepositoryApi", "LightRAGNotReadyError"]

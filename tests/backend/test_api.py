@@ -9,17 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from core.api import KnowledgeRepositoryApi
+from core.api import KnowledgeRepositoryApi, LightRAGNotReadyError
 from core.domain.models import (
     DocumentChunk,
-    GraphEntity,
-    GraphRelation,
     SourceDocument,
     SyncRecord,
     SyncStatus,
     SyncTargetKind,
 )
-from core.repository.graph_store.memory import InMemoryGraphStore
 from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
 from core.repository.source_store.memory import InMemorySourceDocumentStore
 from core.repository.sync_targets.memory import InMemorySyncTarget
@@ -115,7 +112,7 @@ async def test_delete_document() -> None:
     assert await api.delete_document("d1") is False
 
 
-async def test_delete_document_cleans_graph_remote_and_managed_file(tmp_path: Path) -> None:
+async def test_delete_document_cleans_remote_and_managed_file(tmp_path: Path) -> None:
     managed_dir = tmp_path / "documents"
     managed_dir.mkdir()
     managed_file = managed_dir / "d1.pdf"
@@ -134,22 +131,18 @@ async def test_delete_document_cleans_graph_remote_and_managed_file(tmp_path: Pa
             status=SyncStatus.SYNCED,
         )
     )
-    graph = InMemoryGraphStore()
-    await graph.upsert_entities([GraphEntity("e1", "Entity", source_chunk_ids=["c1"])])
     target = InMemorySyncTarget()
     target._objects["c/d1"] = b"pdf"
     api = KnowledgeRepositoryApi(
         source_store=store,
         kb_reader=InMemoryKnowledgeBaseReader({}),
         sync_targets={SyncTargetKind.R2: target},
-        graph_store=graph,
         managed_documents_dir=managed_dir,
     )
 
     assert await api.delete_document("d1") is True
     assert not managed_file.exists()
     assert target._objects == {}
-    assert await graph.get_entity("e1") is None
     assert await store.list_sync_records() == []
 
 
@@ -189,48 +182,6 @@ async def test_sync_all_fans_out_to_each_target() -> None:
         (SyncTargetKind.NOTION, ["d1"]),
         (SyncTargetKind.R2, ["d1"]),
     ]
-
-
-async def test_get_graph_filters_by_collection_and_returns_source_previews() -> None:
-    store = InMemorySourceDocumentStore()
-    await store.add_document(_doc("d1", "papers"))
-    await store.add_document(_doc("d2", "manuals"))
-    await store.replace_chunks(
-        "d1",
-        [DocumentChunk("c1", "d1", 0, "Transformer source text " * 30, "h1")],
-    )
-    await store.replace_chunks("d2", [DocumentChunk("c2", "d2", 0, "Manual source text", "h2")])
-    graph = InMemoryGraphStore()
-    await graph.upsert_entities([
-        GraphEntity("transformer", "Transformer", "Method", "desc", ["c1"]),
-        GraphEntity("manual", "Manual", "Document", "desc", ["c2"]),
-    ])
-    await graph.upsert_relations([
-        GraphRelation(
-            "transformer:manual:mentions",
-            "transformer",
-            "manual",
-            "mentions",
-            "cross collection",
-            1.0,
-            ["c1"],
-        )
-    ])
-    api = KnowledgeRepositoryApi(
-        source_store=store,
-        kb_reader=InMemoryKnowledgeBaseReader({}),
-        graph_store=graph,
-    )
-
-    payload = await api.get_graph("papers")
-
-    assert payload["status"] == "success"
-    assert payload["collection"] == "papers"
-    assert [n["id"] for n in payload["nodes"]] == ["transformer"]
-    assert payload["edges"] == []
-    preview = payload["nodes"][0]["source_previews"][0]
-    assert preview["chunk_id"] == "c1"
-    assert preview["truncated"] is True
 
 
 # ── ask() ────────────────────────────────────────────────────────
@@ -322,11 +273,311 @@ async def test_ask_uses_provided_conversation_id() -> None:
     assert result["conversation_id"] == "existing-id"
 
 
-async def test_vector_db_sync_and_rebuild() -> None:
+async def test_default_ask_never_calls_lightrag() -> None:
+    class FailingRegistry:
+        async def query(self, *args, **kwargs):
+            raise AssertionError("default Ask must not call LightRAG")
+
+    api = await _make_api()
+    api._lightrag_registry = FailingRegistry()  # type: ignore[assignment]
+    result = await api.ask(question="alpha", collection="kb1")
+    assert result["requested_retrieval_mode"] == "default"
+    assert "lightrag" not in result["retrieval_engines"]
+
+
+async def test_high_precision_uses_context_and_one_outer_llm_call(tmp_path: Path) -> None:
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.pipelines.retrieval_orchestrator import RetrievalOutcome
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return collection == "papers"
+
+    class Orchestrator:
+        async def retrieve_with_outcome(self, collection: str, query: str, top_k: int):
+            return RetrievalOutcome(
+                [DocumentChunk("c1", "d1", 0, "chunk evidence", "h1")],
+                ["milvus", "sqlite_lexical"],
+            )
+
+        async def retrieve_lightrag_context(self, collection: str, query: str) -> str:
+            return "graph context"
+
+    class LLM:
+        calls = 0
+
+        async def generate(self, prompt: str, system_prompt: str = "") -> str:
+            self.calls += 1
+            assert "graph context" in prompt
+            assert "chunk evidence" in prompt
+            return "answer"
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
+    llm = LLM()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+        retrieval_orchestrator=Orchestrator(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+        llm_adapter=llm,  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(
+        question="q",
+        collection="papers",
+        retrieval_mode="high_precision",
+    )
+
+    assert llm.calls == 1
+    assert result["actual_retrieval_mode"] == "milvus_lightrag"
+    assert result["retrieval_engines"] == ["milvus", "sqlite_lexical", "lightrag"]
+
+
+async def test_high_precision_requires_ready_lightrag() -> None:
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return False
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+    )
+    with pytest.raises(LightRAGNotReadyError, match="workspace"):
+        await api.ask(question="q", collection="papers", retrieval_mode="high_precision")
+
+
+async def test_lightrag_build_resets_incompatible_workspace(tmp_path: Path) -> None:
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.lightrag_core import BuildJob
+
+    calls: list[str] = []
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return True
+
+        async def reset_workspace(self, collection: str) -> None:
+            calls.append(f"reset:{collection}")
+
+        async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
+            calls.append(f"insert:{collection}:{doc_id}")
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "evidence", "h1")])
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "old-fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="new-fp",
+    )
+    api._graph_build_jobs["job"] = BuildJob(job_id="job", collection="papers")
+
+    await api._run_lightrag_build_job("job")
+
+    assert calls == ["reset:papers", "insert:papers:d1"]
+    assert api._graph_build_jobs["job"].status == "success"
+    assert compatibility.is_lightrag_compatible("papers", "new-fp")
+
+
+async def test_graph_stats_skip_pending_lightrag_workspace(tmp_path: Path) -> None:
+    from core.index_compatibility import IndexCompatibilityStore
+
+    class Registry:
+        exports = 0
+
+        def existing_collections(self) -> list[str]:
+            return ["papers"]
+
+        def has_workspace(self, collection: str) -> bool:
+            return True
+
+        async def export_graph(self, collection: str) -> dict:
+            self.exports += 1
+            return {"nodes": [{"id": "n1"}], "edges": []}
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.set_lightrag_index_status("d1", "papers", "pending")
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
+    registry = Registry()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=registry,  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    assert await api.get_graph_stats() == {
+        "entities_count": 0,
+        "relations_count": 0,
+        "collections_covered": 0,
+    }
+    assert registry.exports == 0
+
+
+async def test_lightrag_build_only_indexes_pending_docs_when_workspace_is_compatible(
+    tmp_path: Path,
+) -> None:
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.lightrag_core import BuildJob
+
+    inserted: list[str] = []
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return True
+
+        async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
+            inserted.append(doc_id)
+
+    store = InMemorySourceDocumentStore()
+    for doc_id, status in (("d1", "indexed"), ("d2", "pending")):
+        await store.add_document(_doc(doc_id, "papers"))
+        await store.replace_chunks(
+            doc_id, [DocumentChunk(f"c-{doc_id}", doc_id, 0, "evidence", f"h-{doc_id}")]
+        )
+        await store.set_lightrag_index_status(doc_id, "papers", status)
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+    api._graph_build_jobs["job"] = BuildJob(job_id="job", collection="papers")
+
+    await api._run_lightrag_build_job("job")
+
+    assert inserted == ["d2"]
+    assert api._graph_build_jobs["job"].total_docs == 1
+    assert api._graph_build_jobs["job"].status == "success"
+
+
+async def test_high_precision_can_answer_with_only_lightrag_context(tmp_path: Path) -> None:
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.pipelines.retrieval_orchestrator import RetrievalOutcome
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return True
+
+    class Orchestrator:
+        async def retrieve_with_outcome(self, collection: str, query: str, top_k: int):
+            return RetrievalOutcome([], [])
+
+        async def retrieve_lightrag_context(self, collection: str, query: str) -> str:
+            return "only graph context"
+
+    class LLM:
+        calls = 0
+
+        async def generate(self, prompt: str, system_prompt: str = "") -> str:
+            self.calls += 1
+            assert "only graph context" in prompt
+            return "answer"
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
+    llm = LLM()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+        retrieval_orchestrator=Orchestrator(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+        llm_adapter=llm,  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(question="q", collection="papers", retrieval_mode="high_precision")
+
+    assert result["answer"] == "answer"
+    assert result["sources"] == []
+    assert result["actual_retrieval_mode"] == "lightrag"
+    assert llm.calls == 1
+
+
+async def test_embedding_change_marks_docs_pending_and_rebuilds_incompatible_milvus(
+    tmp_path: Path,
+) -> None:
+    from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    class CountingVectorStore(InMemoryVectorStore):
+        clear_calls = 0
+
+        async def clear(self) -> None:
+            self.clear_calls += 1
+            await super().clear()
+
+        async def delete_chunks(self, chunk_ids: list[str]) -> None:
+            raise AssertionError("incompatible Milvus must not receive lifecycle writes")
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "evidence", "h1")])
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+    vector_store = CountingVectorStore()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=vector_store,
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    update = await api.update_config_value("embedding", "model", "replacement-model")
+    assert await api.classify_document("d1", collection="moved") is True
+
+    assert update["rebuild_required"] is True
+    assert [doc.doc_id for doc in await store.list_pending_reindex_documents()] == ["d1"]
+    assert (await store.get_lightrag_index_status("d1"))["status"] == "pending"
+    assert not compatibility.is_milvus_compatible("fp")
+
+    rebuilt = await api.rebuild_index_pending()
+
+    assert rebuilt == {"rebuilt_docs": 1, "rebuilt_chunks": 1}
+    assert vector_store.clear_calls == 1
+    assert await store.list_pending_reindex_documents() == []
+    assert compatibility.is_milvus_compatible("fp")
+
+    token_update = await api.update_config_value("embedding", "max_token_size", 4096)
+    assert token_update["restart_required"] is True
+    assert token_update["rebuild_required"] is False
+    assert compatibility.is_milvus_compatible("fp")
+
+
+async def test_vector_db_sync_and_rebuild(tmp_path: Path) -> None:
     """测试在 milvus 模式下
     rebuild_vector_store、delete_document 和 delete_collection 的联动一致性。
     """
     from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
     from core.repository.vector_store.memory import InMemoryVectorStore
     from tests.backend.test_embedding import MockEmbeddingProvider
 
@@ -349,6 +600,7 @@ async def test_vector_db_sync_and_rebuild() -> None:
     v_store = InMemoryVectorStore()
     v_store.set_doc_collection_mapping(doc_id, "col1")
     embedding = MockEmbeddingProvider(dimension=4)
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
 
     api = KnowledgeRepositoryApi(
         source_store=store,
@@ -356,6 +608,8 @@ async def test_vector_db_sync_and_rebuild() -> None:
         config=config,
         vector_store=v_store,
         embedding_provider=embedding,
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
     )
 
     # 2. 测试全量 rebuild
@@ -380,6 +634,3 @@ async def test_vector_db_sync_and_rebuild() -> None:
     assert "chunk_A" in v_store._data
     await api.delete_collection("col1")
     assert "chunk_A" not in v_store._data
-
-
-

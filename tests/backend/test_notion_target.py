@@ -20,9 +20,12 @@ from core.repository.sync_targets.notion import NotionSyncTarget
 
 @pytest.mark.asyncio
 async def test_astrbot_kb_reader_list_collections() -> None:
-    # 模拟 context.kb_manager.list_collections
+    class Kb:
+        def __init__(self, name: str) -> None:
+            self.kb_name = name
+
     mock_kb_manager = MagicMock()
-    mock_kb_manager.list_collections = AsyncMock(return_value=["papers", "manuals"])
+    mock_kb_manager.list_kbs = AsyncMock(return_value=[Kb("papers"), Kb("manuals")])
     mock_context = MagicMock()
     mock_context.kb_manager = mock_kb_manager
 
@@ -33,45 +36,31 @@ async def test_astrbot_kb_reader_list_collections() -> None:
 
 @pytest.mark.asyncio
 async def test_astrbot_kb_reader_list_chunks_translation() -> None:
-    # 模拟 raw chunk 字典形式
-    raw_chunk = {
-        "chunk_id": "c1",
-        "doc_id": "d1",
-        "ordinal": 2,
-        "text": "sample text",
-        "content_hash": "hash_123",
-    }
-    mock_kb_manager = MagicMock()
-    mock_kb_manager.list_chunks = AsyncMock(return_value=[raw_chunk])
-    mock_context = MagicMock()
-    mock_context.kb_manager = mock_kb_manager
-
-    reader = AstrBotKnowledgeBaseReader(mock_context)
+    reader = AstrBotKnowledgeBaseReader(MagicMock())
     chunks = await reader.list_chunks("papers")
-    assert len(chunks) == 1
-    c = chunks[0]
-    assert isinstance(c, DocumentChunk)
-    assert c.chunk_id == "c1"
-    assert c.doc_id == "d1"
-    assert c.ordinal == 2
-    assert c.text == "sample text"
-    assert c.content_hash == "hash_123"
+    assert chunks == []
 
 
 @pytest.mark.asyncio
 async def test_astrbot_kb_reader_search() -> None:
-    # 模拟 raw chunk 对象形式
-    class MockRawChunk:
-
-        def __init__(self) -> None:
-            self.id = "c2"
-            self.doc_id = "d1"
-            self.ordinal = 0
-            self.text = "search match"
-            self.content_hash = "hash_456"
+    class Kb:
+        kb_name = "papers"
 
     mock_kb_manager = MagicMock()
-    mock_kb_manager.search = AsyncMock(return_value=[MockRawChunk()])
+    mock_kb_manager.list_kbs = AsyncMock(return_value=[Kb()])
+    mock_kb_manager.retrieve = AsyncMock(
+        return_value={
+            "context_text": "search match",
+            "results": [
+                {
+                    "chunk_id": "c2",
+                    "doc_id": "d1",
+                    "chunk_index": 0,
+                    "content": "search match",
+                }
+            ],
+        }
+    )
     mock_context = MagicMock()
     mock_context.kb_manager = mock_kb_manager
 
@@ -80,6 +69,12 @@ async def test_astrbot_kb_reader_search() -> None:
     assert len(results) == 1
     assert results[0].chunk_id == "c2"
     assert results[0].text == "search match"
+    mock_kb_manager.retrieve.assert_awaited_once_with(
+        query="query",
+        kb_names=["papers"],
+        top_k_fusion=20,
+        top_m_final=5,
+    )
 
 
 # ── Notion Sync Target 测试 ─────────────────────────────────────

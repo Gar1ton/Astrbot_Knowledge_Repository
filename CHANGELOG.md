@@ -21,10 +21,42 @@
 
 ---
 
+## [v0.17.0] — 2026-06-04
+
+### 新增功能 (Added)
+
+- **Milvus 默认召回与按需高精度模式**：新安装默认使用 Milvus；Web Research Agent 可在指定 collection 中显式启用 `Milvus chunks + LightRAG context` 高精度召回，并由外层 LLM 单次生成最终答案。回答气泡展示实际召回方式，LightRAG 未就绪时可查看构建预估、构建后自动续问或仅本次使用默认召回（`core/api.py`, `core/pipelines/retrieval_orchestrator.py`, `web/frontend/app/(console)/ask/page.tsx`）。
+- **Embedding 运行时真值与索引兼容性**：新增顶层 `embedding` 配置、真实向量维度探针和持久化索引指纹；Milvus 与 LightRAG 在 provider/model/base URL/实际维度变化后拒绝静默复用旧索引（`core/config.py`, `core/index_compatibility.py`, `core/plugin_initializer.py`）。
+- **设置页 LightRAG Core 参数问号说明**：新增可复用 `HelpTip` 问号角标组件，为设置页 LightRAG Core 区的「启用图谱索引 / 检索模式 / LLM 并发上限 / Embedding 并发上限 / 工作目录（只读）」5 个设置项各加一个悬停/聚焦/点击即显的中英文解释气泡，降低非专家用户的理解门槛（`web/frontend/components/ui/HelpTip.tsx`, `web/frontend/app/(console)/settings/page.tsx`, `web/frontend/lib/i18n.ts`）。
+
+### 修复 (Fixed)
+
+- **Milvus 生命周期一致性**：启动时前置校验依赖与 collection schema，维度冲突或 `pymilvus` 不可用时受控回退 AstrBot；写入与查询严格校验向量维度，文档移动集合时同步更新 Milvus collection 映射（`core/repository/vector_store/milvus_lite.py`, `core/api.py`）。
+- **Discord 问答路径确定化**：Discord `query_agent` 始终走默认召回，不再自动调用 LightRAG；`/kr agent on` 明确提示高精度模式仅在 Web Research Agent 提供（`core/event_handler.py`）。
+- **AstrBot 对话增强 hook 修复**：`inject` 改由官方 `on_llm_request` hook 写入 system prompt；`query_agent` 直接返回答案，不再依赖 AstrBot LLM 遵循转述指令（`main.py`, `core/event_handler.py`）。
+- **首次安装基础上传与召回可用性**：初始化时在缺失时创建配置指定的默认 collection，避免首次上传触发外键错误且不覆盖存量描述；Embedding/Milvus 不可用时继续保存 PDF 与 SQLite 分块，并增强中文无空格查询的词汇召回（`core/plugin_initializer.py`, `core/pipelines/retrieval_orchestrator.py`）。
+- **Web 上传原件单副本存储**：Web 上传改用 `uploads/` 临时目录，成功摄入后仅保留 `documents/{doc_id}.pdf` 托管原件，失败时清理暂存文件（`core/plugin_initializer.py`, `web/server.py`）。
+
+### 架构健康 (Refactor)
+
+- **删除旧 GraphStore 体系并收敛 Ask 数据流**：删除旧 GraphStore、GraphBuild/GraphSearch pipeline 与专属领域类型；LightRAG 独立图谱接口保留完整回答，统一 Ask 仅按需获取 context，避免双答案生成（`core/repository/graph_store/`, `core/pipelines/`, `core/domain/models.py`, `core/lightrag_core.py`）。
+- **Embedding 配置分组迁移**：`vector_db` 仅保留后端与索引开关，`graph` 仅保留 LightRAG 专属设置；旧字段继续兼容读取并输出迁移 diagnostics，API Key 仅从 `KR_EMBEDDING_API_KEY` 读取（`_conf_schema.json`, `core/config.py`, `core/runtime_config.py`, `web/frontend/app/(console)/settings/page.tsx`）。
+- **AstrBot 消息职责拆分与设置页风格统一**：`on_message` 与 `on_llm_request` 分离；LightRAG 查询模式继续使用项目自定义 `Select` 组件（`core/event_handler.py`, `main.py`, `web/frontend/app/(console)/settings/page.tsx`）。
+- **首次安装默认参数与设置页收敛**：默认本地模型切换为轻量多语言 `intfloat/multilingual-e5-small`，设置页在现有设计语言内明确区分默认 Milvus/SQLite 基础召回与可选 LightRAG 高精度路径，并展示运行时 diagnostics（`core/config.py`, `_conf_schema.json`, `web/frontend/app/(console)/settings/page.tsx`）。
+
+### 测试 (Tests)
+
+- 新增 context-only LightRAG 查询、单次外层 LLM、仅图谱上下文、真实探针维度、探针失败降级、首次安装 PDF 摄入/中英文词汇召回、Web 暂存清理、Milvus schema 冲突、索引指纹失效与结构化 HTTP 错误覆盖；AstrBot KB reader 测试对齐 v4 `list_kbs/retrieve` 契约（`tests/backend/`）。
+
+### 构建与工程 (Build/CI)
+
+- 将基础 PDF 摄入所需 `PyMuPDF` 纳入运行时核心依赖，并记录默认 Milvus/本地 Embedding 与 SQLite 降级行为（`requirements.txt`）。
+
 ## [v0.16.1] — 2026-06-04
 
 ### 修复 (Fixed)
 
+- **`embedding_provider='astr'` 导致插件整体崩溃修复**：`graph.enabled=true` 时若 embedding provider 配置为未实现的 `'astr'`，`NotImplementedError` 不加捕获直接向上传播，致使插件初始化失败、整体不可用。现在在 `plugin_initializer.py` 中加 try/except 降级：provider 创建失败时仅禁用图谱/向量检索功能并打印警告，插件主体（问答、文档管理、CLI 等）照常运行（`core/plugin_initializer.py`）。
 - **lightrag-hku 安装失败修复**：`==1.5.0` 在阿里云 PyPI 镜像尚未同步，改为 `>=1.5.0rc1,<2.0.0`；`1.4.x` 与 AstrBot 核心依赖 `google-genai==2.7.0` 冲突（`<2.0.0` vs `==2.7.0`），`1.5.0rc3+` 已放宽至 `<3.0.0` 不再冲突（`requirements.txt`）。
 - **插件热重载后 `on_llm_request` AttributeError 修复**：`_purge_stale_local_modules()` 原仅清理其他插件的 `core.*` 缓存，本插件自身旧版 `EventHandler`（不含 `on_llm_request`）在重载后仍留在 `sys.modules`，导致每条消息报 `AttributeError`。改为无条件清除所有 `core.*`/`web.*`/`migrations.*` 模块，重载时强制从磁盘重新导入（`main.py`）。
 - **Web 控制台配置保存报"api_key 机密字段"修复**：前端保存设置时将所有字段一并发送，空的 `api_key` 字段被拦截导致保存失败。写保护条件改为 `key in _SECRET_KEYS and value`，仅拦截非空机密值（`core/api.py`）。
@@ -37,23 +69,10 @@
 
 ### 架构健康 (Refactor)
 
+- **AstrBotKnowledgeBaseReader 接口对齐修复**：原实现调用 `context.kb_manager.search()`，该方法在 AstrBot v4 中不存在（实际为 `KnowledgeBaseManager`，暴露 `list_kbs()` + `retrieve(query, kb_names, ...)`），导致 `vector_db.backend='astr'` 配置下检索永远返回空列表、inject 模式静默无效。重写 `search()` 和 `list_collections()`：`list_kbs()` 枚举 AstrBot KB，`retrieve()` 调用正确的 FAISS+FTS5+RRF 融合检索，collection 优先映射到同名 KB，不存在则搜索全部 KB（`core/repository/kb_reader/astrbot.py`）。
+- **日志策略优化——用户触发操作终端可见性**：确立日志哲学：写/变更操作记入口+结果，只读/轮询不记（降噪）。具体改动：① `handle_update_config` 新增入口 INFO、成功 INFO、拒绝 WARNING（此前配置保存失败 dashboard 完全空白）；② `handle_rebuild_index_pending` 新增入口 INFO、完成 INFO、失败 ERROR；③ `handle_upload_document` 新增入口 INFO（文件名/大小/集合）；④ `handle_delete_document`、`handle_graph_build`、`handle_sync` 新增入口 INFO；⑤ `update_config_value` 新增入口 INFO + 持久化成功 INFO；⑥ `ingest()` 新增入口 INFO（`web/server.py`, `core/api.py`, `core/managers/ingest_manager.py`）。
+
 - **lightrag-hku 1.5.0 API 兼容性加固**：`insert_document` 捕获并记录 `ainsert` 在 1.5.0 新增的 `track_id` 返回值；`delete_doc` 结果解析改为 `getattr` 取 `.status`/`.message`，兼容 1.5.0 `DeletionResult` 对象与 1.4.x 旧返回类型（`core/lightrag_core.py`）。
-
-## [Unreleased]
-
-### 新增功能 (Added)
-
-- **LightRAG 接入消息召回链路**：`query_agent` 模式优先调用 `LightRAGCoreRegistry.query()` 获取图谱答案，失败时回退 `api.ask()`；`api.ask()` 在 `graph.enabled=True` 时额外调用 LightRAG 并将图谱分析结果以 `[图谱分析]` 标签前置于 LLM context（`core/event_handler.py`, `core/api.py`）。
-
-### 修复 (Fixed)
-
-- **inject 模式静默失效修复**：`AstrMessageEvent` 不存在 `set_system_prompt`/`add_system_prompt`/`system_prompt` 属性，原 A/B/C fallback 全部无效，实际走 D（污染 `message_str`）。新实现迁移至 `@filter.on_llm_request()` hook，直接写 `req.system_prompt`，AstrBot 官方正式 API，可靠注入（`main.py`, `core/event_handler.py`）。
-- **query_agent 模式拦截不彻底修复**：原实现修改 `message_str` 后 AstrBot 仍会调用自己的 LLM，依赖 LLM 遵循 verbatim 指令，不稳定。新实现将 `on_message` 改为 async generator，直接 `yield event.plain_result(answer)`，AstrBot LLM 不会被调用（`main.py`, `core/event_handler.py`）。
-
-### 架构健康 (Refactor)
-
-- **`on_message` 职责拆分**：原 ~190 行单方法拆分为两个独立 hook：`on_message`（async generator，仅处理 query_agent 模式）+ `on_llm_request`（注入 inject 模式 context），各自职责单一（`core/event_handler.py`, `main.py`）。
-- **Settings 页图谱查询模式选择框**：原生 `<select>` 替换为项目自定义 `Select` 组件，UI 风格统一（`web/frontend/app/(console)/settings/page.tsx`）。
 
 ## [v0.16.0] — 2026-06-03
 

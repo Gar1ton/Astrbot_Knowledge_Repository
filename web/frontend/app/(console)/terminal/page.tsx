@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect */
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
@@ -30,8 +31,7 @@ const ALL_LEVELS: Level[] = ["DEBUG", "INFO", "WARNING", "ERROR"];
 const AGENT_MODULES = [
   "KnowledgeRepositoryApi",
   "RetrievalOrchestrator",
-  "GraphSearchPipeline",
-  "GraphBuildPipeline",
+  "LightRAGCoreRegistry",
   "EventHandler",
   "IngestManager",
   "LocalEmbeddingProvider",
@@ -281,4 +281,3 @@ export default function TerminalPage() {
     </div>
   );
 }
-

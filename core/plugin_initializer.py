@@ -19,7 +19,7 @@ import aiosqlite
 from core.api import KnowledgeRepositoryApi
 from core.ask_progress import ProgressStore
 from core.config import Config, merge_config_dicts
-from core.domain.models import SyncTargetKind
+from core.domain.models import Collection, SyncTargetKind
 from core.managers.category_manager import CategoryManager
 from core.managers.ingest_manager import IngestManager
 from core.managers.quota_manager import QuotaManager
@@ -31,11 +31,9 @@ from core.runtime_config import RuntimeConfigStore
 from migrations.runner import run_migrations
 
 if TYPE_CHECKING:
-    from core.pipelines.graph_build_pipeline import GraphBuildPipeline
-    from core.pipelines.graph_search_pipeline import GraphSearchPipeline
+    from core.index_compatibility import IndexCompatibilityStore
     from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
     from core.repository.embedding.base import EmbeddingProvider
-    from core.repository.graph_store.base import GraphStore
     from core.repository.kb_reader.base import KnowledgeBaseReader
     from core.repository.source_store.base import SourceDocumentStore
     from core.repository.vector_store.base import VectorStore
@@ -63,12 +61,12 @@ class PluginInitializer:
         self.source_store: SourceDocumentStore | None = None
         self.kb_reader: KnowledgeBaseReader | None = None
         self.api: KnowledgeRepositoryApi | None = None
-        self.graph_store: GraphStore | None = None
-        self.graph_build_pipeline: GraphBuildPipeline | None = None
-        self.graph_search_pipeline: GraphSearchPipeline | None = None
         self.lightrag_registry: Any | None = None
         self.vector_store: VectorStore | None = None
         self.embedding_provider: EmbeddingProvider | None = None
+        self.embedding_dimension: int | None = None
+        self.embedding_fingerprint: str | None = None
+        self.index_compatibility: IndexCompatibilityStore | None = None
         self.retrieval_orchestrator: RetrievalOrchestrator | None = None
         self.agent_enabled: bool = False
         self.metrics: PerformanceTracker = PerformanceTracker()
@@ -103,6 +101,16 @@ class PluginInitializer:
         await run_migrations(db)
 
         self.source_store = SQLiteSourceDocumentStore(db)
+        existing_collections = {
+            collection.name for collection in await self.source_store.list_collections()
+        }
+        if source_cfg.default_collection not in existing_collections:
+            await self.source_store.upsert_collection(
+                Collection(
+                    name=source_cfg.default_collection,
+                    description="Default collection",
+                )
+            )
         from core.repository.kb_reader.astrbot import AstrBotKnowledgeBaseReader
 
         self.kb_reader = AstrBotKnowledgeBaseReader(self._context)
@@ -141,28 +149,120 @@ class PluginInitializer:
             db_path=db_path,
         )
 
-        # 4.5) 官方 LightRAG Core 替代旧 SQLiteGraphStore/自研图谱管线。
+        # 4.5) 官方 LightRAG Core 是唯一图谱实现。
         from core.adapters.llm import LLMAdapter
 
         llm_adapter = LLMAdapter(self._context)
 
-        # 4.6) 构造本地向量检索与 Embedding 子系统。LightRAG Core 也复用该 provider。
+        # 4.6) 构造共享 Embedding，并用真实探针维度装配 Milvus/LightRAG。
         vdb_cfg = self._config.get_vector_db_config()
-        if vdb_cfg.backend == "milvus":
-            from core.repository.vector_store.milvus_lite import MilvusLiteVectorStore
+        embedding_cfg = self._config.get_embedding_config()
+        from core.index_compatibility import IndexCompatibilityStore, embedding_fingerprint
 
-            milvus_db_path = str(self._data_dir / vdb_cfg.db_filename)
-            self.vector_store = MilvusLiteVectorStore(db_path=milvus_db_path)
-
+        self.index_compatibility = IndexCompatibilityStore(
+            self._data_dir / "index_compatibility.json"
+        )
         if vdb_cfg.backend == "milvus" or graph_cfg.enabled:
             from core.repository.embedding.factory import EmbeddingProviderFactory
 
-            self.embedding_provider = EmbeddingProviderFactory.create_provider(
-                self._config, db_dir=str(self._data_dir)
+            try:
+                self.embedding_provider = EmbeddingProviderFactory.create_provider(
+                    self._config, db_dir=str(self._data_dir)
+                )
+                probe = await self.embedding_provider.embed_query(
+                    "knowledge-repository-dimension-probe"
+                )
+                if not probe:
+                    raise RuntimeError("Embedding dimension probe returned an empty vector")
+                self.embedding_dimension = len(probe)
+                self.embedding_fingerprint = embedding_fingerprint(
+                    embedding_cfg, self.embedding_dimension
+                )
+                self._config.set_embedding_dimension(self.embedding_dimension)
+            except NotImplementedError as exc:
+                logger.warning(
+                    "Embedding provider 初始化失败，图谱/向量检索功能已禁用：%s", exc
+                )
+                self._config.add_diagnostic(f"Embedding provider unavailable: {exc}")
+                self.embedding_provider = None
+            except Exception as exc:
+                logger.error(
+                    "Embedding provider 初始化异常，图谱/向量检索功能已禁用：%s", exc, exc_info=True
+                )
+                self._config.add_diagnostic(f"Embedding dimension probe failed: {exc}")
+                self.embedding_provider = None
+
+        if (
+            vdb_cfg.backend == "milvus"
+            and self.embedding_provider is not None
+            and self.embedding_dimension is not None
+        ):
+            from core.repository.vector_store.milvus_lite import (
+                MilvusLiteVectorStore,
+                MilvusSchemaMismatchError,
             )
 
+            milvus_path = self._data_dir / vdb_cfg.db_filename
+            is_new_index = not milvus_path.exists()
+            try:
+                milvus = MilvusLiteVectorStore(
+                    db_path=str(milvus_path),
+                    dim=self.embedding_dimension,
+                )
+                milvus.validate_schema()
+                self.vector_store = milvus
+                created_collection = bool(
+                    getattr(milvus, "created_collection", is_new_index)
+                )
+                source_has_documents = bool(await self.source_store.list_documents())
+                if (
+                    created_collection
+                    and source_has_documents
+                    and self.embedding_fingerprint
+                ):
+                    self.index_compatibility.mark_milvus_incompatible(
+                        "Milvus collection was recreated while SQLite contains documents."
+                    )
+                    self._config.add_diagnostic(
+                        "Milvus collection is empty while SQLite contains documents; rebuild it."
+                    )
+                    await self._mark_all_documents_needs_reindex()
+                elif created_collection and self.embedding_fingerprint:
+                    self.index_compatibility.mark_milvus_compatible(
+                        self.embedding_fingerprint
+                    )
+                elif (
+                    self.embedding_fingerprint
+                    and not self.index_compatibility.is_milvus_compatible(
+                        self.embedding_fingerprint
+                    )
+                ):
+                    self._config.add_diagnostic(
+                        "Milvus index is incompatible with the active embedding; rebuild it."
+                    )
+                    await self._mark_all_documents_needs_reindex()
+            except MilvusSchemaMismatchError as exc:
+                logger.error(
+                    "Milvus schema mismatch; retrieval is disabled until a full rebuild: %s",
+                    exc,
+                )
+                self.index_compatibility.mark_milvus_incompatible(str(exc))
+                self._config.add_diagnostic(str(exc))
+                self.vector_store = milvus
+                await self._mark_all_documents_needs_reindex()
+            except Exception as exc:
+                logger.error(
+                    "Milvus initialization failed; AstrBot fallback remains active: %s", exc
+                )
+                self._config.add_diagnostic(f"Milvus unavailable: {exc}")
+                self.vector_store = None
+
         # 4.6.5) 构造官方 LightRAG Core registry（按 collection 懒加载实例）。
-        if graph_cfg.enabled:
+        if (
+            graph_cfg.enabled
+            and self.embedding_provider is not None
+            and self.embedding_dimension is not None
+        ):
             from core.lightrag_core import LightRAGCoreRegistry
 
             self.lightrag_registry = LightRAGCoreRegistry(
@@ -170,6 +270,27 @@ class PluginInitializer:
                 data_dir=self._data_dir,
                 llm_adapter=llm_adapter,
                 embedding_provider=self.embedding_provider,
+                embedding_dim=self.embedding_dimension,
+                max_token_size=embedding_cfg.max_token_size,
+                embedding_model=embedding_cfg.model,
+            )
+            incompatible_lightrag = [
+                collection
+                for collection in self.lightrag_registry.existing_collections()
+                if not self.embedding_fingerprint
+                or not self.index_compatibility.is_lightrag_compatible(
+                    collection, self.embedding_fingerprint
+                )
+            ]
+            if incompatible_lightrag:
+                self._config.add_diagnostic(
+                    "LightRAG indexes are incompatible with the active embedding; "
+                    "rebuild affected collections."
+                )
+        elif graph_cfg.enabled and self.embedding_provider is None:
+            logger.warning(
+                "graph.enabled=true 但 embedding provider 不可用，LightRAG Core 已跳过。"
+                " 请在配置中将 embedding.provider 改为 'local' 或 'external'。"
             )
 
         # 4.7) 构造统一检索编排器 (RetrievalOrchestrator)
@@ -181,7 +302,9 @@ class PluginInitializer:
             config=self._config,
             vector_store=self.vector_store,
             embedding_provider=self.embedding_provider,
-            graph_store=self.graph_store,
+            lightrag_registry=self.lightrag_registry,
+            index_compatibility=self.index_compatibility,
+            embedding_fingerprint=self.embedding_fingerprint,
         )
 
         # 5) 业务门面（依赖已装配的仓储/managers）。
@@ -193,9 +316,6 @@ class PluginInitializer:
             category_manager=self.category_manager,
             quota_manager=self.quota_manager,
             sync_pipeline=self.sync_pipeline,
-            graph_store=self.graph_store,
-            graph_build_pipeline=self.graph_build_pipeline,
-            graph_search_pipeline=self.graph_search_pipeline,
             lightrag_registry=self.lightrag_registry,
             config=self._config,
             config_persist=self._persist_config_value,
@@ -206,6 +326,8 @@ class PluginInitializer:
             retrieval_orchestrator=self.retrieval_orchestrator,
             metrics=self.metrics,
             progress_store=self.progress_store,
+            index_compatibility=self.index_compatibility,
+            embedding_fingerprint=self.embedding_fingerprint,
         )
 
         # 6) 周期任务（如 R2 周期备份，v0.3.0 起注册）。
@@ -255,7 +377,7 @@ class PluginInitializer:
 
         plugin_root = Path(__file__).parent.parent
         static_dir = plugin_root / "pages"
-        upload_dir = self._data_dir / "documents"
+        upload_dir = self._data_dir / "uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -291,6 +413,17 @@ class PluginInitializer:
             logger.info("Background periodic backup task cancelled.")
         except Exception as e:
             logger.error(f"Error in background periodic backup: {e}")
+
+    async def _mark_all_documents_needs_reindex(self) -> None:
+        if self.source_store is None:
+            return
+        for doc in await self.source_store.list_documents():
+            if not doc.needs_reindex:
+                doc.needs_reindex = True
+                try:
+                    await self.source_store.update_document(doc)
+                except Exception as exc:
+                    logger.error("Failed to mark document %s for reindex: %s", doc.doc_id, exc)
 
     # ── 关闭：与构造顺序相反释放 ────────────────────────────────
     async def teardown(self) -> None:

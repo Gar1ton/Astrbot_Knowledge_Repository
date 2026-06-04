@@ -48,6 +48,7 @@ export interface EffectiveConfig {
   graph?: Record<string, unknown>;
   ask?: Record<string, unknown>;
   vector_db?: Record<string, unknown>;
+  embedding?: Record<string, unknown>;
   diagnostics?: string[];
 }
 
@@ -129,6 +130,10 @@ export interface AskResult {
   conversation_id: string;
   answer: string;
   sources: AskSource[];
+  requested_retrieval_mode: "default" | "high_precision";
+  actual_retrieval_mode: string;
+  retrieval_engines: string[];
+  fallback_reason?: string | null;
 }
 
 export interface ReservedResult {
@@ -159,7 +164,8 @@ function isMock(): boolean {
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
-    message: string
+    message: string,
+    public readonly body?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "ApiError";
@@ -178,19 +184,21 @@ async function apiFetch<T>(
   });
   if (!res.ok) {
     let msg = res.statusText;
+    let parsedBody: Record<string, unknown> | undefined;
     try {
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
+      parsedBody = body;
       if (res.status === 501 && body.status === "reserved") {
         return {
           ...body,
           reserved: true,
         } as T;
       }
-      msg = body.error || body.message || body.detail || msg;
+      msg = String(body.error || body.message || body.detail || msg);
     } catch {
       /* ignore parse error */
     }
-    throw new ApiError(res.status, msg);
+    throw new ApiError(res.status, msg, parsedBody);
   }
   return res.json() as Promise<T>;
 }
@@ -319,9 +327,10 @@ const MOCK_CONFIG: EffectiveConfig = {
   r2_sync: { enabled: true, bucket: "kr-bucket", account_id: "ac****nt", access_key_id: "ak****id", secret_access_key: "****", free_tier_gb: 10, warn_threshold: 0.8 },
   notion_sync: { enabled: true, database_id: "db-****", max_upload_mib: 5 },
   web_console: { enabled: true, host: "0.0.0.0", port: 6520, username: "admin", password: "****" },
-  graph: { enabled: true, llm_extraction: true, rrf_k: 60, query_top_k: 5 },
-  ask: { top_k: 5, cite_sources: true },
-  vector_db: { backend: "astr", embedding_provider: "external", db_filename: "milvus_lite.db" },
+  graph: { enabled: false, query_mode: "mix", llm_max_async: 4, embedding_max_async: 8, working_dir: "lightrag_workspaces" },
+  ask: { conversation_enhancement_mode: "inject" },
+  vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true },
+  embedding: { provider: "local", model: "intfloat/multilingual-e5-small", base_url: "https://api.openai.com/v1", max_token_size: 512, actual_dimension: 384, api_key: "" },
 };
 
 const MOCK_ASK: AskResult = {
@@ -332,6 +341,10 @@ const MOCK_ASK: AskResult = {
     { n: 2, doc_id: "seed-2", title: "LightRAG 论文", chunk_id: "k2", ordinal: 1, text: "LightRAG 将知识图谱与向量检索融合，采用双层检索策略。", rrf_score: 0.0289 },
     { n: 3, doc_id: "seed-1", title: "Attention Is All You Need", chunk_id: "k3", ordinal: 2, text: "RRF 是一种无参数排名融合算法，通过 1/(k+rank_i) 公式合并多路召回结果。", rrf_score: 0.0214 },
   ],
+  requested_retrieval_mode: "default",
+  actual_retrieval_mode: "milvus",
+  retrieval_engines: ["milvus", "sqlite_lexical"],
+  fallback_reason: null,
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -359,7 +372,7 @@ export async function logout(): Promise<void> {
   if (isMock()) return;
   try {
     await apiFetch<{ ok: boolean }>("/api/logout", { method: "POST" });
-  } catch (e) {
+  } catch {
     // Fallback: clear session cookie locally if backend logout endpoint doesn't exist
     if (typeof document !== "undefined") {
       document.cookie = "kr_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT;";
@@ -518,9 +531,9 @@ export async function updateConfigValue(
   section: string,
   key: string,
   value: unknown
-): Promise<{ status: string }> {
-  if (isMock()) return { status: "success" };
-  return apiFetch<{ status: string }>("/api/config/update", {
+): Promise<ConfigUpdateResult> {
+  if (isMock()) return { status: "success", restart_required: false, rebuild_required: false, message: "Configuration saved." };
+  return apiFetch<ConfigUpdateResult>("/api/config/update", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -529,6 +542,12 @@ export async function updateConfigValue(
   });
 }
 
+export interface ConfigUpdateResult {
+  status: string;
+  restart_required: boolean;
+  rebuild_required: boolean;
+  message: string;
+}
 
 export async function rebuildIndexPending(): Promise<{ rebuilt_docs: number; rebuilt_chunks: number }> {
   if (isMock()) return { rebuilt_docs: 0, rebuilt_chunks: 0 };
@@ -548,7 +567,6 @@ export interface EmbeddingTestResult {
 }
 
 export async function testEmbeddingConnection(
-  apiKey: string,
   baseUrl: string,
   modelName: string
 ): Promise<EmbeddingTestResult> {
@@ -556,7 +574,7 @@ export async function testEmbeddingConnection(
   return apiFetch<EmbeddingTestResult>("/api/config/test-embedding", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ api_key: apiKey, base_url: baseUrl, model_name: modelName }),
+    body: JSON.stringify({ base_url: baseUrl, model_name: modelName }),
   });
 }
 
@@ -680,10 +698,18 @@ export async function ask(opts: {
   top_k?: number;
   conversation_id?: string | null;
   persona_enabled?: boolean;
+  retrieval_mode?: "default" | "high_precision";
 }): Promise<AskResult> {
   if (isMock()) {
     await new Promise((r) => setTimeout(r, 800));
-    return { ...MOCK_ASK, conversation_id: `conv-${Date.now()}` };
+    const requested = opts.retrieval_mode ?? "default";
+    return {
+      ...MOCK_ASK,
+      conversation_id: `conv-${Date.now()}`,
+      requested_retrieval_mode: requested,
+      actual_retrieval_mode: requested === "high_precision" ? "milvus_lightrag" : "milvus",
+      retrieval_engines: requested === "high_precision" ? ["milvus", "sqlite_lexical", "lightrag"] : ["milvus", "sqlite_lexical"],
+    };
   }
   return apiFetch<AskResult>("/api/ask", {
     method: "POST",
@@ -694,6 +720,7 @@ export async function ask(opts: {
       top_k: opts.top_k ?? 5,
       conversation_id: opts.conversation_id ?? null,
       persona_enabled: opts.persona_enabled ?? false,
+      retrieval_mode: opts.retrieval_mode ?? "default",
     }),
   });
 }

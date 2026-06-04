@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+# ruff: noqa: E402
 import sys
 from pathlib import Path
 
@@ -29,17 +31,19 @@ def _purge_stale_local_modules() -> None:
 
 _purge_stale_local_modules()
 
-from core.plugin_initializer import PluginInitializer
-from core.event_handler import EventHandler
-from astrbot.api.star import Context, Star, StarTools, register
-from astrbot.api.event import filter
 from typing import TYPE_CHECKING
+
+from astrbot.api.event import filter
+from astrbot.api.star import Context, Star, StarTools, register
+
+from core.event_handler import EventHandler
+from core.plugin_initializer import PluginInitializer
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v0.15.1"
+_PLUGIN_VERSION = "v0.17.0"
 
 
 @register(
@@ -66,14 +70,14 @@ class KnowledgeRepositoryPlugin(Star):
     # ── 消息 Hook（RAG 注入）─────────────────────────────────────
 
     @filter.event_message_type(filter.EventMessageType.ALL)
-    async def on_message(self, event: "AstrMessageEvent"):
+    async def on_message(self, event: AstrMessageEvent):
         if self._handler:
             answer = await self._handler.on_message(event)
             if answer is not None:
                 yield event.plain_result(answer)
 
     @filter.on_llm_request()
-    async def on_llm_request(self, event: "AstrMessageEvent", req: "ProviderRequest") -> None:
+    async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         if self._handler:
             await self._handler.on_llm_request(event, req)
 
@@ -84,7 +88,13 @@ class KnowledgeRepositoryPlugin(Star):
         pass
 
     @kr.command("add")
-    async def kr_add(self, event: "AstrMessageEvent", file_path: str, collection: str = "", tags: str = ""):
+    async def kr_add(
+        self,
+        event: AstrMessageEvent,
+        file_path: str,
+        collection: str = "",
+        tags: str = "",
+    ):
         '''/kr add <file_path> [collection] [tags(逗号分隔)]'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -95,7 +105,7 @@ class KnowledgeRepositoryPlugin(Star):
         )
 
     @kr.command("quota")
-    async def kr_quota(self, event: "AstrMessageEvent"):
+    async def kr_quota(self, event: AstrMessageEvent):
         '''/kr quota — 显示存储配额'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -103,7 +113,7 @@ class KnowledgeRepositoryPlugin(Star):
         yield event.plain_result(await self._handler.on_quota())
 
     @kr.command("agent")
-    async def kr_agent(self, event: "AstrMessageEvent", action: str):
+    async def kr_agent(self, event: AstrMessageEvent, action: str):
         '''/kr agent <on|off> — 启用/关闭 RAG 注入'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -111,7 +121,13 @@ class KnowledgeRepositoryPlugin(Star):
         yield event.plain_result(await self._handler.on_agent(action))
 
     @kr.command("collection")
-    async def kr_collection(self, event: "AstrMessageEvent", action: str, name: str = "", description: str = ""):
+    async def kr_collection(
+        self,
+        event: AstrMessageEvent,
+        action: str,
+        name: str = "",
+        description: str = "",
+    ):
         '''/kr collection <list|create|delete> [name] [description]'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -121,7 +137,7 @@ class KnowledgeRepositoryPlugin(Star):
         )
 
     @kr.command("tag")
-    async def kr_tag(self, event: "AstrMessageEvent", action: str, doc_id: str, tags_str: str = ""):
+    async def kr_tag(self, event: AstrMessageEvent, action: str, doc_id: str, tags_str: str = ""):
         '''/kr tag <set|show> <doc_id> [tags(逗号分隔)]'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -137,7 +153,7 @@ class KnowledgeRepositoryPlugin(Star):
         pass
 
     @kr_sync.command("r2")
-    async def kr_sync_r2(self, event: "AstrMessageEvent"):
+    async def kr_sync_r2(self, event: AstrMessageEvent):
         '''/kr sync r2 — 同步到 Cloudflare R2'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -145,7 +161,7 @@ class KnowledgeRepositoryPlugin(Star):
         yield event.plain_result(await self._handler.on_sync_r2())
 
     @kr_sync.command("notion")
-    async def kr_sync_notion(self, event: "AstrMessageEvent"):
+    async def kr_sync_notion(self, event: AstrMessageEvent):
         '''/kr sync notion — 推送到 Notion'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -153,7 +169,7 @@ class KnowledgeRepositoryPlugin(Star):
         yield event.plain_result(await self._handler.on_sync_notion())
 
     @kr_sync.command("status")
-    async def kr_sync_status(self, event: "AstrMessageEvent"):
+    async def kr_sync_status(self, event: AstrMessageEvent):
         '''/kr sync status — 查看同步状态'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -167,7 +183,12 @@ class KnowledgeRepositoryPlugin(Star):
         pass
 
     @kr_notion.command("init")
-    async def kr_notion_init(self, event: "AstrMessageEvent", parent_page_id: str = "", database_title: str = ""):
+    async def kr_notion_init(
+        self,
+        event: AstrMessageEvent,
+        parent_page_id: str = "",
+        database_title: str = "",
+    ):
         '''/kr notion init [parent_page_id] [database_title]'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -177,7 +198,7 @@ class KnowledgeRepositoryPlugin(Star):
         )
 
     @kr_notion.command("pull")
-    async def kr_notion_pull(self, event: "AstrMessageEvent"):
+    async def kr_notion_pull(self, event: AstrMessageEvent):
         '''/kr notion pull — 从 Notion 拉取元数据'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -191,7 +212,7 @@ class KnowledgeRepositoryPlugin(Star):
         pass
 
     @kr_graph.command("build")
-    async def kr_graph_build(self, event: "AstrMessageEvent", collection: str = ""):
+    async def kr_graph_build(self, event: AstrMessageEvent, collection: str = ""):
         '''/kr graph build [collection] — 构建知识图谱'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
@@ -199,7 +220,7 @@ class KnowledgeRepositoryPlugin(Star):
         yield event.plain_result(await self._handler.on_graph_build(collection or None))
 
     @kr_graph.command("query")
-    async def kr_graph_query(self, event: "AstrMessageEvent", query: str, top_k: int = 5):
+    async def kr_graph_query(self, event: AstrMessageEvent, query: str, top_k: int = 5):
         '''/kr graph query <q> [top_k] — 查询知识图谱'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")

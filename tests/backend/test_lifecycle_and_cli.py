@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -12,7 +13,7 @@ import pytest
 
 from core.main import KnowledgeRepositoryPlugin
 from core.migration_runner import run_migrations
-from core.plugin_initializer import PluginInitializer
+from core.plugin_initializer import PluginInitializer, _load_plugin_web_build_app
 
 
 @pytest.fixture
@@ -81,6 +82,20 @@ async def test_plugin_initializer_lifecycle(
 
 def test_initializer_uses_plugin_owned_migration_runner() -> None:
     assert run_migrations.__module__ == "core.migration_runner"
+
+
+def test_web_server_loader_ignores_conflicting_top_level_web_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conflicting_web = ModuleType("web")
+    conflicting_server = ModuleType("web.server")
+    conflicting_server.build_app = object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "web", conflicting_web)
+    monkeypatch.setitem(sys.modules, "web.server", conflicting_server)
+
+    build_app = _load_plugin_web_build_app()
+
+    assert build_app.__module__ == "_astrbot_plugin_knowledge_repository_web_server"
 
 
 async def test_plugin_initializer_lifecycle_periodic_disabled(

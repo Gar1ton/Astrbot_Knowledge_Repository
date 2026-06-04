@@ -3,6 +3,7 @@
 定义原件（PDF 等）与集合/分块的持久化契约。生产实现 sqlite.py、测试实现 memory.py 共用本接口。
 本层只依赖 domain，不依赖 managers/框架（见 ../README.md）。
 """
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -91,6 +92,20 @@ class SourceDocumentStore(ABC):
     @abstractmethod
     async def list_chunks(self, doc_id: str) -> list[DocumentChunk]:
         """列出某文档的分块，按 ordinal 升序。文档不存在或无分块返回空列表。"""
+        ...
+
+    # ── LightRAG 索引状态 ───────────────────────────────────────
+
+    @abstractmethod
+    async def set_lightrag_index_status(
+        self, doc_id: str, collection: str, status: str, last_error: str = ""
+    ) -> None:
+        """设置独立 LightRAG 索引状态；不得复用 needs_reindex。"""
+        ...
+
+    @abstractmethod
+    async def get_lightrag_index_status(self, doc_id: str) -> dict[str, str] | None:
+        """读取文档的独立 LightRAG 索引状态。"""
         ...
 
     # ── 同步状态 ──────────────────────────────────────────────────

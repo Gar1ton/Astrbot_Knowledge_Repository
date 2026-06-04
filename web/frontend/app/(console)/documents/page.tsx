@@ -257,6 +257,7 @@ function Inspector({ doc, collections, onClose, onUpdate, onDelete }: InspectorP
 
   async function handleSave() {
     if (!doc) return;
+    if (editCollection !== doc.collection && !window.confirm("移动文档会从旧 collection 的 LightRAG 索引删除该文档，并要求在目标 collection 手动重建索引。确认继续？")) return;
     setSaving(true);
     try {
       const updated = await patchDocument(doc.doc_id, {
@@ -274,6 +275,7 @@ function Inspector({ doc, collections, onClose, onUpdate, onDelete }: InspectorP
 
   async function handleDelete() {
     if (!doc) return;
+    if (!window.confirm("删除文档会同时调用 LightRAG adelete_by_doc_id 清理索引。确认继续？")) return;
     try {
       await deleteDocument(doc.doc_id);
       onDelete(doc.doc_id);
@@ -454,6 +456,7 @@ function BatchBar({ selected, collections, onDone, onClear }: BatchBarProps) {
   const [targetCollection, setTargetCollection] = useState(collections[0]?.name ?? "default");
 
   async function handleMove() {
+    if (!window.confirm("移动文档会影响旧 collection 的 LightRAG 索引，目标 collection 需要手动重建索引。确认继续？")) return;
     setMoving(true);
     const updated: KrDocument[] = [];
     try {
@@ -472,6 +475,7 @@ function BatchBar({ selected, collections, onDone, onClear }: BatchBarProps) {
 
   async function handleDelete() {
     const ids = Array.from(selected);
+    if (!window.confirm(`删除 ${ids.length} 个文档会同时清理其 LightRAG 索引。确认继续？`)) return;
     try {
       await Promise.all(ids.map((id) => deleteDocument(id)));
       onDone([], ids);

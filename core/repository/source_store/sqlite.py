@@ -3,6 +3,7 @@
 使用 aiosqlite 进行异步数据库交互，完成原件、集合与分块的 CRUD。
 遵循仓储契约，执行参数化查询防止 SQL 注入，通过 JSON 序列化存储标签数组。
 """
+
 from __future__ import annotations
 
 import json
@@ -79,9 +80,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             ]
 
     async def delete_collection(self, name: str) -> bool:
-        async with self._db.execute(
-            "DELETE FROM collections WHERE name = ?", (name,)
-        ) as cursor:
+        async with self._db.execute("DELETE FROM collections WHERE name = ?", (name,)) as cursor:
             await self._db.commit()
             return cursor.rowcount > 0
 
@@ -236,13 +235,21 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                         tags = []
                 except (json.JSONDecodeError, TypeError):
                     tags = []
-                results.append(SourceDocument(
-                    doc_id=row[0], title=row[1], file_path=row[2],
-                    content_type=row[3], size_bytes=row[4], content_hash=row[5],
-                    collection=row[6], tags=tags,
-                    created_at=_parse_dt(row[8]), updated_at=_parse_dt(row[9]),
-                    needs_reindex=bool(row[10]),
-                ))
+                results.append(
+                    SourceDocument(
+                        doc_id=row[0],
+                        title=row[1],
+                        file_path=row[2],
+                        content_type=row[3],
+                        size_bytes=row[4],
+                        content_hash=row[5],
+                        collection=row[6],
+                        tags=tags,
+                        created_at=_parse_dt(row[8]),
+                        updated_at=_parse_dt(row[9]),
+                        needs_reindex=bool(row[10]),
+                    )
+                )
             return results
 
     async def update_document(self, document: SourceDocument) -> bool:
@@ -275,9 +282,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
     async def delete_document(self, doc_id: str) -> bool:
         # SQLite 配了外键级联删除 (ON DELETE CASCADE) 关联的 chunks 会由外键级联自动删除
         # 但遵循仓储接口约定，为了确定 doc_id 存在性，我们可以在事务里手动操作
-        async with self._db.execute(
-            "DELETE FROM documents WHERE doc_id = ?", (doc_id,)
-        ) as cursor:
+        async with self._db.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,)) as cursor:
             await self._db.commit()
             return cursor.rowcount > 0
 
@@ -327,7 +332,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                         meta = {}
                 except Exception:
                     meta = {}
-                
+
                 results.append(
                     DocumentChunk(
                         chunk_id=row[0],
@@ -339,6 +344,41 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                     )
                 )
             return results
+
+    # ── LightRAG 索引状态 ───────────────────────────────────────
+
+    async def set_lightrag_index_status(
+        self, doc_id: str, collection: str, status: str, last_error: str = ""
+    ) -> None:
+        updated_at = _format_dt(datetime.now(timezone.utc))
+        await self._db.execute(
+            """
+            INSERT INTO lightrag_index_status (doc_id, collection, status, last_error, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                collection = excluded.collection, status = excluded.status,
+                last_error = excluded.last_error, updated_at = excluded.updated_at
+            """,
+            (doc_id, collection, status, last_error, updated_at),
+        )
+        await self._db.commit()
+
+    async def get_lightrag_index_status(self, doc_id: str) -> dict[str, str] | None:
+        async with self._db.execute(
+            "SELECT collection, status, last_error, updated_at "
+            "FROM lightrag_index_status WHERE doc_id = ?",
+            (doc_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            return {
+                "doc_id": doc_id,
+                "collection": row[0],
+                "status": row[1],
+                "last_error": row[2],
+                "updated_at": row[3],
+            }
 
     # ── 同步状态 ──────────────────────────────────────────────────
 

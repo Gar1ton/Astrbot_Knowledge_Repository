@@ -1,12 +1,12 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Btn } from "@/components/ui/Btn";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
-  GraphData, GraphNode, GraphEdge, KbChunk, ApiError,
-  getGraph, queryGraph, buildGraph, isReserved, listCollections,
+  GraphData, GraphNode, GraphEdge, KbChunk, ApiError, GraphBuildJob,
+  getGraph, queryGraph, buildGraph, estimateGraphBuild, getGraphBuildJob, isReserved, listCollections,
 } from "@/lib/api";
 import { Select } from "@/components/ui/Select";
 
@@ -390,6 +390,78 @@ function HybridGraph({
   );
 }
 
+// ─── 构建预估弹窗 ─────────────────────────────────────────────
+
+interface BuildEstimateModalProps {
+  estimate: import("@/lib/api").GraphBuildEstimate;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+function BuildEstimateModal({ estimate, onConfirm, onCancel }: BuildEstimateModalProps) {
+  const { t } = useI18n();
+
+  const rows: [string, string][] = [
+    [t("graph_build_modal_docs"),         String(estimate.docs_count)],
+    [t("graph_build_modal_chunks"),       String(estimate.chunks_count)],
+    [t("graph_build_modal_chars"),        estimate.chars_count.toLocaleString()],
+    [t("graph_build_modal_llm_calls"),    `${estimate.estimated_llm_calls_min} – ${estimate.estimated_llm_calls_max}`],
+    [t("graph_build_modal_embed_batches"),String(estimate.estimated_embedding_batches)],
+    [t("graph_build_modal_duration"),     `${estimate.estimated_duration_seconds_min} – ${estimate.estimated_duration_seconds_max}`],
+  ];
+
+  return (
+    <div
+      style={{
+        position: "fixed", inset: 0, background: "rgba(0,0,0,.35)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300,
+      }}
+      onClick={(e) => e.target === e.currentTarget && onCancel()}
+    >
+      <div style={{
+        background: "var(--surface)", border: "1px solid var(--border)",
+        borderRadius: 14, padding: 24, width: 380, boxShadow: "var(--shadow-pop)",
+        display: "flex", flexDirection: "column", gap: 16,
+      }}>
+        <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: "var(--heading)" }}>
+          {t("graph_build_modal_title")}
+        </h3>
+
+        <div style={{
+          background: "var(--bg-inset)", border: "1px solid var(--border)",
+          borderRadius: 10, overflow: "hidden",
+        }}>
+          {rows.map(([label, value], i) => (
+            <div key={label} style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "8px 14px",
+              borderTop: i > 0 ? "1px solid var(--border)" : undefined,
+            }}>
+              <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>{label}</span>
+              <span style={{ fontSize: 12, fontFamily: "var(--font-geist-mono)", color: "var(--fg)", fontWeight: 600 }}>{value}</span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{
+          fontSize: 11, lineHeight: 1.6,
+          color: "var(--warn)",
+          background: "color-mix(in srgb, var(--warn, #d97706) 10%, transparent)",
+          border: "1px solid color-mix(in srgb, var(--warn, #d97706) 30%, transparent)",
+          borderRadius: 8, padding: "8px 12px",
+        }}>
+          ⚠ {estimate.estimate_notice}
+        </div>
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <Btn variant="ghost" size="sm" onClick={onCancel}>{t("btn_cancel")}</Btn>
+          <Btn size="sm" onClick={onConfirm}>{t("graph_build_modal_confirm")}</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── 预留横幅 ─────────────────────────────────────────────────
 
 function ReservedBanner({ availableIn }: { availableIn: string }) {
@@ -423,14 +495,18 @@ export default function GraphPage() {
   const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
   const [queryInput, setQueryInput] = useState("");
   const [queryResult, setQueryResult] = useState<{
+    answer?: string;
+    context?: string;
     chunks: KbChunk[];
     entities: GraphNode[];
     relations: GraphEdge[];
     debug?: unknown;
   } | null>(null);
   const [querying, setQuerying] = useState(false);
-  const [buildReserved, setBuildReserved] = useState<string | null>(null);
+  const [buildJob, setBuildJob] = useState<GraphBuildJob | null>(null);
   const [graphReserved, setGraphReserved] = useState<string | null>(null);
+  const [showEstimateModal, setShowEstimateModal] = useState(false);
+  const [pendingEstimate, setPendingEstimate] = useState<import("@/lib/api").GraphBuildEstimate | null>(null);
   const [collections, setCollections] = useState<string[]>([]);
   const [collection, setCollection] = useState("");
   const [showDetailPanel, setShowDetailPanel] = useState(true);
@@ -456,8 +532,9 @@ export default function GraphPage() {
       } else {
         setGraphData(res);
       }
-    } catch {
-      toast(t("error_generic"), "error");
+    } catch (err) {
+      setGraphData(null);
+      toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
     } finally {
       setLoading(false);
     }
@@ -466,19 +543,46 @@ export default function GraphPage() {
   async function handleBuild() {
     setBuilding(true);
     try {
-      const res = await buildGraph(collection || undefined);
-      if (isReserved(res)) {
-        setBuildReserved(res.available_in);
-      } else {
-        toast("图谱构建已启动", "ok");
-        setTimeout(() => loadGraph(collection), 2000);
-      }
+      const estimate = await estimateGraphBuild(collection || undefined);
+      setPendingEstimate(estimate);
+      setShowEstimateModal(true);
     } catch (err) {
       toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
     } finally {
       setBuilding(false);
     }
   }
+
+  const handleEstimateConfirm = useCallback(async () => {
+    setShowEstimateModal(false);
+    setPendingEstimate(null);
+    try {
+      const job = await buildGraph(collection || undefined);
+      setBuildJob(job);
+      toast(t("graph_build_modal_confirm"), "ok");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
+    }
+  }, [collection, t, toast]);
+
+  const handleEstimateCancel = useCallback(() => {
+    setShowEstimateModal(false);
+    setPendingEstimate(null);
+  }, []);
+
+  useEffect(() => {
+    if (!buildJob || ["success", "partial_failure", "error"].includes(buildJob.status)) return;
+    const timer = window.setTimeout(async () => {
+      try {
+        const next = await getGraphBuildJob(buildJob.job_id);
+        setBuildJob(next);
+        if (next.status === "success" || next.status === "partial_failure") loadGraph(next.collection);
+      } catch (err) {
+        toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
+      }
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [buildJob, t, toast]);
 
   async function handleQuery(e: React.FormEvent) {
     e.preventDefault();
@@ -490,7 +594,10 @@ export default function GraphPage() {
       if (isReserved(res)) {
         toast(`图谱查询即将上线（${res.available_in}）`, "info");
       } else {
-        setQueryResult({ chunks: res.chunks, entities: res.entities, relations: res.relations, debug: res.debug });
+        setQueryResult({
+          answer: res.answer, context: res.context, chunks: res.chunks ?? [],
+          entities: res.entities ?? [], relations: res.relations ?? [], debug: res.debug,
+        });
       }
     } catch (err) {
       toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
@@ -506,6 +613,13 @@ export default function GraphPage() {
 
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", position: "relative" }}>
+      {showEstimateModal && pendingEstimate && (
+        <BuildEstimateModal
+          estimate={pendingEstimate}
+          onConfirm={handleEstimateConfirm}
+          onCancel={handleEstimateCancel}
+        />
+      )}
       {/* 主视图 */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {/* 工具条 */}
@@ -536,13 +650,9 @@ export default function GraphPage() {
             onChange={(next) => { setCollection(next); loadGraph(next); }}
             options={collections.map((name) => ({ value: name, label: name }))}
           />
-          {buildReserved ? (
-            <ReservedBanner availableIn={buildReserved} />
-          ) : (
-            <Btn variant="outline" size="sm" loading={building} onClick={handleBuild}>
-              {t("graph_build")}
-            </Btn>
-          )}
+          <Btn variant="outline" size="sm" loading={building} onClick={handleBuild}>
+            {t("graph_build")}
+          </Btn>
           <button
             onClick={() => setShowDetailPanel(v => !v)}
             title={showDetailPanel ? "收起详情面板" : "展开详情面板"}
@@ -589,6 +699,17 @@ export default function GraphPage() {
             </div>
           )}
         </div>
+
+        {buildJob && (
+          <div style={{ borderTop: "1px solid var(--border)", padding: "8px 16px", fontSize: 11, color: "var(--fg-muted)", display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <strong style={{ color: "var(--fg)" }}>LightRAG 索引：{buildJob.status}</strong>
+            <span>阶段：{buildJob.stage ?? "queued"}</span>
+            <span>文档：{buildJob.processed_docs ?? 0}/{buildJob.total_docs ?? 0}</span>
+            <span>失败：{buildJob.failed_docs ?? 0}</span>
+            <span>耗时：{buildJob.elapsed_seconds ?? 0}s</span>
+            {buildJob.recent_error && <span style={{ color: "var(--danger)" }}>{buildJob.recent_error}</span>}
+          </div>
+        )}
 
         {/* 图谱增强查询 */}
         <div style={{ borderTop: "1px solid var(--border)", padding: "10px 16px" }}>
@@ -679,6 +800,11 @@ export default function GraphPage() {
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-subtle)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
               查询结果
             </div>
+            {(queryResult.answer || queryResult.context) && (
+              <div style={{ background: "var(--accent-soft)", border: "1px solid var(--border)", borderRadius: 8, padding: 10, marginBottom: 8, whiteSpace: "pre-wrap", fontSize: 11, lineHeight: 1.55 }}>
+                {queryResult.answer || queryResult.context}
+              </div>
+            )}
             {queryResult.chunks.map((chunk) => (
               <div
                 key={chunk.chunk_id}

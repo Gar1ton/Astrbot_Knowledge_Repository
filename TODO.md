@@ -44,6 +44,34 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.16.0 Official LightRAG Core replacement (in progress)
+
+### User constraints / 约束
+
+- 官方 `lightrag-hku` Core 单后端；所有触发 LLM 的索引动作必须手动确认。
+- sandbox 不配置模型，真实 insert/query/export/delete 探针由 AstrBot 部署后手动执行并观察 terminal。
+
+### Technical implementation path
+
+- [x] **Phase 0 — 部署后探针入口**：新增 `POST /api/graph/probe`，要求 `confirmed=true`，真实 provider 不可用时禁止 mock；输出逐步 `KR LightRAG` terminal 日志。
+- [x] **Phase 1 — 依赖与配置**：版本升至 `v0.16.0`，新增 `lightrag-hku`，graph 配置切换为 Core 语义。
+- [x] **Phase 2 — Core 接入**：按 collection 独立 workspace，显式 `ainsert(ids=[doc_id])`，查询、导出、删除走官方 Core。
+- [x] **Phase 3 — 手动构建**：dry-run estimate、`confirmed=true`、后台 job 与轮询进度。
+- [x] **Phase 4 — 可视化**：解析官方 `export_data()` CSV 为真实 nodes/edges；导出失败返回明确错误。
+- [x] **Phase 5 — 文档生命周期**：删除/移动固定调用 `adelete_by_doc_id`；独立 `lightrag_index_status` 跟踪 pending/indexed/error。
+- [x] **Frontend**：LightRAG 文案、成本确认、job 进度、answer/context、删除/移动影响提示、设置区。
+- [ ] **Deployment verification**：在 AstrBot 真实 LLM/Embedding 环境执行 `docs/LIGHTRAG_DEPLOYMENT_PROBE.md`，确认 `delete_stable=true`。
+- [x] **Static frontend export**：使用临时 Node.js 20 完成 Next.js build，并执行 `python tools/sync_frontend.py --force` 同步 `pages/`。
+
+### Verification
+
+- `python -m pytest -q` → `168 passed, 5 skipped`
+- `python -m ruff check ...` → `All checks passed`
+- `npx tsc --noEmit` → passed
+- `npx -y node@20 node_modules/next/dist/bin/next build` → passed; 12 static pages generated
+
+---
+
 ## v0.15.3 Web 控制台启动接线 (completed)
 
 ### User constraints / 约束

@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { useI18n, Lang } from "@/lib/i18n";
 import { getEffectiveConfig, EffectiveConfig, updateConfigValue, testEmbeddingConnection, EmbeddingTestResult, listLocalModels, deleteLocalModel, LocalModel } from "@/lib/api";
+import { Select } from "@/components/ui/Select";
 
 // ─── 外观控件 ─────────────────────────────────────────────────
 
@@ -104,6 +105,12 @@ export default function SettingsPage() {
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [askEnhancementMode, setAskEnhancementMode] = useState<"inject" | "query_agent">("inject");
+  const [graphEnabled, setGraphEnabled] = useState(false);
+  const [graphQueryMode, setGraphQueryMode] = useState("mix");
+  const [graphEmbeddingDim, setGraphEmbeddingDim] = useState(1024);
+  const [graphMaxTokenSize, setGraphMaxTokenSize] = useState(8192);
+  const [graphLlmMaxAsync, setGraphLlmMaxAsync] = useState(4);
+  const [graphEmbeddingMaxAsync, setGraphEmbeddingMaxAsync] = useState(8);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
   const [testing, setTesting] = useState(false);
@@ -128,6 +135,14 @@ export default function SettingsPage() {
       if (config.ask) {
         setAskEnhancementMode((config.ask.conversation_enhancement_mode as "inject" | "query_agent") || "inject");
       }
+      if (config.graph) {
+        setGraphEnabled(Boolean(config.graph.enabled));
+        setGraphQueryMode((config.graph.query_mode as string) || "mix");
+        setGraphEmbeddingDim(Number(config.graph.embedding_dim) || 1024);
+        setGraphMaxTokenSize(Number(config.graph.max_token_size) || 8192);
+        setGraphLlmMaxAsync(Number(config.graph.llm_max_async) || 4);
+        setGraphEmbeddingMaxAsync(Number(config.graph.embedding_max_async) || 8);
+      }
     } else {
       // 保存后重拉：只更新枚举型选择项，不覆盖用户已编辑的文本框
       if (config.vector_db) {
@@ -150,6 +165,12 @@ export default function SettingsPage() {
       await updateConfigValue("vector_db", "api_key", apiKey);
       await updateConfigValue("vector_db", "base_url", baseUrl);
       await updateConfigValue("ask", "conversation_enhancement_mode", askEnhancementMode);
+      await updateConfigValue("graph", "enabled", graphEnabled);
+      await updateConfigValue("graph", "query_mode", graphQueryMode);
+      await updateConfigValue("graph", "embedding_dim", graphEmbeddingDim);
+      await updateConfigValue("graph", "max_token_size", graphMaxTokenSize);
+      await updateConfigValue("graph", "llm_max_async", graphLlmMaxAsync);
+      await updateConfigValue("graph", "embedding_max_async", graphEmbeddingMaxAsync);
 
       setSaveMessage(lang === "zh" ? "配置更新成功并已成功重载！" : "Configuration updated and reloaded successfully!");
       
@@ -798,6 +819,52 @@ export default function SettingsPage() {
                 </>
               )}
             </div>
+          </div>
+
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 18 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--heading)", marginBottom: 12 }}>{t("graph_config_section_title")}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+              <label style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+                {t("graph_config_enabled")}
+                <input type="checkbox" checked={graphEnabled} onChange={(e) => setGraphEnabled(e.target.checked)} style={{ marginLeft: 8 }} />
+              </label>
+              <label style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+                {t("graph_config_query_mode")}
+                <Select
+                  value={graphQueryMode}
+                  onChange={setGraphQueryMode}
+                  options={(["mix", "local", "global", "hybrid", "naive", "bypass"] as const).map((mode) => ({
+                    value: mode,
+                    label: t(`graph_mode_${mode}` as any),
+                  }))}
+                  style={{ display: "block", width: "100%", marginTop: 5 }}
+                />
+              </label>
+              <label style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+                {t("graph_config_embedding_dim")}
+                <input
+                  readOnly
+                  value={graphEmbeddingDim}
+                  title={lang === "zh" ? "向量维度与 Embedding 模型绑定，修改需删除所有 workspace 重建索引，请联系管理员操作。" : "Embedding dim is tied to the model. Changing it destroys all workspaces — contact an admin to reconfigure."}
+                  style={{ display: "block", width: "100%", marginTop: 5, opacity: 0.7, cursor: "not-allowed" }}
+                />
+              </label>
+              {([
+                [t("graph_config_max_token_size"), graphMaxTokenSize, setGraphMaxTokenSize],
+                [t("graph_config_llm_max_async"), graphLlmMaxAsync, setGraphLlmMaxAsync],
+                [t("graph_config_embedding_max_async"), graphEmbeddingMaxAsync, setGraphEmbeddingMaxAsync],
+              ] as [string, number, React.Dispatch<React.SetStateAction<number>>][]).map(([label, value, setter]) => (
+                <label key={label} style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+                  {label}
+                  <input type="number" min={1} value={value} onChange={(e) => setter(Number(e.target.value))} style={{ display: "block", width: "100%", marginTop: 5 }} />
+                </label>
+              ))}
+              <label style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+                {t("graph_config_working_dir")}
+                <input readOnly value={String(config?.graph?.working_dir ?? "lightrag_workspaces")} style={{ display: "block", width: "100%", marginTop: 5, opacity: .7 }} />
+              </label>
+            </div>
+            <div style={{ marginTop: 10, fontSize: 11, color: "var(--warn)" }}>{t("graph_config_rebuild_warn")}</div>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 16, marginTop: 10 }}>

@@ -2,6 +2,7 @@
 
 行为与 sqlite.py 应一致，仅以内存 dict 持久化。深拷贝进出，避免调用方持有内部引用造成隐式改动。
 """
+
 from __future__ import annotations
 
 import copy
@@ -27,6 +28,7 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._documents: dict[str, SourceDocument] = {}
         self._chunks: dict[str, list[DocumentChunk]] = {}
         self._sync_records: dict[tuple[str, SyncTargetKind], SyncRecord] = {}
+        self._lightrag_status: dict[str, dict[str, str]] = {}
 
     # ── 集合 ────────────────────────────────────────────────────
 
@@ -49,6 +51,7 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
 
     async def list_pending_reindex_documents(self) -> list[SourceDocument]:
         import copy
+
         pending = [d for d in self._documents.values() if d.needs_reindex]
         return [
             copy.deepcopy(d)
@@ -86,11 +89,12 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
     async def delete_document(self, doc_id: str) -> bool:
         if doc_id not in self._documents:
             return False
-        self._chunks.pop(doc_id, None)   # 先删分块
+        self._chunks.pop(doc_id, None)  # 先删分块
         self._sync_records = {
             key: record for key, record in self._sync_records.items() if key[0] != doc_id
         }
-        del self._documents[doc_id]       # 再删文档
+        self._lightrag_status.pop(doc_id, None)
+        del self._documents[doc_id]  # 再删文档
         return True
 
     # ── 分块 ────────────────────────────────────────────────────
@@ -102,6 +106,22 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         chunks = self._chunks.get(doc_id, [])
         ordered = sorted(chunks, key=lambda c: c.ordinal)
         return [copy.deepcopy(c) for c in ordered]
+
+    # ── LightRAG 索引状态 ───────────────────────────────────────
+
+    async def set_lightrag_index_status(
+        self, doc_id: str, collection: str, status: str, last_error: str = ""
+    ) -> None:
+        self._lightrag_status[doc_id] = {
+            "doc_id": doc_id,
+            "collection": collection,
+            "status": status,
+            "last_error": last_error,
+        }
+
+    async def get_lightrag_index_status(self, doc_id: str) -> dict[str, str] | None:
+        value = self._lightrag_status.get(doc_id)
+        return copy.deepcopy(value) if value else None
 
     # ── 同步状态 ──────────────────────────────────────────────────
 

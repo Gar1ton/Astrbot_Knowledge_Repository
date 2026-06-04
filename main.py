@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
+    from astrbot.api.provider import ProviderRequest
 
 _PLUGIN_VERSION = "v0.15.1"
 
@@ -80,9 +81,16 @@ class KnowledgeRepositoryPlugin(Star):
     # ── 消息 Hook（RAG 注入）─────────────────────────────────────
 
     @filter.event_message_type(filter.EventMessageType.ALL)
-    async def on_message(self, event: "AstrMessageEvent") -> None:
+    async def on_message(self, event: "AstrMessageEvent"):
         if self._handler:
-            await self._handler.on_message(event)
+            answer = await self._handler.on_message(event)
+            if answer is not None:
+                yield event.plain_result(answer)
+
+    @filter.on_llm_request()
+    async def on_llm_request(self, event: "AstrMessageEvent", req: "ProviderRequest") -> None:
+        if self._handler:
+            await self._handler.on_llm_request(event, req)
 
     # ── 命令组 /kr ───────────────────────────────────────────────
 

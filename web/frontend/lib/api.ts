@@ -23,6 +23,7 @@ export interface KrDocument {
   updated?: string;
   ext?: string;
   needs_reindex?: boolean;
+  lightrag_index_status?: { status: string; collection: string; last_error?: string } | null;
 }
 
 export interface KbChunk {
@@ -69,6 +70,8 @@ export interface GraphEdge {
 }
 
 export interface GraphData {
+  status?: string;
+  engine?: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
 }
@@ -77,16 +80,39 @@ export interface GraphQueryResult {
   status: string;
   query: string;
   collection?: string;
-  chunks: KbChunk[];
-  entities: GraphNode[];
-  relations: GraphEdge[];
+  engine?: string;
+  answer?: string;
   context?: string;
-  debug?: {
-    vector_chunk_ids: string[];
-    keyword_chunk_ids: string[];
-    graph_chunk_ids: string[];
-    rrf_scores: Record<string, number>;
-  };
+  chunks?: KbChunk[];
+  entities?: GraphNode[];
+  relations?: GraphEdge[];
+  debug?: Record<string, unknown>;
+}
+
+export interface GraphBuildEstimate {
+  collection: string;
+  docs_count: number;
+  chunks_count: number;
+  chars_count: number;
+  estimated_llm_calls_min: number;
+  estimated_llm_calls_max: number;
+  estimated_embedding_batches: number;
+  estimated_duration_seconds_min: number;
+  estimated_duration_seconds_max: number;
+  estimate_notice: string;
+}
+
+export interface GraphBuildJob {
+  job_id: string;
+  collection: string;
+  engine: "lightrag_core";
+  status: string;
+  stage?: string;
+  processed_docs?: number;
+  failed_docs?: number;
+  total_docs?: number;
+  elapsed_seconds?: number;
+  recent_error?: string;
 }
 
 export interface AskSource {
@@ -160,7 +186,7 @@ async function apiFetch<T>(
           reserved: true,
         } as T;
       }
-      msg = body.error || body.detail || msg;
+      msg = body.error || body.message || body.detail || msg;
     } catch {
       /* ignore parse error */
     }
@@ -567,17 +593,31 @@ export async function queryGraph(
   return apiFetch<MaybeReserved<GraphQueryResult>>(`/api/graph/query?${params}`);
 }
 
-export async function buildGraph(
-  collection?: string
-): Promise<MaybeReserved<{ status: string; message?: string }>> {
-  if (isMock()) {
-    return { reserved: true, available_in: "v0.6.0" };
-  }
-  return apiFetch<MaybeReserved<{ status: string }>>("/api/graph/build", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+export async function estimateGraphBuild(collection?: string): Promise<GraphBuildEstimate> {
+  if (isMock()) return {
+    collection: collection || "papers", docs_count: 5, chunks_count: 144, chars_count: 42000,
+    estimated_llm_calls_min: 5, estimated_llm_calls_max: 28, estimated_embedding_batches: 15,
+    estimated_duration_seconds_min: 25, estimated_duration_seconds_max: 420,
+    estimate_notice: "这是估算，不是承诺；实际 LLM 调用次数和耗时可能更高。",
+  };
+  return apiFetch<GraphBuildEstimate>("/api/graph/build/estimate", {
+    method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(collection ? { collection } : {}),
   });
+}
+
+export async function buildGraph(collection?: string): Promise<GraphBuildJob> {
+  if (isMock()) return { job_id: `mock-${Date.now()}`, status: "queued", engine: "lightrag_core", collection: collection || "papers" };
+  return apiFetch<GraphBuildJob>("/api/graph/build", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ collection, confirmed: true }),
+  });
+}
+
+export async function getGraphBuildJob(jobId: string): Promise<GraphBuildJob> {
+  if (isMock()) return { job_id: jobId, status: "success", stage: "done", engine: "lightrag_core", collection: "papers", processed_docs: 5, failed_docs: 0, total_docs: 5, elapsed_seconds: 12 };
+  return apiFetch<GraphBuildJob>(`/api/graph/build/${encodeURIComponent(jobId)}`);
 }
 
 // ─────────────────────────────────────────────────────────────

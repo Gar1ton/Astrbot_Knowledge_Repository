@@ -1,4 +1,5 @@
 """单元与集成测试：PluginInitializer 生命周期、后台任务调度，与 CLI/EventHandler 事件分发。"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -118,9 +119,7 @@ async def test_plugin_shell_lifecycle(
     assert "papers" in res_list
 
     # 6) 测试 /kr add
-    res_ingest = await plugin.on_add(
-        str(pdf_path), collection="papers", tags=["tag1", "tag2"]
-    )
+    res_ingest = await plugin.on_add(str(pdf_path), collection="papers", tags=["tag1", "tag2"])
     assert "Success: Document ingested with ID" in res_ingest
     doc_id = res_ingest.split(":")[-1].strip()
 
@@ -152,12 +151,12 @@ async def test_plugin_shell_lifecycle(
 
     # 10.5) 测试 /kr graph build
     res_graph_build = await plugin.on_graph_build("papers")
-    assert "Success" in res_graph_build
+    assert "estimate only" in res_graph_build
+    assert "no LLM call was started" in res_graph_build
 
-    # 测试 /kr graph query
+    # graph query requires graph.enabled and a configured LightRAG Core registry
     res_graph_query = await plugin.on_graph_query("Transformer")
-    assert "Graph Query Results" in res_graph_query
-    assert "Transformer" in res_graph_query
+    assert "Error: Graph query failed" in res_graph_query
 
     # 10.6) 测试 /kr notion init 与 /kr sync notion --pull
     res_notion_init = await plugin.on_notion_init()
@@ -171,92 +170,70 @@ async def test_plugin_shell_lifecycle(
     await plugin.on_agent("on")
     assert plugin._initializer.agent_enabled is True
 
-    # 11a) 测试默认的 "inject" 召回注入模式
-    # 构造带有 message_str 属性且有 system_prompt 的 Mock Event
-    mock_event_on = MagicMock()
-    mock_event_on.message_str = "testing"  # 能够模糊匹配到我们摄入的文本
-    mock_event_on.system_prompt = "You are a bot."
-    # 显式删除 set_system_prompt 和 add_system_prompt 属性，
-    # 以迫使 on_message 走属性直接修改分支 (B) 以验证其兼容性
-    del mock_event_on.set_system_prompt
-    del mock_event_on.add_system_prompt
-    
     from core.domain.models import DocumentChunk
+
     mock_chunk = DocumentChunk(
         chunk_id="test-chunk-1",
         doc_id=doc_id,
         ordinal=0,
         text="Hello world text segment for testing.",
-        content_hash="mock-hash"
+        content_hash="mock-hash",
     )
 
-    # 用 patch.object 模拟检索召回以验证注入契约
-    with patch.object(
-        plugin._initializer.retrieval_orchestrator,
-        "retrieve",
-        return_value=[mock_chunk]
-    ) as mock_retrieve:
-        # 触发 Hook 消息处理
-        res_hook_on = await plugin.on_message(mock_event_on)
-        assert res_hook_on is None
-        mock_retrieve.assert_called_once()
-        # 验证是否成功注入了系统提示词
-        assert "Knowledge Base Context" in mock_event_on.system_prompt
-        assert "testing" in mock_event_on.system_prompt
+    # 11a) inject 模式：on_llm_request 向 req.system_prompt 注入知识库上下文
+    mock_event_on = MagicMock()
+    mock_event_on.message_str = "testing"
 
-    # 11b) 测试 "query_agent" 代理问答模式 (Phase 7)
-    # 修改配置以启用 query_agent 模式
-    plugin._initializer.config.raw.setdefault("ask", {})[
-        "conversation_enhancement_mode"
-    ] = "query_agent"
+    class _MockReq:
+        system_prompt = "You are a bot."
+
+    mock_req = _MockReq()
+
+    with patch.object(
+        plugin._initializer.retrieval_orchestrator, "retrieve", return_value=[mock_chunk]
+    ) as mock_retrieve:
+        await plugin._handler.on_llm_request(mock_event_on, mock_req)
+        mock_retrieve.assert_called_once()
+        assert "Knowledge Base Context" in mock_req.system_prompt
+        assert "testing" in mock_req.system_prompt
+
+    # 11b) query_agent 模式：on_message 直接返回知识库答案字符串
+    plugin._initializer.config.raw.setdefault("ask", {})["conversation_enhancement_mode"] = (
+        "query_agent"
+    )
     assert (
-        plugin._initializer.config.get_ask_agent_config()
-        .conversation_enhancement_mode
+        plugin._initializer.config.get_ask_agent_config().conversation_enhancement_mode
         == "query_agent"
     )
 
     mock_event_query = MagicMock()
     mock_event_query.message_str = "testing"
-    mock_event_query.system_prompt = "You are a bot."
     mock_event_query.session_id = "test-session-123"
-    del mock_event_query.set_system_prompt
-    del mock_event_query.add_system_prompt
 
-    # 模拟内部 Standalone Ask Agent 生成的回答
     mock_ask_result = {
         "conversation_id": "event-test-session-123",
         "answer": "This is the generated academic answer from standalone ask agent.",
-        "sources": []
+        "sources": [],
     }
-    with patch.object(
-        plugin._initializer.api,
-        "ask",
-        return_value=mock_ask_result
-    ) as mock_ask:
-        res_hook_query = await plugin.on_message(mock_event_query)
-        assert res_hook_query is None
-        # 验证是否强制关闭内部 agent 的 persona 开关以防止过拟合，并绑定打通了 WebUI Ask 历史大一统
+    with patch.object(plugin._initializer.api, "ask", return_value=mock_ask_result) as mock_ask:
+        answer = await plugin._handler.on_message(mock_event_query)
+        assert answer == "This is the generated academic answer from standalone ask agent."
         mock_ask.assert_called_once_with(
             question="testing",
             collection=None,
             top_k=5,
             conversation_id="event-test-session-123",
-            persona_enabled=False
+            persona_enabled=False,
         )
-        # 验证是否注入了指令级绝对代理提示词
-        assert "Absolute System Override" in mock_event_query.system_prompt
-        assert "This is the generated academic answer" in mock_event_query.system_prompt
 
-    # 测试 /kr agent off 状态下，完全进行 zero-overhead 旁路而不改变提示词 (Phase 6)
+    # 11c) agent off 状态下完全旁路，on_message 返回 None
     await plugin.on_agent("off")
     assert plugin._initializer.agent_enabled is False
-    
+
     mock_event_off = MagicMock()
     mock_event_off.message_str = "testing"
-    mock_event_off.system_prompt = "You are a bot."
-    res_hook_off = await plugin.on_message(mock_event_off)
-    assert res_hook_off is None
-    assert mock_event_off.system_prompt == "You are a bot."
+    result_off = await plugin._handler.on_message(mock_event_off)
+    assert result_off is None
 
     # 11.1) 删除文档并删除集合
     assert plugin._initializer is not None

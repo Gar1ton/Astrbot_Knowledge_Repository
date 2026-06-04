@@ -5,6 +5,7 @@
 
 v0.3.0 生产实现：装配数据库、仓储、PDF抽取、分类管理、R2同步和配额预警。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -65,6 +66,7 @@ class PluginInitializer:
         self.graph_store: GraphStore | None = None
         self.graph_build_pipeline: GraphBuildPipeline | None = None
         self.graph_search_pipeline: GraphSearchPipeline | None = None
+        self.lightrag_registry: Any | None = None
         self.vector_store: VectorStore | None = None
         self.embedding_provider: EmbeddingProvider | None = None
         self.retrieval_orchestrator: RetrievalOrchestrator | None = None
@@ -102,16 +104,19 @@ class PluginInitializer:
 
         self.source_store = SQLiteSourceDocumentStore(db)
         from core.repository.kb_reader.astrbot import AstrBotKnowledgeBaseReader
+
         self.kb_reader = AstrBotKnowledgeBaseReader(self._context)
 
         # 3) 构造同步目标
         from core.repository.sync_targets.base import SyncTarget
+
         sync_targets: dict[SyncTargetKind, SyncTarget] = {}
         # R2SyncTarget 延迟初始化 boto3.client，故总是先实例化并配置。
         r2_target = R2SyncTarget(r2_cfg)
         sync_targets[SyncTargetKind.R2] = r2_target
 
         from core.repository.sync_targets.notion import NotionSyncTarget
+
         notion_target = NotionSyncTarget(
             config=notion_cfg,
             source_store=self.source_store,
@@ -136,41 +141,40 @@ class PluginInitializer:
             db_path=db_path,
         )
 
-        # 4.5) 构造知识图谱子系统与管线
+        # 4.5) 官方 LightRAG Core 替代旧 SQLiteGraphStore/自研图谱管线。
         from core.adapters.llm import LLMAdapter
-        from core.pipelines.graph_build_pipeline import GraphBuildPipeline
-        from core.pipelines.graph_search_pipeline import GraphSearchPipeline
-        from core.repository.graph_store.sqlite import SQLiteGraphStore
 
-        self.graph_store = SQLiteGraphStore(db)
         llm_adapter = LLMAdapter(self._context)
-        self.graph_build_pipeline = GraphBuildPipeline(
-            source_store=self.source_store,
-            graph_store=self.graph_store,
-            llm_adapter=llm_adapter,
-            config=graph_cfg,
-        )
-        self.graph_search_pipeline = GraphSearchPipeline(
-            source_store=self.source_store,
-            graph_store=self.graph_store,
-            kb_reader=self.kb_reader,
-            config=graph_cfg,
-        )
 
-        # 4.6) 构造本地向量检索与 Embedding 子系统 (Phase 4)
+        # 4.6) 构造本地向量检索与 Embedding 子系统。LightRAG Core 也复用该 provider。
         vdb_cfg = self._config.get_vector_db_config()
         if vdb_cfg.backend == "milvus":
-            from core.repository.embedding.factory import EmbeddingProviderFactory
             from core.repository.vector_store.milvus_lite import MilvusLiteVectorStore
 
             milvus_db_path = str(self._data_dir / vdb_cfg.db_filename)
             self.vector_store = MilvusLiteVectorStore(db_path=milvus_db_path)
+
+        if vdb_cfg.backend == "milvus" or graph_cfg.enabled:
+            from core.repository.embedding.factory import EmbeddingProviderFactory
+
             self.embedding_provider = EmbeddingProviderFactory.create_provider(
                 self._config, db_dir=str(self._data_dir)
             )
 
+        # 4.6.5) 构造官方 LightRAG Core registry（按 collection 懒加载实例）。
+        if graph_cfg.enabled:
+            from core.lightrag_core import LightRAGCoreRegistry
+
+            self.lightrag_registry = LightRAGCoreRegistry(
+                config=graph_cfg,
+                data_dir=self._data_dir,
+                llm_adapter=llm_adapter,
+                embedding_provider=self.embedding_provider,
+            )
+
         # 4.7) 构造统一检索编排器 (RetrievalOrchestrator)
         from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
+
         self.retrieval_orchestrator = RetrievalOrchestrator(
             source_store=self.source_store,
             kb_reader=self.kb_reader,
@@ -192,6 +196,7 @@ class PluginInitializer:
             graph_store=self.graph_store,
             graph_build_pipeline=self.graph_build_pipeline,
             graph_search_pipeline=self.graph_search_pipeline,
+            lightrag_registry=self.lightrag_registry,
             config=self._config,
             config_persist=self._persist_config_value,
             llm_adapter=llm_adapter,
@@ -230,8 +235,7 @@ class PluginInitializer:
                     save_cb(merged)
                     self._raw_config = merged
                     logger.info(
-                        "Successfully persisted runtime config back via "
-                        f"context.{method_name}"
+                        f"Successfully persisted runtime config back via context.{method_name}"
                     )
                     return
                 except Exception as e:
@@ -240,12 +244,12 @@ class PluginInitializer:
     async def _start_web_console(self, web_cfg: Any) -> None:
         """启动插件独立 Web 控制台（aiohttp + Next.js 静态文件）。"""
         from aiohttp import web as aiohttp_web
+
         from web.server import build_app
 
         if not web_cfg.password:
             logger.error(
-                "web_console.password 为空，Web 控制台未启动。"
-                "请在配置中设置密码后重启插件。"
+                "web_console.password 为空，Web 控制台未启动。请在配置中设置密码后重启插件。"
             )
             return
 
@@ -306,6 +310,13 @@ class PluginInitializer:
             except Exception as e:
                 logger.warning(f"Web 控制台关闭异常：{e}")
             self._web_runner = None
+
+        if self.lightrag_registry is not None:
+            try:
+                await self.lightrag_registry.close()
+            except Exception as e:
+                logger.error(f"Failed to close LightRAG Core on teardown: {e}")
+            self.lightrag_registry = None
 
         if self.vector_store is not None:
             try:

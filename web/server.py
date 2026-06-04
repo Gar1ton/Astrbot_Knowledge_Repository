@@ -5,6 +5,7 @@
 
 依赖经 build_app 注入（api 门面 + 配置），自身不构造依赖。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -53,10 +54,7 @@ def _api(request: web.Request) -> KnowledgeRepositoryApi:
 async def handle_auth(request: web.Request) -> web.Response:
     """前端探测是否需要登录 / 当前是否已登录。"""
     app = request.app
-    logged_in = (
-        not app["auth_required"]
-        or request.cookies.get(SESSION_COOKIE) in app["sessions"]
-    )
+    logged_in = not app["auth_required"] or request.cookies.get(SESSION_COOKIE) in app["sessions"]
     return web.json_response({"auth_required": app["auth_required"], "logged_in": logged_in})
 
 
@@ -186,7 +184,7 @@ async def handle_download_document(request: web.Request) -> web.StreamResponse:
         file_path,
         headers={
             "Content-Disposition": f'attachment; filename="{doc.title}"',
-        }
+        },
     )
 
 
@@ -259,9 +257,7 @@ async def handle_effective_config(request: web.Request) -> web.Response:
 async def handle_update_config(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     if not isinstance(body, dict):
-        return web.json_response(
-            {"status": "error", "message": "Invalid JSON body"}, status=400
-        )
+        return web.json_response({"status": "error", "message": "Invalid JSON body"}, status=400)
     section = body.get("section")
     key = body.get("key")
     value = body.get("value")
@@ -278,8 +274,6 @@ async def handle_update_config(request: web.Request) -> web.Response:
         return await _reserved(_update(), "v0.10.0")
     except ValueError as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
-
-
 
 
 async def handle_rebuild_index_pending(request: web.Request) -> web.Response:
@@ -318,14 +312,63 @@ async def handle_restore(request: web.Request) -> web.Response:
     return await _reserved(_api(request).restore_from_backup(snapshot), "v0.3.0")
 
 
-async def handle_graph_build(request: web.Request) -> web.Response:
+async def handle_graph_build_estimate(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     collection = body.get("collection") if isinstance(body, dict) else None
     try:
-        result = await _api(request).build_graph(collection)
+        result = await _api(request).estimate_graph_build(collection)
         return web.json_response(result)
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_graph_build(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    collection = body.get("collection") if isinstance(body, dict) else None
+    confirmed = bool(body.get("confirmed")) if isinstance(body, dict) else False
+    try:
+        result = await _api(request).build_graph(collection, confirmed=confirmed)
+        return web.json_response(result)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
     except NotImplementedError as exc:
         return web.json_response({"status": "reserved", "message": str(exc)}, status=501)
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_graph_build_job(request: web.Request) -> web.Response:
+    result = await _api(request).get_graph_build_job(request.match_info["job_id"])
+    if result is None:
+        return web.json_response({"status": "error", "message": "job not found"}, status=404)
+    return web.json_response(result)
+
+
+async def handle_graph_probe(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    if not isinstance(body, dict) or body.get("confirmed") is not True:
+        return web.json_response(
+            {"status": "error", "message": "LightRAG probe requires confirmed=true"}, status=400
+        )
+    collection = body.get("collection") or "default"
+    text = (
+        (body.get("text") or "LightRAG probe document for Knowledge Repository.")
+        if isinstance(body, dict)
+        else "LightRAG probe document for Knowledge Repository."
+    )
+    doc_id = (
+        (body.get("doc_id") or "kr-lightrag-probe-doc")
+        if isinstance(body, dict)
+        else "kr-lightrag-probe-doc"
+    )
+    query = (
+        (body.get("query") or "What is this probe document about?")
+        if isinstance(body, dict)
+        else "What is this probe document about?"
+    )
+    try:
+        result = await _api(request).probe_lightrag_core(collection, text, doc_id, query)
+        return web.json_response(result)
     except Exception as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=500)
 
@@ -411,6 +454,7 @@ async def handle_list_local_models(request: web.Request) -> web.Response:
 async def handle_delete_local_model(request: web.Request) -> web.Response:
     """DELETE /api/models/local/{name} — 删除本地缓存模型（name 经 URL 编码）。"""
     from urllib.parse import unquote
+
     raw = request.match_info.get("name", "")
     model_name = unquote(raw)
     try:
@@ -466,6 +510,7 @@ async def handle_ask(request: web.Request) -> web.Response:
 
 def _collection_dict(c: object) -> dict:
     from core.api import SYSTEM_COLLECTION_UNCATEGORIZED
+
     return {
         "name": c.name,  # type: ignore[attr-defined]
         "description": c.description,  # type: ignore[attr-defined]
@@ -475,44 +520,46 @@ def _collection_dict(c: object) -> dict:
 
 async def _document_dict(api: KnowledgeRepositoryApi, d: object) -> dict:
     chunks = await api.list_document_chunks(d.doc_id)  # type: ignore[attr-defined]
+    lightrag_status = await api.get_lightrag_index_status(d.doc_id)  # type: ignore[attr-defined]
     updated_at = d.updated_at.isoformat() if d.updated_at else None  # type: ignore[attr-defined]
     filename = Path(d.file_path).name  # type: ignore[attr-defined]
     ext = Path(filename).suffix.lstrip(".").lower()
     return {
-        "doc_id": d.doc_id,                  # type: ignore[attr-defined]
-        "title": d.title,                    # type: ignore[attr-defined]
+        "doc_id": d.doc_id,  # type: ignore[attr-defined]
+        "title": d.title,  # type: ignore[attr-defined]
         "filename": filename,
-        "content_type": d.content_type,      # type: ignore[attr-defined]
-        "size_bytes": d.size_bytes,          # type: ignore[attr-defined]
-        "size": d.size_bytes,                # type: ignore[attr-defined]
-        "collection": d.collection,          # type: ignore[attr-defined]
-        "tags": d.tags,                      # type: ignore[attr-defined]
-        "content_hash": d.content_hash,      # type: ignore[attr-defined]
+        "content_type": d.content_type,  # type: ignore[attr-defined]
+        "size_bytes": d.size_bytes,  # type: ignore[attr-defined]
+        "size": d.size_bytes,  # type: ignore[attr-defined]
+        "collection": d.collection,  # type: ignore[attr-defined]
+        "tags": d.tags,  # type: ignore[attr-defined]
+        "content_hash": d.content_hash,  # type: ignore[attr-defined]
         "chunks": len(chunks),
         "updated_at": updated_at,
         "updated": updated_at,
         "ext": ext,
         "needs_reindex": getattr(d, "needs_reindex", False),
+        "lightrag_index_status": lightrag_status,
     }
 
 
 def _chunk_dict(c: object) -> dict:
     return {
         "chunk_id": c.chunk_id,  # type: ignore[attr-defined]
-        "doc_id": c.doc_id,      # type: ignore[attr-defined]
-        "ordinal": c.ordinal,    # type: ignore[attr-defined]
-        "text": c.text,          # type: ignore[attr-defined]
+        "doc_id": c.doc_id,  # type: ignore[attr-defined]
+        "ordinal": c.ordinal,  # type: ignore[attr-defined]
+        "text": c.text,  # type: ignore[attr-defined]
         "metadata": getattr(c, "metadata", {}),
     }
 
 
 def _quota_dict(u: object) -> dict:
     return {
-        "target": u.target.value,            # type: ignore[attr-defined]
-        "used_bytes": u.used_bytes,          # type: ignore[attr-defined]
-        "limit_bytes": u.limit_bytes,        # type: ignore[attr-defined]
-        "ratio": round(u.ratio, 4),          # type: ignore[attr-defined]
-        "detail": u.detail,                  # type: ignore[attr-defined]
+        "target": u.target.value,  # type: ignore[attr-defined]
+        "used_bytes": u.used_bytes,  # type: ignore[attr-defined]
+        "limit_bytes": u.limit_bytes,  # type: ignore[attr-defined]
+        "ratio": round(u.ratio, 4),  # type: ignore[attr-defined]
+        "detail": u.detail,  # type: ignore[attr-defined]
     }
 
 
@@ -602,7 +649,10 @@ def build_app(
     app.router.add_get("/api/sync/status", handle_sync_status)
     app.router.add_post("/api/backup", handle_backup)
     app.router.add_post("/api/restore", handle_restore)
+    app.router.add_post("/api/graph/build/estimate", handle_graph_build_estimate)
     app.router.add_post("/api/graph/build", handle_graph_build)
+    app.router.add_get("/api/graph/build/{job_id}", handle_graph_build_job)
+    app.router.add_post("/api/graph/probe", handle_graph_probe)
     app.router.add_get("/api/graph/query", handle_graph_query)
     app.router.add_get("/api/graph/stats", handle_graph_stats)
     app.router.add_get("/api/graph", handle_graph_data)
@@ -617,6 +667,7 @@ def build_app(
 
     # 安装内存日志 handler（幂等，重复调用安全）
     from core.log_capture import install as _install_log_handler
+
     app["log_handler"] = _install_log_handler(maxlen=500)
 
     # 静态文件服务：兼容 Next.js export 产物（pages/ 下存在子目录 index.html）

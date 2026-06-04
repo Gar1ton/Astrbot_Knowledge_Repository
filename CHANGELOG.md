@@ -25,6 +25,42 @@
 
 ### 新增功能 (Added)
 
+- **LightRAG 接入消息召回链路**：`query_agent` 模式优先调用 `LightRAGCoreRegistry.query()` 获取图谱答案，失败时回退 `api.ask()`；`api.ask()` 在 `graph.enabled=True` 时额外调用 LightRAG 并将图谱分析结果以 `[图谱分析]` 标签前置于 LLM context（`core/event_handler.py`, `core/api.py`）。
+
+### 修复 (Fixed)
+
+- **inject 模式静默失效修复**：`AstrMessageEvent` 不存在 `set_system_prompt`/`add_system_prompt`/`system_prompt` 属性，原 A/B/C fallback 全部无效，实际走 D（污染 `message_str`）。新实现迁移至 `@filter.on_llm_request()` hook，直接写 `req.system_prompt`，AstrBot 官方正式 API，可靠注入（`main.py`, `core/event_handler.py`）。
+- **query_agent 模式拦截不彻底修复**：原实现修改 `message_str` 后 AstrBot 仍会调用自己的 LLM，依赖 LLM 遵循 verbatim 指令，不稳定。新实现将 `on_message` 改为 async generator，直接 `yield event.plain_result(answer)`，AstrBot LLM 不会被调用（`main.py`, `core/event_handler.py`）。
+
+### 架构健康 (Refactor)
+
+- **`on_message` 职责拆分**：原 ~190 行单方法拆分为两个独立 hook：`on_message`（async generator，仅处理 query_agent 模式）+ `on_llm_request`（注入 inject 模式 context），各自职责单一（`core/event_handler.py`, `main.py`）。
+- **Settings 页图谱查询模式选择框**：原生 `<select>` 替换为项目自定义 `Select` 组件，UI 风格统一（`web/frontend/app/(console)/settings/page.tsx`）。
+
+## [v0.16.0] — 2026-06-03
+
+### 新增功能 (Added)
+
+- **官方 LightRAG Core 单后端接入**：新增按 collection 隔离 workspace 的 `LightRAGCoreRegistry`、严格真实 LLM/Embedding adapter、显式 KR `doc_id` 插入、查询、真实 CSV 导出解析与 `adelete_by_doc_id` 删除路径（`core/lightrag_core.py`, `core/api.py`, `core/plugin_initializer.py`）。
+- **手动确认构建与进度**：新增 dry-run estimate、`confirmed=true` 构建门槛、后台 build job 轮询、部署后真实探针及可读 terminal 输出（`web/server.py`, `docs/LIGHTRAG_DEPLOYMENT_PROBE.md`）。
+- **独立 LightRAG 索引状态**：新增 `lightrag_index_status`，以 KR `doc_id` 跟踪 pending/indexed/error，不复用 `needs_reindex`（`migrations/006_lightrag_index_status.sql`, `core/repository/source_store/*`）。
+- **LightRAG WebUI**：图谱页新增成本估算确认、免责声明、job 进度、answer/context 展示；文档删除/移动提示索引影响；设置页新增 LightRAG Core 参数区（`web/frontend/`）。
+
+### 架构健康 (Refactor)
+
+- **移除旧图谱生产装配**：组合根不再装配 `SQLiteGraphStore`、旧 GraphBuild/GraphSearch pipeline；CLI build 改为无 LLM 的 estimate-only 输出（`core/plugin_initializer.py`, `core/event_handler.py`）。
+
+### 测试 (Tests)
+
+- 新增 workspace sanitize、build estimate、官方导出 CSV 解析和新 HTTP 契约覆盖；旧图谱 pipeline 测试标记为 v0.16 已替换（`tests/backend/`）。
+
+### 构建与工程 (Build/CI)
+
+- 新增 `lightrag-hku` 核心依赖，不启用 `[api]` extra；版本同步至 `v0.16.0`（`requirements.txt`, `metadata.yaml`, `_conf_schema.json`）。
+
+
+### 新增功能 (Added)
+
 - **Web 控制台自动启动接线**：`core/plugin_initializer.py` 新增 `_start_web_console()` 私有方法与 `_web_runner` 实例变量；`initialize()` 步骤 7 读取 `web_console` 配置，若 `enabled=true` 且 `password` 非空则自动以 aiohttp `AppRunner` + `TCPSite` 启动 Web 控制台服务器（静态文件指向插件 `pages/` 目录，上传目录复用 `data_dir/documents`）；`teardown()` 补充 `runner.cleanup()` 优雅关闭。密码为空或端口占用时仅 log error，不影响插件主体运行。涉及 `core/plugin_initializer.py`。
 
 ### 架构健康 (Refactor)

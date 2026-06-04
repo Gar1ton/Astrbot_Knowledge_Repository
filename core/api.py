@@ -7,8 +7,10 @@
 managers/pipelines（ingest/category/sync/quota）后，对应写操作改为委派到 manager，门面签名不变。
 依赖经构造器注入，自身不创建依赖（装配在组合根）。
 """
+
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
     from core.ask_progress import ProgressStore
     from core.config import Config
     from core.domain.models import DocumentChunk, QuotaUsage
+    from core.lightrag_core import BuildJob, LightRAGCoreRegistry
     from core.managers.base import BaseCategoryManager, BaseIngestManager, BaseQuotaManager
     from core.metrics import PerformanceTracker
     from core.pipelines.graph_build_pipeline import GraphBuildPipeline
@@ -100,6 +103,7 @@ class KnowledgeRepositoryApi:
         graph_store: GraphStore | None = None,
         graph_build_pipeline: GraphBuildPipeline | None = None,
         graph_search_pipeline: GraphSearchPipeline | None = None,
+        lightrag_registry: LightRAGCoreRegistry | None = None,
         config: Config | None = None,
         config_persist: Callable[[str, str, object], None] | None = None,
         llm_adapter: LLMAdapter | None = None,
@@ -123,6 +127,8 @@ class KnowledgeRepositoryApi:
         self._graph_store = graph_store
         self._graph_build_pipeline = graph_build_pipeline
         self._graph_search_pipeline = graph_search_pipeline
+        self._lightrag_registry = lightrag_registry
+        self._graph_build_jobs: dict[str, BuildJob] = {}
         self._config = config
         self._config_persist = config_persist
         self._llm_adapter = llm_adapter
@@ -161,7 +167,15 @@ class KnowledgeRepositoryApi:
             raise ValueError(f"系统集合 '{SYSTEM_COLLECTION_UNCATEGORIZED}' 不可删除。")
 
         await self._ensure_system_collections()
+        moving_docs = await self._source_store.list_documents(collection=name)
+        if self._lightrag_registry is not None:
+            for doc in moving_docs:
+                await self._lightrag_registry.delete_doc(name, doc.doc_id)
         await self._source_store.move_documents_to_collection(name, SYSTEM_COLLECTION_UNCATEGORIZED)
+        for doc in moving_docs:
+            await self._source_store.set_lightrag_index_status(
+                doc.doc_id, SYSTEM_COLLECTION_UNCATEGORIZED, "pending"
+            )
 
         if self._config:
             vdb = self._config.get_vector_db_config()
@@ -187,6 +201,9 @@ class KnowledgeRepositoryApi:
     async def list_document_chunks(self, doc_id: str) -> list[DocumentChunk]:
         """列出单个文档的本地文本分块，供管理端展示摘要统计。"""
         return await self._source_store.list_chunks(doc_id)
+
+    async def get_lightrag_index_status(self, doc_id: str) -> dict[str, str] | None:
+        return await self._source_store.get_lightrag_index_status(doc_id)
 
     async def register_document(
         self,
@@ -232,6 +249,7 @@ class KnowledgeRepositoryApi:
                 if doc:
                     doc.needs_reindex = True
                     await self._source_store.update_document(doc)
+            await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
             return doc_id
 
         doc_id = uuid.uuid4().hex
@@ -249,6 +267,7 @@ class KnowledgeRepositoryApi:
                 updated_at=_now(),
             )
         )
+        await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
         return doc_id
 
     async def classify_document(
@@ -258,12 +277,28 @@ class KnowledgeRepositoryApi:
 
         仅改动传入的维度：collection/tags 为 None 时该维度保持不变。
         """
-        if self._category_manager:
-            return await self._category_manager.classify_document(
-                doc_id, collection=collection, tags=tags
+        old_doc = await self._source_store.get_document(doc_id)
+        if old_doc is None:
+            return False
+        old_collection = old_doc.collection
+        if collection is not None and collection != old_collection and self._lightrag_registry:
+            await self._lightrag_registry.delete_doc(old_doc.collection, doc_id)
+            logger.info(
+                "LightRAG old workspace delete completed before moving doc %s from %s to %s",
+                doc_id,
+                old_collection,
+                collection,
             )
 
-        doc = await self._source_store.get_document(doc_id)
+        if self._category_manager:
+            updated = await self._category_manager.classify_document(
+                doc_id, collection=collection, tags=tags
+            )
+            if updated and collection is not None and collection != old_collection:
+                await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
+            return updated
+
+        doc = old_doc
         if doc is None:
             return False
         if collection is not None:
@@ -271,7 +306,10 @@ class KnowledgeRepositoryApi:
         if tags is not None:
             doc.tags = tags
         doc.updated_at = _now()
-        return await self._source_store.update_document(doc)
+        updated = await self._source_store.update_document(doc)
+        if updated and collection is not None and collection != old_collection:
+            await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
+        return updated
 
     async def delete_document(self, doc_id: str) -> bool:
         """删除文档、图谱贡献、远端镜像和插件托管原件。"""
@@ -280,6 +318,8 @@ class KnowledgeRepositoryApi:
             return False
 
         chunks = await self._source_store.list_chunks(doc_id)
+        if self._lightrag_registry is not None:
+            await self._lightrag_registry.delete_doc(doc.collection, doc_id)
         records = [
             record
             for record in await self._source_store.list_sync_records()
@@ -316,9 +356,7 @@ class KnowledgeRepositoryApi:
         """列出 AstrBot 知识库中的集合名。"""
         return await self._kb_reader.list_collections()
 
-    async def search_kb(
-        self, collection: str, query: str, top_k: int
-    ) -> list[DocumentChunk]:
+    async def search_kb(self, collection: str, query: str, top_k: int) -> list[DocumentChunk]:
         """在某 AstrBot 知识库集合内检索。"""
         if self._retrieval_orchestrator is not None:
             return await self._retrieval_orchestrator.retrieve(collection, query, top_k)
@@ -435,6 +473,21 @@ class KnowledgeRepositoryApi:
         # 阶段 2：图谱扩展（此处已在 retrieval_orchestrator 内完成，记录占位进度）
         _progress("graph_expand", 50)
 
+        # ── LightRAG 图谱补充上下文（graph.enabled=True 时启用） ───────────────
+        lightrag_context = ""
+        graph_cfg = self._config.get_graph_config() if self._config is not None else None
+        if self._lightrag_registry is not None and graph_cfg is not None and graph_cfg.enabled:
+            try:
+                lg_col = collection
+                if not lg_col:
+                    cols = await self.list_collections()
+                    lg_col = cols[0].name if cols else None
+                if lg_col:
+                    lg_result = await self._lightrag_registry.query(lg_col, question)
+                    lightrag_context = (lg_result.get("answer") or "").strip()
+            except Exception as _e:
+                logger.warning("LightRAG context augmentation in ask() failed: %s", _e)
+
         # 阶段 3：RRF 融合（同上）
         _progress("rrf_fusion", 65)
 
@@ -445,21 +498,19 @@ class KnowledgeRepositoryApi:
             n = i + 1
             doc = await self.get_document(chunk.doc_id)
             title = doc.title if doc else chunk.doc_id
-            sources.append({
-                "n": n,
-                "doc_id": chunk.doc_id,
-                "title": title,
-                "chunk_id": chunk.chunk_id,
-                "ordinal": chunk.ordinal,
-                "text": chunk.text,
-                "metadata": chunk.metadata,
-            })
-            has_page = chunk.metadata and "page_number" in chunk.metadata
-            page_info = (
-                f" (Page {chunk.metadata['page_number']})"
-                if has_page
-                else ""
+            sources.append(
+                {
+                    "n": n,
+                    "doc_id": chunk.doc_id,
+                    "title": title,
+                    "chunk_id": chunk.chunk_id,
+                    "ordinal": chunk.ordinal,
+                    "text": chunk.text,
+                    "metadata": chunk.metadata,
+                }
             )
+            has_page = chunk.metadata and "page_number" in chunk.metadata
+            page_info = f" (Page {chunk.metadata['page_number']})" if has_page else ""
             context_parts.append(f"[{n}] {title}{page_info}\n{chunk.text}")
 
         # 阶段 4：LLM 生成答案
@@ -479,8 +530,12 @@ class KnowledgeRepositoryApi:
                 if bot_persona:
                     system_prompt = f"{bot_persona}\n\n[RAG Constraints]\n{system_prompt}"
 
+            graph_header = (
+                f"[图谱分析]\n{lightrag_context}\n\n---\n\n" if lightrag_context else ""
+            )
             user_prompt = (
                 "Context:\n\n"
+                + graph_header
                 + "\n\n---\n\n".join(context_parts)
                 + f"\n\nQuestion: {question}"
             )
@@ -522,9 +577,7 @@ class KnowledgeRepositoryApi:
     # 真实实现到对应版本接入（届时本类构造器注入对应 manager，方法体改为委派，签名不变）。
     # 现阶段统一抛 NotImplementedError，web 层捕获后回 501 + available_in，前端展示「将接入」。
 
-    async def sync_documents(
-        self, target: str, doc_ids: list[str] | None = None
-    ) -> dict:
+    async def sync_documents(self, target: str, doc_ids: list[str] | None = None) -> dict:
         """把文档同步到在线目标（target=r2|notion|all）。doc_ids=None 表示全量。
 
         Reserved（v0.3.0 R2 / v0.4.0 Notion 接入）：返回逐文档同步结果汇总 + 配额预警。
@@ -588,27 +641,35 @@ class KnowledgeRepositoryApi:
             raise NotImplementedError("get_effective_config: available in v0.8.0")
         return self._config.to_public_dict()
 
-    _SECRET_KEYS: frozenset[str] = frozenset({
-        "api_key", "secret_access_key", "access_key_id", "password",
-    })
+    _SECRET_KEYS: frozenset[str] = frozenset(
+        {
+            "api_key",
+            "secret_access_key",
+            "access_key_id",
+            "password",
+        }
+    )
 
     async def update_config_value(self, section: str, key: str, value: Any) -> None:
         """更新受限配置项，并进行写保护校验与运行时热重载。"""
-        if section not in ("vector_db", "ask"):
+        if section not in ("vector_db", "ask", "graph"):
             raise ValueError(f"Section '{section}' is write-protected or read-only.")
         if key in self._SECRET_KEYS:
             raise ValueError(f"'{key}' 为机密字段，必须通过环境变量注入，不可经此接口写入。")
 
         # 保存配置到内存与物理存储
         self._persist_config_value(section, key, value)
+        if self._config:
+            self._config.set_value(section, key, value)
 
         # 针对 vector_db 的改动，触发热重载 (Hot-reload)
         if section == "vector_db" and self._config:
             vdb = self._config.get_vector_db_config()
-            
+
             # 如果 vector_db 开启了 milvus，但 vector_store 尚未初始化，在此进行动态构建
             if vdb.backend == "milvus" and not self._vector_store:
                 from core.repository.vector_store.milvus_lite import MilvusLiteVectorStore
+
                 db_dir_path = (
                     self._managed_documents_dir.parent
                     if self._managed_documents_dir
@@ -616,29 +677,26 @@ class KnowledgeRepositoryApi:
                 )
                 milvus_db_path = str(db_dir_path / vdb.db_filename)
                 self._vector_store = MilvusLiteVectorStore(db_path=milvus_db_path)
-            
+
             # 重新实例化并构建 Embedding Provider 实例
             from core.repository.embedding.factory import EmbeddingProviderFactory
+
             db_dir_str = (
-                str(self._managed_documents_dir.parent)
-                if self._managed_documents_dir
-                else "./data"
+                str(self._managed_documents_dir.parent) if self._managed_documents_dir else "./data"
             )
             self._embedding_provider = EmbeddingProviderFactory.create_provider(
                 self._config, db_dir=db_dir_str
             )
-            
+
             # 将更新后的实例同步回统一检索编排器 (RetrievalOrchestrator) 内部
             if self._retrieval_orchestrator:
                 self._retrieval_orchestrator._embedding_provider = self._embedding_provider
                 self._retrieval_orchestrator._vector_store = self._vector_store
 
-
-    async def test_embedding_connection(
-        self, api_key: str, base_url: str, model_name: str
-    ) -> dict:
+    async def test_embedding_connection(self, api_key: str, base_url: str, model_name: str) -> dict:
         """临时创建一个 ExternalEmbeddingProvider 并发送测试请求，验证云端 API 可连通性。"""
         from core.repository.embedding.external import ExternalEmbeddingProvider
+
         provider = ExternalEmbeddingProvider(
             api_key=api_key,
             base_url=base_url,
@@ -688,14 +746,88 @@ class KnowledgeRepositoryApi:
 
         raise NotImplementedError("restore_from_backup: available in v0.3.0")
 
-    async def build_graph(self, collection: str | None = None) -> dict:
-        """构建/增量更新知识图谱（仅对变化 chunk 抽取）。
+    async def estimate_graph_build(self, collection: str | None = None) -> dict:
+        """Dry-run LightRAG build estimate. This never calls LLM or Embedding."""
+        from core.lightrag_core import estimate_lightrag_build
 
-        Reserved（v0.6.0 LightRAG）：返回新增/更新的实体与关系数。
-        """
-        if self._graph_build_pipeline:
-            return await self._graph_build_pipeline.build_graph(collection)
-        raise NotImplementedError("build_graph: available in v0.6.0")
+        col = await self._resolve_collection(collection)
+        docs = await self._source_store.list_documents(collection=col)
+        chunks_by_doc = {
+            doc.doc_id: await self._source_store.list_chunks(doc.doc_id) for doc in docs
+        }
+        estimate = estimate_lightrag_build(docs, chunks_by_doc)
+        return {"collection": col, **estimate}
+
+    async def build_graph(self, collection: str | None = None, *, confirmed: bool = False) -> dict:
+        """Start a manually confirmed LightRAG Core build job."""
+        if not confirmed:
+            raise ValueError(
+                "LightRAG build requires confirmed=true because it triggers LLM indexing"
+            )
+        if self._lightrag_registry is None:
+            raise RuntimeError("LightRAG Core registry is not configured")
+
+        from core.lightrag_core import BuildJob
+
+        col = await self._resolve_collection(collection)
+        job_id = uuid.uuid4().hex
+        docs = await self._source_store.list_documents(collection=col)
+        job = BuildJob(job_id=job_id, collection=col, total_docs=len(docs))
+        self._graph_build_jobs[job_id] = job
+        asyncio.create_task(self._run_lightrag_build_job(job_id))
+        return {"job_id": job_id, "status": job.status, "engine": job.engine, "collection": col}
+
+    async def get_graph_build_job(self, job_id: str) -> dict | None:
+        job = self._graph_build_jobs.get(job_id)
+        return job.to_dict() if job else None
+
+    async def _run_lightrag_build_job(self, job_id: str) -> None:
+        job = self._graph_build_jobs[job_id]
+        assert self._lightrag_registry is not None
+        job.status = "running"
+        job.stage = "reading_documents"
+        try:
+            docs = await self._source_store.list_documents(collection=job.collection)
+            job.total_docs = len(docs)
+            for doc in docs:
+                job.stage = "indexing"
+                chunks = await self._source_store.list_chunks(doc.doc_id)
+                text = "\n\n".join(chunk.text for chunk in chunks if chunk.text.strip())
+                if not text.strip():
+                    job.processed_docs += 1
+                    continue
+                try:
+                    await self._lightrag_registry.insert_document(job.collection, doc.doc_id, text)
+                    await self._source_store.set_lightrag_index_status(
+                        doc.doc_id, job.collection, "indexed"
+                    )
+                    job.processed_docs += 1
+                except Exception as exc:
+                    job.failed_docs += 1
+                    job.recent_error = str(exc)
+                    await self._source_store.set_lightrag_index_status(
+                        doc.doc_id, job.collection, "error", str(exc)
+                    )
+                    logger.error("LightRAG build failed for doc %s: %s", doc.doc_id, exc)
+            job.stage = "done"
+            job.status = "success" if job.failed_docs == 0 else "partial_failure"
+        except Exception as exc:
+            job.stage = "error"
+            job.status = "error"
+            job.recent_error = str(exc)
+            logger.error("LightRAG build job %s failed: %s", job_id, exc)
+        finally:
+            job.finished_at = time.time()
+
+    async def probe_lightrag_core(
+        self, collection: str, text: str, doc_id: str, query: str
+    ) -> dict:
+        """Deployment manual probe for AstrBot terminal verification."""
+        if self._lightrag_registry is None:
+            raise RuntimeError("LightRAG Core registry is not configured")
+        return await self._lightrag_registry.manual_probe(
+            collection=collection, text=text, doc_id=doc_id, query=query
+        )
 
     async def query_graph(
         self,
@@ -708,6 +840,13 @@ class KnowledgeRepositoryApi:
 
         Reserved（v0.6.0）：返回命中实体/关系与来源 chunk。
         """
+        if self._lightrag_registry is not None:
+            col = await self._resolve_collection(collection)
+            payload = await self._lightrag_registry.query(col, query)
+            payload["status"] = "success"
+            payload["query"] = query
+            return payload
+
         if self._graph_search_pipeline:
             col = collection
             if col is None:
@@ -724,36 +863,42 @@ class KnowledgeRepositoryApi:
             # 序列化为纯 dict 以确保 Web/JSON 兼容性
             serialized_chunks = []
             for ch in res.get("chunks", []):
-                serialized_chunks.append({
-                    "chunk_id": ch.chunk_id,
-                    "doc_id": ch.doc_id,
-                    "ordinal": ch.ordinal,
-                    "text": ch.text,
-                    "content_hash": ch.content_hash,
-                })
+                serialized_chunks.append(
+                    {
+                        "chunk_id": ch.chunk_id,
+                        "doc_id": ch.doc_id,
+                        "ordinal": ch.ordinal,
+                        "text": ch.text,
+                        "content_hash": ch.content_hash,
+                    }
+                )
 
             serialized_entities = []
             for ent in res.get("entities", []):
-                serialized_entities.append({
-                    "entity_id": ent.entity_id,
-                    "name": ent.name,
-                    "entity_type": ent.entity_type,
-                    "description": ent.description,
-                    "source_chunk_ids": ent.source_chunk_ids,
-                    "degree": ent.degree,
-                })
+                serialized_entities.append(
+                    {
+                        "entity_id": ent.entity_id,
+                        "name": ent.name,
+                        "entity_type": ent.entity_type,
+                        "description": ent.description,
+                        "source_chunk_ids": ent.source_chunk_ids,
+                        "degree": ent.degree,
+                    }
+                )
 
             serialized_relations = []
             for rel in res.get("relations", []):
-                serialized_relations.append({
-                    "relation_id": rel.relation_id,
-                    "src_entity_id": rel.src_entity_id,
-                    "dst_entity_id": rel.dst_entity_id,
-                    "relation": rel.relation,
-                    "description": rel.description,
-                    "weight": rel.weight,
-                    "source_chunk_ids": rel.source_chunk_ids,
-                })
+                serialized_relations.append(
+                    {
+                        "relation_id": rel.relation_id,
+                        "src_entity_id": rel.src_entity_id,
+                        "dst_entity_id": rel.dst_entity_id,
+                        "relation": rel.relation,
+                        "description": rel.description,
+                        "weight": rel.weight,
+                        "source_chunk_ids": rel.source_chunk_ids,
+                    }
+                )
 
             payload = {
                 "status": "success",
@@ -775,6 +920,10 @@ class KnowledgeRepositoryApi:
 
         Reserved（v0.7.0 图谱可视化）：返回 {nodes:[...], edges:[...]}。
         """
+        if self._lightrag_registry is not None:
+            col = await self._resolve_collection(collection)
+            return await self._lightrag_registry.export_graph(col)
+
         if self._graph_store:
             col = collection
             if col is None:
@@ -793,15 +942,17 @@ class KnowledgeRepositoryApi:
                 source_ids = [cid for cid in ent.source_chunk_ids if cid in scoped_chunk_ids]
                 if not source_ids:
                     continue
-                nodes.append({
-                    "id": ent.entity_id,
-                    "name": ent.name,
-                    "type": ent.entity_type,
-                    "description": ent.description,
-                    "degree": ent.degree,
-                    "source_chunk_ids": source_ids,
-                    "source_previews": _chunk_previews(chunk_by_id, source_ids),
-                })
+                nodes.append(
+                    {
+                        "id": ent.entity_id,
+                        "name": ent.name,
+                        "type": ent.entity_type,
+                        "description": ent.description,
+                        "degree": ent.degree,
+                        "source_chunk_ids": source_ids,
+                        "source_previews": _chunk_previews(chunk_by_id, source_ids),
+                    }
+                )
 
             node_ids = {node["id"] for node in nodes}
             edges = []
@@ -811,16 +962,18 @@ class KnowledgeRepositoryApi:
                     continue
                 if rel.src_entity_id not in node_ids or rel.dst_entity_id not in node_ids:
                     continue
-                edges.append({
-                    "id": rel.relation_id,
-                    "source": rel.src_entity_id,
-                    "target": rel.dst_entity_id,
-                    "relation": rel.relation,
-                    "description": rel.description,
-                    "weight": rel.weight,
-                    "source_chunk_ids": source_ids,
-                    "source_previews": _chunk_previews(chunk_by_id, source_ids),
-                })
+                edges.append(
+                    {
+                        "id": rel.relation_id,
+                        "source": rel.src_entity_id,
+                        "target": rel.dst_entity_id,
+                        "relation": rel.relation,
+                        "description": rel.description,
+                        "weight": rel.weight,
+                        "source_chunk_ids": source_ids,
+                        "source_previews": _chunk_previews(chunk_by_id, source_ids),
+                    }
+                )
 
             return {
                 "status": "success",
@@ -830,6 +983,12 @@ class KnowledgeRepositoryApi:
             }
 
         raise NotImplementedError("get_graph: available in v0.7.0")
+
+    async def _resolve_collection(self, collection: str | None) -> str:
+        if collection:
+            return collection
+        cols = await self.list_collections()
+        return cols[0].name if cols else "default"
 
     # ── 性能指标与进度（供 WebUI 监控面板使用）─────────────────────
 
@@ -857,9 +1016,11 @@ class KnowledgeRepositoryApi:
         collections: set[str] = set()
         for cid in chunk_ids:
             # 通过 doc_id 映射集合（best-effort）
-            chunk_rows = await self._source_store.list_chunks_by_id([cid]) if hasattr(
-                self._source_store, "list_chunks_by_id"
-            ) else []
+            chunk_rows = (
+                await self._source_store.list_chunks_by_id([cid])
+                if hasattr(self._source_store, "list_chunks_by_id")
+                else []
+            )
             for chunk in chunk_rows:
                 doc = await self._source_store.get_document(chunk.doc_id)
                 if doc:
@@ -875,9 +1036,9 @@ class KnowledgeRepositoryApi:
     def get_system_info(self) -> dict:
         """返回后端运行环境基础信息，供调试面板使用。"""
         import sys
+
         data_dir = (
-            self._managed_documents_dir.parent
-            if self._managed_documents_dir else Path("data")
+            self._managed_documents_dir.parent if self._managed_documents_dir else Path("data")
         )
         source_cfg = self._config.get_source_store_config() if self._config else None
         db_file = source_cfg.db_filename if source_cfg else "knowledge_repository.db"
@@ -912,12 +1073,16 @@ class KnowledgeRepositoryApi:
         entries = []
         for item in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name)):
             stat = item.stat()
-            entries.append({
-                "name": item.name,
-                "type": "file" if item.is_file() else "dir",
-                "size_bytes": stat.st_size if item.is_file() else None,
-                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-            })
+            entries.append(
+                {
+                    "name": item.name,
+                    "type": "file" if item.is_file() else "dir",
+                    "size_bytes": stat.st_size if item.is_file() else None,
+                    "modified_at": datetime.fromtimestamp(
+                        stat.st_mtime, tz=timezone.utc
+                    ).isoformat(),
+                }
+            )
         return {
             "path": str(target.relative_to(data_dir)),
             "entries": entries,
@@ -928,16 +1093,17 @@ class KnowledgeRepositoryApi:
     def list_local_embedding_models(self) -> list[dict]:
         """列出 HuggingFace hub 缓存中的本地 embedding 模型目录。"""
         import os
-        hf_cache = Path(
-            os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
-        ) / "hub"
+
+        hf_cache = (
+            Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))) / "hub"
+        )
         if not hf_cache.is_dir():
             return []
         models = []
         for entry in sorted(hf_cache.iterdir()):
             if not entry.is_dir() or not entry.name.startswith("models--"):
                 continue
-            raw_name = entry.name[len("models--"):]
+            raw_name = entry.name[len("models--") :]
             display_name = raw_name.replace("--", "/")
             size_bytes = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
             try:
@@ -945,13 +1111,15 @@ class KnowledgeRepositoryApi:
                 last_modified = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
             except ValueError:
                 last_modified = None
-            models.append({
-                "name": display_name,
-                "dir_name": entry.name,
-                "size_bytes": size_bytes,
-                "last_modified": last_modified,
-                "path": str(entry),
-            })
+            models.append(
+                {
+                    "name": display_name,
+                    "dir_name": entry.name,
+                    "size_bytes": size_bytes,
+                    "last_modified": last_modified,
+                    "path": str(entry),
+                }
+            )
         return models
 
     def delete_local_embedding_model(self, model_name: str) -> dict:
@@ -962,11 +1130,12 @@ class KnowledgeRepositoryApi:
         import os
         import re
         import shutil
+
         if not re.fullmatch(r"[A-Za-z0-9\-_./]+", model_name) or ".." in model_name:
             raise ValueError("Invalid model name")
-        hf_cache = Path(
-            os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
-        ) / "hub"
+        hf_cache = (
+            Path(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))) / "hub"
+        )
         dir_name = "models--" + model_name.replace("/", "--")
         target = hf_cache / dir_name
         if not target.exists():
@@ -1008,13 +1177,15 @@ def _chunk_previews(
         if chunk is None:
             continue
         text = chunk.text.strip()
-        previews.append({
-            "chunk_id": chunk.chunk_id,
-            "doc_id": chunk.doc_id,
-            "ordinal": chunk.ordinal,
-            "text": text[:limit],
-            "truncated": len(text) > limit,
-        })
+        previews.append(
+            {
+                "chunk_id": chunk.chunk_id,
+                "doc_id": chunk.doc_id,
+                "ordinal": chunk.ordinal,
+                "text": text[:limit],
+                "truncated": len(text) > limit,
+            }
+        )
     return previews
 
 

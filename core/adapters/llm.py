@@ -3,6 +3,7 @@
 利用 AstrBot 运行态 context 中的 LLM Provider，执行学术实体与有向关系的结构化 JSON 抽取。
 支持动态注入自定义 Entity Types 提示词约束，并提供高保真的离线测试 Stub 实现。
 """
+
 from __future__ import annotations
 
 import json
@@ -19,7 +20,9 @@ class LLMAdapter:
     def __init__(self, context: Any = None) -> None:
         self._context = context
 
-    async def generate(self, prompt: str, system_prompt: str = "") -> str:
+    async def generate(
+        self, prompt: str, system_prompt: str = "", *, allow_mock: bool = True
+    ) -> str:
         """通用文本生成（用于 Ask Agent 等问答场景）。
 
         优先使用 AstrBot context 中的 LLM Provider；无运行态时返回离线占位答案。
@@ -34,9 +37,8 @@ class LLMAdapter:
                 if not raw:
                     provider = getattr(self._context, "llm_provider", None)
                     if provider is not None:
-                        chat_fn = (
-                            getattr(provider, "chat", None)
-                            or getattr(provider, "generate", None)
+                        chat_fn = getattr(provider, "chat", None) or getattr(
+                            provider, "generate", None
                         )
                         if callable(chat_fn):
                             raw = await chat_fn(prompt, system_prompt=system_prompt or None)
@@ -45,9 +47,8 @@ class LLMAdapter:
                     get_provider = getattr(self._context, "get_llm_provider", None)
                     if callable(get_provider):
                         provider = await get_provider()
-                        chat_fn = (
-                            getattr(provider, "chat", None)
-                            or getattr(provider, "generate", None)
+                        chat_fn = getattr(provider, "chat", None) or getattr(
+                            provider, "generate", None
                         )
                         if callable(chat_fn):
                             raw = await chat_fn(prompt, system_prompt=system_prompt or None)
@@ -55,6 +56,10 @@ class LLMAdapter:
                 logger.error(f"LLMAdapter.generate failed: {e}")
 
         if not raw or not raw.strip():
+            if not allow_mock:
+                raise RuntimeError(
+                    "No real AstrBot LLM provider response; mock fallback is disabled"
+                )
             logger.info("[Offline Stub] generate: returning placeholder answer.")
             raw = self._mock_generate(prompt)
 
@@ -115,8 +120,7 @@ Output ONLY the raw JSON string.
 """
 
         user_prompt = (
-            f"Please analyze the following academic text and extract the knowledge graph:\n\n"
-            f"{text}"
+            f"Please analyze the following academic text and extract the knowledge graph:\n\n{text}"
         )
 
         raw_response = ""
@@ -172,26 +176,29 @@ Output ONLY the raw JSON string.
 
         # 如果发现专有名词，构造实体
         for i, word in enumerate(unique_words[:4]):  # 限制数量
-            entities.append({
-                "name": word,
-                "type": default_type,
-                "description": f"Extracted academic concept representing {word}."
-            })
+            entities.append(
+                {
+                    "name": word,
+                    "type": default_type,
+                    "description": f"Extracted academic concept representing {word}.",
+                }
+            )
 
         # 构造链式有向关系
         for i in range(len(entities) - 1):
-            relations.append({
-                "src": entities[i]["name"],
-                "dst": entities[i+1]["name"],
-                "relation": "relates_to",
-                "description": f"{entities[i]['name']} is connected to {entities[i+1]['name']}.",
-                "weight": 1.0
-            })
+            relations.append(
+                {
+                    "src": entities[i]["name"],
+                    "dst": entities[i + 1]["name"],
+                    "relation": "relates_to",
+                    "description": (
+                        f"{entities[i]['name']} is connected to {entities[i + 1]['name']}."
+                    ),
+                    "weight": 1.0,
+                }
+            )
 
-        result = {
-            "entities": entities,
-            "relations": relations
-        }
+        result = {"entities": entities, "relations": relations}
         return json.dumps(result)
 
     def _clean_and_parse_json(self, raw_str: str) -> dict[str, list[dict[str, Any]]]:

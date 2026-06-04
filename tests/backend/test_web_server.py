@@ -290,44 +290,29 @@ async def test_sync_status_endpoint_returns_200(tmp_path: Path) -> None:
 
 
 async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
-    from unittest.mock import AsyncMock
-    # Create an API with mocked pipelines
+    class StubLightRAGRegistry:
+        async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
+            self.inserted = (collection, doc_id, text)
+
+        async def query(self, collection: str, query: str) -> dict:
+            return {
+                "answer": "LightRAG answer",
+                "context": "LightRAG context",
+                "collection": collection,
+                "engine": "lightrag_core",
+                "debug": {"query_mode": "mix"},
+            }
+
     store = InMemorySourceDocumentStore()
-    kb = InMemoryKnowledgeBaseReader({})
-
-    mock_build = AsyncMock()
-    mock_build.build_graph.return_value = {
-        "status": "success",
-        "message": "Extracted 2, skipped 1.",
-        "total_chunks": 3,
-        "extracted_chunks": 2,
-        "skipped_chunks": 1,
-        "deleted_stale_chunks": 0,
-    }
-
-    mock_search = AsyncMock()
-    mock_search.search.return_value = {
-        "status": "success",
-        "query": "Transformer",
-        "chunks": [],
-        "entities": [GraphEntity("transformer", "Transformer", "Method", "desc", ["c2"])],
-        "relations": [
-            GraphRelation("r1", "transformer", "attention", "uses", "desc", 1.0, ["c2"])
-        ],
-        "context": "Context text",
-        "debug": {
-            "vector_chunk_ids": ["c2"],
-            "keyword_chunk_ids": [],
-            "graph_chunk_ids": [],
-            "rrf_scores": {"c2": 0.1},
-        },
-    }
-
+    await store.upsert_collection(Collection(name="papers", description="d"))
+    await store.add_document(
+        SourceDocument("d1", "Doc 1", "/p/d1.pdf", "application/pdf", 100, "h1", "papers")
+    )
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "source text", "ch1")])
     api = KnowledgeRepositoryApi(
         source_store=store,
-        kb_reader=kb,
-        graph_build_pipeline=mock_build,
-        graph_search_pipeline=mock_search,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=StubLightRAGRegistry(),  # type: ignore[arg-type]
     )
 
     app = build_app(
@@ -340,25 +325,34 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
     client = TestClient(TestServer(app))
     await client.start_server()
     try:
-        # Test post build graph
+        estimate = await client.post("/api/graph/build/estimate", json={"collection": "papers"})
+        assert estimate.status == 200
+        estimate_body = await estimate.json()
+        assert estimate_body["estimate_notice"].endswith("实际 LLM 调用次数和耗时可能更高。")
+
         resp1 = await client.post("/api/graph/build", json={"collection": "papers"})
+        assert resp1.status == 400
+        resp1 = await client.post(
+            "/api/graph/build", json={"collection": "papers", "confirmed": True}
+        )
         assert resp1.status == 200
         body1 = await resp1.json()
-        assert body1["status"] == "success"
-        assert body1["extracted_chunks"] == 2
+        assert body1["engine"] == "lightrag_core"
+        assert body1["collection"] == "papers"
+        assert body1["job_id"]
 
-        # Test get query graph
-        resp2 = await client.get("/api/graph/query?q=Transformer&top_k=3&debug=true")
+        job_resp = await client.get(f"/api/graph/build/{body1['job_id']}")
+        assert job_resp.status == 200
+        assert (await job_resp.json())["engine"] == "lightrag_core"
+
+        resp2 = await client.get("/api/graph/query?q=Transformer&top_k=3&debug=true&collection=papers")
         assert resp2.status == 200
         body2 = await resp2.json()
         assert body2["status"] == "success"
-        assert body2["context"] == "Context text"
-        assert body2["debug"]["vector_chunk_ids"] == ["c2"]
-        assert body2["entities"][0]["id"] == "transformer"
-        assert body2["entities"][0]["type"] == "Method"
-        assert body2["relations"][0]["id"] == "r1"
-        assert body2["relations"][0]["source"] == "transformer"
-        assert body2["relations"][0]["target"] == "attention"
+        assert body2["answer"] == "LightRAG answer"
+        assert body2["context"] == "LightRAG context"
+        assert body2["engine"] == "lightrag_core"
+        assert body2["debug"]["query_mode"] == "mix"
     finally:
         await client.close()
 

@@ -3,6 +3,7 @@
 验证图谱检索管线：向量检索召回、关键词精确实体检索、
 1-hop 边邻居扩展、RRF 互惠排名打分及上下文生成逻辑。
 """
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -17,6 +18,10 @@ from core.repository.graph_store.sqlite import SQLiteGraphStore
 from core.repository.kb_reader.base import KnowledgeBaseReader
 from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
 from migrations.runner import run_migrations
+
+pytestmark = pytest.mark.skip(
+    reason="v0.16.0 replaced the legacy graph pipeline with official LightRAG Core"
+)
 
 
 @pytest.fixture
@@ -82,28 +87,30 @@ async def test_graph_search_pipeline_hybrid_rrf_and_context(
     # e1: Transformer (Method), 支撑 chunk: c1
     # e2: Attention (Method), 支撑 chunk: c2
     # r1: Transformer --(uses)--> Attention, 支撑 chunk: c1
-    await graph_store.upsert_entities([
-        GraphEntity("transformer", "Transformer", "Method", "Self-attention model.", ["c1"]),
-        GraphEntity("attention", "Attention", "Method", "Alignment mapping.", ["c2"]),
-    ])
-    await graph_store.upsert_relations([
-        GraphRelation(
-            "transformer:attention:uses",
-            "transformer",
-            "attention",
-            "uses",
-            "Transformer uses attention.",
-            1.0,
-            ["c1"],
-        )
-    ])
+    await graph_store.upsert_entities(
+        [
+            GraphEntity("transformer", "Transformer", "Method", "Self-attention model.", ["c1"]),
+            GraphEntity("attention", "Attention", "Method", "Alignment mapping.", ["c2"]),
+        ]
+    )
+    await graph_store.upsert_relations(
+        [
+            GraphRelation(
+                "transformer:attention:uses",
+                "transformer",
+                "attention",
+                "uses",
+                "Transformer uses attention.",
+                1.0,
+                ["c1"],
+            )
+        ]
+    )
 
     # 2) 模拟 Stream 1 (向量搜索)，让其返回 chunk c2
     mock_reader = MagicMock(spec=KnowledgeBaseReader)
     mock_reader.search = AsyncMock(
-        return_value=[
-            DocumentChunk("c2", "d1", 1, "Attention is powerful.", "chash2")
-        ]
+        return_value=[DocumentChunk("c2", "d1", 1, "Attention is powerful.", "chash2")]
     )
 
     pipeline = GraphSearchPipeline(

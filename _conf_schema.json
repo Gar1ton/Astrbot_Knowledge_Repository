@@ -22,7 +22,6 @@
       }
     }
   },
-
   "r2_sync": {
     "description": "Cloudflare R2 备份（崩溃恢复）",
     "type": "object",
@@ -68,7 +67,6 @@
       }
     }
   },
-
   "notion_sync": {
     "description": "Notion 单向镜像（经 MCP）",
     "type": "object",
@@ -107,7 +105,6 @@
       }
     }
   },
-
   "web_console": {
     "description": "独立 Web 控制台",
     "type": "object",
@@ -142,48 +139,58 @@
       }
     }
   },
-
   "graph": {
-    "description": "LightRAG 知识图谱",
+    "description": "LightRAG Core 知识图谱",
     "type": "object",
-    "hint": "增量式知识图谱：仅对内容变化的 chunk 抽取实体/关系，复用 KB 既有 embedding",
+    "hint": "官方 lightrag-hku Core：上传后不自动构建；用户手动确认后才触发 LLM/Embedding 索引。每个 collection 使用独立 workspace。",
     "items": {
       "enabled": {
-        "description": "启用知识图谱",
+        "description": "启用 LightRAG Core 图谱",
         "type": "bool",
         "default": false
       },
-      "incremental": {
-        "description": "增量索引（按内容哈希跳过未变 chunk）",
-        "type": "bool",
-        "default": true
+      "query_mode": {
+        "description": "LightRAG 查询模式",
+        "type": "string",
+        "default": "mix",
+        "options": [
+          "mix",
+          "local",
+          "global",
+          "hybrid",
+          "naive",
+          "bypass"
+        ]
       },
-      "rrf_k": {
-        "description": "向量召回与图召回 RRF 融合常数",
+      "embedding_dim": {
+        "description": "Embedding 向量维度",
         "type": "int",
-        "default": 60,
-        "hint": "与 AstrBot 知识库检索的 RRF 常数对齐"
+        "default": 1024,
+        "hint": "必须与当前 EmbeddingProvider 真实输出维度一致，否则 LightRAG 会拒绝写入。"
       },
-      "query_top_k": {
-        "description": "图谱查询返回上限",
+      "max_token_size": {
+        "description": "Embedding 最大 token 数",
         "type": "int",
-        "default": 5
+        "default": 8192
       },
-      "entity_types": {
-        "description": "自定义实体类型定义（支持不同学术领域的本体自定义）",
-        "type": "list",
-        "default": [
-          "Method/Algorithm",
-          "Scientific Problem/Task",
-          "Dataset",
-          "Evaluation Metric",
-          "Theory/Hypothesis"
-        ],
-        "hint": "不同学术领域可自定义。如生物医学可设为 [Gene, Disease, Drug, Protein, Pathway]"
+      "llm_max_async": {
+        "description": "LLM 并发上限",
+        "type": "int",
+        "default": 4
+      },
+      "embedding_max_async": {
+        "description": "Embedding 并发上限",
+        "type": "int",
+        "default": 8
+      },
+      "working_dir": {
+        "description": "LightRAG workspace 根目录",
+        "type": "string",
+        "default": "lightrag_workspaces",
+        "hint": "相对路径会放在插件 data_dir 下；WebUI 只读展示。"
       }
     }
   },
-
   "vector_db": {
     "description": "向量数据库与检索后端",
     "type": "object",
@@ -193,14 +200,21 @@
         "description": "检索后端",
         "type": "string",
         "default": "astr",
-        "options": ["astr", "milvus"],
+        "options": [
+          "astr",
+          "milvus"
+        ],
         "hint": "astr 表示复用 AstrBot 自带检索（FAISS+FTS5+RRF）；milvus 表示开启插件本地 Milvus Lite 向量引擎"
       },
       "embedding_provider": {
         "description": "Embedding 提供商（仅 milvus 后端有效）",
         "type": "string",
         "default": "local",
-        "options": ["local", "external", "astr"],
+        "options": [
+          "local",
+          "external",
+          "astr"
+        ],
         "hint": "astr 表示复用 AstrBot 主框架已配置的 Embedding 模型，无需额外安装依赖或填写 API Key（待完整接口对接后生效）；local 表示使用本地离线模型（如 BAAI/bge-large-en-v1.5），首次启用需手动执行 pip install sentence-transformers；external 为云端 API 转换（如 OpenAI，需自行配置 api_key 与 base_url）"
       },
       "db_filename": {
@@ -216,7 +230,6 @@
       }
     }
   },
-
   "ask": {
     "description": "Ask Agent 问答与对话增强",
     "type": "object",
@@ -226,7 +239,10 @@
         "description": "普通对话增强模式",
         "type": "string",
         "default": "inject",
-        "options": ["inject", "query_agent"],
+        "options": [
+          "inject",
+          "query_agent"
+        ],
         "hint": "inject: 召回注入模式（将片段作为 Grounded Context 注入 system prompt，由原生 LLM 组织作答）；query_agent: 代理问答模式（直接由 Standalone Ask Agent 闭环生成纯学术级严谨回答并进行指令级绝对代理代理输出，强制关闭 persona 防止过拟合）"
       }
     }

@@ -2,6 +2,7 @@
 
 验证图谱构建管线：增量对比跳过、过期数据级联清理、大模型不匹配类型对齐、外键完整性实体自动打桩等业务逻辑。
 """
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -16,6 +17,10 @@ from core.pipelines.graph_build_pipeline import GraphBuildPipeline
 from core.repository.graph_store.sqlite import SQLiteGraphStore
 from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
 from migrations.runner import run_migrations
+
+pytestmark = pytest.mark.skip(
+    reason="v0.16.0 replaced the legacy graph pipeline with official LightRAG Core"
+)
 
 
 @pytest.fixture
@@ -78,15 +83,15 @@ async def test_graph_build_pipeline_first_run_and_incremental(
             "entities": [
                 {"name": "Transformers", "type": "Method", "description": "GNN style method."}
             ],
-            "relations": []
+            "relations": [],
         },
         # c2 提取结果
         {
             "entities": [
                 {"name": "BLEU", "type": "Metric", "description": "N-gram matching metric."}
             ],
-            "relations": []
-        }
+            "relations": [],
+        },
     ]
 
     pipeline = GraphBuildPipeline(
@@ -138,13 +143,13 @@ async def test_graph_build_pipeline_obsolete_pruning(
         # 首次提取 (c1)
         {
             "entities": [{"name": "OldConcept", "type": "Method", "description": "old"}],
-            "relations": []
+            "relations": [],
         },
         # 修改后重新提取 (c1)
         {
             "entities": [{"name": "NewConcept", "type": "Method", "description": "new"}],
-            "relations": []
-        }
+            "relations": [],
+        },
     ]
 
     pipeline = GraphBuildPipeline(
@@ -202,7 +207,7 @@ async def test_graph_build_pipeline_type_alignment_and_foreign_key_stubs(
                     "description": "BERT is built on PyTorch framework",
                     "weight": 1.0,
                 }
-            ]
+            ],
         }
     )
 

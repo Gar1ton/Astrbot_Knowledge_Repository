@@ -2,6 +2,7 @@
 
 # ── 运行时核心依赖 ─────────────────────────────────────────────
 aiosqlite                  # 异步 SQLite（repository/source_store、graph_store）
+lightrag-hku==1.5.0         # 官方 LightRAG Core（不启用 [api] extra）
 
 # ── 可选 / 按功能启用 ─────────────────────────────────────────
 PyMuPDF                    # 本地 PDF 文本抽取（无 LLM）；ingest_manager 使用

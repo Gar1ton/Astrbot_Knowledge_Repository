@@ -16,7 +16,7 @@ def test_defaults_when_empty() -> None:
     assert cfg.get_r2_sync_config().free_tier_gb == 10
     assert cfg.get_notion_sync_config().mcp_server_name == "notion"
     assert cfg.get_web_console_config().port == 6520
-    assert cfg.get_graph_config().rrf_k == 60
+    assert cfg.get_graph_config().query_mode == "mix"
 
 
 def test_section_overrides() -> None:
@@ -24,7 +24,7 @@ def test_section_overrides() -> None:
     r2 = cfg.get_r2_sync_config()
     assert r2.enabled is True
     assert r2.account_id == "acc"
-    assert r2.free_tier_gb == 5
+    assert r2.free_tier_gb == 10
 
 
 def test_r2_endpoint_and_free_tier_bytes() -> None:
@@ -67,7 +67,7 @@ def test_web_password_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_malformed_section_falls_back_to_defaults() -> None:
     # 子配置类型不符（非 dict）时应安全回退默认值
     cfg = Config({"graph": "not-a-dict"})
-    assert cfg.get_graph_config().rrf_k == 60
+    assert cfg.get_graph_config().query_mode == "mix"
 
 
 def test_public_config_masks_secrets() -> None:

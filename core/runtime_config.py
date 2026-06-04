@@ -26,6 +26,14 @@ _ALLOWED_RUNTIME_KEYS = {
         "db_filename",
         "auto_index_enabled",
     }),
+    "graph": frozenset({
+        "enabled",
+        "query_mode",
+        "embedding_dim",
+        "max_token_size",
+        "llm_max_async",
+        "embedding_max_async",
+    }),
     "ask": frozenset({"conversation_enhancement_mode", "persona_enabled"}),
 }
 

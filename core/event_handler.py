@@ -5,6 +5,7 @@
 
 v0.3.0 生产实现：实现 /kr add, /kr sync r2, /kr quota, /kr collection, /kr tag 等命令路由。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -301,12 +302,18 @@ class EventHandler:
             return "Error: API facade not initialized."
 
         try:
-            res = await self._initializer.api.build_graph(collection)
-            if res.get("status") == "success":
-                return f"Success: {res.get('message')}"
-            return f"Error: Graph build failed: {res.get('message')}"
+            estimate = await self._initializer.api.estimate_graph_build(collection)
+            return (
+                "LightRAG build estimate only; no LLM call was started. "
+                f"collection={estimate['collection']} docs={estimate['docs_count']} "
+                f"chunks={estimate['chunks_count']} chars={estimate['chars_count']} "
+                f"llm_calls={estimate['estimated_llm_calls_min']}-"
+                f"{estimate['estimated_llm_calls_max']}. "
+                "Open the WebUI Graph page to review the estimate and confirm the build. "
+                + str(estimate["estimate_notice"])
+            )
         except Exception as e:
-            return f"Error: Graph build failed: {e}"
+            return f"Error: Graph estimate failed: {e}"
 
     async def on_graph_query(self, query: str, top_k: int = 5) -> str:
         """/kr graph query <q> [--top_k <top_k>]"""
@@ -316,7 +323,10 @@ class EventHandler:
         try:
             res = await self._initializer.api.query_graph(query, top_k=top_k)
             if res.get("status") == "success":
-                lines = [f"=== Graph Query Results for '{query}' ==="]
+                lines = [f"=== LightRAG Query Results for '{query}' ==="]
+                if res.get("answer"):
+                    lines.append("\n[Answer]")
+                    lines.append(str(res["answer"]))
                 if res.get("entities"):
                     lines.append("\n[Entities]")
                     for ent in res["entities"][:5]:
@@ -334,7 +344,9 @@ class EventHandler:
                 if res.get("chunks"):
                     lines.append("\n[Text Chunks]")
                     for i, ch in enumerate(res["chunks"]):
-                        lines.append(f"Chunk {i+1} (DocID: {ch['doc_id']}): {ch['text'][:150]}...")
+                        lines.append(
+                            f"Chunk {i + 1} (DocID: {ch['doc_id']}): {ch['text'][:150]}..."
+                        )
 
                 if res.get("context"):
                     lines.append("\n[Academic Context Header Preview]")
@@ -358,16 +370,17 @@ class EventHandler:
         self._initializer.agent_enabled = enabled
         return f"Ask Agent has been turned {action.upper()}."
 
-    async def on_message(self, event: Any) -> Any:
-        """捕获 AstrBot 普通消息事件的非侵入式旁路 Hook。
+    async def on_message(self, event: Any) -> str | None:
+        """捕获 AstrBot 消息事件。
 
-        若 /kr agent 为 off，采取旁路 Dry-Run 机制，仅用于验证物理通道 the stable；
-        若 /kr agent 为 on，触发高性能召回，并通过多版本兼容注入技术将 Grounded Context
-        传回 AstrBot 的 system prompt。
+        query_agent 模式：返回知识库答案字符串，由 main.py 通过 yield 接管回复，AstrBot LLM 不被调用。
+        inject 模式：pass-through 返回 None，上下文注入由 on_llm_request hook 负责。
         """
-        logger.info("AstrBot message captured by Knowledge Repository Hook.")
+        if not self._initializer.agent_enabled:
+            logger.debug("Slot Hook bypassed (agent disabled).")
+            return None
 
-        # 1. 安全提取事件中的文本
+        # 提取文本
         message_text = ""
         if hasattr(event, "message_str"):
             message_text = getattr(event, "message_str")
@@ -382,195 +395,159 @@ class EventHandler:
         if not query:
             return None
 
-        # 2. 如果 /kr agent 开启，进行真实记忆检索并动态注入至 AstrBot system_prompt
-        if self._initializer.agent_enabled:
+        # 仅 query_agent 模式在此处理；inject 模式由 on_llm_request 接管
+        mode = "inject"
+        if self._initializer.config is not None:
             try:
-                if self._initializer.api is not None:
-                    # 获取当前增强模式，默认为 "inject"
-                    mode = "inject"
-                    if self._initializer.config is not None:
-                        try:
-                            ask_config = (
-                                self._initializer.config.get_ask_agent_config()
-                            )
-                            mode = ask_config.conversation_enhancement_mode
-                        except Exception as ce:
-                            logger.warning(
-                                "Failed to get conversation_enhancement_mode, "
-                                f"default to inject: {ce}"
-                            )
+                ask_config = self._initializer.config.get_ask_agent_config()
+                mode = ask_config.conversation_enhancement_mode
+            except Exception as ce:
+                logger.warning(
+                    "Failed to get conversation_enhancement_mode, default to inject: %s", ce
+                )
 
-                    if mode == "query_agent":
-                        # 代理问答模式：直接调用内部 Standalone Ask Agent 闭环生成学术回答
-                        # 并进行指令级绝对代理输出
-                        # 提取 session_id 用于 conversation_id 绑定打通 WebUI Ask 历史大一统
-                        session_id = None
-                        if hasattr(event, "session_id") and getattr(event, "session_id"):
-                            session_id = getattr(event, "session_id")
-                        elif (
-                            hasattr(event, "conversation_id")
-                            and getattr(event, "conversation_id")
-                        ):
-                            session_id = getattr(event, "conversation_id")
-                        elif (
-                            hasattr(event, "unified_msg_id")
-                            and getattr(event, "unified_msg_id")
-                        ):
-                            session_id = getattr(event, "unified_msg_id")
-                        elif (
-                            hasattr(event, "message")
-                            and hasattr(event.message, "session_id")
-                            and getattr(event.message, "session_id")
-                        ):
-                            session_id = getattr(event.message, "session_id")
+        if mode != "query_agent":
+            return None
 
-                        if not session_id:
-                            session_id = "default-session"
+        if self._initializer.api is None:
+            return None
 
-                        conversation_id = f"event-{session_id}"
-                        # 强制关闭内部 agent 的 persona 开关防止过拟合 (persona_enabled=False)
-                        ask_res = await self._initializer.api.ask(
-                            question=query,
-                            collection=None,
-                            top_k=5,
-                            conversation_id=conversation_id,
-                            persona_enabled=False
-                        )
-                        agent_answer = ask_res.get("answer") or ""
+        logger.info("query_agent mode: retrieving answer for message.")
 
-                        # 构造指令级绝对代理提示词
-                        injected_override = (
-                            "\n\n[Absolute System Override / 插件代理回答]\n"
-                            "CRITICAL DIRECTIVE: You are acting as a strict proxy for an external "
-                            "academic agent.\n"
-                            "You MUST return the following answer verbatim, exactly as-is, word "
-                            "for word, without any changes, additions, explanations, markdown "
-                            "wrapping, or greetings whatsoever.\n"
-                            "Do NOT answer the question yourself. ONLY output "
-                            "the exact text below:\n"
-                            "====================\n"
-                            f"{agent_answer}\n"
-                            "====================\n"
-                        )
+        # 提取 session_id
+        session_id = None
+        if hasattr(event, "session_id") and getattr(event, "session_id"):
+            session_id = getattr(event, "session_id")
+        elif hasattr(event, "conversation_id") and getattr(event, "conversation_id"):
+            session_id = getattr(event, "conversation_id")
+        elif hasattr(event, "unified_msg_id") and getattr(event, "unified_msg_id"):
+            session_id = getattr(event, "unified_msg_id")
+        elif (
+            hasattr(event, "message")
+            and hasattr(event.message, "session_id")
+            and getattr(event.message, "session_id")
+        ):
+            session_id = getattr(event.message, "session_id")
 
-                        logger.info("Injecting proxy answer in query_agent mode.")
-                        # 注入到 event 结构中以代理最终的回答
-                        # A) 尝试 set_system_prompt / add_system_prompt 函数
-                        if hasattr(event, "set_system_prompt"):
-                            getattr(event, "set_system_prompt")(injected_override)
-                        elif hasattr(event, "add_system_prompt"):
-                            getattr(event, "add_system_prompt")(injected_override)
-                        # B) 尝试直接修改 system_prompt 属性
-                        elif hasattr(event, "system_prompt"):
-                            curr = getattr(event, "system_prompt") or ""
-                            setattr(event, "system_prompt", curr + injected_override)
-                        # C) 尝试 event.ctx 或 session 上的 system_prompt 字段
-                        elif hasattr(event, "ctx") and hasattr(event.ctx, "system_prompt"):
-                            curr = getattr(event.ctx, "system_prompt") or ""
-                            setattr(event.ctx, "system_prompt", curr + injected_override)
-                        # D) 降级方案：若以上标准属性均不可写，则直接隐式 prepend 接入用户消息本身
-                        elif hasattr(event, "message_str"):
-                            curr = getattr(event, "message_str") or ""
-                            enhanced = (
-                                f"[System Constraints]: {injected_override}\n"
-                                f"[User Msg]: {curr}"
-                            )
-                            setattr(event, "message_str", enhanced)
+        if not session_id:
+            session_id = "default-session"
 
-                    else:
-                        # 召回注入模式 (inject)
-                        cols = await self._initializer.api.list_collections()
-                        all_cols = [c.name for c in cols] if cols else ["default"]
+        conversation_id = f"event-{session_id}"
 
-                        if self._initializer.retrieval_orchestrator is not None:
-                            # 检索各集合下最相关的文本分块并去重，限制在 top 3
-                            chunks = []
-                            seen_ids = set()
-                            for col in all_cols:
-                                results = (
-                                    await self._initializer.retrieval_orchestrator.retrieve(
-                                        collection=col,
-                                        query=query,
-                                        top_k=3
-                                    )
-                                )
-                                for ch in results:
-                                    if ch.chunk_id not in seen_ids:
-                                        seen_ids.add(ch.chunk_id)
-                                        chunks.append(ch)
-                                    if len(chunks) >= 3:
-                                        break
-                                if len(chunks) >= 3:
-                                    break
+        # 优先 LightRAG 图谱查询，fallback api.ask()
+        agent_answer = ""
+        graph_cfg = (
+            self._initializer.config.get_graph_config()
+            if self._initializer.config is not None
+            else None
+        )
+        if (
+            graph_cfg is not None
+            and graph_cfg.enabled
+            and self._initializer.lightrag_registry is not None
+        ):
+            try:
+                cols = await self._initializer.api.list_collections()
+                for col in ([c.name for c in cols] if cols else []):
+                    lg_result = await self._initializer.lightrag_registry.query(col, query)
+                    agent_answer = (lg_result.get("answer") or "").strip()
+                    if agent_answer:
+                        break
+            except Exception as _exc:
+                logger.warning(
+                    "LightRAG query_agent failed, falling back to api.ask: %s", _exc
+                )
+                agent_answer = ""
 
-                            if chunks:
-                                context_lines = []
-                                for i, chunk in enumerate(chunks):
-                                    doc = await self._initializer.api.get_document(chunk.doc_id)
-                                    title = doc.title if doc else chunk.doc_id
-                                    context_lines.append(
-                                        f"[{i+1}] 来源: 《{title}》 | 内容: {chunk.text}"
-                                    )
-                                
-                                grounded_context = "\n".join(context_lines)
-                                injected_system_prompt = (
-                                    "\n\n[Knowledge Base Context / 插件记忆召回]\n"
-                                    "请优先结合以下从知识库召回的相关文献分块"
-                                    "回答用户的问题，并以 [n] 格式标注引用来源：\n"
-                                    f"{grounded_context}\n"
-                                )
-
-                                # 动态注入以引导其最终对话回答
-                                logger.info(
-                                    "Injecting knowledge context into "
-                                    f"system prompt: {len(chunks)} chunks."
-                                )
-                                
-                                # A) 尝试 set_system_prompt / add_system_prompt 函数
-                                if hasattr(event, "set_system_prompt"):
-                                    getattr(event, "set_system_prompt")(
-                                        injected_system_prompt
-                                    )
-                                elif hasattr(event, "add_system_prompt"):
-                                    getattr(event, "add_system_prompt")(
-                                        injected_system_prompt
-                                    )
-                                # B) 尝试直接修改 system_prompt 属性
-                                elif hasattr(event, "system_prompt"):
-                                    curr = getattr(event, "system_prompt") or ""
-                                    setattr(
-                                        event,
-                                        "system_prompt",
-                                        curr + injected_system_prompt
-                                    )
-                                # C) 尝试 event.ctx 或 session 上的 system_prompt 字段
-                                elif (
-                                    hasattr(event, "ctx")
-                                    and hasattr(event.ctx, "system_prompt")
-                                ):
-                                    curr = getattr(event.ctx, "system_prompt") or ""
-                                    setattr(
-                                        event.ctx,
-                                        "system_prompt",
-                                        curr + injected_system_prompt
-                                    )
-                                # D) 降级方案：若以上标准属性均不可写，
-                                # 则直接隐式 prepend 接入用户消息本身
-                                elif hasattr(event, "message_str"):
-                                    curr = getattr(event, "message_str") or ""
-                                    enhanced = (
-                                        f"[System Constraints]: {injected_system_prompt}\n"
-                                        f"[User Msg]: {curr}"
-                                    )
-                                    setattr(event, "message_str", enhanced)
+        if not agent_answer:
+            try:
+                ask_res = await self._initializer.api.ask(
+                    question=query,
+                    collection=None,
+                    top_k=5,
+                    conversation_id=conversation_id,
+                    persona_enabled=False,
+                )
+                agent_answer = ask_res.get("answer") or ""
             except Exception as exc:
-                logger.error(f"Failed to inject retrieved knowledge into message: {exc}")
-        else:
-            # 旁路完全不进行任何检索与干预，实现 100% 零开销 pass-through
-            logger.debug("Slot Hook bypassed (agent disabled).")
+                logger.error("query_agent api.ask failed: %s", exc)
+                return None
 
-        # 3. 严格逻辑透传（Pass-through）：返回 None，确保原有消息回答链条 100% 完好
-        return None
+        logger.info("query_agent mode: answer ready (%d chars).", len(agent_answer))
+        return agent_answer or None
+
+
+    async def on_llm_request(self, event: Any, req: Any) -> None:
+        """inject 模式：在 LLM 请求前向 req.system_prompt 注入知识库上下文。
+
+        由 main.py 的 @filter.on_llm_request() 触发，仅在 LLM 即将被调用时执行，
+        命令处理（/kr ...）不会触发此 hook。
+        """
+        if not self._initializer.agent_enabled:
+            return
+
+        mode = "inject"
+        if self._initializer.config is not None:
+            try:
+                ask_config = self._initializer.config.get_ask_agent_config()
+                mode = ask_config.conversation_enhancement_mode
+            except Exception:
+                pass
+
+        if mode != "inject":
+            return
+
+        if self._initializer.api is None or self._initializer.retrieval_orchestrator is None:
+            return
+
+        query = ""
+        if hasattr(event, "message_str"):
+            query = str(getattr(event, "message_str")).strip()
+        if not query:
+            return
+
+        try:
+            cols = await self._initializer.api.list_collections()
+            all_cols = [c.name for c in cols] if cols else ["default"]
+
+            chunks = []
+            seen_ids: set = set()
+            for col in all_cols:
+                results = await self._initializer.retrieval_orchestrator.retrieve(
+                    collection=col, query=query, top_k=3
+                )
+                for ch in results:
+                    if ch.chunk_id not in seen_ids:
+                        seen_ids.add(ch.chunk_id)
+                        chunks.append(ch)
+                    if len(chunks) >= 3:
+                        break
+                if len(chunks) >= 3:
+                    break
+
+            if not chunks:
+                return
+
+            context_lines = []
+            for i, chunk in enumerate(chunks):
+                doc = await self._initializer.api.get_document(chunk.doc_id)
+                title = doc.title if doc else chunk.doc_id
+                context_lines.append(f"[{i + 1}] 来源: 《{title}》 | 内容: {chunk.text}")
+
+            grounded_context = "\n".join(context_lines)
+            injected_system_prompt = (
+                "\n\n[Knowledge Base Context / 插件记忆召回]\n"
+                "请优先结合以下从知识库召回的相关文献分块"
+                "回答用户的问题，并以 [n] 格式标注引用来源：\n"
+                f"{grounded_context}\n"
+            )
+
+            req.system_prompt += injected_system_prompt
+            logger.info(
+                "Injected %d chunks into req.system_prompt via on_llm_request.", len(chunks)
+            )
+        except Exception as exc:
+            logger.error("on_llm_request inject failed: %s", exc)
 
 
 __all__ = ["EventHandler"]

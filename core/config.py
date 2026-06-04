@@ -8,6 +8,7 @@
     - Web 控制台密码：env `KR_WEB_PASSWORD`
     Notion 不在此持有 token——同步经 AstrBot 已配置的 notion MCP server，token 由 MCP 侧管理。
 """
+
 from __future__ import annotations
 
 import os
@@ -59,6 +60,7 @@ class R2SyncConfig:
     access_key_id: str = ""
     secret_access_key: str = ""
     bucket: str = ""
+    cdn_domain: str = ""
     free_tier_gb: int = 10
     warn_threshold: float = 0.8
     backup_interval_sec: int = 86400
@@ -110,21 +112,15 @@ class WebConsoleConfig:
 
 @dataclass
 class GraphConfig:
-    """LightRAG 图谱配置。向量召回复用 KB chunk 检索；实体 embedding 持久化尚未接入。"""
+    """LightRAG Core 图谱配置。每个 collection 使用独立 workspace。"""
 
     enabled: bool = False
-    incremental: bool = True
-    rrf_k: int = 60
-    query_top_k: int = 5
-    entity_types: list[str] = field(
-        default_factory=lambda: [
-            "Method/Algorithm",
-            "Scientific Problem/Task",
-            "Dataset",
-            "Evaluation Metric",
-            "Theory/Hypothesis",
-        ]
-    )
+    query_mode: str = "mix"
+    embedding_dim: int = 1024
+    max_token_size: int = 8192
+    llm_max_async: int = 4
+    embedding_max_async: int = 8
+    working_dir: str = "lightrag_workspaces"
 
 
 @dataclass
@@ -207,10 +203,12 @@ class Config:
             },
             "graph": {
                 "enabled": graph.enabled,
-                "incremental": graph.incremental,
-                "rrf_k": graph.rrf_k,
-                "query_top_k": graph.query_top_k,
-                "entity_types": graph.entity_types,
+                "query_mode": graph.query_mode,
+                "embedding_dim": graph.embedding_dim,
+                "max_token_size": graph.max_token_size,
+                "llm_max_async": graph.llm_max_async,
+                "embedding_max_async": graph.embedding_max_async,
+                "working_dir": graph.working_dir,
             },
             "vector_db": {
                 "backend": vector_db.backend,
@@ -270,6 +268,7 @@ class Config:
             access_key_id=s.get("access_key_id", R2SyncConfig.access_key_id),
             secret_access_key=_secret(s.get("secret_access_key"), ENV_R2_SECRET_ACCESS_KEY),
             bucket=s.get("bucket", R2SyncConfig.bucket),
+            cdn_domain=s.get("cdn_domain", R2SyncConfig.cdn_domain),
             warn_threshold=float(s.get("warn_threshold", R2SyncConfig.warn_threshold)),
             backup_interval_sec=int(s.get("backup_interval_sec", R2SyncConfig.backup_interval_sec)),
         )
@@ -297,18 +296,17 @@ class Config:
 
     def get_graph_config(self) -> GraphConfig:
         s = _section(self.raw, "graph")
+        query_mode = str(s.get("query_mode", GraphConfig.query_mode))
+        if query_mode not in {"local", "global", "hybrid", "naive", "mix", "bypass"}:
+            query_mode = GraphConfig.query_mode
         return GraphConfig(
             enabled=bool(s.get("enabled", GraphConfig.enabled)),
-            incremental=bool(s.get("incremental", GraphConfig.incremental)),
-            rrf_k=int(s.get("rrf_k", GraphConfig.rrf_k)),
-            query_top_k=int(s.get("query_top_k", GraphConfig.query_top_k)),
-            entity_types=s.get("entity_types") if isinstance(s.get("entity_types"), list) else [
-                "Method/Algorithm",
-                "Scientific Problem/Task",
-                "Dataset",
-                "Evaluation Metric",
-                "Theory/Hypothesis",
-            ],
+            query_mode=query_mode,
+            embedding_dim=int(s.get("embedding_dim", GraphConfig.embedding_dim)),
+            max_token_size=int(s.get("max_token_size", GraphConfig.max_token_size)),
+            llm_max_async=int(s.get("llm_max_async", GraphConfig.llm_max_async)),
+            embedding_max_async=int(s.get("embedding_max_async", GraphConfig.embedding_max_async)),
+            working_dir=str(s.get("working_dir", GraphConfig.working_dir)),
         )
 
     def get_vector_db_config(self) -> VectorDbConfig:

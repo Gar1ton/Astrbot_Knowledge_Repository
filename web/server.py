@@ -27,7 +27,22 @@ _API_PREFIX = "/api/"
 _PUBLIC_PATHS = frozenset({"/api/login", "/api/auth"})
 
 
-# ── 中间件：认证 ────────────────────────────────────────────────
+# ── 中间件 ──────────────────────────────────────────────────────
+
+import logging as _logging
+_mw_logger = _logging.getLogger("KRWebServer")
+
+
+@web.middleware
+async def _error_middleware(request: web.Request, handler: web.Handler) -> web.StreamResponse:
+    """将所有未捕获异常转为 JSON 500，确保 API 始终返回结构化响应。"""
+    try:
+        return await handler(request)
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        _mw_logger.error("Unhandled error [%s %s]: %s", request.method, request.path, exc, exc_info=True)
+        return web.json_response({"error": str(exc)}, status=500)
 
 
 @web.middleware
@@ -136,15 +151,19 @@ async def handle_upload_document(request: web.Request) -> web.Response:
     dest = upload_dir / f"{content_hash[:16]}_{filename}"
     dest.write_bytes(payload)
 
-    doc_id = await _api(request).register_document(
-        title=filename,
-        file_path=str(dest),
-        content_type=content_type,
-        size_bytes=len(payload),
-        content_hash=content_hash,
-        collection=collection,
-        tags=tags,
-    )
+    try:
+        doc_id = await _api(request).register_document(
+            title=filename,
+            file_path=str(dest),
+            content_type=content_type,
+            size_bytes=len(payload),
+            content_hash=content_hash,
+            collection=collection,
+            tags=tags,
+        )
+    except Exception as exc:
+        _mw_logger.error("Upload failed for %r: %s", filename, exc, exc_info=True)
+        return web.json_response({"error": str(exc)}, status=500)
     doc = await _api(request).get_document(doc_id)
     if doc is None:
         return web.json_response({"error": "document registration failed"}, status=500)
@@ -615,7 +634,7 @@ def build_app(
             "web console password is empty; set a password or pass auth_required=False"
         )
 
-    app = web.Application(middlewares=[_auth_middleware])
+    app = web.Application(middlewares=[_error_middleware, _auth_middleware])
     app["api"] = api
     app["upload_dir"] = upload_dir
     app["auth_required"] = auth_required

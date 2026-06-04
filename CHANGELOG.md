@@ -21,6 +21,24 @@
 
 ---
 
+## [v0.16.1] — 2026-06-04
+
+### 修复 (Fixed)
+
+- **lightrag-hku 安装失败修复**：`==1.5.0` 在阿里云 PyPI 镜像尚未同步，改为 `>=1.5.0rc1,<2.0.0`；`1.4.x` 与 AstrBot 核心依赖 `google-genai==2.7.0` 冲突（`<2.0.0` vs `==2.7.0`），`1.5.0rc3+` 已放宽至 `<3.0.0` 不再冲突（`requirements.txt`）。
+- **插件热重载后 `on_llm_request` AttributeError 修复**：`_purge_stale_local_modules()` 原仅清理其他插件的 `core.*` 缓存，本插件自身旧版 `EventHandler`（不含 `on_llm_request`）在重载后仍留在 `sys.modules`，导致每条消息报 `AttributeError`。改为无条件清除所有 `core.*`/`web.*`/`migrations.*` 模块，重载时强制从磁盘重新导入（`main.py`）。
+- **Web 控制台配置保存报"api_key 机密字段"修复**：前端保存设置时将所有字段一并发送，空的 `api_key` 字段被拦截导致保存失败。写保护条件改为 `key in _SECRET_KEYS and value`，仅拦截非空机密值（`core/api.py`）。
+- **文档上传 Internal Server Error 无错误信息修复**：`handle_upload_document` 对 `register_document` 的调用无 try/except，任何异常（PDF 解析失败、路径错误等）均变成 aiohttp 裸 500，前端不知原因，dashboard 无日志。新增 try/except 捕获后返回含具体错误信息的 JSON 并通过 `KRWebServer` logger 输出完整 traceback（`web/server.py`）。
+
+### 新增功能 (Added)
+
+- **全局 HTTP 错误中间件**：新增 `_error_middleware`，置于中间件链最外层。所有 handler 内未被捕获的 `Exception` 统一转为 `{"error": "..."}` 的 JSON 500 响应，并经 `KRWebServer` logger 输出完整 traceback（在 AstrBot dashboard 可见）。原有 23 个缺少 try/except 的 handler 一次全部覆盖（`web/server.py`）。
+- **结构性配置字段写保护**：`update_config_value` 新增 `_STRUCTURAL_KEYS` 黑名单：`graph.embedding_dim`、`graph.max_token_size`、`graph.working_dir`、`vector_db.db_filename`。这些字段运行时修改会静默破坏已有向量/图谱索引，现在写入时返回 400 并提示需手动改配置文件后重启（`core/api.py`）。
+
+### 架构健康 (Refactor)
+
+- **lightrag-hku 1.5.0 API 兼容性加固**：`insert_document` 捕获并记录 `ainsert` 在 1.5.0 新增的 `track_id` 返回值；`delete_doc` 结果解析改为 `getattr` 取 `.status`/`.message`，兼容 1.5.0 `DeletionResult` 对象与 1.4.x 旧返回类型（`core/lightrag_core.py`）。
+
 ## [Unreleased]
 
 ### 新增功能 (Added)

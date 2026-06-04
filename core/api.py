@@ -650,12 +650,23 @@ class KnowledgeRepositoryApi:
         }
     )
 
+    # 修改这些字段需要重建索引，运行时直接写入会静默破坏已有数据
+    _STRUCTURAL_KEYS: dict[str, frozenset[str]] = {
+        "graph": frozenset({"embedding_dim", "max_token_size", "working_dir"}),
+        "vector_db": frozenset({"db_filename"}),
+    }
+
     async def update_config_value(self, section: str, key: str, value: Any) -> None:
         """更新受限配置项，并进行写保护校验与运行时热重载。"""
         if section not in ("vector_db", "ask", "graph"):
             raise ValueError(f"Section '{section}' is write-protected or read-only.")
-        if key in self._SECRET_KEYS:
+        if key in self._SECRET_KEYS and value:
             raise ValueError(f"'{key}' 为机密字段，必须通过环境变量注入，不可经此接口写入。")
+        if key in self._STRUCTURAL_KEYS.get(section, frozenset()):
+            raise ValueError(
+                f"'{section}.{key}' 为结构性参数，修改后需手动重建索引。"
+                "请直接修改插件配置文件并重启插件，而非通过此接口写入。"
+            )
 
         # 保存配置到内存与物理存储
         self._persist_config_value(section, key, value)

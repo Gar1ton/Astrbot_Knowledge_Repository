@@ -157,7 +157,9 @@ class LightRAGCoreRegistry:
     async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
         rag = await self.get(collection)
         _terminal(f"ainsert collection={collection!r} doc_id={doc_id!r} chars={len(text)}")
-        await rag.ainsert(text, ids=[doc_id])
+        result = await rag.ainsert(text, ids=[doc_id])
+        if result is not None:
+            _terminal(f"ainsert done track_id={result!r}")
 
     async def query(self, collection: str, query: str) -> dict[str, Any]:
         from lightrag import QueryParam
@@ -188,11 +190,14 @@ class LightRAGCoreRegistry:
         rag = await self.get(collection)
         _terminal(f"adelete_by_doc_id collection={collection!r} doc_id={doc_id!r}")
         result = await rag.adelete_by_doc_id(doc_id)
+        status = getattr(result, "status", None) or str(result)
+        message = getattr(result, "message", None) or ""
         return {
             "engine": "lightrag_core",
             "collection": collection,
             "doc_id": doc_id,
-            "result": str(result),
+            "result": status,
+            "message": message,
         }
 
     async def manual_probe(

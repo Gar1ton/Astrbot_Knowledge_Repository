@@ -8,37 +8,22 @@ if str(_ROOT_DIR) not in sys.path:
 
 
 def _purge_stale_local_modules() -> None:
-    """Evict any cached core/web/migrations modules that belong to another plugin.
+    """Evict ALL cached core/web/migrations modules on every load.
 
-    Both this plugin and astrbot_plugin_moirai expose a top-level ``core``
-    package.  If moirai loads first its ``core.*`` entries linger in
-    sys.modules.  Without eviction this plugin would import moirai's
-    PluginInitializer instead of its own.  We remove every ``core.*`` /
-    ``web.*`` / ``migrations.*`` entry whose __file__ does NOT live under
-    this plugin's root directory.
+    Two reasons:
+    1. Other plugins (e.g. astrbot_plugin_moirai) expose a top-level ``core``
+       package — without eviction we'd import their PluginInitializer.
+    2. On plugin reload AstrBot re-imports main.py but Python's module cache
+       keeps the *old* EventHandler/etc. alive, so new methods added between
+       installs are invisible.  Unconditional eviction forces a fresh import
+       every time, fixing AttributeError on hot-reload.
     """
-    root = _ROOT_DIR.resolve()
     _OWNED_TOPS = frozenset(("core", "web", "migrations"))
 
     for name in list(sys.modules.keys()):
         if name == __name__:
             continue
-        top = name.split(".")[0]
-        if top not in _OWNED_TOPS:
-            continue
-        module = sys.modules.get(name)
-        if module is None:
-            sys.modules.pop(name, None)
-            continue
-        module_file = getattr(module, "__file__", None)
-        if not module_file:
-            continue
-        try:
-            path = Path(module_file).resolve()
-            is_ours = path == root or root in path.parents
-        except Exception:
-            is_ours = False
-        if not is_ours:
+        if name.split(".")[0] in _OWNED_TOPS:
             sys.modules.pop(name, None)
 
 

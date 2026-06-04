@@ -19,8 +19,8 @@ from core.domain.models import (
     SyncStatus,
     SyncTargetKind,
 )
+from core.migration_runner import run_migrations
 from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
-from migrations.runner import run_migrations
 
 
 def _doc(doc_id: str, collection: str = "default", tags: list[str] | None = None) -> SourceDocument:

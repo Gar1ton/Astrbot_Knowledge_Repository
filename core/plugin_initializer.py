@@ -27,11 +27,11 @@ from core.managers.category_manager import CategoryManager
 from core.managers.ingest_manager import IngestManager
 from core.managers.quota_manager import QuotaManager
 from core.metrics import PerformanceTracker
+from core.migration_runner import run_migrations
 from core.pipelines.sync_pipeline import SyncPipeline
 from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
 from core.repository.sync_targets.r2 import R2SyncTarget
 from core.runtime_config import RuntimeConfigStore
-from migrations.runner import run_migrations
 
 if TYPE_CHECKING:
     from core.index_compatibility import IndexCompatibilityStore

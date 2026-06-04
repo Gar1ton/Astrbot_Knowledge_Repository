@@ -11,6 +11,7 @@ import fitz  # type: ignore[import-untyped]
 import pytest
 
 from core.main import KnowledgeRepositoryPlugin
+from core.migration_runner import run_migrations
 from core.plugin_initializer import PluginInitializer
 
 
@@ -76,6 +77,10 @@ async def test_plugin_initializer_lifecycle(
     # 3) 销毁
     await initializer.teardown()
     assert initializer._backup_task is None
+
+
+def test_initializer_uses_plugin_owned_migration_runner() -> None:
+    assert run_migrations.__module__ == "core.migration_runner"
 
 
 async def test_plugin_initializer_lifecycle_periodic_disabled(

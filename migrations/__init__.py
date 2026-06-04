@@ -1,4 +1,4 @@
-"""Backward-compatible import for the plugin-owned migration runner."""
+"""Knowledge Repository database migrations."""
 
 from core.migration_runner import run_migrations
 

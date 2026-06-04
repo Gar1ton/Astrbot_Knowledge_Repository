@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -159,12 +160,36 @@ async def test_initializer_passes_probed_dimension_to_milvus_and_lightrag(
         ),
         patch("core.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
         patch("core.lightrag_core.LightRAGCoreRegistry", Registry),
+        patch("core.plugin_initializer._module_available", return_value=True),
     ):
         initializer = PluginInitializer(mock_context, config, temp_dir)
         await initializer.initialize()
         assert initializer.embedding_dimension == 7
         assert initializer.config.runtime_embedding_dimension == 7
         assert captured == {"milvus": 7, "lightrag": 7}
+        await initializer.teardown()
+
+
+async def test_default_initializer_starts_without_optional_feature_packages(
+    temp_dir: Path, mock_context: object
+) -> None:
+    blocked_modules = {
+        "boto3": None,
+        "botocore": None,
+        "lightrag": None,
+        "pymilvus": None,
+        "sentence_transformers": None,
+    }
+    with patch.dict(sys.modules, blocked_modules):
+        initializer = PluginInitializer(mock_context, {}, temp_dir)
+        await initializer.initialize()
+
+        assert initializer.api is not None
+        assert initializer.source_store is not None
+        assert initializer.vector_store is None
+        assert initializer.lightrag_registry is None
+        diagnostics = initializer.config.get_diagnostics()
+        assert sum("requirements-additional.txt" in item for item in diagnostics) >= 2
         await initializer.teardown()
 
 
@@ -180,9 +205,12 @@ async def test_initializer_probe_failure_disables_embedding_indexes(
         "vector_db": {"backend": "milvus"},
         "graph": {"enabled": True},
     }
-    with patch(
-        "core.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
-        return_value=Provider(),
+    with (
+        patch(
+            "core.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            return_value=Provider(),
+        ),
+        patch("core.plugin_initializer._module_available", return_value=True),
     ):
         initializer = PluginInitializer(mock_context, config, temp_dir)
         await initializer.initialize()
@@ -213,9 +241,12 @@ async def test_fresh_install_uploads_and_lexically_retrieves_when_embedding_prob
     pdf.save(pdf_path)
     pdf.close()
 
-    with patch(
-        "core.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
-        return_value=Provider(),
+    with (
+        patch(
+            "core.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            return_value=Provider(),
+        ),
+        patch("core.plugin_initializer._module_available", return_value=True),
     ):
         initializer = PluginInitializer(mock_context, {}, temp_dir)
         await initializer.initialize()
@@ -279,6 +310,7 @@ async def test_initializer_keeps_mismatched_milvus_available_for_manual_rebuild(
             return_value=Provider(),
         ),
         patch("core.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
+        patch("core.plugin_initializer._module_available", return_value=True),
     ):
         initializer = PluginInitializer(mock_context, config, temp_dir)
         await initializer.initialize()
@@ -339,6 +371,7 @@ async def test_initializer_marks_recreated_empty_milvus_incompatible_when_docs_e
             return_value=Provider(),
         ),
         patch("core.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
+        patch("core.plugin_initializer._module_available", return_value=True),
     ):
         initializer = PluginInitializer(mock_context, config, temp_dir)
         await initializer.initialize()

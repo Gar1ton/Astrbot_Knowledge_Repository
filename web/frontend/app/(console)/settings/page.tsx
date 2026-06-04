@@ -2,6 +2,7 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 
 import React, { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useTheme } from "next-themes";
 import { useI18n, I18nKey, Lang } from "@/lib/i18n";
 import { getEffectiveConfig, EffectiveConfig, updateConfigValue, testEmbeddingConnection, EmbeddingTestResult, listLocalModels, deleteLocalModel, LocalModel } from "@/lib/api";
@@ -281,16 +282,8 @@ export default function SettingsPage() {
     updateAccentColor(h, s, l);
   }
 
+  // 数据流概览与后端切换已迁至独立的「数据流 / 配置向导」页（/flow）；此处仅保留诊断提示与高级字段编辑。
   const diagnostics = config?.diagnostics ?? [];
-  const actualDimension = Number(config?.embedding?.actual_dimension ?? 0);
-  const milvusDegraded = diagnostics.some((item) =>
-    item.includes("Milvus") || item.includes("Embedding dimension probe failed")
-  );
-  const defaultRecallStatus = vectorBackend === "milvus" && actualDimension > 0 && !milvusDegraded
-    ? `Milvus + SQLite RRF · ${actualDimension}d`
-    : vectorBackend === "milvus"
-      ? (lang === "zh" ? "SQLite / AstrBot 受控回退" : "SQLite / AstrBot fallback")
-      : (lang === "zh" ? "AstrBot KB + SQLite RRF" : "AstrBot KB + SQLite RRF");
 
   return (
     <div
@@ -544,35 +537,24 @@ export default function SettingsPage() {
             gap: 20,
           }}
         >
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 10 }}>
-            {[
-              {
-                title: lang === "zh" ? "PDF 源库" : "PDF source store",
-                value: lang === "zh" ? "本地原件 + SQLite 分块" : "Local originals + SQLite chunks",
-                detail: lang === "zh" ? "首次安装即可上传与词汇召回" : "Upload and lexical retrieval work after install",
-              },
-              {
-                title: lang === "zh" ? "默认召回" : "Default retrieval",
-                value: defaultRecallStatus,
-                detail: autoIndexEnabled
-                  ? (lang === "zh" ? "上传后自动构建向量索引" : "Vector index builds on upload")
-                  : (lang === "zh" ? "自动索引已暂停" : "Automatic indexing is paused"),
-              },
-              {
-                title: "LightRAG",
-                value: graphEnabled
-                  ? (lang === "zh" ? "已启用 · 手动构建" : "Enabled · manual build")
-                  : (lang === "zh" ? "默认关闭 · 可选高精度" : "Off by default · optional precision"),
-                detail: lang === "zh" ? "不影响基础上传与默认召回" : "Does not gate upload or default retrieval",
-              },
-            ].map((item) => (
-              <div key={item.title} style={{ background: "var(--bg-inset)", border: "1px solid var(--border)", borderRadius: 10, padding: "10px 12px" }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: "var(--fg-subtle)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>{item.title}</div>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--heading)", marginBottom: 2 }}>{item.value}</div>
-                <div style={{ fontSize: 10, color: "var(--fg-muted)", lineHeight: 1.45 }}>{item.detail}</div>
-              </div>
-            ))}
-          </div>
+          <Link
+            href="/flow"
+            style={{
+              display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+              textDecoration: "none",
+              background: "var(--accent-soft)", border: "1px solid var(--accent-border)",
+              borderRadius: 10, padding: "12px 16px",
+            }}
+          >
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--accent)" }}>
+              {lang === "zh" ? "数据流 / 配置向导" : "Data Flow / Setup"}
+            </span>
+            <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+              {lang === "zh"
+                ? "查看各环节当前后端、按需切换、并安装可选依赖 →"
+                : "See active backends per stage, switch on demand, install optional deps →"}
+            </span>
+          </Link>
 
           {diagnostics.length > 0 && (
             <div style={{ background: "color-mix(in srgb, var(--warn, #e09a5b) 10%, transparent)", border: "1px solid color-mix(in srgb, var(--warn, #e09a5b) 35%, transparent)", borderRadius: 10, padding: "10px 12px", color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.55 }}>
@@ -580,17 +562,6 @@ export default function SettingsPage() {
               {diagnostics.join(" · ")}
             </div>
           )}
-
-          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--heading)", marginBottom: 4 }}>
-              {lang === "zh" ? "基础召回（默认路径）" : "Base retrieval (default path)"}
-            </div>
-            <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.55 }}>
-              {lang === "zh"
-                ? "新安装默认使用 Milvus Lite + 本地多语言 Embedding，并始终保留 SQLite 词汇召回；LightRAG 不参与此路径。"
-                : "New installs use Milvus Lite with local multilingual embeddings and always retain SQLite lexical retrieval. LightRAG is not part of this path."}
-            </div>
-          </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 24 }}>
             {/* Left Column: Backend and Provider selectors */}
@@ -799,7 +770,7 @@ export default function SettingsPage() {
                         )}
                       </div>
                     </>
-                  ) : embedModel ? null : (
+                  ) : (
                     <div
                       style={{
                         background: "var(--accent-soft)",
@@ -816,28 +787,28 @@ export default function SettingsPage() {
                       </div>
                       <div style={{ marginBottom: 10, color: "var(--fg)" }}>
                         {lang === "zh"
-                          ? "本地模式会在你的机器上直接运行 Embedding 模型，无需 API Key，适合隐私敏感或无网络的场景。"
-                          : "Local mode runs the embedding model directly on your machine — no API key needed, ideal for offline or privacy-sensitive use."}
+                          ? "本地模式不会随插件自动安装，避免首次安装下载大型 PyTorch/CUDA。单一 Additional Requirements 文件会同时安装全部扩展功能与开发工具。"
+                          : "Local mode is not auto-installed, avoiding large PyTorch/CUDA downloads during plugin setup. The single Additional Requirements file installs all extensions and development tools."}
                       </div>
                       <div style={{ fontWeight: 600, marginBottom: 4, color: "var(--accent)" }}>
                         {lang === "zh" ? "第 1 步：安装依赖" : "Step 1: Install dependencies"}
                       </div>
                       <code style={{ display: "block", background: "var(--bg-inset)", border: "1px solid var(--border)", padding: "6px 10px", borderRadius: 6, marginBottom: 10, fontFamily: "var(--font-geist-mono)", color: "var(--fg)", fontSize: 11 }}>
-                        pip install sentence-transformers
+                        python -m pip install torch --index-url https://download.pytorch.org/whl/cpu &amp;&amp; python -m pip install -r requirements-additional.txt
                       </code>
                       <div style={{ fontWeight: 600, marginBottom: 4, color: "var(--accent)" }}>
                         {lang === "zh" ? "第 2 步：选择模型（首次运行自动下载）" : "Step 2: Pick a model (auto-downloaded on first run)"}
                       </div>
                       <div style={{ marginBottom: 10, color: "var(--fg-muted)", fontSize: 11 }}>
                         {lang === "zh"
-                          ? "默认 intfloat/multilingual-e5-small 支持多语言并降低首次启动资源占用；需要更长上下文时可切换 BAAI/bge-m3。"
-                          : "The default intfloat/multilingual-e5-small supports multilingual retrieval with a lighter first startup; use BAAI/bge-m3 when longer context is required."}
+                          ? "安装 requirements-additional.txt 后，默认 intfloat/multilingual-e5-small 可为 Milvus 与 LightRAG 提供多语言向量；需要更长上下文时可切换 BAAI/bge-m3。"
+                          : "After installing requirements-additional.txt, the default intfloat/multilingual-e5-small provides multilingual vectors for Milvus and LightRAG; use BAAI/bge-m3 for longer context."}
                       </div>
                       <div style={{ fontWeight: 600, marginBottom: 4, color: "var(--accent)" }}>
                         {lang === "zh" ? "国内网络加速（可选）" : "China mirror (optional)"}
                       </div>
                       <code style={{ display: "block", background: "var(--bg-inset)", border: "1px solid var(--border)", padding: "6px 10px", borderRadius: 6, fontFamily: "var(--font-geist-mono)", color: "var(--fg)", fontSize: 11 }}>
-                        {`HF_ENDPOINT=https://hf-mirror.com pip install -U sentence-transformers`}
+                        {`HF_ENDPOINT=https://hf-mirror.com python -m pip install -r requirements-additional.txt`}
                       </code>
 
                       {/* 已安装本地模型列表 */}

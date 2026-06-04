@@ -136,6 +136,22 @@ def test_embedding_diagnostics_report_unsupported_or_unconfigured_provider(
     )
 
 
+def test_diagnostics_report_missing_optional_feature_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.config._module_available", lambda name: False)
+    diagnostics = Config(
+        {
+            "r2_sync": {"enabled": True},
+            "graph": {"enabled": True},
+            "vector_db": {"backend": "milvus"},
+            "embedding": {"provider": "local"},
+        }
+    ).get_diagnostics()
+
+    assert sum("requirements-additional.txt" in item for item in diagnostics) == 4
+
+
 def test_runtime_config_store_only_persists_generated_notion_values(tmp_path: Path) -> None:
     path = tmp_path / "runtime_config.json"
     persisted = []

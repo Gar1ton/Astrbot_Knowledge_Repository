@@ -23,7 +23,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-additional.txt
 
       # 若被测代码依赖某宿主框架（如 astrbot），在此 clone/安装它以满足 import。
       # - name: Provision host framework

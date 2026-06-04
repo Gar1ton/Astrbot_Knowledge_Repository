@@ -9,34 +9,15 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.config import merge_config_dicts
+from core.config import merge_config_dicts, runtime_persistable_keys
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = logging.getLogger("RuntimeConfigStore")
 
-_ALLOWED_RUNTIME_KEYS = {
-    "notion_sync": frozenset({"database_id", "parent_page_id", "database_title"}),
-    "vector_db": frozenset({
-        "backend",
-        "db_filename",
-        "auto_index_enabled",
-    }),
-    "embedding": frozenset({
-        "provider",
-        "model",
-        "base_url",
-        "max_token_size",
-    }),
-    "graph": frozenset({
-        "enabled",
-        "query_mode",
-        "llm_max_async",
-        "embedding_max_async",
-    }),
-    "ask": frozenset({"conversation_enhancement_mode", "persona_enabled"}),
-}
+# 允许持久化到 runtime_config.json 的键，从 config.py 的单一登记表派生（不再手抄一份）。
+_ALLOWED_RUNTIME_KEYS = runtime_persistable_keys()
 
 
 class RuntimeConfigStore:

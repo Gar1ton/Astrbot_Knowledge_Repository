@@ -6,6 +6,14 @@
 > **规范并约束「vibe coding」的代码可视性**——让任何人/任何 coding agent 一眼就知道
 > 「代码该放哪、依赖该指向哪、文档该怎么写」，并能自动遵循执行。
 
+## 插件安装依赖
+
+AstrBot 自动安装的 [`requirements.txt`](./requirements.txt) 仅包含 PDF 上传、SQLite
+基础召回和 Web 控制台需要的轻量依赖。Milvus、本地 Embedding/PyTorch、LightRAG 与
+R2 均为真正的可选功能，并统一由
+[`requirements-additional.txt`](./requirements-additional.txt) 手动安装；配置方法见
+[`docs/OPTIONAL_DEPENDENCIES.md`](./docs/OPTIONAL_DEPENDENCIES.md)。
+
 ## 怎么用（复制后三步）
 
 1. **复制**整个目录为你的新项目。

@@ -18,6 +18,9 @@ import aiosqlite
 
 from core.api import KnowledgeRepositoryApi
 from core.ask_progress import ProgressStore
+
+# 依赖探测收口至能力注册表；保留模块内 _module_available 名以兼容既有测试的 monkeypatch。
+from core.capabilities import module_available as _module_available
 from core.config import Config, merge_config_dicts
 from core.domain.models import Collection, SyncTargetKind
 from core.managers.category_manager import CategoryManager
@@ -162,7 +165,17 @@ class PluginInitializer:
         self.index_compatibility = IndexCompatibilityStore(
             self._data_dir / "index_compatibility.json"
         )
-        if vdb_cfg.backend == "milvus" or graph_cfg.enabled:
+        embedding_runtime_available = not (
+            embedding_cfg.provider == "local"
+            and not _module_available("sentence_transformers")
+        )
+        if not embedding_runtime_available:
+            logger.warning(
+                "未安装本地 Embedding 可选依赖；Milvus/LightRAG 已跳过，"
+                "AstrBot/SQLite 基础召回保持可用。"
+            )
+
+        if (vdb_cfg.backend == "milvus" or graph_cfg.enabled) and embedding_runtime_available:
             from core.repository.embedding.factory import EmbeddingProviderFactory
 
             try:
@@ -196,6 +209,7 @@ class PluginInitializer:
             vdb_cfg.backend == "milvus"
             and self.embedding_provider is not None
             and self.embedding_dimension is not None
+            and _module_available("pymilvus")
         ):
             from core.repository.vector_store.milvus_lite import (
                 MilvusLiteVectorStore,
@@ -256,6 +270,14 @@ class PluginInitializer:
                 )
                 self._config.add_diagnostic(f"Milvus unavailable: {exc}")
                 self.vector_store = None
+        elif (
+            vdb_cfg.backend == "milvus"
+            and self.embedding_provider is not None
+            and self.embedding_dimension is not None
+        ):
+            logger.warning(
+                "未安装 Milvus Lite 可选依赖；AstrBot/SQLite 基础召回保持可用。"
+            )
 
         # 4.6.5) 构造官方 LightRAG Core registry（按 collection 懒加载实例）。
         if (
@@ -263,30 +285,35 @@ class PluginInitializer:
             and self.embedding_provider is not None
             and self.embedding_dimension is not None
         ):
-            from core.lightrag_core import LightRAGCoreRegistry
+            if not _module_available("lightrag"):
+                logger.warning(
+                    "graph.enabled=true 但未安装 LightRAG 可选依赖，LightRAG Core 已跳过。"
+                )
+            else:
+                from core.lightrag_core import LightRAGCoreRegistry
 
-            self.lightrag_registry = LightRAGCoreRegistry(
-                config=graph_cfg,
-                data_dir=self._data_dir,
-                llm_adapter=llm_adapter,
-                embedding_provider=self.embedding_provider,
-                embedding_dim=self.embedding_dimension,
-                max_token_size=embedding_cfg.max_token_size,
-                embedding_model=embedding_cfg.model,
-            )
-            incompatible_lightrag = [
-                collection
-                for collection in self.lightrag_registry.existing_collections()
-                if not self.embedding_fingerprint
-                or not self.index_compatibility.is_lightrag_compatible(
-                    collection, self.embedding_fingerprint
+                self.lightrag_registry = LightRAGCoreRegistry(
+                    config=graph_cfg,
+                    data_dir=self._data_dir,
+                    llm_adapter=llm_adapter,
+                    embedding_provider=self.embedding_provider,
+                    embedding_dim=self.embedding_dimension,
+                    max_token_size=embedding_cfg.max_token_size,
+                    embedding_model=embedding_cfg.model,
                 )
-            ]
-            if incompatible_lightrag:
-                self._config.add_diagnostic(
-                    "LightRAG indexes are incompatible with the active embedding; "
-                    "rebuild affected collections."
-                )
+                incompatible_lightrag = [
+                    collection
+                    for collection in self.lightrag_registry.existing_collections()
+                    if not self.embedding_fingerprint
+                    or not self.index_compatibility.is_lightrag_compatible(
+                        collection, self.embedding_fingerprint
+                    )
+                ]
+                if incompatible_lightrag:
+                    self._config.add_diagnostic(
+                        "LightRAG indexes are incompatible with the active embedding; "
+                        "rebuild affected collections."
+                    )
         elif graph_cfg.enabled and self.embedding_provider is None:
             logger.warning(
                 "graph.enabled=true 但 embedding provider 不可用，LightRAG Core 已跳过。"

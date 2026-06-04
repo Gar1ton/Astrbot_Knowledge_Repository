@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import sys
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -137,3 +138,12 @@ async def test_r2_disabled_boundary() -> None:
     # 2) 未启用时执行 push 应当直接抛错
     with pytest.raises(ValueError, match="R2 sync is disabled"):
         await target.push(_doc("d1"), b"data")
+
+
+async def test_r2_missing_optional_dependency_does_not_break_module_import(
+    r2_config: R2SyncConfig,
+) -> None:
+    with patch.dict(sys.modules, {"boto3": None, "botocore": None}):
+        target = R2SyncTarget(r2_config)
+        with pytest.raises(RuntimeError, match="requirements-additional.txt"):
+            await target.push(_doc("d1"), b"data")

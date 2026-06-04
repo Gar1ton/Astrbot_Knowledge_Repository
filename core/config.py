@@ -16,6 +16,9 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+# 依赖探测收口至能力注册表；保留模块内 _module_available 名以兼容既有测试的 monkeypatch。
+from core.capabilities import module_available as _module_available
+
 # ── 环境变量名（机密来源）────────────────────────────────────────
 
 ENV_R2_SECRET_ACCESS_KEY = "KR_R2_SECRET_ACCESS_KEY"
@@ -262,6 +265,10 @@ class Config:
                 for key, value in required.items()
                 if not value
             )
+            if not _module_available("boto3"):
+                diagnostics.append(
+                    "R2 sync requires optional dependencies from requirements-additional.txt."
+                )
 
         notion = self.get_notion_sync_config()
         if notion.enabled:
@@ -292,9 +299,23 @@ class Config:
             diagnostics.append(
                 "embedding.provider=astr is not implemented; choose local or external."
             )
+        elif embedding.provider == "local" and not _module_available("sentence_transformers"):
+            diagnostics.append(
+                "Local embedding requires optional dependencies from "
+                "requirements-additional.txt."
+            )
         elif embedding.provider == "external" and not _secret("", ENV_EMBEDDING_API_KEY):
             diagnostics.append(
                 "KR_EMBEDDING_API_KEY is required when embedding.provider=external."
+            )
+        if self.get_vector_db_config().backend == "milvus" and not _module_available("pymilvus"):
+            diagnostics.append(
+                "Milvus Lite requires optional dependencies from requirements-additional.txt; "
+                "SQLite/AstrBot fallback remains available."
+            )
+        if self.get_graph_config().enabled and not _module_available("lightrag"):
+            diagnostics.append(
+                "LightRAG requires optional dependencies from requirements-additional.txt."
             )
         return diagnostics + list(self.runtime_diagnostics)
 
@@ -403,6 +424,111 @@ class Config:
         )
 
 
+# ── 可写配置键登记（API 写入 / 运行时持久化的唯一真相源）────────────
+#
+# 此前「允许写入的键」散落三处：api 的 _CONFIG_UPDATE_KEYS、_STRUCTURAL_KEYS 与
+# runtime_config 的 _ALLOWED_RUNTIME_KEYS。在此收口为单一登记表，两个消费者各自派生其
+# 子集（见 api.py / runtime_config.py）。新增项须与 _conf_schema.json 同步（CLAUDE.md §6）。
+
+# 切换某键后的后果标识：none 即时生效 / restart 需重启插件 / rebuild 需重建索引（且隐含重启）。
+CONSEQUENCE_NONE = "none"
+CONSEQUENCE_RESTART = "restart"
+CONSEQUENCE_REBUILD = "rebuild"
+
+
+@dataclass(frozen=True)
+class ConfigKeyPolicy:
+    """单个配置键的写入策略。
+
+    api_writable        可经 /api/config/update 写入（机密与结构键不可）。
+    runtime_persistable 可写入 data_dir/runtime_config.json 持久化。
+    structural          结构性参数：禁止运行时 API 写，改后须重建/重启（防静默破坏数据）。
+    consequence         改动后果，用于计算 restart_required / rebuild_required 与前端提示。
+    """
+
+    api_writable: bool = False
+    runtime_persistable: bool = False
+    structural: bool = False
+    consequence: str = CONSEQUENCE_NONE
+
+
+# 注：r2_sync.enabled / notion_sync.enabled / source_store.ocr_enabled 为新纳入的非机密开关，
+# 让数据流向导可「按需切换」更多环节；机密（secret_access_key/password/api_key）始终不可写。
+CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
+    "vector_db": {
+        "backend": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "auto_index_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "db_filename": ConfigKeyPolicy(
+            False, True, structural=True, consequence=CONSEQUENCE_RESTART
+        ),
+    },
+    "embedding": {
+        "provider": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
+        "model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
+        "base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
+        "max_token_size": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+    },
+    "ask": {
+        "conversation_enhancement_mode": ConfigKeyPolicy(True, True),
+        "persona_enabled": ConfigKeyPolicy(False, True),
+    },
+    "graph": {
+        "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "query_mode": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "llm_max_async": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "embedding_max_async": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "working_dir": ConfigKeyPolicy(
+            False, False, structural=True, consequence=CONSEQUENCE_RESTART
+        ),
+    },
+    "notion_sync": {
+        "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "database_id": ConfigKeyPolicy(False, True),
+        "parent_page_id": ConfigKeyPolicy(False, True),
+        "database_title": ConfigKeyPolicy(False, True),
+    },
+    "r2_sync": {
+        "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+    },
+    "source_store": {
+        "ocr_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+    },
+}
+
+
+def api_writable_keys() -> dict[str, frozenset[str]]:
+    """可经 API 写入的键（排除机密与结构键）。供 api._CONFIG_UPDATE_KEYS 派生。"""
+    return {
+        section: frozenset(k for k, p in keys.items() if p.api_writable and not p.structural)
+        for section, keys in CONFIG_KEY_POLICY.items()
+        if any(p.api_writable and not p.structural for p in keys.values())
+    }
+
+
+def structural_keys() -> dict[str, frozenset[str]]:
+    """结构性键：禁止运行时 API 写。供 api._STRUCTURAL_KEYS 派生。"""
+    return {
+        section: frozenset(k for k, p in keys.items() if p.structural)
+        for section, keys in CONFIG_KEY_POLICY.items()
+        if any(p.structural for p in keys.values())
+    }
+
+
+def runtime_persistable_keys() -> dict[str, frozenset[str]]:
+    """可写入 runtime_config.json 的键。供 runtime_config._ALLOWED_RUNTIME_KEYS 派生。"""
+    return {
+        section: frozenset(k for k, p in keys.items() if p.runtime_persistable)
+        for section, keys in CONFIG_KEY_POLICY.items()
+        if any(p.runtime_persistable for p in keys.values())
+    }
+
+
+def change_consequence(section: str, key: str) -> str:
+    """返回改动该键的后果标识（none/restart/rebuild）；未登记键按 none 处理。"""
+    policy = CONFIG_KEY_POLICY.get(section, {}).get(key)
+    return policy.consequence if policy else CONSEQUENCE_NONE
+
+
 def merge_config_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """递归合并配置 dict，返回新对象。"""
     merged: dict[str, Any] = dict(base)
@@ -427,6 +553,15 @@ __all__ = [
     "ENV_R2_SECRET_ACCESS_KEY",
     "ENV_WEB_PASSWORD",
     "ENV_EMBEDDING_API_KEY",
+    "CONSEQUENCE_NONE",
+    "CONSEQUENCE_RESTART",
+    "CONSEQUENCE_REBUILD",
+    "ConfigKeyPolicy",
+    "CONFIG_KEY_POLICY",
+    "api_writable_keys",
+    "structural_keys",
+    "runtime_persistable_keys",
+    "change_consequence",
     "merge_config_dicts",
     "SourceStoreConfig",
     "R2SyncConfig",

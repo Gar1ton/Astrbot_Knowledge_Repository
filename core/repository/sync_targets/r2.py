@@ -8,10 +8,6 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-import boto3
-from botocore.config import Config as BotoConfig
-from botocore.exceptions import ClientError
-
 from core.domain.models import QuotaUsage, SyncTargetKind
 from core.repository.sync_targets.base import SyncTarget
 
@@ -43,6 +39,15 @@ class R2SyncTarget(SyncTarget):
             if not self._config.bucket:
                 raise ValueError("R2 bucket name is required.")
 
+            try:
+                import boto3
+                from botocore.config import Config as BotoConfig
+            except ImportError as exc:
+                raise RuntimeError(
+                    "R2 sync requires optional dependencies. Install requirements-additional.txt "
+                    "into the AstrBot Python environment and restart."
+                ) from exc
+
             self._s3_client = boto3.client(
                 service_name="s3",
                 endpoint_url=self._config.endpoint,
@@ -70,7 +75,7 @@ class R2SyncTarget(SyncTarget):
                 f"bucket {self._config.bucket} as {key}."
             )
             return key
-        except ClientError as e:
+        except Exception as e:
             logger.error(f"Failed to push to R2: {e}")
             raise RuntimeError(f"R2 upload failed: {e}") from e
 
@@ -80,7 +85,7 @@ class R2SyncTarget(SyncTarget):
             s3.delete_object(Bucket=self._config.bucket, Key=remote_ref)
             logger.info(f"Successfully deleted object {remote_ref} from R2 bucket.")
             return True
-        except ClientError as e:
+        except Exception as e:
             # S3 delete_object 通常是幂等的，但如果网络/鉴权异常则抛错
             logger.error(f"Failed to delete object from R2: {e}")
             return False
@@ -96,7 +101,7 @@ class R2SyncTarget(SyncTarget):
                 ContentType=content_type,
             )
             return key
-        except ClientError as e:
+        except Exception as e:
             raise RuntimeError(f"R2 backup upload failed: {e}") from e
 
     async def pull_backup(self, key: str) -> bytes:
@@ -105,7 +110,7 @@ class R2SyncTarget(SyncTarget):
         try:
             response = s3.get_object(Bucket=self._config.bucket, Key=key)
             return response["Body"].read()
-        except ClientError as e:
+        except Exception as e:
             raise RuntimeError(f"R2 backup download failed: {e}") from e
 
     async def check_quota(self, pending_bytes: int = 0) -> QuotaUsage:

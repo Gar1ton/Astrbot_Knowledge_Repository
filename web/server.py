@@ -529,6 +529,48 @@ async def handle_delete_local_model(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=500)
 
 
+async def handle_capabilities(request: web.Request) -> web.Response:
+    """GET /api/capabilities — 数据流各环节状态 + 依赖状态 + 诊断（向导页唯一数据源）。"""
+    try:
+        return web.json_response(_api(request).get_capabilities())
+    except NotImplementedError as exc:
+        return web.json_response({"error": str(exc)}, status=503)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def handle_dependencies(request: web.Request) -> web.Response:
+    """GET /api/dependencies — 列出可选依赖的安装/版本状态。"""
+    try:
+        return web.json_response({"dependencies": _api(request).list_dependencies()})
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def handle_dependency_install(request: web.Request) -> web.Response:
+    """POST /api/dependencies/install — 一键安装清单内依赖（仅白名单），输出转发到日志。"""
+    body = await request.json() if request.can_read_body else {}
+    package = body.get("package") if isinstance(body, dict) else None
+    if not package:
+        return web.json_response({"status": "error", "message": "Missing package"}, status=400)
+    _mw_logger.info("Dependency install requested: %s", package)
+    try:
+        result = await _api(request).install_dependency(package)
+        status = 200 if result.get("status") == "ok" else 500
+        return web.json_response(result, status=status)
+    except ValueError as exc:  # 白名单外包名
+        _mw_logger.warning("Dependency install rejected: %s", exc)
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
+async def handle_dependency_recheck(request: web.Request) -> web.Response:
+    """POST /api/dependencies/recheck — 清 import 缓存后重新探测并返回最新状态。"""
+    try:
+        return web.json_response(_api(request).recheck_dependencies())
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 async def handle_logs(request: web.Request) -> web.Response:
     """GET /api/logs?after=<float>&limit=<int> — 返回内存日志缓冲区中的最新日志行。"""
     handler: MemoryLogHandler | None = request.app.get("log_handler")
@@ -749,6 +791,10 @@ def build_app(
     app.router.add_get("/api/files/list", handle_files_list)
     app.router.add_get("/api/models/local", handle_list_local_models)
     app.router.add_delete("/api/models/local/{name}", handle_delete_local_model)
+    app.router.add_get("/api/capabilities", handle_capabilities)
+    app.router.add_get("/api/dependencies", handle_dependencies)
+    app.router.add_post("/api/dependencies/install", handle_dependency_install)
+    app.router.add_post("/api/dependencies/recheck", handle_dependency_recheck)
     app.router.add_get("/api/logs", handle_logs)
     app.router.add_post("/api/ask", handle_ask)
 

@@ -59,7 +59,7 @@
 
 ```bash
 # 安装依赖
-pip install -r requirements.txt
+pip install -r requirements-additional.txt
 
 # 运行测试（标 [x] 前必须绿）
 python -m pytest

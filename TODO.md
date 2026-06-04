@@ -44,6 +44,33 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.18.0 Data-flow wizard + optional dependency management + capability registry (completed)
+
+### User constraints / 约束
+
+- WebUI 核心参数配置需清晰呈现数据流并按需切换，采用分步流程图 + TODO 式状态，保持现有暖色/玻璃风格。
+- 在设置中加入「一键安装并管理」`requirements-additional.txt` 可选依赖（pymilvus / sentence-transformers / lightrag-hku / boto3）的方法，并与数据流视图结合。
+- 安装机密始终仅经环境变量；Docker 部署需提示依赖持久化与「装后需重启」。
+- 后端梳理数据流、消除冗余、优化结构（去重 + 大文件拆分）。
+
+### Technical implementation path
+
+- [x] **Phase 1 后端基础**：新建 `core/capabilities.py`（可选依赖清单 + 唯一 `module_available` + 数据流环节快照 `detect_pipeline`/`detect_capabilities`）；消除 `config.py`、`plugin_initializer.py` 重复的 `_module_available`（改为 import 同一实现，保留模块名兼容既有 monkeypatch）；在 `core/config.py` 建立 `CONFIG_KEY_POLICY` 单一登记表，`api._CONFIG_UPDATE_KEYS`/`_STRUCTURAL_KEYS` 与 `runtime_config._ALLOWED_RUNTIME_KEYS` 改为派生；`r2_sync.enabled`/`notion_sync.enabled`/`source_store.ocr_enabled` 纳入可写（非机密）。
+- [x] **Phase 2 后端接口**：`KnowledgeRepositoryApi` 新增 `get_capabilities`/`list_dependencies`/`install_dependency`/`recheck_dependencies`；`web/server.py` 注册 `/api/capabilities`、`/api/dependencies`、`/api/dependencies/install`、`/api/dependencies/recheck`；安装经 `sys.executable -m pip install`，仅限白名单包（`resolve_install_spec` 防注入），输出逐行转发到日志缓冲（终端日志页可见）。
+- [x] **Phase 3 后端结构**：能力检测/允许键去重收敛（请求 #3 实质）；抽出 `core/api_capabilities.py::CapabilitiesApiMixin`，确立 mixin 拆分范式。
+- [ ] **Phase 3b（deferred 跟进）**：将 `core/api.py`（仍 ~1360 行，超 CONVENTIONS §4 红线）的 documents/retrieval/graph/sync 公共方法进一步拆为 mixin 子门面，并把 `plugin_initializer.initialize()` 分阶段化。理由：该门面耦合密集、被 web/event_handler/测试广泛依赖，宜在独立 session 单独评审与回归；本次优先交付前端可见价值，去重已完成。按 CONVENTIONS §4 以本条登记跟进。
+- [x] **Phase 4 前端**：`lib/api.ts` 新增 capabilities/dependencies 类型、客户端与 mock；`lib/i18n.ts` 新增 `nav_flow` + `flow_*` 中英键；`components/rail/Rail.tsx` 新增「数据流」入口；新建 `app/(console)/flow/page.tsx` 数据流流程图（① → ⑦ 节点 + TODO 式状态徽章 + 节点内切换后端 + 切换后果横幅 + 缺失依赖就地安装），数据源为 `/api/capabilities`（取代前端字符串匹配）。
+- [x] **Phase 5 前端**：flow 页内依赖管理面板（安装 / 版本 / 重新检测）+ 终端日志链接 + 安装后「需重启 + Docker 持久化」提示。
+- [x] **Phase 6 前端**：`settings/page.tsx` 精简（移除与 flow 重复的状态概览卡与「基础召回」说明，新增指向 `/flow` 的入口横幅；保留外观与高级字段编辑）。
+
+### Verification
+
+- `python -m pytest` → 199 passed, 1 skipped
+- `ruff check .` → All checks passed
+- `mypy` → Success（domain 严格域无误）
+- `cd web/frontend && npm run build` → 编译通过，`/flow` 静态路由生成
+- `python tools/sync_frontend.py` → 同步 149 文件至 `pages/`（含 `/flow`）
+
 ## v0.17.0 Milvus default retrieval and on-demand LightRAG precision mode (completed)
 
 ### User constraints / 约束
@@ -61,10 +88,11 @@
 - [x] **Phase 3 — Web 高精度交互**：在 Research Agent 设置浮层加入会话级开关、collection 约束、构建续问与实际模式标识。
 - [x] **Phase 4 — 发布与回归闭环**：更新 schema、文档、版本、测试和静态前端产物。
 - [x] **Phase 5 — 首次安装基础能力与设置页收敛**：启动时创建默认 collection，保证 PDF 上传与 SQLite 词汇召回始终可用；采用轻量多语言本地 Embedding 作为新安装默认值；设置页明确区分基础召回和可选 LightRAG 高精度参数，并清理 Web 上传暂存副本。
+- [x] **Phase 6 — 安装依赖轻量化**：根 requirements 仅保留基础安装依赖；Milvus、本地 Embedding/PyTorch、LightRAG、R2 与开发工具统一进入手动安装的 Additional Requirements 文件，缺包时保持插件启动、上传与 SQLite/AstrBot 基础召回。
 
 ### Verification
 
-- `python -m pytest -q` → `182 passed, 1 skipped`
+- `python -m pytest -q` → `185 passed, 1 skipped`
 - `python -m ruff check . && python -m mypy` → `All checks passed / Success`
 - `cd web/frontend && npm run lint && npm run build` → `0 errors, 8 existing warnings / 12 static pages generated`
 - `python tools/sync_frontend.py --check` → `pages/ 已与 web/frontend/out 一致`

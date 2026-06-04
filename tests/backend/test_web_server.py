@@ -694,15 +694,89 @@ async def test_config_update_route(tmp_path: Path) -> None:
             await resp_invalid_provider.json()
         )["message"]
 
-        # 3. 拒绝非白名单配置节的更新
-        resp_blocked = await client.post(
+        # 3a. 机密键即便其所在节（r2_sync）已开放 enabled 开关，也拒绝写入（命中键白名单）。
+        resp_secret = await client.post(
             "/api/config/update",
             json={"section": "r2_sync", "key": "secret_access_key", "value": "hack"}
+        )
+        assert resp_secret.status == 400
+        secret_data = await resp_secret.json()
+        assert secret_data["status"] == "error"
+        assert "not allowed" in secret_data["message"]
+
+        # 3b. 完全只读的配置节仍整节拒绝（命中节白名单）。
+        resp_blocked = await client.post(
+            "/api/config/update",
+            json={"section": "web_console", "key": "password", "value": "hack"}
         )
         assert resp_blocked.status == 400
         data = await resp_blocked.json()
         assert data["status"] == "error"
         assert "write-protected" in data["message"]
+    finally:
+        await client.close()
+
+
+async def test_capabilities_route_returns_pipeline_and_dependencies(tmp_path: Path) -> None:
+    """GET /api/capabilities 返回环节快照 + 依赖状态 + 诊断。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.get("/api/capabilities")
+        assert resp.status == 200
+        data = await resp.json()
+        stage_ids = [s["id"] for s in data["pipeline"]]
+        assert stage_ids == [
+            "ingest", "embedding", "vector_store", "retrieval", "graph", "ask", "sync",
+        ]
+        assert {d["key"] for d in data["dependencies"]} == {
+            "local_embedding",
+            "milvus",
+            "lightrag",
+            "r2",
+        }
+        assert isinstance(data["diagnostics"], list)
+    finally:
+        await client.close()
+
+
+async def test_dependencies_route_lists_optional_packages(tmp_path: Path) -> None:
+    """GET /api/dependencies 列出可选依赖与安装状态。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.get("/api/dependencies")
+        assert resp.status == 200
+        deps = (await resp.json())["dependencies"]
+        milvus = next(d for d in deps if d["key"] == "milvus")
+        assert milvus["pip_spec"] == "pymilvus[milvus_lite]>=2.5,<3.0"
+        assert "installed" in milvus
+    finally:
+        await client.close()
+
+
+async def test_dependency_install_rejects_unlisted_package(tmp_path: Path) -> None:
+    """POST /api/dependencies/install 拒绝白名单外包名（防注入），不触发 pip。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post(
+            "/api/dependencies/install", json={"package": "evil; rm -rf /"}
+        )
+        assert resp.status == 400
+        assert (await resp.json())["status"] == "error"
+
+        missing = await client.post("/api/dependencies/install", json={})
+        assert missing.status == 400
+    finally:
+        await client.close()
+
+
+async def test_dependency_recheck_returns_fresh_state(tmp_path: Path) -> None:
+    """POST /api/dependencies/recheck 重新探测并返回最新状态。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post("/api/dependencies/recheck")
+        assert resp.status == 200
+        data = await resp.json()
+        assert "dependencies" in data
     finally:
         await client.close()
 

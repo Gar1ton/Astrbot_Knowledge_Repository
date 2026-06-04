@@ -788,3 +788,93 @@ export async function getLogs(after = 0, limit = 200): Promise<LogsResponse> {
   if (isMock()) return { lines: [], server_ts: Date.now() / 1000 };
   return apiFetch<LogsResponse>(`/api/logs?after=${after}&limit=${limit}`);
 }
+
+// ─────────────────────────────────────────────────────────────
+// 系统能力 / 数据流 / 可选依赖（向导页 + 依赖管理面板）
+// 后端唯一真相源：core/capabilities.py。前端只渲染，不再反推状态。
+// ─────────────────────────────────────────────────────────────
+
+/** 数据流单个环节的结构化快照。status: ready|degraded|off|info。consequence: none|restart|rebuild。 */
+export interface PipelineStage {
+  id: string;
+  current: string;
+  candidates: string[];
+  status: "ready" | "degraded" | "off" | "info";
+  switchable: boolean;
+  consequence: "none" | "restart" | "rebuild";
+  required_deps: string[];
+  configured: boolean;
+  detail: Record<string, unknown>;
+}
+
+/** 单个可选依赖的安装状态。 */
+export interface DependencyStatus {
+  key: string;
+  import_name: string;
+  dist_name: string;
+  pip_spec: string;
+  feature: string;
+  stages: string[];
+  installed: boolean;
+  version: string | null;
+}
+
+export interface CapabilitiesData {
+  pipeline: PipelineStage[];
+  dependencies: DependencyStatus[];
+  diagnostics: string[];
+}
+
+export interface InstallResult {
+  status: "ok" | "error";
+  package?: string;
+  returncode?: number;
+  restart_required?: boolean;
+  message?: string;
+}
+
+const MOCK_DEPENDENCIES: DependencyStatus[] = [
+  { key: "local_embedding", import_name: "sentence_transformers", dist_name: "sentence-transformers", pip_spec: "sentence-transformers>=3,<6", feature: "local_embedding", stages: ["embedding"], installed: true, version: "3.0.1" },
+  { key: "milvus", import_name: "pymilvus", dist_name: "pymilvus", pip_spec: "pymilvus[milvus_lite]>=2.5,<3.0", feature: "milvus", stages: ["vector_store", "retrieval"], installed: true, version: "2.5.0" },
+  { key: "lightrag", import_name: "lightrag", dist_name: "lightrag-hku", pip_spec: "lightrag-hku>=1.5.0rc1,<2.0.0", feature: "lightrag", stages: ["graph"], installed: false, version: null },
+  { key: "r2", import_name: "boto3", dist_name: "boto3", pip_spec: "boto3", feature: "r2", stages: ["sync"], installed: false, version: null },
+];
+
+const MOCK_CAPABILITIES: CapabilitiesData = {
+  pipeline: [
+    { id: "ingest", current: "sqlite", candidates: ["sqlite"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { ocr_enabled: false } },
+    { id: "embedding", current: "local", candidates: ["local", "external"], status: "ready", switchable: true, consequence: "rebuild", required_deps: ["local_embedding"], configured: true, detail: { model: "intfloat/multilingual-e5-small", actual_dimension: 384 } },
+    { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true } },
+    { id: "retrieval", current: "rrf_fusion", candidates: ["rrf_fusion"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { engines: ["milvus", "sqlite_lexical"] } },
+    { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix" } },
+    { id: "ask", current: "inject", candidates: ["inject", "query_agent"], status: "ready", switchable: true, consequence: "none", required_deps: [], configured: true, detail: {} },
+    { id: "sync", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { r2_enabled: false, notion_enabled: false } },
+  ],
+  dependencies: MOCK_DEPENDENCIES,
+  diagnostics: [],
+};
+
+export async function getCapabilities(): Promise<CapabilitiesData> {
+  if (isMock()) return JSON.parse(JSON.stringify(MOCK_CAPABILITIES));
+  return apiFetch<CapabilitiesData>("/api/capabilities");
+}
+
+export async function listDependencies(): Promise<DependencyStatus[]> {
+  if (isMock()) return JSON.parse(JSON.stringify(MOCK_DEPENDENCIES));
+  const res = await apiFetch<{ dependencies: DependencyStatus[] }>("/api/dependencies");
+  return res.dependencies;
+}
+
+export async function installDependency(pkg: string): Promise<InstallResult> {
+  if (isMock()) return { status: "ok", package: pkg, restart_required: true, message: "mock installed" };
+  return apiFetch<InstallResult>("/api/dependencies/install", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ package: pkg }),
+  });
+}
+
+export async function recheckDependencies(): Promise<CapabilitiesData> {
+  if (isMock()) return JSON.parse(JSON.stringify(MOCK_CAPABILITIES));
+  return apiFetch<CapabilitiesData>("/api/dependencies/recheck", { method: "POST" });
+}

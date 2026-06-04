@@ -25,7 +25,7 @@
   "r2_sync": {
     "description": "Cloudflare R2 备份（崩溃恢复）",
     "type": "object",
-    "hint": "S3 兼容对象存储：增量备份插件托管原件，并保存本插件 knowledge_repository.db 快照。免费额度 10GB，出口免费",
+    "hint": "可选功能，启用前需安装 requirements-additional.txt。增量备份插件托管原件，并保存 knowledge_repository.db 快照。",
     "items": {
       "enabled": {
         "description": "启用 R2 同步备份",
@@ -142,7 +142,7 @@
   "graph": {
     "description": "LightRAG Core 知识图谱",
     "type": "object",
-    "hint": "可选高精度召回：默认关闭，上传后不自动构建；仅在用户手动确认后触发 LLM/Embedding 索引。每个 collection 使用独立 workspace。",
+    "hint": "可选高精度召回，启用前需安装 requirements-additional.txt。默认关闭，上传后不自动构建；仅在用户手动确认后触发索引。",
     "items": {
       "enabled": {
         "description": "启用 LightRAG Core 图谱",
@@ -183,7 +183,7 @@
   "vector_db": {
     "description": "向量数据库与检索后端",
     "type": "object",
-    "hint": "新安装默认使用 Milvus Lite；Milvus 暂不可用时仍保留 AstrBot KB 与插件 SQLite 词汇召回。",
+    "hint": "默认配置优先使用 Milvus Lite，启用前需安装 requirements-additional.txt 并配置可用 Embedding；否则自动使用 AstrBot/SQLite 基础召回。",
     "items": {
       "backend": {
         "description": "检索后端",
@@ -211,7 +211,7 @@
   "embedding": {
     "description": "默认召回与 LightRAG 共享 Embedding",
     "type": "object",
-    "hint": "运行时会执行一次真实向量探针，并以实际返回维度作为 Milvus 与 LightRAG 的唯一维度真值。API Key 仅从 KR_EMBEDDING_API_KEY 读取。",
+    "hint": "local 需手动安装 requirements-additional.txt；external 直接使用轻量 HTTP 客户端，API Key 仅从 KR_EMBEDDING_API_KEY 读取。",
     "items": {
       "provider": {
         "description": "Embedding 提供商",
@@ -221,7 +221,7 @@
           "local",
           "external"
         ],
-        "hint": "local 使用随插件依赖提供的本地运行时，首次启动自动下载模型；external 使用兼容 OpenAI Embeddings 的 API。"
+        "hint": "local 为可选本地运行时，不随插件自动安装以避免拉取大型 PyTorch/CUDA；external 使用兼容 OpenAI Embeddings 的 API。"
       },
       "model": {
         "description": "Embedding 模型",

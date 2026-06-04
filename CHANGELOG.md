@@ -21,6 +21,28 @@
 
 ---
 
+## [v0.18.0] — 2026-06-04
+
+### 新增功能 (Added)
+
+- **数据流 / 配置向导页**：新增独立 WebUI 页面 `/flow`，把「上传 → 向量化 → 向量库 → 检索 → 图谱 → 问答 → 同步」七环节绘成分步流程图，每个节点带 TODO 式状态徽章（就绪/待处理/可选关闭），展示当前后端与生效引擎，并可在节点内按需切换后端（embedding provider / vector_db backend / graph enabled / ask mode），切换后明确提示需重启或重建索引（`web/frontend/app/(console)/flow/page.tsx`, `web/frontend/components/rail/Rail.tsx`, `web/frontend/lib/i18n.ts`, `web/frontend/lib/api.ts`）。
+- **可选依赖一键安装与管理**：新增 `/api/capabilities`、`/api/dependencies`、`/api/dependencies/install`、`/api/dependencies/recheck` 接口；flow 页依赖面板展示 `requirements-additional.txt` 各包（pymilvus / sentence-transformers / lightrag-hku / boto3）的安装状态与版本，可一键 `pip install`（仅白名单包、防注入），安装输出实时写入终端日志，完成后提示重启插件并附 Docker 持久化提醒（`core/capabilities.py`, `core/api_capabilities.py`, `web/server.py`）。
+- **数据流非机密开关可运行时切换**：`r2_sync.enabled`、`notion_sync.enabled`、`source_store.ocr_enabled` 纳入可经 `/api/config/update` 写入的键（机密仍仅经环境变量注入）（`core/config.py`, `core/runtime_config.py`, `core/api.py`）。
+
+### 架构健康 (Refactor)
+
+- **系统能力单一真相源**：新建 `core/capabilities.py` 作为「可选依赖是否安装 + 各数据流环节当前后端/就绪/切换后果」的唯一来源，消除 `config.py` 与 `plugin_initializer.py` 中重复的 `_module_available` 实现，并取代前端对诊断字符串的子串匹配（`core/capabilities.py`, `core/config.py`, `core/plugin_initializer.py`）。
+- **可写配置键登记收敛**：在 `core/config.py` 建立 `CONFIG_KEY_POLICY` 单一登记表，`api._CONFIG_UPDATE_KEYS`/`_STRUCTURAL_KEYS` 与 `runtime_config._ALLOWED_RUNTIME_KEYS` 改为派生，restart/rebuild 后果统一由登记表 `consequence` 计算，消除三处重复（`core/config.py`, `core/api.py`, `core/runtime_config.py`）。
+- **业务门面初步拆分**：抽出 `core/api_capabilities.py::CapabilitiesApiMixin`，确立按职责拆分巨型 `KnowledgeRepositoryApi` 的 mixin 范式；documents/retrieval/graph/sync 子门面与 `plugin_initializer` 分阶段化登记 TODO v0.18.0 Phase 3b 跟进（`core/api.py`, `core/api_capabilities.py`）。
+
+### 测试 (Tests)
+
+- 新增 `tests/backend/test_capabilities.py`（环节状态机、依赖清单、安装白名单防注入）；`tests/backend/test_web_server.py` 新增 capabilities/dependencies 路由与「拒绝白名单外包名」测试；调整 `test_config_update_route` 以反映 `r2_sync` 节开放 `enabled` 后机密键改由键白名单拒绝（`tests/backend/test_capabilities.py`, `tests/backend/test_web_server.py`）。
+
+### 构建与工程 (Build/CI)
+
+- 前端构建产物同步至 `pages/`（新增 `/flow` 静态路由）（`pages/`, `tools/sync_frontend.py`）。
+
 ## [v0.17.0] — 2026-06-04
 
 ### 新增功能 (Added)
@@ -31,6 +53,8 @@
 
 ### 修复 (Fixed)
 
+- **AstrBot 插件安装被大型 PyTorch/CUDA 下载中断修复**：根 `requirements.txt` 仅保留 PDF 上传、SQLite 基础召回与 Web 控制台所需轻量依赖；Milvus、本地 Embedding、LightRAG、R2 与开发工具统一放入手动安装的 `requirements-additional.txt`，避免 AstrBot 自动安装 `sentence-transformers` 时继续拉取超大 `torch`/CUDA wheel（`requirements.txt`, `requirements-additional.txt`, `.github/workflows/tests.yml`）。
+- **缺少可选依赖时的启动降级**：未安装本地 Embedding、Milvus、LightRAG 或 boto3 时插件继续启动，默认上传与 AstrBot/SQLite 基础召回保持可用，并通过 diagnostics 指明对应安装文件；R2 改为调用时懒加载 boto3（`core/config.py`, `core/plugin_initializer.py`, `core/repository/sync_targets/r2.py`）。
 - **Milvus 生命周期一致性**：启动时前置校验依赖与 collection schema，维度冲突或 `pymilvus` 不可用时受控回退 AstrBot；写入与查询严格校验向量维度，文档移动集合时同步更新 Milvus collection 映射（`core/repository/vector_store/milvus_lite.py`, `core/api.py`）。
 - **Discord 问答路径确定化**：Discord `query_agent` 始终走默认召回，不再自动调用 LightRAG；`/kr agent on` 明确提示高精度模式仅在 Web Research Agent 提供（`core/event_handler.py`）。
 - **AstrBot 对话增强 hook 修复**：`inject` 改由官方 `on_llm_request` hook 写入 system prompt；`query_agent` 直接返回答案，不再依赖 AstrBot LLM 遵循转述指令（`main.py`, `core/event_handler.py`）。
@@ -51,6 +75,7 @@
 ### 构建与工程 (Build/CI)
 
 - 将基础 PDF 摄入所需 `PyMuPDF` 纳入运行时核心依赖，并记录默认 Milvus/本地 Embedding 与 SQLite 降级行为（`requirements.txt`）。
+- 新增扩展功能安装手册与单一 `requirements-additional.txt`；设置页和原生配置 Schema 明确基础安装、Milvus 首选配置及各可选运行时的边界（`docs/OPTIONAL_DEPENDENCIES.md`, `README.md`, `_conf_schema.json`, `web/frontend/app/(console)/settings/page.tsx`）。
 
 ## [v0.16.1] — 2026-06-04
 

@@ -18,6 +18,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from core.api_capabilities import CapabilitiesApiMixin
+from core.config import (
+    CONSEQUENCE_REBUILD,
+    CONSEQUENCE_RESTART,
+    api_writable_keys,
+    change_consequence,
+    structural_keys,
+)
 from core.domain.models import Collection, SourceDocument, SyncTargetKind
 
 logger = logging.getLogger("KnowledgeRepositoryApi")
@@ -100,8 +108,12 @@ class HighPrecisionQueryError(RuntimeError):
         self.reason = reason
 
 
-class KnowledgeRepositoryApi:
-    """知识库应用的业务门面。依赖经构造器注入，自身不创建依赖（装配在组合根）。"""
+class KnowledgeRepositoryApi(CapabilitiesApiMixin):
+    """知识库应用的业务门面。依赖经构造器注入，自身不创建依赖（装配在组合根）。
+
+    公共方法面按职责拆分到 mixin（如 CapabilitiesApiMixin 承载能力/依赖管理），
+    本类负责 __init__ 装配与文档/检索/图谱/同步核心方法及其共享私有助手。
+    """
 
     def __init__(
         self,
@@ -825,25 +837,14 @@ class KnowledgeRepositoryApi:
         }
     )
 
-    # 修改这些字段需要重建索引，运行时直接写入会静默破坏已有数据
-    _STRUCTURAL_KEYS: dict[str, frozenset[str]] = {
-        "graph": frozenset({"working_dir"}),
-        "vector_db": frozenset({"db_filename"}),
-    }
-    _CONFIG_UPDATE_KEYS: dict[str, frozenset[str]] = {
-        "vector_db": frozenset({"backend", "auto_index_enabled"}),
-        "embedding": frozenset({"provider", "model", "base_url", "max_token_size"}),
-        "ask": frozenset({"conversation_enhancement_mode"}),
-        "graph": frozenset(
-            {"enabled", "query_mode", "llm_max_async", "embedding_max_async"}
-        ),
-    }
-    _EMBEDDING_INDEX_KEYS = frozenset({"provider", "model", "base_url"})
+    # 可写键与结构键从 config.py 的单一登记表派生（不再手抄，重启/重建后果亦由登记表决定）。
+    _CONFIG_UPDATE_KEYS: dict[str, frozenset[str]] = api_writable_keys()
+    _STRUCTURAL_KEYS: dict[str, frozenset[str]] = structural_keys()
 
     async def update_config_value(self, section: str, key: str, value: Any) -> dict[str, Any]:
         """Persist a safe config value without hot-swapping embedding-backed runtime state."""
         logger.info("update_config: %s.%s", section, key)
-        if section not in ("vector_db", "embedding", "ask", "graph"):
+        if section not in self._CONFIG_UPDATE_KEYS:
             raise ValueError(f"Section '{section}' is write-protected or read-only.")
         if key not in self._CONFIG_UPDATE_KEYS.get(section, frozenset()):
             raise ValueError(f"runtime config key is not allowed: {section}.{key}")
@@ -861,10 +862,9 @@ class KnowledgeRepositoryApi:
 
         changed = self._current_config_value(section, key) != value
         self._persist_config_value(section, key, value)
-        restart_required = changed and section in {"embedding", "vector_db", "graph"}
-        rebuild_required = (
-            changed and section == "embedding" and key in self._EMBEDDING_INDEX_KEYS
-        )
+        consequence = change_consequence(section, key)
+        rebuild_required = changed and consequence == CONSEQUENCE_REBUILD
+        restart_required = changed and consequence in (CONSEQUENCE_RESTART, CONSEQUENCE_REBUILD)
         if rebuild_required:
             await self._invalidate_embedding_indexes(
                 f"Configuration changed: {section}.{key}"
@@ -1262,6 +1262,9 @@ class KnowledgeRepositoryApi:
             "embedding": self._config.get_embedding_config,
             "ask": self._config.get_ask_agent_config,
             "graph": self._config.get_graph_config,
+            "r2_sync": self._config.get_r2_sync_config,
+            "notion_sync": self._config.get_notion_sync_config,
+            "source_store": self._config.get_source_store_config,
         }
         getter = getters.get(section)
         return getattr(getter(), key, None) if getter else None

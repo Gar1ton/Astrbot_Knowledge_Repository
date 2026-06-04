@@ -44,6 +44,15 @@ function GraphIcon() {
   );
 }
 
+function FlowIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="6" height="6" rx="1" /><rect x="15" y="15" width="6" height="6" rx="1" />
+      <path d="M9 6h6a2 2 0 0 1 2 2v7" />
+    </svg>
+  );
+}
+
 function SyncIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -322,6 +331,7 @@ export function Rail({ onLogout, collapsed = false, onToggle }: RailProps) {
       {!collapsed && <SectionLabel label={t("nav_ops")} />}
       {collapsed && <div style={{ height: 8 }} />}
       <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <NavItem href="/flow" icon={<FlowIcon />} label={t("nav_flow")} collapsed={collapsed} />
         <NavItem href="/sync" icon={<SyncIcon />} label={t("nav_sync")} collapsed={collapsed} />
         <NavItem href="/quota" icon={<QuotaIcon />} label={t("nav_quota")} badge={quotaWarning} collapsed={collapsed} />
         <NavItem href="/terminal" icon={<TerminalIcon />} label="终端日志" collapsed={collapsed} />

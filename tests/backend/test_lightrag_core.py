@@ -35,7 +35,8 @@ def test_estimate_lightrag_build_uses_existing_chunks_without_model_calls() -> N
     assert result["docs_count"] == 1
     assert result["chunks_count"] == 2
     assert result["chars_count"] == len("abc\n\ndef")
-    assert "实际 LLM 调用次数和耗时可能更高" in result["estimate_notice"]
+    assert result["estimated_lrag_chunks"] == 1
+    assert "LRAG chunk" in result["estimate_notice"]
 
 
 def test_parse_lightrag_csv_entities_and_relations(tmp_path: Path) -> None:
@@ -78,6 +79,54 @@ async def test_lightrag_llm_adapter_flattens_history_and_disables_mock() -> None
 
     assert result == "answer"
     assert stub.call == ("user: old\n\ncurrent", "system", False)
+
+
+async def test_estimate_lightrag_build_local_profile_is_conservative() -> None:
+    docs = [SourceDocument("d1", "Doc", "/tmp/d.pdf", "application/pdf", 1, "h", "papers")]
+    long_text = "x" * 9000
+    chunks = {"d1": [DocumentChunk("c1", "d1", 0, long_text, "h1")]}
+
+    remote = estimate_lightrag_build(docs, chunks, seconds_per_chunk_remote=10)
+    local = estimate_lightrag_build(
+        docs,
+        chunks,
+        is_local_lightrag_llm=True,
+        seconds_per_chunk_local=90,
+    )
+
+    assert local["runtime_profile"] == "local"
+    assert local["estimated_lrag_chunks"] == remote["estimated_lrag_chunks"]
+    assert local["estimated_duration_seconds_max"] > remote["estimated_duration_seconds_max"]
+
+
+async def test_registry_chunk_document_uses_lightrag_chunking_func() -> None:
+    class Tokenizer:
+        def encode(self, text: str) -> list[int]:
+            return list(range(len(text)))
+
+    class Rag:
+        tokenizer = Tokenizer()
+        chunk_overlap_token_size = 1
+        chunk_token_size = 4
+
+        def chunking_func(self, tokenizer, text, split, split_only, overlap, size):
+            self.call = (text, split, split_only, overlap, size)
+            return [{"content": "aa"}, {"content": "bb"}]
+
+    rag = Rag()
+    registry = object.__new__(LightRAGCoreRegistry)
+
+    async def get(collection: str):
+        assert collection == "papers"
+        return rag
+
+    registry.get = get  # type: ignore[method-assign]
+
+    chunks, basis = await registry.chunk_document("papers", "aabb")
+
+    assert chunks == ["aa", "bb"]
+    assert basis == "lrag_chunks"
+    assert rag.call == ("aabb", None, False, 1, 4)
 
 
 async def test_lightrag_embedding_adapter_returns_numpy_batch() -> None:

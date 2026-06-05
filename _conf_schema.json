@@ -165,7 +165,8 @@
       "llm_max_async": {
         "description": "LLM 并发上限",
         "type": "int",
-        "default": 4
+        "default": 1,
+        "hint": "本地 LM Studio/Ollama 建议保持 1；云端 API 可按额度调高。"
       },
       "embedding_max_async": {
         "description": "Embedding 并发上限",
@@ -182,7 +183,44 @@
         "description": "每篇文档传入 LightRAG 的最大字符数（0 = 不限制）",
         "type": "int",
         "default": 30000,
-        "hint": "LightRAG 以 ~2000 字符/块分块并逐块调用 LLM；限制此值可直接控制 LLM 调用次数和成本。30000 字符 ≈ 15 次 LLM 调用/文档。"
+        "hint": "限制原文长度可直接控制 LRAG chunk 数、LLM 调用次数和成本。"
+      },
+      "lightrag_llm_base_url": {
+        "description": "图谱构建专用 OpenAI-compatible LLM endpoint",
+        "type": "string",
+        "default": "",
+        "hint": "例如 LM Studio: http://host.docker.internal:1234/v1；留空则沿用主 LLM。"
+      },
+      "lightrag_llm_model": {
+        "description": "图谱构建专用 LLM 模型名",
+        "type": "string",
+        "default": ""
+      },
+      "lightrag_llm_timeout_seconds": {
+        "description": "图谱构建 LLM 单次调用超时秒数",
+        "type": "int",
+        "default": 900,
+        "hint": "本地 phi4 推理慢，建议明显高于 180 秒。"
+      },
+      "lightrag_llm_max_retries": {
+        "description": "图谱构建 LLM 调用失败重试次数",
+        "type": "int",
+        "default": 2
+      },
+      "lightrag_llm_retry_backoff_seconds": {
+        "description": "图谱构建 LLM 重试退避秒数",
+        "type": "float",
+        "default": 2.0
+      },
+      "lightrag_seconds_per_chunk_local": {
+        "description": "本地模型每个 LRAG chunk 的估算秒数",
+        "type": "float",
+        "default": 90.0
+      },
+      "lightrag_seconds_per_chunk_remote": {
+        "description": "云端模型每个 LRAG chunk 的估算秒数",
+        "type": "float",
+        "default": 20.0
       }
     }
   },

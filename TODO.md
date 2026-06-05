@@ -44,6 +44,35 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.20.2 LightRAG local runtime observability (completed)
+
+### User constraints / 约束
+
+- 保留 LightRAG raw-text indexing path，不把 Milvus `DocumentChunk` 当作 LRAG chunk 复用。
+- 进度条按 LRAG 实际或等价切分的 chunk 计数，时间显示必须贴近真实耗时。
+- 本地 phi4/LM Studio 长时间推理优先保证稳定，不为本地模型增加并发。
+- Terminal 需要更细分类并纳入前端 toast 成功/失败事件。
+- 前端设计尽量不碰，只做必要字段、文案和日志上报。
+
+### Technical implementation path
+
+- [x] **Phase 0 — Governance / 执行治理**：按 `AGENTS.md` → `CLAUDE.md` 要求读取项目规范，追加本计划，执行前保护已有 dirty files。技术理由：避免覆盖用户已改动内容，并满足项目闭环。
+- [x] **Phase 1 — Local LLM runtime hardening**：为图谱构建 LLM 增加 timeout/retry/backoff 配置，`LMStudioLLMAdapter` 使用可配置超时并记录耗时、速度、retry 与错误类型。技术理由：本地 phi4 慢推理不能被硬编码 180s 提前杀死。
+- [x] **Phase 2 — LRAG chunk progress + time model**：继续优先读原文；用 LightRAG 等价 chunking 预先得到 LRAG chunk 总数，job 暴露 `processed_chunks/total_chunks`、monotonic elapsed 与动态 ETA 所需字段。技术理由：进度按真实 LRAG 工作量，而非文章数或 Milvus chunk 数。
+- [x] **Phase 3 — Structured terminal events**：扩展内存日志结构化字段与 `/api/logs/events`，把 graph/llm/embedding/retrieval/web/toast/system 分类统一进 terminal 数据源。技术理由：排查性能时需要按功能面筛选，toast 也必须可追踪。
+- [x] **Phase 4 — Minimal frontend adaptation**：Graph/Ask 页优先显示 LRAG chunk 进度和真实 elapsed/ETA；ToastProvider 上报事件；Terminal 增加分类过滤但不重做视觉。技术理由：满足可读性要求，同时控制前端改动面。
+- [x] **Phase 5 — Verification + release notes**：补充后端与前端类型测试，更新 mock/config 示例，测试通过后勾选 TODO 并追加 CHANGELOG。技术理由：`[x]` 仅代表代码落地且相关测试已过。
+
+### Verification
+
+- `python -m pytest tests/backend/test_lightrag_core.py tests/backend/test_api.py tests/backend/test_web_server.py -q` → 84 passed
+- `npx tsc --noEmit` → passed
+- `python -m pytest -q` → 214 passed
+- `python -m ruff check .` → All checks passed
+- `python -m mypy` → Success
+- `npx -y node@20 node_modules/next/dist/bin/next build` → passed，13 static pages generated
+- `python tools/sync_frontend.py` → 149 文件同步至 `pages/`
+
 ## v0.20.1 LightRAG raw-text indexing path (in progress)
 
 ### User constraints / 约束

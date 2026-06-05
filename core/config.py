@@ -122,7 +122,7 @@ class GraphConfig:
 
     enabled: bool = False
     query_mode: str = "mix"
-    llm_max_async: int = 4
+    llm_max_async: int = 1  # 本地模型（LM Studio/Ollama）只支持串行推理，默认 1；云端可调高
     embedding_max_async: int = 8
     working_dir: str = "lightrag_workspaces"
     # 每篇文档传入 LightRAG 进行实体提取的最大字符数。
@@ -134,6 +134,13 @@ class GraphConfig:
     # 支持任意 OpenAI-compatible endpoint，例如 LM Studio: http://localhost:1234/v1
     lightrag_llm_base_url: str = ""
     lightrag_llm_model: str = ""
+    # 本地 phi4/LM Studio 推理慢，图谱构建必须给足时间并允许有限重试。
+    lightrag_llm_timeout_seconds: int = 900
+    lightrag_llm_max_retries: int = 2
+    lightrag_llm_retry_backoff_seconds: float = 2.0
+    # 构建耗时估算参数。云端 API 一般较快，本地模型按 chunk 级长耗时估算。
+    lightrag_seconds_per_chunk_local: float = 90.0
+    lightrag_seconds_per_chunk_remote: float = 20.0
 
 
 @dataclass
@@ -239,8 +246,14 @@ class Config:
                 "llm_max_async": graph.llm_max_async,
                 "embedding_max_async": graph.embedding_max_async,
                 "working_dir": graph.working_dir,
+                "max_doc_chars": graph.max_doc_chars,
                 "lightrag_llm_base_url": graph.lightrag_llm_base_url,
                 "lightrag_llm_model": graph.lightrag_llm_model,
+                "lightrag_llm_timeout_seconds": graph.lightrag_llm_timeout_seconds,
+                "lightrag_llm_max_retries": graph.lightrag_llm_max_retries,
+                "lightrag_llm_retry_backoff_seconds": graph.lightrag_llm_retry_backoff_seconds,
+                "lightrag_seconds_per_chunk_local": graph.lightrag_seconds_per_chunk_local,
+                "lightrag_seconds_per_chunk_remote": graph.lightrag_seconds_per_chunk_remote,
             },
             "vector_db": {
                 "backend": vector_db.backend,
@@ -385,8 +398,52 @@ class Config:
             embedding_max_async=int(s.get("embedding_max_async", GraphConfig.embedding_max_async)),
             working_dir=str(s.get("working_dir", GraphConfig.working_dir)),
             max_doc_chars=max(0, int(s.get("max_doc_chars", GraphConfig.max_doc_chars))),
-            lightrag_llm_base_url=str(s.get("lightrag_llm_base_url", GraphConfig.lightrag_llm_base_url)),
-            lightrag_llm_model=str(s.get("lightrag_llm_model", GraphConfig.lightrag_llm_model)),
+            lightrag_llm_base_url=str(
+                s.get("lightrag_llm_base_url", GraphConfig.lightrag_llm_base_url)
+            ),
+            lightrag_llm_model=str(
+                s.get("lightrag_llm_model", GraphConfig.lightrag_llm_model)
+            ),
+            lightrag_llm_timeout_seconds=max(
+                1,
+                int(
+                    s.get(
+                        "lightrag_llm_timeout_seconds",
+                        GraphConfig.lightrag_llm_timeout_seconds,
+                    )
+                ),
+            ),
+            lightrag_llm_max_retries=max(
+                0,
+                int(s.get("lightrag_llm_max_retries", GraphConfig.lightrag_llm_max_retries)),
+            ),
+            lightrag_llm_retry_backoff_seconds=max(
+                0.0,
+                float(
+                    s.get(
+                        "lightrag_llm_retry_backoff_seconds",
+                        GraphConfig.lightrag_llm_retry_backoff_seconds,
+                    )
+                ),
+            ),
+            lightrag_seconds_per_chunk_local=max(
+                1.0,
+                float(
+                    s.get(
+                        "lightrag_seconds_per_chunk_local",
+                        GraphConfig.lightrag_seconds_per_chunk_local,
+                    )
+                ),
+            ),
+            lightrag_seconds_per_chunk_remote=max(
+                1.0,
+                float(
+                    s.get(
+                        "lightrag_seconds_per_chunk_remote",
+                        GraphConfig.lightrag_seconds_per_chunk_remote,
+                    )
+                ),
+            ),
         )
 
     def get_vector_db_config(self) -> VectorDbConfig:
@@ -495,8 +552,20 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "working_dir": ConfigKeyPolicy(
             False, False, structural=True, consequence=CONSEQUENCE_RESTART
         ),
+        "max_doc_chars": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "lightrag_llm_base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "lightrag_llm_model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "lightrag_llm_timeout_seconds": ConfigKeyPolicy(
+            True, True, consequence=CONSEQUENCE_RESTART
+        ),
+        "lightrag_llm_max_retries": ConfigKeyPolicy(
+            True, True, consequence=CONSEQUENCE_RESTART
+        ),
+        "lightrag_llm_retry_backoff_seconds": ConfigKeyPolicy(
+            True, True, consequence=CONSEQUENCE_RESTART
+        ),
+        "lightrag_seconds_per_chunk_local": ConfigKeyPolicy(True, True),
+        "lightrag_seconds_per_chunk_remote": ConfigKeyPolicy(True, True),
     },
     "notion_sync": {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),

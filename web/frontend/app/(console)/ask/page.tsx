@@ -280,6 +280,15 @@ interface PrecisionDialogState {
   job?: GraphBuildJob;
 }
 
+function formatDuration(seconds?: number | null): string {
+  const total = Math.max(0, Math.round(seconds ?? 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 function PrecisionDialog({
   state,
   onBuild,
@@ -294,9 +303,10 @@ function PrecisionDialog({
   const rows: [string, string][] = state.estimate ? [
     ["集合", state.estimate.collection],
     ["文档数", String(state.estimate.docs_count)],
-    ["分块数", String(state.estimate.chunks_count)],
+    ["Milvus 分块数", String(state.estimate.chunks_count)],
+    ["LRAG 分块数", String(state.estimate.estimated_lrag_chunks ?? state.estimate.chunks_count)],
     ["估算 LLM 调用", `${state.estimate.estimated_llm_calls_min} – ${state.estimate.estimated_llm_calls_max}`],
-    ["估算耗时（秒）", `${state.estimate.estimated_duration_seconds_min} – ${state.estimate.estimated_duration_seconds_max}`],
+    ["估算耗时", `${formatDuration(state.estimate.estimated_duration_seconds_min)} – ${formatDuration(state.estimate.estimated_duration_seconds_max)}`],
   ] : [["集合", state.collection]];
 
   return (
@@ -336,11 +346,17 @@ function PrecisionDialog({
           </div>
         )}
 
-        {state.job && (
-          <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.6 }}>
-            LightRAG 索引：{state.job.status} · {state.job.processed_docs ?? 0}/{state.job.total_docs ?? 0} 文档
-          </div>
-        )}
+        {state.job && (() => {
+          const done = state.job.total_chunks !== undefined ? (state.job.processed_chunks ?? 0) : (state.job.processed_docs ?? 0);
+          const total = state.job.total_chunks !== undefined ? (state.job.total_chunks ?? 0) : (state.job.total_docs ?? 0);
+          const unit = state.job.total_chunks !== undefined ? "LRAG chunk" : "文档";
+          return (
+            <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.6 }}>
+              LightRAG 索引：{state.job.status} · {unit} {done}/{total} · 已运行 {formatDuration(state.job.elapsed_seconds)}
+              {state.job.estimated_remaining_seconds ? ` · 剩余约 ${formatDuration(state.job.estimated_remaining_seconds)}` : ""}
+            </div>
+          );
+        })()}
 
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
           <Btn variant="ghost" size="sm" disabled={state.building} onClick={onCancel}>取消</Btn>

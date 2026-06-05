@@ -108,6 +108,30 @@ class SourceDocumentStore(ABC):
         """读取文档的独立 LightRAG 索引状态。"""
         ...
 
+    # ── 聊天记录 ─────────────────────────────────────────────────
+
+    @abstractmethod
+    async def add_chat_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        sources: list | None = None,
+        retrieval_mode: str = "",
+    ) -> None:
+        """追加一条聊天记录（role='user'|'assistant'）。"""
+        ...
+
+    @abstractmethod
+    async def get_chat_messages(self, conversation_id: str) -> list[dict]:
+        """返回某会话的全部消息，按 id 升序。"""
+        ...
+
+    @abstractmethod
+    async def clear_chat_messages(self, conversation_id: str) -> None:
+        """删除某会话的全部消息。"""
+        ...
+
     # ── 同步状态 ──────────────────────────────────────────────────
 
     @abstractmethod

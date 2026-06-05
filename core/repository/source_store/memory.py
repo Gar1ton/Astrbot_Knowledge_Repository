@@ -140,4 +140,23 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         return [copy.deepcopy(r) for r in ordered]
 
 
+    # ── 聊天记录（内存实现：进程重启后丢失，仅用于测试）───────────
+
+    async def add_chat_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        sources: list | None = None,
+        retrieval_mode: str = "",
+    ) -> None:
+        pass  # 内存实现不持久化聊天记录
+
+    async def get_chat_messages(self, conversation_id: str) -> list[dict]:
+        return []
+
+    async def clear_chat_messages(self, conversation_id: str) -> None:
+        pass
+
+
 __all__ = ["InMemorySourceDocumentStore"]

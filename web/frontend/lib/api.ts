@@ -26,10 +26,26 @@ export interface KrDocument {
   lightrag_index_status?: { status: string; collection: string; last_error?: string } | null;
 }
 
-export interface KbChunk {
+export interface KbChunkContext {
   chunk_id: string;
+  doc_id: string;
   ordinal: number;
   text: string;
+}
+
+export interface KbChunk {
+  chunk_id: string;
+  doc_id: string;
+  ordinal: number;
+  text: string;
+  context_before?: KbChunkContext[];
+  context_after?: KbChunkContext[];
+}
+
+export interface ChunkContextResult {
+  context_before: KbChunkContext[];
+  context_after: KbChunkContext[];
+  matched_chunk_id: string;
 }
 
 export interface QuotaItem {
@@ -130,7 +146,7 @@ export interface AskResult {
   conversation_id: string;
   answer: string;
   sources: AskSource[];
-  requested_retrieval_mode: "default" | "high_precision";
+  requested_retrieval_mode: "default" | "high_precision" | "graph_only";
   actual_retrieval_mode: string;
   retrieval_engines: string[];
   fallback_reason?: string | null;
@@ -282,9 +298,9 @@ const MOCK_DOCS: KrDocument[] = [
 ];
 
 const MOCK_KB_CHUNKS: KbChunk[] = [
-  { chunk_id: "k1", ordinal: 0, text: "Transformer 架构通过自注意力机制（Self-Attention）实现对序列中任意位置的直接依赖建模，彻底摆脱了 RNN 的顺序计算限制。" },
-  { chunk_id: "k2", ordinal: 1, text: "LightRAG 将知识图谱与向量检索融合，采用双层检索策略：局部级（实体邻域）与全局级（跨文档主题）协同工作以提升召回质量。" },
-  { chunk_id: "k3", ordinal: 2, text: "RRF（Reciprocal Rank Fusion）是一种无参数排名融合算法，通过 1/(k+rank_i) 公式合并多路召回结果，天然规避了分数量纲不统一的问题。" },
+  { chunk_id: "k1", doc_id: "seed-1", ordinal: 0, text: "Transformer 架构通过自注意力机制（Self-Attention）实现对序列中任意位置的直接依赖建模，彻底摆脱了 RNN 的顺序计算限制。", context_before: [], context_after: [] },
+  { chunk_id: "k2", doc_id: "seed-2", ordinal: 1, text: "LightRAG 将知识图谱与向量检索融合，采用双层检索策略：局部级（实体邻域）与全局级（跨文档主题）协同工作以提升召回质量。", context_before: [], context_after: [] },
+  { chunk_id: "k3", doc_id: "seed-1", ordinal: 2, text: "RRF（Reciprocal Rank Fusion）是一种无参数排名融合算法，通过 1/(k+rank_i) 公式合并多路召回结果，天然规避了分数量纲不统一的问题。", context_before: [], context_after: [] },
 ];
 
 const MOCK_GRAPH: GraphData = {
@@ -509,8 +525,17 @@ export async function searchKb(
   k: number = 5
 ): Promise<KbChunk[]> {
   if (isMock()) return [...MOCK_KB_CHUNKS];
-  const params = new URLSearchParams({ collection, q, top_k: String(k) });
+  const params = new URLSearchParams({ collection, q, top_k: String(k), window: "2" });
   return apiFetch<KbChunk[]>(`/api/kb/search?${params}`);
+}
+
+export async function getChunkContext(
+  doc_id: string,
+  chunk_id: string,
+  window: number = 2,
+): Promise<ChunkContextResult> {
+  const params = new URLSearchParams({ doc_id, chunk_id, window: String(window) });
+  return apiFetch<ChunkContextResult>(`/api/kb/chunk-context?${params}`);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -557,6 +582,30 @@ export async function rebuildIndexPending(): Promise<{ rebuilt_docs: number; reb
 export async function getPendingReindexCount(): Promise<{ count: number }> {
   if (isMock()) return { count: 0 };
   return apiFetch("/api/documents/pending-reindex-count");
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  sources: AskSource[];
+  retrieval_mode: string;
+  created_at: string;
+}
+
+export async function getChatHistory(conversationId: string): Promise<ChatMessage[]> {
+  if (isMock()) return [];
+  const res = await apiFetch<{ messages: ChatMessage[] }>(
+    `/api/chat/history?conversation_id=${encodeURIComponent(conversationId)}`
+  );
+  return res.messages;
+}
+
+export async function clearChatHistory(conversationId: string): Promise<void> {
+  if (isMock()) return;
+  await apiFetch<{ status: string }>(
+    `/api/chat/history?conversation_id=${encodeURIComponent(conversationId)}`,
+    { method: "DELETE" }
+  );
 }
 
 export interface EmbeddingTestResult {
@@ -698,7 +747,9 @@ export async function ask(opts: {
   top_k?: number;
   conversation_id?: string | null;
   persona_enabled?: boolean;
-  retrieval_mode?: "default" | "high_precision";
+  retrieval_mode?: "default" | "high_precision" | "graph_only";
+  use_english_retrieval?: boolean;
+  answer_language?: "auto" | "zh" | "en";
 }): Promise<AskResult> {
   if (isMock()) {
     await new Promise((r) => setTimeout(r, 800));
@@ -707,8 +758,8 @@ export async function ask(opts: {
       ...MOCK_ASK,
       conversation_id: `conv-${Date.now()}`,
       requested_retrieval_mode: requested,
-      actual_retrieval_mode: requested === "high_precision" ? "milvus_lightrag" : "milvus",
-      retrieval_engines: requested === "high_precision" ? ["milvus", "sqlite_lexical", "lightrag"] : ["milvus", "sqlite_lexical"],
+      actual_retrieval_mode: requested === "high_precision" ? "milvus_lightrag" : requested === "graph_only" ? "lightrag_only" : "milvus",
+      retrieval_engines: requested === "high_precision" ? ["milvus", "sqlite_lexical", "lightrag"] : requested === "graph_only" ? ["lightrag"] : ["milvus", "sqlite_lexical"],
     };
   }
   return apiFetch<AskResult>("/api/ask", {
@@ -721,6 +772,8 @@ export async function ask(opts: {
       conversation_id: opts.conversation_id ?? null,
       persona_enabled: opts.persona_enabled ?? false,
       retrieval_mode: opts.retrieval_mode ?? "default",
+      use_english_retrieval: opts.use_english_retrieval ?? false,
+      answer_language: opts.answer_language ?? "auto",
     }),
   });
 }

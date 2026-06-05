@@ -177,6 +177,12 @@
         "type": "string",
         "default": "lightrag_workspaces",
         "hint": "相对路径会放在插件 data_dir 下；WebUI 只读展示。"
+      },
+      "max_doc_chars": {
+        "description": "每篇文档传入 LightRAG 的最大字符数（0 = 不限制）",
+        "type": "int",
+        "default": 30000,
+        "hint": "LightRAG 以 ~2000 字符/块分块并逐块调用 LLM；限制此值可直接控制 LLM 调用次数和成本。30000 字符 ≈ 15 次 LLM 调用/文档。"
       }
     }
   },

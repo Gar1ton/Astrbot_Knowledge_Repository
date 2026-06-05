@@ -24,6 +24,7 @@ from core.capabilities import module_available as _module_available
 ENV_R2_SECRET_ACCESS_KEY = "KR_R2_SECRET_ACCESS_KEY"
 ENV_WEB_PASSWORD = "KR_WEB_PASSWORD"
 ENV_EMBEDDING_API_KEY = "KR_EMBEDDING_API_KEY"
+ENV_LIGHTRAG_LLM_API_KEY = "KR_LIGHTRAG_LLM_API_KEY"
 
 
 def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
@@ -124,6 +125,15 @@ class GraphConfig:
     llm_max_async: int = 4
     embedding_max_async: int = 8
     working_dir: str = "lightrag_workspaces"
+    # 每篇文档传入 LightRAG 进行实体提取的最大字符数。
+    # LightRAG 以内部 ~2000 chars/chunk 分块并为每块调用 LLM，限制此值可直接控制 LLM 调用次数。
+    # 默认 30000 chars ≈ 15 次 LLM 调用/文档；设为 0 表示不限制。
+    max_doc_chars: int = 30000
+    # 图谱构建专用 LLM（可选）。设置后 LightRAG 的实体/关系抽取将调用此 endpoint，
+    # 与答案生成所用的主 LLM（AstrBot context）完全独立。
+    # 支持任意 OpenAI-compatible endpoint，例如 LM Studio: http://localhost:1234/v1
+    lightrag_llm_base_url: str = ""
+    lightrag_llm_model: str = ""
 
 
 @dataclass
@@ -229,6 +239,8 @@ class Config:
                 "llm_max_async": graph.llm_max_async,
                 "embedding_max_async": graph.embedding_max_async,
                 "working_dir": graph.working_dir,
+                "lightrag_llm_base_url": graph.lightrag_llm_base_url,
+                "lightrag_llm_model": graph.lightrag_llm_model,
             },
             "vector_db": {
                 "backend": vector_db.backend,
@@ -372,6 +384,9 @@ class Config:
             llm_max_async=int(s.get("llm_max_async", GraphConfig.llm_max_async)),
             embedding_max_async=int(s.get("embedding_max_async", GraphConfig.embedding_max_async)),
             working_dir=str(s.get("working_dir", GraphConfig.working_dir)),
+            max_doc_chars=max(0, int(s.get("max_doc_chars", GraphConfig.max_doc_chars))),
+            lightrag_llm_base_url=str(s.get("lightrag_llm_base_url", GraphConfig.lightrag_llm_base_url)),
+            lightrag_llm_model=str(s.get("lightrag_llm_model", GraphConfig.lightrag_llm_model)),
         )
 
     def get_vector_db_config(self) -> VectorDbConfig:
@@ -480,6 +495,8 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "working_dir": ConfigKeyPolicy(
             False, False, structural=True, consequence=CONSEQUENCE_RESTART
         ),
+        "lightrag_llm_base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "lightrag_llm_model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
     },
     "notion_sync": {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
@@ -553,6 +570,7 @@ __all__ = [
     "ENV_R2_SECRET_ACCESS_KEY",
     "ENV_WEB_PASSWORD",
     "ENV_EMBEDDING_API_KEY",
+    "ENV_LIGHTRAG_LLM_API_KEY",
     "CONSEQUENCE_NONE",
     "CONSEQUENCE_RESTART",
     "CONSEQUENCE_REBUILD",

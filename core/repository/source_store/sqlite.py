@@ -457,4 +457,54 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             ]
 
 
+    # ── 聊天记录 ─────────────────────────────────────────────────
+
+    async def add_chat_message(
+        self,
+        conversation_id: str,
+        role: str,
+        content: str,
+        sources: list | None = None,
+        retrieval_mode: str = "",
+    ) -> None:
+        now = _format_dt(datetime.now(timezone.utc))
+        await self._db.execute(
+            """
+            INSERT INTO chat_history
+                (conversation_id, role, content, sources, retrieval_mode, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (conversation_id, role, content, json.dumps(sources or []), retrieval_mode, now),
+        )
+        await self._db.commit()
+
+    async def get_chat_messages(self, conversation_id: str) -> list[dict]:
+        async with self._db.execute(
+            """
+            SELECT role, content, sources, retrieval_mode, created_at
+              FROM chat_history WHERE conversation_id = ?
+             ORDER BY id ASC
+            """,
+            (conversation_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "role": row[0],
+                "content": row[1],
+                "sources": json.loads(row[2]),
+                "retrieval_mode": row[3],
+                "created_at": row[4],
+            })
+        return result
+
+    async def clear_chat_messages(self, conversation_id: str) -> None:
+        await self._db.execute(
+            "DELETE FROM chat_history WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+        await self._db.commit()
+
+
 __all__ = ["SQLiteSourceDocumentStore"]

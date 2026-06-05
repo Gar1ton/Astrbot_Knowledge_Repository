@@ -404,15 +404,29 @@ def sanitize_collection_name(collection: str, existing: set[str] | None = None) 
 
 
 def estimate_lightrag_build(
-    docs: list[Any], chunks_by_doc: dict[str, list[Any]]
+    docs: list[Any],
+    chunks_by_doc: dict[str, list[Any]],
+    max_doc_chars: int = 0,
 ) -> dict[str, int | str]:
     docs_count = len(docs)
     chunks_count = sum(len(chunks_by_doc.get(doc.doc_id, [])) for doc in docs)
-    chars_count = sum(
+    raw_chars = sum(
         len("\n\n".join(chunk.text for chunk in chunks_by_doc.get(doc.doc_id, []))) for doc in docs
     )
+    # 若启用截断，估算实际传入字符数（每篇文档不超过 max_doc_chars）
+    if max_doc_chars > 0:
+        chars_count = sum(
+            min(
+                len("\n\n".join(chunk.text for chunk in chunks_by_doc.get(doc.doc_id, []))),
+                max_doc_chars,
+            )
+            for doc in docs
+        )
+    else:
+        chars_count = raw_chars
+    # LightRAG 以 ~2000 chars/chunk 分块，每块 1 次 LLM 调用
     estimated_llm_min = docs_count
-    estimated_llm_max = max(docs_count, docs_count * 4 + max(0, chars_count // 6000))
+    estimated_llm_max = max(docs_count, max(1, chars_count // 2000) * docs_count)
     estimated_embedding_batches = max(1 if docs_count else 0, (chunks_count + 9) // 10)
     return {
         "docs_count": docs_count,
@@ -431,9 +445,19 @@ def parse_lightrag_csv(path: Path, collection: str) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8")
     sections = _split_export_sections(text)
     if "ENTITIES" not in sections and "RELATIONS" not in sections:
-        raise RuntimeError(
-            "LightRAG export_data output did not contain ENTITIES or RELATIONS sections"
+        # 空图：LightRAG 提取到 0 个实体（LLM 返回为空或提取失败），不报错，返回空图
+        logger.warning(
+            "LightRAG export for collection %r returned no entities/relations — "
+            "graph may be empty or entity extraction produced no output.",
+            collection,
         )
+        return {
+            "status": "success",
+            "collection": collection,
+            "engine": "lightrag_core",
+            "nodes": [],
+            "edges": [],
+        }
 
     nodes: list[dict[str, Any]] = []
     for row in _read_csv_rows(sections.get("ENTITIES", "")):

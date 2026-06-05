@@ -21,6 +21,81 @@
 
 ---
 
+## [v0.20.1] — 2026-06-05
+
+### 架构健康 (Refactor)
+
+- **LightRAG 索引路径与 Milvus chunk 路径分离**：`_run_lightrag_build_job` 新增优先从 `SourceDocument.file_path` 重提取原始文本（PDF 用 fitz 逐页提取，txt/md 直接读文件），避免将 Milvus 预切 chunk 重新拼接后二次分块的 overhead；fitz 未安装或文件不可读时自动降级到原有 chunk 拼接路径，完全向后兼容；新增模块级纯函数 `_extract_raw_doc_text(doc)` 封装提取逻辑（`core/api.py`）。
+
+## [v0.20.0] — 2026-06-05
+
+### 新增功能 (Added)
+
+- **知识库检索前后文窗口**：`GET /api/kb/search` 现在为每个命中 chunk 内联返回 `context_before` / `context_after`（ordinal ±2 相邻 chunk），Search 页结果卡片三段式展示（前文弱化 → 命中高亮 → 后文弱化）；新增 `GET /api/kb/chunk-context?doc_id=&chunk_id=&window=` 端点供按需独立获取（`core/api.py`、`web/server.py`、`web/frontend/lib/api.ts`、`web/frontend/app/(console)/search/page.tsx`）。
+- **引用来源 → 展开显示上下文**：SourcesPanel 中每个来源卡片可点击展开，异步调用 `getChunkContext()` 加载前后文，命中段落加粗，展开区域含 spinner 加载指示（`web/frontend/app/(console)/ask/page.tsx`）。
+- **图谱页空态 CTA**：无图谱时主视图中央显示大尺寸「预估并构建知识图谱」主操作区，代替原来的小字提示（`web/frontend/app/(console)/graph/page.tsx`）。
+- **图谱页侧边栏双 Tab**：「详情」Tab 保留节点/边信息，「图谱查询」Tab 包含原来底部的查询表单，功能组织更清晰（`web/frontend/app/(console)/graph/page.tsx`）。
+
+### 修复 (Fixed)
+
+- **知识库检索不可用**：Search 页改用 `listCollections()`（而非 `listKbCollections()`）初始化集合列表，解决非 AstrBot 环境下集合为空导致搜索按钮无效的问题（`web/frontend/app/(console)/search/page.tsx`）。
+- **图谱页一直加载中**：`listCollections()` 调用加 5s `Promise.race` 超时保护，超时后仍调用 `loadGraph()` 清除初始 `loading: true` 状态（`web/frontend/app/(console)/graph/page.tsx`）。
+- **图谱构建进度不可见**：buildJob 状态行改为带动态进度条的组件，`processed_docs / total_docs` 实时更新；构建成功后显示提取的实体/关系数量（`web/frontend/app/(console)/graph/page.tsx`）。
+
+### 架构健康 (Refactor)
+
+- **引用来源绑定当前查看消息**：`sources` state 替换为 `selectedMsgIndex`（`number | null`）+ 派生的 `displayedSources`；点击 assistant 气泡触发白色辉光动画（2圈）并切换来源面板内容；SourcesPanel 关闭 X 按钮改为点击即收起的折叠 bar（`web/frontend/app/(console)/ask/page.tsx`）。
+- **RA 顶部栏精简**：移除「Research Agent」标题文字，直接展示 `Milvus · 本地 Embedding · 注入增强` 状态行；集合选择持久化至 `localStorage("kr_ask_collection")`，切换页面后恢复上次选择（`web/frontend/app/(console)/ask/page.tsx`）。
+- **输入框焦点辉光统一化**：移除 `.ask-card:focus-within` 的橙色 `border-color` + `box-shadow` ring；新增 `:not(.ask-card--loading):focus-within::before` 轨道辉光（1.8s/圈，亮白混橙，扩散半径更大）与 loading 辉光视觉统一；新增 `.msg-bubble--glow` 白色辉光动画类（`web/frontend/app/globals.css`）。
+- **图谱构建按钮显著化**：无图谱时工具栏按钮切换为 `variant="primary"` 并改文字「预估并构建知识图谱」（`web/frontend/app/(console)/graph/page.tsx`）。
+- **移除文档页手动索引入口**：删除 auto-index toggle 按钮和手动「重建索引」按钮（Milvus auto-index 始终开启），清理相关 state 和废弃 import（`rebuildIndexPending`、`getPendingReindexCount`、`updateConfigValue`）（`web/frontend/app/(console)/documents/page.tsx`）。
+- **搜索页图谱 tab 移除**：`/search` 页完全专注于向量检索；图谱检索功能已整合至 `/graph` 侧边栏「图谱查询」Tab（`web/frontend/app/(console)/search/page.tsx`）。
+- **预先存在的 E501 lint 修复**：修正 `core/api.py`（翻译 prompt 换行）、`core/plugin_initializer.py`（Milvus 状态检查）、`core/repository/source_store/sqlite.py`（SQL INSERT 换行）的超长行。
+
+## [v0.19.1] — 2026-06-04
+
+### 新增功能 (Added)
+
+- **Search 页图谱检索 tab**：在 `/search` 页新增第三个 tab「图谱检索」，调用已有的 `GET /api/graph/query` 端点，将 LightRAG 返回的 answer、entities、relations 以结构化卡片展示；与向量检索 tab 并列，方便直接对比两种召回路径的结果差异；共享 collection 下拉选择器（`web/frontend/app/(console)/search/page.tsx`）。
+- **Graph 页实体搜索浮层**：在图谱画布左上角新增实体名称搜索输入框，输入时对已加载的 `nodes` 做前端模糊过滤（最多显示 8 条），点击结果直接聚焦并高亮对应节点及其邻居；支持 × 一键清空，无需新增后端接口（`web/frontend/app/(console)/graph/page.tsx`）。
+- **Graph 页构建完成后显示实体/关系数量**：LightRAG 构建任务状态栏在 `status === "success"` 时追加「已提取 N 个实体，M 条关系」，数据来自构建完成后自动刷新的图谱快照（`web/frontend/app/(console)/graph/page.tsx`）。
+- **LightRAG 连通性探针**：`run_dev_realtime.py` 在创建 Deepseek 适配器后立即执行 1 次轻量 LLM API 调用（Phase 7.1），验证 DEEPSEEK_API_KEY / LLM_API_URL / LLM_MODEL 三项配置可达；失败时立即打印错误并退出，防止用户等到构建阶段才发现密钥错误；启动 banner 新增 LightRAG 测试操作路径说明（`tests/mocks/run_dev_realtime.py`）。
+
+### 测试 (Tests)
+
+- **LightRAG API 层覆盖补充**：在 `tests/backend/test_api.py` 新增 6 个测试，覆盖此前缺失的路径：`get_lightrag_readiness()` 全通路（ready=True）、部分已索引状态（partial indexed）、`build_graph(confirmed=False)` 的 ValueError guard、insert 抛异常导致 `partial_failure`、`probe_lightrag_core()` 委托传参、`query_graph()` 委托 registry 并验证返回。
+- **LightRAG 核心层单元测试补充**：在 `tests/backend/test_lightrag_core.py` 新增 2 个测试：`has_workspace()` 的 True/False 检测（基于文件系统目录），以及 `manual_probe()` 在 `get()` 初始化失败时返回 `{"status": "error"}` 并记录 steps。
+
+---
+
+## [v0.19.0] — 2026-06-04
+
+### 新增功能 (Added)
+
+- **Ask 聊天记录持久化**：新增 `migrations/007_chat_history.sql` 表，每次 ask() 成功后自动将用户问题与 LLM 回答（含来源、召回模式）写入 SQLite；Ask 页加载时从 `localStorage` 读取 `conversation_id` 并拉取历史恢复对话；"新对话"按钮调用 `DELETE /api/chat/history` 清除 DB 记录并生成新 ID（`migrations/007_chat_history.sql`, `core/repository/source_store/base.py`, `core/repository/source_store/sqlite.py`, `core/repository/source_store/memory.py`, `core/api.py`, `web/server.py`, `web/frontend/lib/api.ts`, `web/frontend/app/(console)/ask/page.tsx`）。
+- **Ask 查询设置新增「使用英语召回」与「回答语言」**：用 LLM 将中文问题翻译为英语后再送入 embedding，提升英语文档向量召回精度（默认开启）；新增强制 LLM 用中文/英文/自动回答的三档语言选项，替代原"与问题同语言"自动逻辑（`core/api.py`, `web/server.py`, `web/frontend/lib/api.ts`, `web/frontend/app/(console)/ask/page.tsx`）。
+- **本地集成测试脚本**：新增 `tests/mocks/run_dev_realtime.py`，使用真实 Milvus Lite + LightRAG + Deepseek API 在端口 6521 启动测试 WebUI，直接从 `tests/mock_data/Brian Massumi/` 读取 PDF 播种数据，绕开 IngestManager；新增 `tests/mocks/reset_dev_realtime.py` 一键归档/清理测试数据；新增 `tests/mock_data/Config/config.example.py` 配置模板；相关文件全部入 `.gitignore`（`tests/mocks/`, `tests/mock_data/Config/config.example.py`, `.gitignore`）。
+
+### 修复 (Fixed)
+
+- **终端日志不显示问题**：`core/plugin_initializer.py` 在 `initialize()` 第一行即调用 `log_capture.install()`，使嵌入探针、Milvus 初始化等启动日志能被终端页捕获；末尾输出组件激活摘要，Milvus 未激活时发出 WARNING；`tests/run_webui.py` 同步提前安装 handler（`core/plugin_initializer.py`, `tests/run_webui.py`）。
+- **日志噪声过滤**：扩展 `MemoryLogHandler._SKIP_PREFIXES`，新增 `httpx`、`httpcore`、`hpack`、`charset_normalizer`、`urllib3`、`asyncio` 前缀，消除第三方库 DEBUG 日志刷屏（`core/log_capture.py`）。
+- **重建索引错误静默问题**：`handle_rebuild_index_pending` 异常捕获从 `RuntimeError` 扩展为 `Exception` 并加 `exc_info=True`；前端 `handleRebuildIndex` 将 `catch {}` 改为 `catch (err) {}` 并在 toast 显示 `ApiError.message`（原为通用"请重试"）；RuntimeError 消息中文化并指向正确操作（`core/api.py`, `web/server.py`, `web/frontend/app/(console)/documents/page.tsx`）。
+- **重建索引进度日志**：`rebuild_index_pending()` 新增"N 个文档待重建"与逐文档"嵌入 N chunks"进度日志；`MilvusLiteVectorStore.upsert_chunks` 添加 INFO 级日志（`core/api.py`, `core/repository/vector_store/milvus_lite.py`）。
+- **Ask 查询设置 dropdown 点击失效**：原 `document.addEventListener("mousedown")` 与 React 18 事件委托同层导致 `stopPropagation` 无效，改为 `refs.contains(target)` 检测点击是否在组件内，彻底修复设置项无法交互的问题（`web/frontend/app/(console)/ask/page.tsx`）。
+- **聊天记录加载可靠性**：历史拉取从主 `useEffect([])` 拆出至独立 `useEffect([conversationId])`，用 `historyLoadedRef` 防重复加载，`.catch(() => {})` 改为 `.catch(console.error)` 不再静默吃错误（`web/frontend/app/(console)/ask/page.tsx`）。
+
+### 架构健康 (Refactor)
+
+- **Ask 页底部工具栏重设计**：设置按钮移至左侧并改为齿轮图标；原"三横线"图标删除；集合选择按钮始终展示当前选中集合名（无选择时显示"全部"）；"使用英语召回"和"回答语言"归入设置 dropdown（此前错误放在工具栏裸露），高精度召回改名为"LightRAG 召回"；checkbox 全部替换为 iOS 风格 toggle 开关组件 `SettingRow`；删除顶部水平召回进度条 `RetrievalProgress`（`web/frontend/app/(console)/ask/page.tsx`, `web/frontend/app/globals.css`）。
+- **Ask 输入框辉光动画**：新增 `@property --ask-beam-angle` + `@keyframes askBeamOrbit`，加载时边框辉光弧形绕 `ask-card` 轨道旋转（1.5s/圈，双层 `drop-shadow`，宽弧形渐入），无 `@keyframes` 以外的 JS 依赖（`web/frontend/app/globals.css`）。
+
+### 构建与工程 (Build/CI)
+
+- 前端所有变更均通过 `npm run build && python tools/sync_frontend.py` 同步至 `pages/`（`pages/`）。
+
+---
+
 ## [v0.18.0] — 2026-06-04
 
 ### 新增功能 (Added)

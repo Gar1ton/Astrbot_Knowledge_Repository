@@ -14,6 +14,59 @@ from typing import Any
 logger = logging.getLogger("LLMAdapter")
 
 
+class LMStudioLLMAdapter:
+    """OpenAI-compatible HTTP adapter，供 LightRAG 图谱构建专用。
+
+    调用任意 OpenAI-compatible endpoint（LM Studio / Ollama / vLLM 等）。
+    与主 LLMAdapter（AstrBot context）完全独立，图谱构建 LLM 与答案生成 LLM 互不影响。
+    """
+
+    def __init__(self, base_url: str, model: str, api_key: str = "") -> None:
+        self._base_url = base_url.rstrip("/")
+        self._model = model
+        self._api_key = api_key
+
+    async def generate(
+        self, prompt: str, system_prompt: str = "", *, allow_mock: bool = True
+    ) -> str:
+        try:
+            import aiohttp
+        except ImportError as exc:
+            if not allow_mock:
+                raise RuntimeError("aiohttp is required for LMStudioLLMAdapter") from exc
+            logger.error("aiohttp not available; LMStudioLLMAdapter cannot call LM Studio")
+            return ""
+
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        payload = {"model": self._model, "messages": messages, "temperature": 0.1}
+        url = f"{self._base_url}/chat/completions"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=180),
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    return str(data["choices"][0]["message"]["content"]).strip()
+        except Exception as exc:
+            if not allow_mock:
+                raise RuntimeError(f"LM Studio call to {url} failed: {exc}") from exc
+            logger.error("LMStudioLLMAdapter.generate failed: %s", exc)
+            return ""
+
+
 class LLMAdapter:
     """运行态 LLM 通用调用适配器（结构化抽取 + 问答生成）。"""
 

@@ -102,6 +102,11 @@ class PluginInitializer:
 
     # ── 启动：按依赖顺序构造 ────────────────────────────────────
     async def initialize(self) -> None:
+        # 0) 最优先安装日志 handler，确保后续所有启动日志可被终端页捕获。
+        from core.log_capture import install as _install_log_capture
+        _install_log_capture()
+        logger.info("PluginInitializer.initialize() 开始")
+
         self._exit_stack = AsyncExitStack()
 
         # 1) 解析各子系统专属 typed config（此处已可用，供后续构造使用）。
@@ -306,10 +311,30 @@ class PluginInitializer:
             else:
                 from core.lightrag_core import LightRAGCoreRegistry
 
+                # 图谱构建专用 LLM 选择：
+                # 若配置了 lightrag_llm_base_url + lightrag_llm_model，则使用本地 LM Studio，
+                # 与答案生成所用的主 LLM（llm_adapter / AstrBot context）完全独立。
+                if graph_cfg.lightrag_llm_base_url and graph_cfg.lightrag_llm_model:
+                    import os
+                    from core.adapters.llm import LMStudioLLMAdapter
+                    from core.config import ENV_LIGHTRAG_LLM_API_KEY
+                    lightrag_llm_adapter = LMStudioLLMAdapter(
+                        base_url=graph_cfg.lightrag_llm_base_url,
+                        model=graph_cfg.lightrag_llm_model,
+                        api_key=os.environ.get(ENV_LIGHTRAG_LLM_API_KEY, ""),
+                    )
+                    logger.info(
+                        "LightRAG 图谱构建将使用本地 LM Studio：%s  model=%s",
+                        graph_cfg.lightrag_llm_base_url,
+                        graph_cfg.lightrag_llm_model,
+                    )
+                else:
+                    lightrag_llm_adapter = llm_adapter
+
                 self.lightrag_registry = LightRAGCoreRegistry(
                     config=graph_cfg,
                     data_dir=self._data_dir,
-                    llm_adapter=llm_adapter,
+                    llm_adapter=lightrag_llm_adapter,
                     embedding_provider=self.embedding_provider,
                     embedding_dim=self.embedding_dimension,
                     max_token_size=embedding_cfg.max_token_size,
@@ -375,6 +400,20 @@ class PluginInitializer:
         if r2_cfg.enabled and r2_cfg.backup_interval_sec > 0:
             self._backup_task = asyncio.create_task(
                 self._periodic_backup(r2_cfg.backup_interval_sec)
+            )
+
+        # 6.5) 启动摘要——记录各关键组件激活状态，方便终端页快速诊断。
+        logger.info(
+            "初始化完成 | embedding=%s dim=%s | vector_store=%s | lightrag=%s",
+            self._config.get_embedding_config().provider if self._config else "N/A",
+            self.embedding_dimension or "N/A",
+            "Milvus" if self.vector_store is not None else "未激活",
+            "已启用" if self.lightrag_registry is not None else "未激活",
+        )
+        vdb_backend = self._config.get_vector_db_config().backend if self._config else None
+        if self.vector_store is None and vdb_backend == "milvus":
+            logger.warning(
+                "VectorStore 未激活——Milvus 安装后需重启插件才能加载，重建索引操作在此之前将失败"
             )
 
         # 7) 独立 Web 控制台（enabled=true 时自动启动，端口/认证由 web_console 配置管辖）。

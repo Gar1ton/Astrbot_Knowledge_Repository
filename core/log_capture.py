@@ -22,8 +22,18 @@ class MemoryLogHandler(logging.Handler):
         self._lock = threading.Lock()
         self._records: deque[dict[str, Any]] = deque(maxlen=maxlen)
 
-    # logger 名称前缀黑名单：这些是框架内部日志，对应用调试无意义且会产生噪声
-    _SKIP_PREFIXES = ("aiohttp.access", "aiohttp.server", "aiohttp.web")
+    # logger 名称前缀黑名单：框架/库内部日志，对业务调试无意义且产生噪声
+    _SKIP_PREFIXES = (
+        "aiohttp.access",
+        "aiohttp.server",
+        "aiohttp.web",
+        "charset_normalizer",
+        "httpx",
+        "hpack",
+        "httpcore",
+        "urllib3",
+        "asyncio",
+    )
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.name.startswith(self._SKIP_PREFIXES):

@@ -18,7 +18,10 @@ const T = {
 } as const;
 
 // ─── 类型 ──────────────────────────────────────────────────────
-interface LogLine { ts: number; level: string; name: string; msg: string; }
+interface LogLine {
+  ts: number; level: string; name: string; msg: string;
+  source?: string; category?: string; operation?: string; status?: string;
+}
 
 interface SystemInfo {
   cwd?: string; data_dir?: string; db_file?: string; python_version?: string; platform?: string;
@@ -26,6 +29,7 @@ interface SystemInfo {
 
 type Level = "DEBUG" | "INFO" | "WARNING" | "ERROR";
 const ALL_LEVELS: Level[] = ["DEBUG", "INFO", "WARNING", "ERROR"];
+const ALL_CATEGORIES = ["graph", "llm", "embedding", "retrieval", "web", "toast", "system", "sync", "other"];
 
 // Agent 相关模块名（Ask 检索 + 事件处理）
 const AGENT_MODULES = [
@@ -59,6 +63,7 @@ function fmtTime(ts: number): string {
 export default function TerminalPage() {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [visibleLevels, setVisibleLevels] = useState<Set<Level>>(new Set(ALL_LEVELS));
+  const [visibleCategories, setVisibleCategories] = useState<Set<string>>(new Set(ALL_CATEGORIES));
   const [agentOnly, setAgentOnly] = useState(false);
   const [sysInfo, setSysInfo] = useState<SystemInfo>({});
   const [sysOpen, setSysOpen] = useState(true);
@@ -128,10 +133,20 @@ export default function TerminalPage() {
     });
   }
 
+  function toggleCategory(category: string) {
+    setVisibleCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(category)) { next.delete(category); } else { next.add(category); }
+      return next;
+    });
+  }
+
   const filtered = lines.filter((l) => {
     const levelOk = visibleLevels.has((l.level || "INFO") as Level) || !ALL_LEVELS.includes(l.level as Level);
+    const category = l.category || "other";
+    const categoryOk = visibleCategories.has(category);
     const agentOk = !agentOnly || AGENT_MODULES.some((m) => l.name.startsWith(m));
-    return levelOk && agentOk;
+    return levelOk && categoryOk && agentOk;
   });
 
   return (
@@ -160,6 +175,28 @@ export default function TerminalPage() {
         >
           AGENT
         </button>
+
+        {/* 分隔 */}
+        <span style={{ color: T.border, fontSize: 14, flexShrink: 0 }}>|</span>
+
+        {/* 分类过滤 */}
+        <div style={{ display: "flex", gap: 4, flexShrink: 0, maxWidth: 430, overflowX: "auto" }}>
+          {ALL_CATEGORIES.map((cat) => (
+            <button
+              key={cat}
+              onClick={() => toggleCategory(cat)}
+              style={{
+                padding: "2px 7px", borderRadius: 4, fontSize: 10, fontFamily: "inherit",
+                border: `1px solid ${visibleCategories.has(cat) ? T.purple : T.border}`,
+                background: visibleCategories.has(cat) ? `${T.purple}22` : "transparent",
+                color: visibleCategories.has(cat) ? T.purple : T.fgMuted,
+                cursor: "pointer", transition: "all .15s",
+              }}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
 
         {/* 分隔 */}
         <span style={{ color: T.border, fontSize: 14, flexShrink: 0 }}>|</span>
@@ -259,6 +296,10 @@ export default function TerminalPage() {
               {/* 模块名 */}
               <span style={{ color: T.blue, flexShrink: 0, minWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginRight: 8 }}>
                 {line.name}
+              </span>
+              {/* 分类 */}
+              <span style={{ color: T.purple, flexShrink: 0, minWidth: 86, marginRight: 8 }}>
+                {(line.category || "other").padEnd(9)}
               </span>
               {/* 消息 */}
               <span style={{ color: T.fg, wordBreak: "break-all", whiteSpace: "pre-wrap" }}>

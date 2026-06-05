@@ -337,7 +337,15 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         def has_workspace(self, collection: str) -> bool:
             return collection == "papers"
 
-        async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
+        async def insert_document(
+            self,
+            collection: str,
+            doc_id: str,
+            text: str,
+            *,
+            lrag_chunks: list[str] | None = None,
+            progress_callback=None,
+        ) -> None:
             self.inserted = (collection, doc_id, text)
 
         async def query(self, collection: str, query: str) -> dict:
@@ -379,7 +387,8 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         estimate = await client.post("/api/graph/build/estimate", json={"collection": "papers"})
         assert estimate.status == 200
         estimate_body = await estimate.json()
-        assert estimate_body["estimate_notice"].endswith("实际 LLM 调用次数和耗时可能更高。")
+        assert "LRAG chunk" in estimate_body["estimate_notice"]
+        assert "estimated_lrag_chunks" in estimate_body
 
         resp1 = await client.post("/api/graph/build", json={"collection": "papers"})
         assert resp1.status == 400
@@ -822,6 +831,25 @@ async def test_ask_route_sources_contain_locator_fields(tmp_path: Path) -> None:
         assert src["doc_id"] == "d1"
         assert src["metadata"]["page_number"] == 3
         assert src["metadata"]["locator"] == "page_3_p2"
+    finally:
+        await client.close()
+
+
+async def test_log_event_endpoint_records_frontend_toast(tmp_path: Path) -> None:
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post(
+            "/api/logs/events",
+            json={"type": "ok", "message": "已保存", "route": "/settings"},
+        )
+        assert resp.status == 200
+
+        logs = await (await client.get("/api/logs?after=0&limit=20")).json()
+        toast = next(line for line in logs["lines"] if line.get("category") == "toast")
+        assert toast["source"] == "frontend"
+        assert toast["operation"] == "notify"
+        assert toast["status"] == "ok"
+        assert toast["metadata"]["route"] == "/settings"
     finally:
         await client.close()
 

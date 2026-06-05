@@ -316,12 +316,16 @@ class PluginInitializer:
                 # 与答案生成所用的主 LLM（llm_adapter / AstrBot context）完全独立。
                 if graph_cfg.lightrag_llm_base_url and graph_cfg.lightrag_llm_model:
                     import os
+
                     from core.adapters.llm import LMStudioLLMAdapter
                     from core.config import ENV_LIGHTRAG_LLM_API_KEY
                     lightrag_llm_adapter = LMStudioLLMAdapter(
                         base_url=graph_cfg.lightrag_llm_base_url,
                         model=graph_cfg.lightrag_llm_model,
                         api_key=os.environ.get(ENV_LIGHTRAG_LLM_API_KEY, ""),
+                        timeout_seconds=graph_cfg.lightrag_llm_timeout_seconds,
+                        max_retries=graph_cfg.lightrag_llm_max_retries,
+                        retry_backoff_seconds=graph_cfg.lightrag_llm_retry_backoff_seconds,
                     )
                     logger.info(
                         "LightRAG 图谱构建将使用本地 LM Studio：%s  model=%s",

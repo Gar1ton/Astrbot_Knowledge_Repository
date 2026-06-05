@@ -21,6 +21,22 @@
 
 ---
 
+## [Unreleased]
+
+### 新增功能 (Added)
+
+- **LightRAG 构建进度升级为 LRAG chunk 级别**：`BuildJob` 新增 `processed_chunks` / `total_chunks` / `progress_basis` / `estimated_remaining_seconds` 等字段，`core/api.py` 在构建前按 LightRAG 等价切分规则生成 LRAG chunk plan，不复用 Milvus `DocumentChunk`；Graph/Ask 页优先展示 `LRAG chunk x / n`、真实已运行时间与动态剩余时间（`core/api.py`, `core/lightrag_core.py`, `web/frontend/lib/api.ts`, `web/frontend/app/(console)/graph/page.tsx`, `web/frontend/app/(console)/ask/page.tsx`）。
+- **Terminal 结构化事件流**：内存日志新增 `category` / `source` / `operation` / `status` / `metadata` 字段，新增 `POST /api/logs/events` 接收前端 toast 事件；Terminal 页支持 graph/llm/embedding/retrieval/web/toast/system 等分类过滤（`core/log_capture.py`, `web/server.py`, `web/frontend/app/(console)/terminal/page.tsx`, `web/frontend/components/ui/Toast.tsx`）。
+
+### 修复 (Fixed)
+
+- **本地 phi4/LM Studio 图谱构建过早超时**：`LMStudioLLMAdapter` 的 `180s` 硬编码超时改为 `GraphConfig` 可配置的 `lightrag_llm_timeout_seconds`，并增加 `lightrag_llm_max_retries` 与 `lightrag_llm_retry_backoff_seconds`；LightRAG 实例同步设置 `default_llm_timeout`，避免本地慢推理被提前中断（`core/adapters/llm.py`, `core/config.py`, `core/plugin_initializer.py`, `_conf_schema.json`）。
+- **图谱构建耗时估算过于乐观**：`estimate_lightrag_build()` 改为按每篇文档估算 LRAG chunk，并区分 local/remote runtime profile 与每 chunk 秒数配置，修正旧公式对文档数的重复放大/压缩问题（`core/lightrag_core.py`, `core/api.py`, `tests/backend/test_lightrag_core.py`）。
+
+### 测试 (Tests)
+
+- 新增覆盖 LRAG chunk plan、chunk 级 build job 进度、本地耗时估算和 toast 日志事件端点的测试（`tests/backend/test_lightrag_core.py`, `tests/backend/test_api.py`, `tests/backend/test_web_server.py`）。
+
 ## [v0.20.1] — 2026-06-05
 
 ### 架构健康 (Refactor)

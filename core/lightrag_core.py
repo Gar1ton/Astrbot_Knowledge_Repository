@@ -8,10 +8,13 @@ logs readable "KR LightRAG" lines for terminal-based manual verification.
 from __future__ import annotations
 
 import ast
+import contextvars
 import csv
 import hashlib
+import inspect
 import json
 import logging
+import math
 import re
 import shutil
 import tempfile
@@ -31,6 +34,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("LightRAGCore")
 
 _QUERY_MODES = {"local", "global", "hybrid", "naive", "mix", "bypass"}
+_LLM_PROGRESS_CALLBACK: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "kr_lightrag_llm_progress_callback", default=None
+)
 
 
 @dataclass
@@ -43,12 +49,21 @@ class BuildJob:
     processed_docs: int = 0
     failed_docs: int = 0
     total_docs: int = 0
-    started_at: float = field(default_factory=time.time)
+    processed_chunks: int = 0
+    failed_chunks: int = 0
+    total_chunks: int = 0
+    current_doc_id: str = ""
+    current_chunk_index: int = 0
+    progress_basis: str = "lrag_chunks"
+    started_at: float = field(default_factory=time.monotonic)
     finished_at: float | None = None
     recent_error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        elapsed = (self.finished_at or time.time()) - self.started_at
+        elapsed = (self.finished_at or time.monotonic()) - self.started_at
+        avg = elapsed / self.processed_chunks if self.processed_chunks > 0 else None
+        remaining_chunks = max(0, self.total_chunks - self.processed_chunks)
+        eta = remaining_chunks * avg if avg is not None else None
         return {
             "job_id": self.job_id,
             "collection": self.collection,
@@ -58,7 +73,15 @@ class BuildJob:
             "processed_docs": self.processed_docs,
             "failed_docs": self.failed_docs,
             "total_docs": self.total_docs,
+            "processed_chunks": self.processed_chunks,
+            "failed_chunks": self.failed_chunks,
+            "total_chunks": self.total_chunks,
+            "current_doc_id": self.current_doc_id,
+            "current_chunk_index": self.current_chunk_index,
+            "progress_basis": self.progress_basis,
             "elapsed_seconds": round(elapsed, 2),
+            "average_seconds_per_chunk": round(avg, 2) if avg is not None else None,
+            "estimated_remaining_seconds": round(eta, 2) if eta is not None else None,
             "recent_error": self.recent_error,
         }
 
@@ -77,12 +100,33 @@ class LightRAGLLMAdapter:
         keyword_extraction: bool = False,
         **kwargs: Any,
     ) -> str:
-        del keyword_extraction, kwargs
+        del kwargs
         flattened = _flatten_history(history_messages or [])
         user_prompt = f"{flattened}\n\n{prompt}" if flattened else prompt
-        return await self._llm_adapter.generate(
-            user_prompt, system_prompt=system_prompt or "", allow_mock=False
+        started = time.monotonic()
+        try:
+            result = await self._llm_adapter.generate(
+                user_prompt, system_prompt=system_prompt or "", allow_mock=False
+            )
+        except Exception:
+            _emit_llm_progress(
+                {
+                    "status": "error",
+                    "elapsed_seconds": time.monotonic() - started,
+                    "keyword_extraction": keyword_extraction,
+                    "prompt_chars": len(user_prompt),
+                }
+            )
+            raise
+        _emit_llm_progress(
+            {
+                "status": "ok",
+                "elapsed_seconds": time.monotonic() - started,
+                "keyword_extraction": keyword_extraction,
+                "prompt_chars": len(user_prompt),
+            }
         )
+        return result
 
 
 class LightRAGEmbeddingAdapter:
@@ -196,12 +240,54 @@ class LightRAGCoreRegistry:
         self._workspace_map.pop(collection, None)
         self._save_workspace_map()
 
-    async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
+    async def chunk_document(self, collection: str, text: str) -> tuple[list[str], str]:
+        """按当前 LightRAG SDK 默认路径生成 LRAG chunk，不复用 Milvus chunk。"""
         rag = await self.get(collection)
-        _terminal(f"ainsert collection={collection!r} doc_id={doc_id!r} chars={len(text)}")
-        result = await rag.ainsert(text, ids=[doc_id])
-        if result is not None:
-            _terminal(f"ainsert done track_id={result!r}")
+        try:
+            value = rag.chunking_func(
+                rag.tokenizer,
+                text,
+                None,
+                False,
+                int(rag.chunk_overlap_token_size),
+                int(rag.chunk_token_size),
+            )
+            rows = await value if inspect.isawaitable(value) else value
+            chunks = [str(row.get("content") or "") for row in rows if row.get("content")]
+            return (chunks or [text], "lrag_chunks")
+        except Exception as exc:
+            logger.warning("LightRAG chunk planning failed; using estimated chunks: %s", exc)
+            return (_fallback_text_chunks(text), "estimated_lrag_chunks")
+
+    async def insert_document(
+        self,
+        collection: str,
+        doc_id: str,
+        text: str,
+        *,
+        lrag_chunks: list[str] | None = None,
+        progress_callback: Any = None,
+    ) -> None:
+        rag = await self.get(collection)
+        chunks = lrag_chunks or []
+        token = _LLM_PROGRESS_CALLBACK.set(progress_callback)
+        try:
+            if chunks and hasattr(rag, "ainsert_custom_chunks"):
+                _terminal(
+                    f"ainsert_custom_chunks collection={collection!r} doc_id={doc_id!r} "
+                    f"chars={len(text)} chunks={len(chunks)}"
+                )
+                await rag.ainsert_custom_chunks(text, chunks, doc_id=doc_id)
+                return
+            _terminal(
+                f"ainsert collection={collection!r} doc_id={doc_id!r} "
+                f"chars={len(text)} chunks={len(chunks)}"
+            )
+            result = await rag.ainsert(text, ids=[doc_id])
+            if result is not None:
+                _terminal(f"ainsert done track_id={result!r}")
+        finally:
+            _LLM_PROGRESS_CALLBACK.reset(token)
 
     async def query(
         self, collection: str, query: str, *, only_need_context: bool = False
@@ -353,6 +439,7 @@ class LightRAGCoreRegistry:
             ),
             llm_model_func=LightRAGLLMAdapter(self._llm_adapter),
             llm_model_max_async=self._config.llm_max_async,
+            default_llm_timeout=self._config.lightrag_llm_timeout_seconds,
             embedding_func_max_async=self._config.embedding_max_async,
             auto_manage_storages_states=False,
         )
@@ -407,37 +494,51 @@ def estimate_lightrag_build(
     docs: list[Any],
     chunks_by_doc: dict[str, list[Any]],
     max_doc_chars: int = 0,
-) -> dict[str, int | str]:
+    *,
+    is_local_lightrag_llm: bool = False,
+    seconds_per_chunk_local: float = 90.0,
+    seconds_per_chunk_remote: float = 20.0,
+) -> dict[str, int | float | str]:
     docs_count = len(docs)
-    chunks_count = sum(len(chunks_by_doc.get(doc.doc_id, [])) for doc in docs)
-    raw_chars = sum(
-        len("\n\n".join(chunk.text for chunk in chunks_by_doc.get(doc.doc_id, []))) for doc in docs
+
+    doc_char_counts: list[int] = []
+    chunks_count = 0
+    raw_chars = 0
+    for doc in docs:
+        chunks = chunks_by_doc.get(doc.doc_id, [])
+        chunks_count += len(chunks)
+        doc_chars = len("\n\n".join(chunk.text for chunk in chunks))
+        raw_chars += doc_chars
+        doc_char_counts.append(min(doc_chars, max_doc_chars) if max_doc_chars > 0 else doc_chars)
+
+    chars_count = sum(doc_char_counts)
+    # LightRAG SDK 默认 F chunker 是 token-based；这里 dry-run 不初始化模型，按字符保守估算。
+    estimated_lrag_chunks = sum(
+        max(1, math.ceil(chars / 4000)) for chars in doc_char_counts if chars
     )
-    # 若启用截断，估算实际传入字符数（每篇文档不超过 max_doc_chars）
-    if max_doc_chars > 0:
-        chars_count = sum(
-            min(
-                len("\n\n".join(chunk.text for chunk in chunks_by_doc.get(doc.doc_id, []))),
-                max_doc_chars,
-            )
-            for doc in docs
-        )
-    else:
-        chars_count = raw_chars
-    # LightRAG 以 ~2000 chars/chunk 分块，每块 1 次 LLM 调用
-    estimated_llm_min = docs_count
-    estimated_llm_max = max(docs_count, max(1, chars_count // 2000) * docs_count)
-    estimated_embedding_batches = max(1 if docs_count else 0, (chunks_count + 9) // 10)
+    estimated_llm_min = estimated_lrag_chunks
+    estimated_llm_max = max(estimated_lrag_chunks, math.ceil(estimated_lrag_chunks * 1.5))
+    estimated_embedding_batches = max(1 if docs_count else 0, (estimated_lrag_chunks + 9) // 10)
+
+    per_chunk = seconds_per_chunk_local if is_local_lightrag_llm else seconds_per_chunk_remote
+    duration_min = int(max(docs_count * 5, estimated_llm_min * per_chunk * 0.6))
+    duration_max = int(max(duration_min, estimated_llm_max * per_chunk * 1.6))
+    runtime = "local" if is_local_lightrag_llm else "remote"
     return {
         "docs_count": docs_count,
         "chunks_count": chunks_count,
         "chars_count": chars_count,
+        "estimated_lrag_chunks": estimated_lrag_chunks,
         "estimated_llm_calls_min": estimated_llm_min,
         "estimated_llm_calls_max": estimated_llm_max,
         "estimated_embedding_batches": estimated_embedding_batches,
-        "estimated_duration_seconds_min": docs_count * 5,
-        "estimated_duration_seconds_max": max(docs_count * 20, estimated_llm_max * 15),
-        "estimate_notice": "这是估算，不是承诺；实际 LLM 调用次数和耗时可能更高。",
+        "estimated_duration_seconds_min": duration_min,
+        "estimated_duration_seconds_max": duration_max,
+        "seconds_per_chunk": per_chunk,
+        "runtime_profile": runtime,
+        "estimate_notice": (
+            "这是基于 LRAG chunk 的估算，不是倒计时；实际耗时会按运行中速度动态修正。"
+        ),
     }
 
 
@@ -554,6 +655,22 @@ def _flatten_history(history: list[dict[str, str]]) -> str:
         if content:
             lines.append(f"{role}: {content}")
     return "\n".join(lines)
+
+
+def _emit_llm_progress(event: dict[str, Any]) -> None:
+    callback = _LLM_PROGRESS_CALLBACK.get()
+    if callable(callback):
+        callback(event)
+
+
+def _fallback_text_chunks(
+    text: str, chunk_chars: int = 4000, overlap_chars: int = 300
+) -> list[str]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    step = max(1, chunk_chars - overlap_chars)
+    return [stripped[i : i + chunk_chars] for i in range(0, len(stripped), step)]
 
 
 def _terminal(message: str) -> None:

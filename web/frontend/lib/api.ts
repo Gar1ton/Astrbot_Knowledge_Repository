@@ -111,11 +111,14 @@ export interface GraphBuildEstimate {
   docs_count: number;
   chunks_count: number;
   chars_count: number;
+  estimated_lrag_chunks?: number;
   estimated_llm_calls_min: number;
   estimated_llm_calls_max: number;
   estimated_embedding_batches: number;
   estimated_duration_seconds_min: number;
   estimated_duration_seconds_max: number;
+  seconds_per_chunk?: number;
+  runtime_profile?: "local" | "remote" | string;
   estimate_notice: string;
 }
 
@@ -128,7 +131,15 @@ export interface GraphBuildJob {
   processed_docs?: number;
   failed_docs?: number;
   total_docs?: number;
+  processed_chunks?: number;
+  failed_chunks?: number;
+  total_chunks?: number;
+  current_doc_id?: string;
+  current_chunk_index?: number;
+  progress_basis?: "lrag_chunks" | "estimated_lrag_chunks" | string;
   elapsed_seconds?: number;
+  average_seconds_per_chunk?: number | null;
+  estimated_remaining_seconds?: number | null;
   recent_error?: string;
 }
 
@@ -663,8 +674,10 @@ export async function queryGraph(
 export async function estimateGraphBuild(collection?: string): Promise<GraphBuildEstimate> {
   if (isMock()) return {
     collection: collection || "papers", docs_count: 5, chunks_count: 144, chars_count: 42000,
-    estimated_llm_calls_min: 5, estimated_llm_calls_max: 28, estimated_embedding_batches: 15,
-    estimated_duration_seconds_min: 25, estimated_duration_seconds_max: 420,
+    estimated_lrag_chunks: 12,
+    estimated_llm_calls_min: 12, estimated_llm_calls_max: 18, estimated_embedding_batches: 2,
+    estimated_duration_seconds_min: 648, estimated_duration_seconds_max: 2592,
+    seconds_per_chunk: 90, runtime_profile: "local",
     estimate_notice: "这是估算，不是承诺；实际 LLM 调用次数和耗时可能更高。",
   };
   return apiFetch<GraphBuildEstimate>("/api/graph/build/estimate", {
@@ -683,7 +696,12 @@ export async function buildGraph(collection?: string): Promise<GraphBuildJob> {
 }
 
 export async function getGraphBuildJob(jobId: string): Promise<GraphBuildJob> {
-  if (isMock()) return { job_id: jobId, status: "success", stage: "done", engine: "lightrag_core", collection: "papers", processed_docs: 5, failed_docs: 0, total_docs: 5, elapsed_seconds: 12 };
+  if (isMock()) return {
+    job_id: jobId, status: "success", stage: "done", engine: "lightrag_core", collection: "papers",
+    processed_docs: 5, failed_docs: 0, total_docs: 5,
+    processed_chunks: 12, failed_chunks: 0, total_chunks: 12, progress_basis: "lrag_chunks",
+    elapsed_seconds: 840, average_seconds_per_chunk: 70, estimated_remaining_seconds: 0,
+  };
   return apiFetch<GraphBuildJob>(`/api/graph/build/${encodeURIComponent(jobId)}`);
 }
 
@@ -834,8 +852,25 @@ export async function deleteLocalModel(name: string): Promise<void> {
 // 日志流
 // ─────────────────────────────────────────────────────────────
 
-export interface LogLine { ts: number; level: string; name: string; msg: string; }
+export interface LogLine {
+  ts: number; level: string; name: string; msg: string;
+  source?: string; category?: string; operation?: string; status?: string;
+  elapsed_ms?: number | null; metadata?: Record<string, unknown>;
+}
 export interface LogsResponse { lines: LogLine[]; server_ts: number; }
+
+export async function postLogEvent(event: {
+  type: "info" | "error" | "ok";
+  message: string;
+  route?: string;
+}): Promise<void> {
+  if (isMock()) return;
+  await apiFetch<{ status: string }>("/api/logs/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(event),
+  });
+}
 
 export async function getLogs(after = 0, limit = 200): Promise<LogsResponse> {
   if (isMock()) return { lines: [], server_ts: Date.now() / 1000 };

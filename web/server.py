@@ -607,6 +607,31 @@ async def handle_dependency_recheck(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=500)
 
 
+async def handle_log_event(request: web.Request) -> web.Response:
+    """POST /api/logs/events — 接收前端 toast 等非 logging 运行事件。"""
+    handler: MemoryLogHandler | None = request.app.get("log_handler")
+    body = await request.json() if request.can_read_body else {}
+    if not isinstance(body, dict):
+        return web.json_response({"status": "error", "message": "Invalid JSON body"}, status=400)
+    if handler is not None:
+        event_type = str(body.get("type") or "info")
+        status = "error" if event_type == "error" else "ok" if event_type == "ok" else "info"
+        level = "ERROR" if event_type == "error" else "INFO"
+        handler.add_event(
+            source="frontend",
+            category="toast",
+            operation="notify",
+            status=status,
+            level=level,
+            msg=str(body.get("message") or ""),
+            metadata={
+                "route": str(body.get("route") or ""),
+                "toast_type": event_type,
+            },
+        )
+    return web.json_response({"status": "ok"})
+
+
 async def handle_logs(request: web.Request) -> web.Response:
     """GET /api/logs?after=<float>&limit=<int> — 返回内存日志缓冲区中的最新日志行。"""
     handler: MemoryLogHandler | None = request.app.get("log_handler")
@@ -837,6 +862,7 @@ def build_app(
     app.router.add_post("/api/dependencies/install", handle_dependency_install)
     app.router.add_post("/api/dependencies/recheck", handle_dependency_recheck)
     app.router.add_get("/api/logs", handle_logs)
+    app.router.add_post("/api/logs/events", handle_log_event)
     app.router.add_post("/api/ask", handle_ask)
     app.router.add_get("/api/chat/history", handle_chat_history_get)
     app.router.add_delete("/api/chat/history", handle_chat_history_clear)

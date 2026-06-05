@@ -1,6 +1,7 @@
 "use client";
 
-import React, { createContext, useCallback, useContext, useState, useEffect } from "react";
+import React, { createContext, useCallback, useContext, useState, useEffect, useRef } from "react";
+import { postLogEvent } from "@/lib/api";
 
 interface ToastItem {
   id: number;
@@ -20,11 +21,13 @@ export function useToast() {
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
-  let nextId = 0;
+  const nextIdRef = useRef(0);
 
   const toast = useCallback((message: string, type: ToastItem["type"] = "info") => {
-    const id = ++nextId;
+    const id = ++nextIdRef.current;
     setItems((prev) => [...prev, { id, message, type }]);
+    const route = typeof window !== "undefined" ? window.location.pathname : "";
+    void postLogEvent({ message, type, route }).catch(() => undefined);
     setTimeout(() => {
       setItems((prev) => prev.filter((t) => t.id !== id));
     }, 3500);

@@ -368,7 +368,15 @@ async def test_lightrag_build_resets_incompatible_workspace(tmp_path: Path) -> N
         async def reset_workspace(self, collection: str) -> None:
             calls.append(f"reset:{collection}")
 
-        async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
+        async def insert_document(
+            self,
+            collection: str,
+            doc_id: str,
+            text: str,
+            *,
+            lrag_chunks: list[str] | None = None,
+            progress_callback=None,
+        ) -> None:
             calls.append(f"insert:{collection}:{doc_id}")
 
     store = InMemorySourceDocumentStore()
@@ -442,7 +450,15 @@ async def test_lightrag_build_only_indexes_pending_docs_when_workspace_is_compat
         def has_workspace(self, collection: str) -> bool:
             return True
 
-        async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
+        async def insert_document(
+            self,
+            collection: str,
+            doc_id: str,
+            text: str,
+            *,
+            lrag_chunks: list[str] | None = None,
+            progress_callback=None,
+        ) -> None:
             inserted.append(doc_id)
 
     store = InMemorySourceDocumentStore()
@@ -718,7 +734,15 @@ async def test_build_graph_partial_failure_when_insert_raises(tmp_path: Path) ->
         def has_workspace(self, collection: str) -> bool:
             return False
 
-        async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
+        async def insert_document(
+            self,
+            collection: str,
+            doc_id: str,
+            text: str,
+            *,
+            lrag_chunks: list[str] | None = None,
+            progress_callback=None,
+        ) -> None:
             raise RuntimeError("LLM API timeout")
 
     store = InMemorySourceDocumentStore()
@@ -736,6 +760,51 @@ async def test_build_graph_partial_failure_when_insert_raises(tmp_path: Path) ->
     job = api._graph_build_jobs["job"]
     assert job.status == "partial_failure"
     assert job.failed_docs == 1
+
+
+async def test_build_graph_reports_lrag_chunk_progress() -> None:
+    from core.lightrag_core import BuildJob
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return False
+
+        async def chunk_document(self, collection: str, text: str) -> tuple[list[str], str]:
+            assert collection == "papers"
+            return ["part 1", "part 2", "part 3"], "lrag_chunks"
+
+        async def insert_document(
+            self,
+            collection: str,
+            doc_id: str,
+            text: str,
+            *,
+            lrag_chunks: list[str] | None = None,
+            progress_callback=None,
+        ) -> None:
+            assert lrag_chunks == ["part 1", "part 2", "part 3"]
+            if progress_callback:
+                progress_callback({"status": "ok"})
+                progress_callback({"status": "ok"})
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "content", "h1")])
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+    )
+    api._graph_build_jobs["job"] = BuildJob(job_id="job", collection="papers")
+
+    await api._run_lightrag_build_job("job")
+
+    job = api._graph_build_jobs["job"]
+    assert job.status == "success"
+    assert job.total_chunks == 3
+    assert job.processed_chunks == 3
+    assert job.progress_basis == "lrag_chunks"
+    assert job.to_dict()["estimated_remaining_seconds"] == 0
 
 
 async def test_probe_lightrag_core_delegates_to_registry() -> None:

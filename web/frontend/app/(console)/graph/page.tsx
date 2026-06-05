@@ -399,16 +399,26 @@ interface BuildEstimateModalProps {
   onCancel: () => void;
 }
 
+function formatDuration(seconds?: number | null): string {
+  const total = Math.max(0, Math.round(seconds ?? 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 function BuildEstimateModal({ estimate, onConfirm, onCancel }: BuildEstimateModalProps) {
   const { t } = useI18n();
 
   const rows: [string, string][] = [
     [t("graph_build_modal_docs"),         String(estimate.docs_count)],
     [t("graph_build_modal_chunks"),       String(estimate.chunks_count)],
+    ["LRAG chunks",                       String(estimate.estimated_lrag_chunks ?? estimate.chunks_count)],
     [t("graph_build_modal_chars"),        estimate.chars_count.toLocaleString()],
     [t("graph_build_modal_llm_calls"),    `${estimate.estimated_llm_calls_min} – ${estimate.estimated_llm_calls_max}`],
     [t("graph_build_modal_embed_batches"),String(estimate.estimated_embedding_batches)],
-    [t("graph_build_modal_duration"),     `${estimate.estimated_duration_seconds_min} – ${estimate.estimated_duration_seconds_max}`],
+    [t("graph_build_modal_duration"),     `${formatDuration(estimate.estimated_duration_seconds_min)} – ${formatDuration(estimate.estimated_duration_seconds_max)}`],
   ];
 
   return (
@@ -720,7 +730,12 @@ export default function GraphPage() {
         </div>
 
         {/* 构建进度条 */}
-        {buildJob && !["success", "partial_failure", "error"].includes(buildJob.status) && (
+        {buildJob && !["success", "partial_failure", "error"].includes(buildJob.status) && (() => {
+          const done = buildJob.total_chunks !== undefined ? (buildJob.processed_chunks ?? 0) : (buildJob.processed_docs ?? 0);
+          const total = buildJob.total_chunks !== undefined ? (buildJob.total_chunks ?? 0) : (buildJob.total_docs ?? 0);
+          const unit = buildJob.total_chunks !== undefined ? "LRAG chunk" : "文档";
+          const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+          return (
           <div style={{ borderTop: "1px solid var(--border)", padding: "10px 16px" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
               <span style={{ width: 10, height: 10, borderRadius: "50%", border: "2px solid var(--accent)", borderTopColor: "transparent", display: "inline-block", animation: "spin 0.6s linear infinite", flexShrink: 0 }} />
@@ -728,14 +743,15 @@ export default function GraphPage() {
                 ⚙ 正在构建图谱：{buildJob.stage ?? "queued"}
               </span>
               <span style={{ fontSize: 11, color: "var(--fg-muted)", marginLeft: "auto" }}>
-                {buildJob.processed_docs ?? 0} / {buildJob.total_docs ?? 0} 文档 · {buildJob.elapsed_seconds ?? 0}s
+                {unit} {done} / {total} · 已运行 {formatDuration(buildJob.elapsed_seconds)}
+                {buildJob.estimated_remaining_seconds ? ` · 剩余约 ${formatDuration(buildJob.estimated_remaining_seconds)}` : ""}
               </span>
             </div>
-            {(buildJob.total_docs ?? 0) > 0 && (
+            {total > 0 && (
               <div style={{ height: 4, borderRadius: 2, background: "var(--border)", overflow: "hidden" }}>
                 <div style={{
                   height: "100%", borderRadius: 2, background: "var(--accent)",
-                  width: `${Math.round(((buildJob.processed_docs ?? 0) / (buildJob.total_docs ?? 1)) * 100)}%`,
+                  width: `${pct}%`,
                   transition: "width 0.4s ease",
                 }} />
               </div>
@@ -744,7 +760,8 @@ export default function GraphPage() {
               <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>{buildJob.recent_error}</div>
             )}
           </div>
-        )}
+          );
+        })()}
         {buildJob?.status === "success" && graphData && (
           <div style={{ borderTop: "1px solid var(--border)", padding: "8px 16px", fontSize: 11, color: "var(--fg-muted)", display: "flex", alignItems: "center", gap: 6 }}>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>

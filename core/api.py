@@ -1125,8 +1125,22 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         chunks_by_doc = {
             doc.doc_id: await self._source_store.list_chunks(doc.doc_id) for doc in docs
         }
-        max_chars = self._config.get_graph_config().max_doc_chars if self._config else 0
-        estimate = estimate_lightrag_build(docs, chunks_by_doc, max_doc_chars=max_chars)
+        graph_cfg = self._config.get_graph_config() if self._config else None
+        max_chars = graph_cfg.max_doc_chars if graph_cfg else 0
+        estimate = estimate_lightrag_build(
+            docs,
+            chunks_by_doc,
+            max_doc_chars=max_chars,
+            is_local_lightrag_llm=bool(
+                graph_cfg and graph_cfg.lightrag_llm_base_url and graph_cfg.lightrag_llm_model
+            ),
+            seconds_per_chunk_local=(
+                graph_cfg.lightrag_seconds_per_chunk_local if graph_cfg else 90.0
+            ),
+            seconds_per_chunk_remote=(
+                graph_cfg.lightrag_seconds_per_chunk_remote if graph_cfg else 20.0
+            ),
+        )
         return {"collection": col, **estimate}
 
     async def build_graph(self, collection: str | None = None, *, confirmed: bool = False) -> dict:
@@ -1170,36 +1184,74 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             ):
                 job.stage = "resetting_workspace"
                 await self._lightrag_registry.reset_workspace(job.collection)
+
             max_chars = 0
             if self._config is not None:
                 max_chars = self._config.get_graph_config().max_doc_chars
+
+            prepared: list[tuple[SourceDocument, str, list[str], str]] = []
             for doc in docs:
-                job.stage = "indexing"
-                # LightRAG 路径：优先从原始文件提取连续文本，避免 Milvus chunk 拼接的双重切块
-                raw = _extract_raw_doc_text(doc)
-                if raw is not None:
-                    text = raw
-                else:
-                    # 降级：fitz 未安装 / 文件不可读 / 格式不支持 → 拼接 chunk
-                    chunks = await self._source_store.list_chunks(doc.doc_id)
-                    text = "\n\n".join(chunk.text for chunk in chunks if chunk.text.strip())
-                # max_doc_chars 截断，控制 LLM 调用次数和成本
+                text = await self._lightrag_text_for_doc(doc)
                 if max_chars > 0 and len(text) > max_chars:
                     text = text[:max_chars]
+                if not text.strip():
+                    prepared.append((doc, "", [], "lrag_chunks"))
+                    continue
+                chunk_document = getattr(self._lightrag_registry, "chunk_document", None)
+                if callable(chunk_document):
+                    chunks, basis = await chunk_document(job.collection, text)
+                else:
+                    chunks, basis = [text], "estimated_lrag_chunks"
+                prepared.append((doc, text, chunks, basis))
+
+            job.total_chunks = sum(len(chunks) for _, text, chunks, _ in prepared if text.strip())
+            bases = {basis for _, _, _, basis in prepared}
+            job.progress_basis = (
+                "lrag_chunks" if bases <= {"lrag_chunks"} else "estimated_lrag_chunks"
+            )
+
+            for doc, text, lrag_chunks, _basis in prepared:
+                job.stage = "indexing"
+                job.current_doc_id = doc.doc_id
                 if not text.strip():
                     await self._source_store.set_lightrag_index_status(
                         doc.doc_id, job.collection, "indexed"
                     )
                     job.processed_docs += 1
                     continue
+
+                chunk_start = job.processed_chunks
+                chunk_target = min(job.total_chunks, chunk_start + len(lrag_chunks))
+
+                def _on_lightrag_llm(event: dict[str, Any]) -> None:
+                    if event.get("status") == "ok":
+                        if job.total_chunks > 0:
+                            job.processed_chunks = min(
+                                job.total_chunks, max(job.processed_chunks + 1, chunk_start)
+                            )
+                            job.current_chunk_index = job.processed_chunks
+                    elif event.get("status") == "error":
+                        job.failed_chunks += 1
+
                 try:
-                    await self._lightrag_registry.insert_document(job.collection, doc.doc_id, text)
+                    await self._lightrag_registry.insert_document(
+                        job.collection,
+                        doc.doc_id,
+                        text,
+                        lrag_chunks=lrag_chunks,
+                        progress_callback=_on_lightrag_llm,
+                    )
+                    if job.processed_chunks < chunk_target:
+                        job.processed_chunks = chunk_target
+                        job.current_chunk_index = job.processed_chunks
                     await self._source_store.set_lightrag_index_status(
                         doc.doc_id, job.collection, "indexed"
                     )
                     job.processed_docs += 1
                 except Exception as exc:
                     job.failed_docs += 1
+                    remaining = max(0, chunk_target - job.processed_chunks)
+                    job.failed_chunks += remaining
                     job.recent_error = str(exc)
                     await self._source_store.set_lightrag_index_status(
                         doc.doc_id, job.collection, "error", str(exc)
@@ -1207,7 +1259,6 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     logger.error("LightRAG build failed for doc %s: %s", doc.doc_id, exc)
             job.stage = "done"
             job.status = "success" if job.failed_docs == 0 else "partial_failure"
-            # 无论 success 还是 partial_failure，只要有文档被处理，embedding 指纹就是有效的
             if (
                 job.status in ("success", "partial_failure")
                 and job.processed_docs > 0
@@ -1223,7 +1274,14 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             job.recent_error = str(exc)
             logger.error("LightRAG build job %s failed: %s", job_id, exc)
         finally:
-            job.finished_at = time.time()
+            job.finished_at = time.monotonic()
+
+    async def _lightrag_text_for_doc(self, doc: SourceDocument) -> str:
+        raw = _extract_raw_doc_text(doc)
+        if raw is not None:
+            return raw
+        chunks = await self._source_store.list_chunks(doc.doc_id)
+        return "\n\n".join(chunk.text for chunk in chunks if chunk.text.strip())
 
     async def _lightrag_docs_for_build(self, collection: str) -> list[SourceDocument]:
         docs = await self._source_store.list_documents(collection=collection)

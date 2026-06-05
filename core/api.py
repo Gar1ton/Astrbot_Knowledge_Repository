@@ -108,6 +108,36 @@ class HighPrecisionQueryError(RuntimeError):
         self.reason = reason
 
 
+def _extract_raw_doc_text(doc: SourceDocument) -> str | None:
+    """从文档原始文件提取全文，供 LightRAG 使用（避免双重切块）。
+
+    与 Milvus 路径（使用预切 chunk）完全分离：LightRAG 拿到连续原始文本后
+    由其内部切块器决定粒度，不会引入 chunk overlap 带来的重复内容。
+
+    降级策略：文件不存在 / fitz 未安装 / 格式不支持 → 返回 None，
+    由调用方回退到 chunk 拼接路径。
+    """
+    from pathlib import Path
+
+    path = Path(doc.file_path)
+    if not path.exists():
+        return None
+    try:
+        suffix = path.suffix.lower()
+        if doc.content_type == "application/pdf" or suffix == ".pdf":
+            try:
+                import fitz  # type: ignore[import-untyped]  # noqa: PLC0415
+            except ImportError:
+                return None
+            with fitz.open(str(path)) as pdf_doc:
+                return "\n".join(page.get_text() for page in pdf_doc)
+        if suffix in {".txt", ".md"}:
+            return path.read_text(encoding="utf-8", errors="replace")
+        return None
+    except Exception:
+        return None
+
+
 class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     """知识库应用的业务门面。依赖经构造器注入，自身不创建依赖（装配在组合根）。
 
@@ -427,6 +457,31 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             return await self._retrieval_orchestrator.retrieve(collection, query, top_k)
         return await self._kb_reader.search(collection, query, top_k)
 
+    async def get_chunk_context(
+        self, doc_id: str, chunk_id: str, window: int = 2
+    ) -> dict:
+        """返回指定 chunk 及其前后 window 个相邻 chunk（按 ordinal 排序）。"""
+        all_chunks = await self._source_store.list_chunks(doc_id)
+        all_chunks.sort(key=lambda c: c.ordinal)
+        matched_idx = next(
+            (i for i, c in enumerate(all_chunks) if c.chunk_id == chunk_id), None
+        )
+        if matched_idx is None:
+            return {"context_before": [], "context_after": [], "matched_chunk_id": chunk_id}
+        before = all_chunks[max(0, matched_idx - window):matched_idx]
+        after = all_chunks[matched_idx + 1:min(len(all_chunks), matched_idx + window + 1)]
+        return {
+            "context_before": [
+                {"chunk_id": c.chunk_id, "doc_id": c.doc_id, "ordinal": c.ordinal, "text": c.text}
+                for c in before
+            ],
+            "context_after": [
+                {"chunk_id": c.chunk_id, "doc_id": c.doc_id, "ordinal": c.ordinal, "text": c.text}
+                for c in after
+            ],
+            "matched_chunk_id": chunk_id,
+        }
+
     async def rebuild_vector_store(self) -> dict[str, int]:
         """清除并从 SQLite 事实源全量 rebuild 本地向量数据库。"""
         if not self._config or not self._vector_store or not self._embedding_provider:
@@ -465,7 +520,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     async def rebuild_index_pending(self) -> dict[str, int]:
         """仅对 needs_reindex=True 的文档进行增量索引重建，完成后清除标记。"""
         if not self._vector_store or not self._embedding_provider:
-            raise RuntimeError("VectorStore or EmbeddingProvider is not configured.")
+            raise RuntimeError(
+                "VectorStore 未配置（请安装 Milvus 并重启插件，或配置 embedding provider）"
+            )
 
         if (
             self._config
@@ -482,6 +539,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         docs = await self._source_store.list_pending_reindex_documents()
         total_chunks = 0
+        logger.info("rebuild_index_pending: %d 个文档待重建", len(docs))
 
         for doc in docs:
             chunks = await self._source_store.list_chunks(doc.doc_id)
@@ -489,19 +547,28 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 if hasattr(self._vector_store, "set_doc_collection_mapping"):
                     self._vector_store.set_doc_collection_mapping(doc.doc_id, doc.collection)
                 texts = [c.text for c in chunks]
+                logger.info("  嵌入 %d 个 chunk: doc=%s", len(chunks), doc.doc_id)
                 embeddings = await self._embedding_provider.embed_documents(texts)
                 await self._vector_store.upsert_chunks(chunks, embeddings)
                 total_chunks += len(chunks)
             doc.needs_reindex = False
             await self._source_store.update_document(doc)
 
-        logger.info("Rebuilt pending index: %d docs, %d chunks", len(docs), total_chunks)
+        logger.info("rebuild_index_pending 完成: %d docs, %d chunks", len(docs), total_chunks)
         return {"rebuilt_docs": len(docs), "rebuilt_chunks": total_chunks}
 
     async def get_pending_reindex_count(self) -> int:
         """返回待重建索引的文档数量。"""
         docs = await self._source_store.list_pending_reindex_documents()
         return len(docs)
+
+    async def get_chat_history(self, conversation_id: str) -> list[dict]:
+        """返回某会话的全部消息记录，按时间升序。"""
+        return await self._source_store.get_chat_messages(conversation_id)
+
+    async def clear_chat_history(self, conversation_id: str) -> None:
+        """删除某会话的全部消息记录。"""
+        await self._source_store.clear_chat_messages(conversation_id)
 
     async def ask(
         self,
@@ -511,12 +578,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         conversation_id: str | None = None,
         persona_enabled: bool = False,
         retrieval_mode: str = "default",
+        use_english_retrieval: bool = False,
+        answer_language: str = "auto",
     ) -> dict:
         """Retrieve evidence and generate one final answer."""
-        if retrieval_mode not in {"default", "high_precision"}:
-            raise ValueError("retrieval_mode must be 'default' or 'high_precision'")
-        if retrieval_mode == "high_precision" and not collection:
-            raise ValueError("high_precision retrieval requires a collection")
+        if retrieval_mode not in {"default", "high_precision", "graph_only"}:
+            raise ValueError("retrieval_mode must be 'default', 'high_precision', or 'graph_only'")
+        if retrieval_mode in {"high_precision", "graph_only"} and not collection:
+            raise ValueError(f"{retrieval_mode} retrieval requires a collection")
+        if answer_language not in {"auto", "zh", "en"}:
+            answer_language = "auto"
 
         cid = conversation_id or uuid.uuid4().hex
         ask_start = time.monotonic()
@@ -532,7 +603,34 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         _progress("embed_query", 0)
         t0 = time.monotonic()
 
-        if retrieval_mode == "high_precision":
+        # 翻译召回查询（当 use_english_retrieval=True 时，将用户问题翻译为英语再送入向量检索）
+        retrieval_question = question
+        if use_english_retrieval and self._llm_adapter is not None:
+            try:
+                prompt = (
+                    "Translate the following query to English for document retrieval."
+                    " Output only the English translation, nothing else:\n\n"
+                    f"{question}"
+                )
+                translated = await self._llm_adapter.generate(
+                    prompt,
+                    system_prompt=(
+                        "You are a translation assistant."
+                        " Output only the English translation, concisely."
+                    ),
+                    allow_mock=False,
+                )
+                if translated and translated.strip():
+                    retrieval_question = translated.strip()
+                    logger.info(
+                        "Query translated for retrieval: %r → %r",
+                        question,
+                        retrieval_question,
+                    )
+            except Exception as exc:
+                logger.warning("Query translation failed, using original: %s", exc)
+
+        if retrieval_mode in {"high_precision", "graph_only"}:
             readiness = await self.get_lightrag_readiness(collection or "")
             if not readiness["ready"]:
                 raise LightRAGNotReadyError(
@@ -544,6 +642,58 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         chunks: list[DocumentChunk] = []
         engines: list[str] = []
         fallback_reason: str | None = None
+
+        # graph_only: 跳过向量/词法召回，仅走图谱路径
+        if retrieval_mode == "graph_only":
+            _progress("lightrag_context", 30)
+            try:
+                if self._retrieval_orchestrator is None:
+                    raise RuntimeError("RetrievalOrchestrator is not configured")
+                lightrag_context = await self._retrieval_orchestrator.retrieve_lightrag_context(
+                    collection or "", question
+                )
+                engines.append("lightrag")
+            except Exception as exc:
+                logger.warning("LightRAG graph_only retrieval failed [%s]: %s", collection, exc)
+                raise HighPrecisionQueryError(collection or "", str(exc)) from exc
+            _progress("llm_generate", 80)
+            t_llm = time.monotonic()
+            if self._llm_adapter is not None and lightrag_context:
+                if answer_language == "zh":
+                    lang_instr = "Answer in Chinese (中文)."
+                elif answer_language == "en":
+                    lang_instr = "Answer in English."
+                else:
+                    lang_instr = "Answer in the same language as the question."
+                system_prompt = (
+                    "You are a helpful academic assistant. "
+                    "Answer the question based solely on the provided context. "
+                    f"{lang_instr}"
+                )
+                user_prompt = f"Context:\n\n{lightrag_context}\n\nQuestion: {question}"
+                answer = await self._llm_adapter.generate(user_prompt, system_prompt=system_prompt)
+            else:
+                answer = lightrag_context or "未在知识图谱中找到与该问题相关的内容。"
+            _record("llm_generate", t_llm)
+            _record("ask_total", ask_start, sources=0)
+            _progress("done", 100)
+            try:
+                await self._source_store.add_chat_message(cid, "user", question)
+                await self._source_store.add_chat_message(
+                    cid, "assistant", answer, sources=[], retrieval_mode="lightrag_only"
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist chat history: %s", exc)
+            return {
+                "conversation_id": cid,
+                "answer": answer,
+                "sources": [],
+                "requested_retrieval_mode": retrieval_mode,
+                "actual_retrieval_mode": "lightrag_only",
+                "retrieval_engines": ["lightrag"],
+                "fallback_reason": None,
+            }
+
         _progress("vector_search", 20)
         t_vs = time.monotonic()
         seen_ids: set[str] = set()
@@ -551,13 +701,13 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             try:
                 if self._retrieval_orchestrator is not None:
                     outcome = await self._retrieval_orchestrator.retrieve_with_outcome(
-                        col, question, top_k
+                        col, retrieval_question, top_k
                     )
                     current_chunks = outcome.chunks
                     engines.extend(outcome.engines)
                     fallback_reason = fallback_reason or outcome.fallback_reason
                 else:
-                    current_chunks = await self._kb_reader.search(col, question, top_k)
+                    current_chunks = await self._kb_reader.search(col, retrieval_question, top_k)
                     engines.append("astrbot")
             except Exception as exc:
                 logger.warning("Ask retrieval failed for collection %s: %s", col, exc)
@@ -586,6 +736,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 )
                 engines.append("lightrag")
             except Exception as exc:
+                logger.warning("LightRAG high-precision retrieval failed [%s]: %s", collection, exc)
                 raise HighPrecisionQueryError(collection or "", str(exc)) from exc
 
         _progress("rrf_fusion", 65)
@@ -616,11 +767,17 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         has_evidence = bool(context_parts or lightrag_context)
         if self._llm_adapter is not None and has_evidence:
+            if answer_language == "zh":
+                lang_instr = "Answer in Chinese (中文)."
+            elif answer_language == "en":
+                lang_instr = "Answer in English."
+            else:
+                lang_instr = "Answer in the same language as the question."
             system_prompt = (
                 "You are a helpful academic assistant. "
                 "Answer the question based solely on the provided context. "
-                "Cite sources using [n] notation (e.g. [1], [2]). "
-                "Answer in the same language as the question."
+                f"Cite sources using [n] notation (e.g. [1], [2]). "
+                f"{lang_instr}"
             )
             if persona_enabled:
                 bot_persona = _get_astrbot_persona_prompt(self._llm_adapter._context)
@@ -672,6 +829,17 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             actual_mode = "sqlite_lexical"
         else:
             actual_mode = "none"
+
+        # 自动持久化聊天记录（source_store 支持时）
+        try:
+            await self._source_store.add_chat_message(cid, "user", question)
+            await self._source_store.add_chat_message(
+                cid, "assistant", answer,
+                sources=[s for s in sources],
+                retrieval_mode=actual_mode,
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist chat history: %s", exc)
 
         return {
             "conversation_id": cid,
@@ -729,22 +897,32 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 "reason": "LightRAG index is incompatible with the active embedding.",
                 "build_available": True,
             }
-        invalid = 0
+        indexed = 0
+        unindexed = 0
         for doc in docs:
             status = await self._source_store.get_lightrag_index_status(doc.doc_id)
             if (
-                status is None
-                or status.get("collection") != collection
-                or status.get("status") != "indexed"
+                status is not None
+                and status.get("collection") == collection
+                and status.get("status") == "indexed"
             ):
-                invalid += 1
-        if invalid:
+                indexed += 1
+            else:
+                unindexed += 1
+        # 至少有一篇文档被成功索引就认为可用；全部失败才阻止
+        if indexed == 0 and unindexed > 0:
             return {
                 "ready": False,
-                "reason": f"{invalid} document(s) require LightRAG indexing.",
+                "reason": f"No documents have been indexed yet ({unindexed} pending).",
                 "build_available": True,
             }
-        return {"ready": True, "reason": "", "build_available": False}
+        return {
+            "ready": True,
+            "reason": "",
+            "build_available": False,
+            "indexed_docs": indexed,
+            "unindexed_docs": unindexed,
+        }
 
     # ── 在线服务（配额）────────────────────────────────────────
 
@@ -947,7 +1125,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         chunks_by_doc = {
             doc.doc_id: await self._source_store.list_chunks(doc.doc_id) for doc in docs
         }
-        estimate = estimate_lightrag_build(docs, chunks_by_doc)
+        max_chars = self._config.get_graph_config().max_doc_chars if self._config else 0
+        estimate = estimate_lightrag_build(docs, chunks_by_doc, max_doc_chars=max_chars)
         return {"collection": col, **estimate}
 
     async def build_graph(self, collection: str | None = None, *, confirmed: bool = False) -> dict:
@@ -991,10 +1170,22 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             ):
                 job.stage = "resetting_workspace"
                 await self._lightrag_registry.reset_workspace(job.collection)
+            max_chars = 0
+            if self._config is not None:
+                max_chars = self._config.get_graph_config().max_doc_chars
             for doc in docs:
                 job.stage = "indexing"
-                chunks = await self._source_store.list_chunks(doc.doc_id)
-                text = "\n\n".join(chunk.text for chunk in chunks if chunk.text.strip())
+                # LightRAG 路径：优先从原始文件提取连续文本，避免 Milvus chunk 拼接的双重切块
+                raw = _extract_raw_doc_text(doc)
+                if raw is not None:
+                    text = raw
+                else:
+                    # 降级：fitz 未安装 / 文件不可读 / 格式不支持 → 拼接 chunk
+                    chunks = await self._source_store.list_chunks(doc.doc_id)
+                    text = "\n\n".join(chunk.text for chunk in chunks if chunk.text.strip())
+                # max_doc_chars 截断，控制 LLM 调用次数和成本
+                if max_chars > 0 and len(text) > max_chars:
+                    text = text[:max_chars]
                 if not text.strip():
                     await self._source_store.set_lightrag_index_status(
                         doc.doc_id, job.collection, "indexed"
@@ -1016,8 +1207,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     logger.error("LightRAG build failed for doc %s: %s", doc.doc_id, exc)
             job.stage = "done"
             job.status = "success" if job.failed_docs == 0 else "partial_failure"
+            # 无论 success 还是 partial_failure，只要有文档被处理，embedding 指纹就是有效的
             if (
-                job.status == "success"
+                job.status in ("success", "partial_failure")
+                and job.processed_docs > 0
                 and self._index_compatibility is not None
                 and self._embedding_fingerprint
             ):

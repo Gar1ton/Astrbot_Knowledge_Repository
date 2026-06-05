@@ -6,8 +6,8 @@ import { Btn } from "@/components/ui/Btn";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
-  GraphData, GraphNode, GraphEdge, KbChunk, ApiError, GraphBuildJob,
-  getGraph, queryGraph, buildGraph, estimateGraphBuild, getGraphBuildJob, isReserved, listCollections,
+  GraphData, GraphNode, GraphEdge, ApiError, GraphBuildJob,
+  getGraph, buildGraph, estimateGraphBuild, getGraphBuildJob, isReserved, listCollections,
 } from "@/lib/api";
 import { Select } from "@/components/ui/Select";
 
@@ -494,28 +494,53 @@ export default function GraphPage() {
   const [building, setBuilding] = useState(false);
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
-  const [queryInput, setQueryInput] = useState("");
-  const [queryResult, setQueryResult] = useState<{
-    answer?: string;
-    context?: string;
-    chunks: KbChunk[];
-    entities: GraphNode[];
-    relations: GraphEdge[];
-    debug?: unknown;
-  } | null>(null);
-  const [querying, setQuerying] = useState(false);
   const [buildJob, setBuildJob] = useState<GraphBuildJob | null>(null);
   const [graphReserved, setGraphReserved] = useState<string | null>(null);
   const [showEstimateModal, setShowEstimateModal] = useState(false);
   const [pendingEstimate, setPendingEstimate] = useState<import("@/lib/api").GraphBuildEstimate | null>(null);
   const [collections, setCollections] = useState<string[]>([]);
   const [collection, setCollection] = useState("");
-  const [showDetailPanel, setShowDetailPanel] = useState(true);
+  const [entitySearch, setEntitySearch] = useState("");
+
+  const matchingNodes = React.useMemo(() => {
+    if (!graphData || !entitySearch.trim()) return [];
+    const q = entitySearch.toLowerCase();
+    return graphData.nodes.filter((n) => n.name.toLowerCase().includes(q)).slice(0, 8);
+  }, [graphData, entitySearch]);
+
+  // Ego network: only the selected node + its direct neighbors
+  const focusedGraphData = React.useMemo((): GraphData => {
+    if (!selectedNode || !graphData) return { nodes: [], edges: [] };
+    const neighborIds = new Set<string>([selectedNode.id]);
+    const relevantEdges: GraphEdge[] = [];
+    graphData.edges.forEach((e) => {
+      if (e.source === selectedNode.id || e.target === selectedNode.id) {
+        neighborIds.add(e.source);
+        neighborIds.add(e.target);
+        relevantEdges.push(e);
+      }
+    });
+    return {
+      nodes: graphData.nodes.filter((n) => neighborIds.has(n.id)),
+      edges: relevantEdges,
+    };
+  }, [selectedNode, graphData]);
+
+  // Edges involving the selected node, sorted: outgoing first
+  const relatedEdges = React.useMemo(() => {
+    if (!selectedNode || !graphData) return [];
+    return graphData.edges.filter(
+      (e) => e.source === selectedNode.id || e.target === selectedNode.id
+    );
+  }, [selectedNode, graphData]);
 
   useEffect(() => {
-    listCollections()
+    const timeoutGuard = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("timeout")), 5000)
+    );
+    Promise.race([listCollections(), timeoutGuard])
       .then((items) => {
-        const names = items.map((item) => item.name);
+        const names = items.map((item: { name: string }) => item.name);
         setCollections(names);
         const initial = names[0] ?? "";
         setCollection(initial);
@@ -585,28 +610,6 @@ export default function GraphPage() {
     return () => window.clearTimeout(timer);
   }, [buildJob, t, toast]);
 
-  async function handleQuery(e: React.FormEvent) {
-    e.preventDefault();
-    if (!queryInput.trim()) return;
-    setQuerying(true);
-    setQueryResult(null);
-    try {
-      const res = await queryGraph(queryInput, collection || undefined);
-      if (isReserved(res)) {
-        toast(`图谱查询即将上线（${res.available_in}）`, "info");
-      } else {
-        setQueryResult({
-          answer: res.answer, context: res.context, chunks: res.chunks ?? [],
-          entities: res.entities ?? [], relations: res.relations ?? [], debug: res.debug,
-        });
-      }
-    } catch (err) {
-      toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
-    } finally {
-      setQuerying(false);
-    }
-  }
-
   function handleClearSelection() {
     setSelectedNode(null);
     setSelectedEdge(null);
@@ -651,24 +654,14 @@ export default function GraphPage() {
             onChange={(next) => { setCollection(next); loadGraph(next); }}
             options={collections.map((name) => ({ value: name, label: name }))}
           />
-          <Btn variant="outline" size="sm" loading={building} onClick={handleBuild}>
-            {t("graph_build")}
-          </Btn>
-          <button
-            onClick={() => setShowDetailPanel(v => !v)}
-            title={showDetailPanel ? "收起详情面板" : "展开详情面板"}
-            style={{
-              width: 28, height: 28, borderRadius: 7, border: "1px solid var(--border)",
-              background: showDetailPanel ? "var(--accent-soft)" : "var(--bg-inset)",
-              color: showDetailPanel ? "var(--accent)" : "var(--fg-subtle)",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              cursor: "pointer", transition: "all .15s", flexShrink: 0,
-            }}
+          <Btn
+            variant={graphData ? "outline" : "primary"}
+            size="sm"
+            loading={building}
+            onClick={handleBuild}
           >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/>
-            </svg>
-          </button>
+            {graphData ? "重建图谱" : t("graph_build")}
+          </Btn>
         </div>
 
         {/* 图谱画布 */}
@@ -679,55 +672,89 @@ export default function GraphPage() {
             <div style={{ padding: 40 }}>
               <ReservedBanner availableIn={graphReserved} />
             </div>
-          ) : graphData ? (
-            <div style={{ width: "100%", height: "100%", borderRadius: 14, overflow: "hidden", border: "1px solid var(--border)", boxShadow: "inset 0 0 26px color-mix(in srgb, var(--border) 70%, transparent), var(--shadow)" }}>
-              <HybridGraph
-                data={graphData}
-                onSelectNode={(n) => { setSelectedNode(n); setSelectedEdge(null); setShowDetailPanel(true); }}
-                onSelectEdge={(e) => { setSelectedEdge(e); setSelectedNode(null); setShowDetailPanel(true); }}
-                selectedNode={selectedNode}
-                selectedEdge={selectedEdge}
-                onClearSelection={handleClearSelection}
-              />
+          ) : graphData && graphData.nodes.length > 0 ? (
+            <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              {selectedNode ? (
+                <div style={{ width: "100%", height: "100%", borderRadius: 14, overflow: "hidden", border: "1px solid var(--border)", boxShadow: "inset 0 0 26px color-mix(in srgb, var(--border) 70%, transparent), var(--shadow)" }}>
+                  <HybridGraph
+                    data={focusedGraphData}
+                    onSelectNode={(n) => { setSelectedNode(n); setSelectedEdge(null); }}
+                    onSelectEdge={(e) => { setSelectedEdge(e); setSelectedNode(null); }}
+                    selectedNode={selectedNode}
+                    selectedEdge={selectedEdge}
+                    onClearSelection={handleClearSelection}
+                  />
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12, textAlign: "center" }}>
+                  <div style={{ width: 52, height: 52, borderRadius: "50%", background: "var(--accent-soft)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                    </svg>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: "var(--heading)", marginBottom: 4 }}>搜索实体以探索关系网络</div>
+                    <div style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.6 }}>在右侧搜索框中输入实体名称<br/>选中后将显示其直接关联网络</div>
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
-            <div style={{ padding: 40, textAlign: "center", color: "var(--fg-muted)", fontSize: 13, lineHeight: 1.7 }}>
-              知识图谱为空
-              <br />
-              <span style={{ fontSize: 11, color: "var(--fg-subtle)" }}>
-                请先上传文档，再点击顶部「{t("graph_build")}」按钮构建实体关系图
-              </span>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 16, textAlign: "center" }}>
+              <div style={{ width: 56, height: 56, borderRadius: "50%", background: "var(--accent-soft)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="5" cy="12" r="2.5"/><circle cx="19" cy="5" r="2.5"/><circle cx="19" cy="19" r="2.5"/>
+                  <line x1="7.5" y1="12" x2="16.5" y2="6"/><line x1="7.5" y1="12" x2="16.5" y2="18"/>
+                </svg>
+              </div>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: "var(--heading)", marginBottom: 6 }}>知识图谱尚未构建</div>
+                <div style={{ fontSize: 13, color: "var(--fg-muted)", lineHeight: 1.6, marginBottom: 20 }}>
+                  当前集合：<strong style={{ color: "var(--fg)" }}>{collection || "（未选择）"}</strong><br/>
+                  LightRAG 将从文档中提取实体与关系
+                </div>
+                <Btn onClick={handleBuild} loading={building}>预估并构建知识图谱</Btn>
+              </div>
             </div>
           )}
         </div>
 
-        {buildJob && (
-          <div style={{ borderTop: "1px solid var(--border)", padding: "8px 16px", fontSize: 11, color: "var(--fg-muted)", display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <strong style={{ color: "var(--fg)" }}>LightRAG 索引：{buildJob.status}</strong>
-            <span>阶段：{buildJob.stage ?? "queued"}</span>
-            <span>文档：{buildJob.processed_docs ?? 0}/{buildJob.total_docs ?? 0}</span>
-            <span>失败：{buildJob.failed_docs ?? 0}</span>
-            <span>耗时：{buildJob.elapsed_seconds ?? 0}s</span>
-            {buildJob.recent_error && <span style={{ color: "var(--danger)" }}>{buildJob.recent_error}</span>}
+        {/* 构建进度条 */}
+        {buildJob && !["success", "partial_failure", "error"].includes(buildJob.status) && (
+          <div style={{ borderTop: "1px solid var(--border)", padding: "10px 16px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <span style={{ width: 10, height: 10, borderRadius: "50%", border: "2px solid var(--accent)", borderTopColor: "transparent", display: "inline-block", animation: "spin 0.6s linear infinite", flexShrink: 0 }} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--fg)" }}>
+                ⚙ 正在构建图谱：{buildJob.stage ?? "queued"}
+              </span>
+              <span style={{ fontSize: 11, color: "var(--fg-muted)", marginLeft: "auto" }}>
+                {buildJob.processed_docs ?? 0} / {buildJob.total_docs ?? 0} 文档 · {buildJob.elapsed_seconds ?? 0}s
+              </span>
+            </div>
+            {(buildJob.total_docs ?? 0) > 0 && (
+              <div style={{ height: 4, borderRadius: 2, background: "var(--border)", overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", borderRadius: 2, background: "var(--accent)",
+                  width: `${Math.round(((buildJob.processed_docs ?? 0) / (buildJob.total_docs ?? 1)) * 100)}%`,
+                  transition: "width 0.4s ease",
+                }} />
+              </div>
+            )}
+            {buildJob.recent_error && (
+              <div style={{ fontSize: 11, color: "var(--danger)", marginTop: 4 }}>{buildJob.recent_error}</div>
+            )}
           </div>
         )}
-
-        {/* 图谱增强查询 */}
-        <div style={{ borderTop: "1px solid var(--border)", padding: "10px 16px" }}>
-          <form onSubmit={handleQuery} style={{ display: "flex", gap: 8 }}>
-            <input
-              value={queryInput}
-              onChange={(e) => setQueryInput(e.target.value)}
-              placeholder={t("graph_query_placeholder")}
-              style={{ flex: 1, height: 36 }}
-            />
-            <Btn size="sm" type="submit" loading={querying}>{t("graph_query")}</Btn>
-          </form>
-        </div>
+        {buildJob?.status === "success" && graphData && (
+          <div style={{ borderTop: "1px solid var(--border)", padding: "8px 16px", fontSize: 11, color: "var(--fg-muted)", display: "flex", alignItems: "center", gap: 6 }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            <span style={{ color: "var(--ok)", fontWeight: 600 }}>构建完成</span>
+            <span>已提取 {graphData.nodes.length} 个实体，{graphData.edges.length} 条关系</span>
+          </div>
+        )}
       </div>
 
-      {/* 右侧详情面板（可折叠） */}
-      {showDetailPanel && (
+      {/* 右侧详情面板（常驻） */}
       <div
         style={{
           width: 280, flexShrink: 0, borderLeft: "1px solid var(--border)",
@@ -735,108 +762,135 @@ export default function GraphPage() {
         }}
         className="fx-glass-edge"
       >
-        {/* 面板标题 + 关闭 */}
+        {/* 搜索框（始终置顶） */}
         <div
-          className="fx-glass"
           style={{
-            position: "sticky", top: 0, zIndex: 2,
-            height: "var(--topbar-h)", boxSizing: "border-box",
-            padding: "0 10px 0 14px",
-            display: "flex", alignItems: "center", gap: 8,
-            borderBottom: "1px solid var(--border)", flexShrink: 0,
+            padding: "10px 12px 8px",
+            borderBottom: "1px solid var(--border)",
+            flexShrink: 0,
           }}
         >
-          <span style={{ flex: 1, fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)" }}>
-            详情
-          </span>
-          <button
-            onClick={() => setShowDetailPanel(false)}
-            title="收起详情面板"
-            style={{ width: 24, height: 24, borderRadius: 6, border: "none", background: "transparent", color: "var(--fg-subtle)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", transition: "all .15s" }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-inset)"; e.currentTarget.style.color = "var(--fg)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--fg-subtle)"; }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6,
+            background: "var(--bg-inset)", border: "1px solid var(--border)",
+            borderRadius: 8, padding: "6px 10px",
+          }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--fg-muted)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
             </svg>
-          </button>
+            <input
+              value={entitySearch}
+              onChange={(e) => setEntitySearch(e.target.value)}
+              placeholder="搜索实体…"
+              style={{
+                flex: 1, background: "transparent", border: "none", outline: "none",
+                fontSize: 12, color: "var(--fg)", minWidth: 0,
+              }}
+            />
+            {entitySearch && (
+              <button
+                onClick={() => setEntitySearch("")}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "var(--fg-muted)", padding: 0, lineHeight: 1, fontSize: 14 }}
+              >×</button>
+            )}
+          </div>
+          {/* 搜索结果下拉 */}
+          {entitySearch.trim() && matchingNodes.length > 0 && (
+            <div style={{
+              marginTop: 4, background: "var(--surface)", border: "1px solid var(--border)",
+              borderRadius: 8, boxShadow: "var(--shadow-pop)", overflow: "hidden",
+            }}>
+              {matchingNodes.map((node) => (
+                <div
+                  key={node.id}
+                  onClick={() => { setSelectedNode(node); setSelectedEdge(null); setEntitySearch(""); }}
+                  style={{ padding: "7px 10px", fontSize: 12, color: "var(--fg)", cursor: "pointer", transition: "background .1s", display: "flex", alignItems: "center", gap: 6 }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--accent-soft)"; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
+                >
+                  <span style={{ fontWeight: 600, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.name}</span>
+                  {node.type && <span style={{ fontSize: 10, color: "var(--fg-muted)", flexShrink: 0 }}>{node.type}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          {entitySearch.trim() && matchingNodes.length === 0 && (
+            <div style={{ marginTop: 4, fontSize: 11, color: "var(--fg-muted)", padding: "6px 2px" }}>无匹配实体</div>
+          )}
         </div>
+
+        {/* 详情区域 */}
         <div style={{ flex: 1, overflowY: "auto", padding: "12px 14px" }}>
-        {/* 节点/边详情 */}
-        {selectedNode && (
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-subtle)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
-              {t("graph_nodes")}
-            </div>
-            <div style={{ background: "var(--accent-soft)", borderRadius: 10, padding: 12 }}>
-              <div style={{ fontWeight: 600, fontSize: 13, color: "var(--accent)", marginBottom: 4 }}>{selectedNode.name}</div>
-              <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>{selectedNode.type ?? "—"}</div>
-              {selectedNode.degree !== undefined && (
-                <div style={{ fontSize: 11, color: "var(--fg-subtle)", marginTop: 4 }}>连接度: {selectedNode.degree}</div>
+          {selectedNode ? (
+            <>
+              {/* 实体标题 */}
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontWeight: 700, fontSize: 15, color: "var(--heading)", marginBottom: 4, lineHeight: 1.3 }}>
+                  {selectedNode.name}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  {selectedNode.type && (
+                    <span style={{
+                      fontSize: 10, fontWeight: 600, padding: "2px 8px", borderRadius: 999,
+                      background: "var(--accent-soft)", color: "var(--accent)", border: "1px solid var(--accent-border)",
+                    }}>{selectedNode.type}</span>
+                  )}
+                  {selectedNode.degree !== undefined && (
+                    <span style={{ fontSize: 10, color: "var(--fg-subtle)" }}>{selectedNode.degree} 个关联</span>
+                  )}
+                </div>
+              </div>
+
+              {/* 关联实体列表 */}
+              {relatedEdges.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-subtle)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
+                    关联实体 ({relatedEdges.length})
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {relatedEdges.map((edge) => {
+                      const isOutgoing = edge.source === selectedNode.id;
+                      const neighborId = isOutgoing ? edge.target : edge.source;
+                      const neighbor = graphData?.nodes.find((n) => n.id === neighborId);
+                      if (!neighbor) return null;
+                      return (
+                        <button
+                          key={edge.id}
+                          onClick={() => { setSelectedNode(neighbor); setSelectedEdge(null); }}
+                          style={{
+                            display: "flex", alignItems: "center", gap: 8,
+                            padding: "7px 10px", borderRadius: 8, border: "1px solid var(--border)",
+                            background: "var(--bg-inset)", cursor: "pointer", textAlign: "left",
+                            transition: "all .12s", width: "100%",
+                          }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--accent-soft)"; e.currentTarget.style.borderColor = "var(--accent-border)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-inset)"; e.currentTarget.style.borderColor = "var(--border)"; }}
+                        >
+                          <span style={{ fontSize: 10, color: "var(--fg-subtle)", flexShrink: 0, width: 14, textAlign: "center" }}>
+                            {isOutgoing ? "→" : "←"}
+                          </span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--fg)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {neighbor.name}
+                            </div>
+                            <div style={{ fontSize: 10, color: "var(--accent)", fontWeight: 500, marginTop: 1 }}>
+                              {edge.relation}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               )}
+            </>
+          ) : (
+            <div style={{ color: "var(--fg-muted)", fontSize: 12, minHeight: 120, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", lineHeight: 1.7 }}>
+              搜索实体名称<br/>或点击画布中的节点
             </div>
-          </div>
-        )}
-
-        {selectedEdge && (
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-subtle)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
-              {t("graph_edges")}
-            </div>
-            <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 12 }}>
-              <div style={{ fontSize: 12, color: "var(--fg)", marginBottom: 4 }}>
-                <strong>{selectedEdge.source}</strong> → <strong>{selectedEdge.target}</strong>
-              </div>
-              <div style={{ fontSize: 12, color: "var(--accent)", fontWeight: 600 }}>{selectedEdge.relation}</div>
-              {selectedEdge.description && (
-                <div style={{ fontSize: 11, color: "var(--fg-muted)", marginTop: 6 }}>{selectedEdge.description}</div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* 查询结果 */}
-        {queryResult && (
-          <>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-subtle)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
-              查询结果
-            </div>
-            {(queryResult.answer || queryResult.context) && (
-              <div style={{ background: "var(--accent-soft)", border: "1px solid var(--border)", borderRadius: 8, padding: 10, marginBottom: 8, whiteSpace: "pre-wrap", fontSize: 11, lineHeight: 1.55 }}>
-                {queryResult.answer || queryResult.context}
-              </div>
-            )}
-            {queryResult.chunks.map((chunk) => (
-              <div
-                key={chunk.chunk_id}
-                style={{ background: "var(--bg-inset)", border: "1px solid var(--border)", borderRadius: 8, padding: 10, marginBottom: 8 }}
-              >
-                <div style={{ fontSize: 10, color: "var(--fg-subtle)", marginBottom: 4, fontFamily: "var(--font-geist-mono)" }}>#{chunk.ordinal + 1}</div>
-                <p style={{ margin: 0, fontSize: 11, color: "var(--fg)", lineHeight: 1.5 }}>{chunk.text}</p>
-              </div>
-            ))}
-
-            {queryResult.debug && (
-              <details style={{ marginTop: 8 }}>
-                <summary style={{ fontSize: 11, color: "var(--fg-muted)", cursor: "pointer" }}>{t("graph_debug")}</summary>
-                <pre style={{ fontSize: 10, color: "var(--fg-subtle)", marginTop: 6, overflow: "auto", fontFamily: "var(--font-geist-mono)", background: "var(--bg-inset)", borderRadius: 8, padding: 8 }}>
-                  {JSON.stringify(queryResult.debug, null, 2)}
-                </pre>
-              </details>
-            )}
-          </>
-        )}
-
-        {!selectedNode && !selectedEdge && !queryResult && (
-          <div style={{ color: "var(--fg-muted)", fontSize: 12, minHeight: 180, padding: 8, display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", lineHeight: 1.7 }}>
-            点击节点或关系查看来源
-            <br />
-            或在下方做图谱增强查询
-          </div>
-        )}
+          )}
         </div>
       </div>
-      )}
     </div>
   );
 }

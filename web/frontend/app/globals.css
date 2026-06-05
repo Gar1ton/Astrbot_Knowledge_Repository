@@ -143,17 +143,122 @@ select:focus {
   clip: rect(0 0 0 0);
 }
 
-/* ─── Ask 输入卡片：正常态低调，focus-within 亮橙描边 ──────── */
+/* ─── Ask 输入卡片：正常态低调；focus-within 辉光轨道（无橙色 ring）──────── */
 .ask-card {
+  position: relative;
+  overflow: visible;
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: 16px;
   box-shadow: var(--shadow);
   transition: border-color 0.18s, box-shadow 0.18s;
 }
-.ask-card:focus-within {
-  border-color: var(--accent-border);
-  box-shadow: 0 0 0 3px var(--ring), var(--shadow);
+
+/* focus 时仅显示轨道辉光（非 loading 状态），不加橙色 border+ring */
+.ask-card:not(.ask-card--loading):focus-within::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: 17px;
+  background: conic-gradient(
+    from var(--ask-beam-angle) at 50% 50%,
+    transparent 0deg,
+    transparent 300deg,
+    color-mix(in srgb, var(--accent) 0%, transparent) 320deg,
+    color-mix(in srgb, var(--accent) 80%, white) 340deg,
+    color-mix(in srgb, var(--accent) 60%, white) 356deg,
+    color-mix(in srgb, var(--accent) 0%, transparent) 360deg
+  );
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--accent) 70%, white))
+          drop-shadow(0 0 28px color-mix(in srgb, var(--accent) 40%, white));
+  animation: askBeamOrbit 1.8s linear infinite;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: destination-out;
+  mask-composite: exclude;
+  padding: 1.5px;
+  z-index: 2;
+}
+
+/* ─── Ask 输入卡片：加载中辉光轨道边框 ────────────────────── */
+@property --ask-beam-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes askBeamOrbit {
+  to { --ask-beam-angle: 360deg; }
+}
+
+.ask-card--loading::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: 17px;
+  background: conic-gradient(
+    from var(--ask-beam-angle) at 50% 50%,
+    transparent 0deg,
+    transparent 300deg,
+    color-mix(in srgb, var(--accent) 0%, transparent) 320deg,
+    color-mix(in srgb, var(--accent) 60%, transparent) 340deg,
+    var(--accent) 356deg,
+    color-mix(in srgb, var(--accent) 0%, transparent) 360deg
+  );
+  filter: drop-shadow(0 0 8px var(--accent)) drop-shadow(0 0 16px var(--accent));
+  animation: askBeamOrbit 1.5s linear infinite;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: destination-out;
+  mask-composite: exclude;
+  padding: 1.5px;
+  z-index: 2;
+}
+
+/* ─── 消息气泡选中白色辉光（2圈后停止）── */
+@property --msg-glow-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes msgGlowOrbit {
+  to { --msg-glow-angle: 720deg; }
+}
+
+.msg-bubble--glow {
+  position: relative;
+}
+
+.msg-bubble--glow::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 18px;
+  background: conic-gradient(
+    from var(--msg-glow-angle) at 50% 50%,
+    transparent 0deg,
+    transparent 300deg,
+    rgba(255,255,255,0) 320deg,
+    rgba(255,255,255,0.7) 345deg,
+    rgba(255,255,255,0.9) 356deg,
+    rgba(255,255,255,0) 360deg
+  );
+  filter: drop-shadow(0 0 10px rgba(255,255,255,0.8))
+          drop-shadow(0 0 22px rgba(255,255,255,0.5));
+  animation: msgGlowOrbit 1.5s linear 1 forwards;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: destination-out;
+  mask-composite: exclude;
+  padding: 2px;
+  z-index: 1;
 }
 
 /* ─── C7：图标基线对齐修复 ────────────────────────────────────── */

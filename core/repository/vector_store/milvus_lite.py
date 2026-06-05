@@ -131,6 +131,7 @@ class MilvusLiteVectorStore(VectorStore):
                 "text": chunk.text,
             })
 
+        logger.info("Milvus upsert: %d chunks", len(chunks))
         try:
             self._client.upsert(collection_name=self._collection_name, data=data)
         except Exception as e:

@@ -155,3 +155,42 @@ async def test_registry_reset_workspace_finalizes_and_deletes_derived_data(
     assert not workspace.exists()
     assert registry._workspace_map == {}
     assert registry._instances == {}
+
+
+async def test_registry_has_workspace_true_and_false(tmp_path: Path) -> None:
+    registry = object.__new__(LightRAGCoreRegistry)
+    registry._root = tmp_path / "lr"
+    registry._workspace_map = {"papers": "papers_safe"}
+
+    # 目录不存在时 → False
+    assert not registry.has_workspace("papers")
+
+    # 创建对应目录后 → True
+    (registry._root / "papers_safe").mkdir(parents=True)
+    assert registry.has_workspace("papers")
+
+    # map 中不存在的 collection → False
+    assert not registry.has_workspace("unknown")
+
+
+async def test_registry_manual_probe_returns_error_on_init_failure(tmp_path: Path) -> None:
+    registry = object.__new__(LightRAGCoreRegistry)
+    registry._config = GraphConfig(enabled=True, query_mode="mix")
+    registry._root = tmp_path / "lr"
+    registry._map_path = registry._root / "workspace_map.json"
+    registry._workspace_map = {}
+    registry._instances = {}
+
+    async def failing_get(collection: str):
+        raise RuntimeError("storage init failed")
+
+    registry.get = failing_get  # type: ignore[method-assign]
+
+    result = await registry.manual_probe(
+        collection="test_col", text="hello world", doc_id="doc1", query="what is this?"
+    )
+
+    assert result["status"] == "error"
+    assert any(
+        s["step"] == "initialize_storages" and s["status"] == "error" for s in result["steps"]
+    )

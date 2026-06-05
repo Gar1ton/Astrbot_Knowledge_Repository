@@ -143,6 +143,10 @@ class _DebugSyncPipeline:
 
 
 async def _make_app(args: argparse.Namespace) -> web.Application:
+    # 提前安装日志 handler，确保后续所有日志（含种子数据构造）可被终端页捕获。
+    from core.log_capture import install as _install_log_capture
+    _install_log_capture()
+
     store = InMemorySourceDocumentStore() if args.empty else await _seed_store()
     kb = InMemoryKnowledgeBaseReader({}) if args.empty else _seed_kb()
     targets = _seed_targets(args.empty)

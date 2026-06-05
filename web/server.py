@@ -231,8 +231,26 @@ async def handle_kb_search(request: web.Request) -> web.Response:
     collection = request.query.get("collection", "")
     query = request.query.get("q", "")
     top_k = int(request.query.get("top_k", "5"))
+    window = int(request.query.get("window", "2"))
     chunks = await _api(request).search_kb(collection, query, top_k)
-    return web.json_response([_chunk_dict(c) for c in chunks])
+    result = []
+    for c in chunks:
+        ctx = await _api(request).get_chunk_context(c.doc_id, c.chunk_id, window)
+        entry = _chunk_dict(c)
+        entry["context_before"] = ctx["context_before"]
+        entry["context_after"] = ctx["context_after"]
+        result.append(entry)
+    return web.json_response(result)
+
+
+async def handle_chunk_context(request: web.Request) -> web.Response:
+    doc_id = request.query.get("doc_id", "")
+    chunk_id = request.query.get("chunk_id", "")
+    window = int(request.query.get("window", "2"))
+    if not doc_id or not chunk_id:
+        return web.json_response({"error": "doc_id and chunk_id required"}, status=400)
+    ctx = await _api(request).get_chunk_context(doc_id, chunk_id, window)
+    return web.json_response(ctx)
 
 
 async def handle_quota(request: web.Request) -> web.Response:
@@ -322,8 +340,8 @@ async def handle_rebuild_index_pending(request: web.Request) -> web.Response:
         result = await _api(request).rebuild_index_pending()
         _mw_logger.info("Index rebuild completed: %s", result)
         return web.json_response({"status": "ok", **result})
-    except RuntimeError as exc:
-        _mw_logger.error("Index rebuild failed: %s", exc)
+    except Exception as exc:
+        _mw_logger.error("Index rebuild failed: %s", exc, exc_info=True)
         return web.json_response({"status": "error", "message": str(exc)}, status=503)
 
 
@@ -483,6 +501,24 @@ async def handle_ask_progress(request: web.Request) -> web.Response:
     return web.json_response(progress)
 
 
+async def handle_chat_history_get(request: web.Request) -> web.Response:
+    """GET /api/chat/history?conversation_id=<id> — 返回某会话的聊天记录。"""
+    cid = request.query.get("conversation_id", "").strip()
+    if not cid:
+        return web.json_response({"error": "conversation_id required"}, status=400)
+    messages = await _api(request).get_chat_history(cid)
+    return web.json_response({"messages": messages})
+
+
+async def handle_chat_history_clear(request: web.Request) -> web.Response:
+    """DELETE /api/chat/history?conversation_id=<id> — 清除某会话的聊天记录。"""
+    cid = request.query.get("conversation_id", "").strip()
+    if not cid:
+        return web.json_response({"error": "conversation_id required"}, status=400)
+    await _api(request).clear_chat_history(cid)
+    return web.json_response({"status": "ok"})
+
+
 async def handle_system_info(request: web.Request) -> web.Response:
     """GET /api/system/info — 返回后端运行环境信息（调试面板用）。"""
     try:
@@ -599,6 +635,8 @@ async def handle_ask(request: web.Request) -> web.Response:
     conversation_id = body.get("conversation_id") or None
     persona_enabled = bool(body.get("persona_enabled") or False)
     retrieval_mode = body.get("retrieval_mode") or "default"
+    use_english_retrieval = bool(body.get("use_english_retrieval") or False)
+    answer_language = str(body.get("answer_language") or "auto")
     from core.api import HighPrecisionQueryError, LightRAGNotReadyError
 
     try:
@@ -609,6 +647,8 @@ async def handle_ask(request: web.Request) -> web.Response:
             conversation_id=conversation_id,
             persona_enabled=persona_enabled,
             retrieval_mode=retrieval_mode,
+            use_english_retrieval=use_english_retrieval,
+            answer_language=answer_language,
         )
     except LightRAGNotReadyError as exc:
         return web.json_response(
@@ -765,6 +805,7 @@ def build_app(
     app.router.add_get("/api/documents/{doc_id}/raw", handle_download_document)
     app.router.add_get("/api/kb/collections", handle_kb_collections)
     app.router.add_get("/api/kb/search", handle_kb_search)
+    app.router.add_get("/api/kb/chunk-context", handle_chunk_context)
     app.router.add_get("/api/quota", handle_quota)
     app.router.add_get("/api/config/effective", handle_effective_config)
     app.router.add_post("/api/config/update", handle_update_config)
@@ -797,6 +838,8 @@ def build_app(
     app.router.add_post("/api/dependencies/recheck", handle_dependency_recheck)
     app.router.add_get("/api/logs", handle_logs)
     app.router.add_post("/api/ask", handle_ask)
+    app.router.add_get("/api/chat/history", handle_chat_history_get)
+    app.router.add_delete("/api/chat/history", handle_chat_history_clear)
 
     # 安装内存日志 handler（幂等，重复调用安全）
     from core.log_capture import install as _install_log_handler

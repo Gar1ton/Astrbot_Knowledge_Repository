@@ -44,6 +44,55 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.20.1 LightRAG raw-text indexing path (in progress)
+
+### User constraints / 约束
+
+- LightRAG 路径使用原始文件文本，Milvus 路径继续使用 SQLite chunk，两者完全分离。
+- fitz 未安装时自动降级到 chunk 拼接，保持向后兼容。
+
+### Technical implementation path
+
+- [x] **Phase 1 — `_extract_raw_doc_text()`**：模块级纯函数，从 `SourceDocument.file_path` 重新提取文本；支持 PDF（fitz）、txt/md（直接读文件）；任何异常返回 `None`（降级）。
+- [x] **Phase 2 — `_run_lightrag_build_job` 分叉**：优先调用 `_extract_raw_doc_text(doc)` 获取原始文本；失败时降级为原有 chunk 拼接；`max_doc_chars` 截断逻辑对两条路径均生效。
+
+### Verification
+
+- `python -m pytest -q` → 210 passed
+- `ruff check . --quiet` → OK
+- 重建图谱时终端观察：传入 LightRAG 的文本为原始 PDF 文本（无 chunk overlap 重复）
+
+## v0.20.0 UX & retrieval overhaul (in progress)
+
+### User constraints / 约束
+
+- 知识库检索：移除图谱 tab，改为仅向量检索，结果显示带前后文的上下文块。
+- 图谱检索迁移到图谱页侧边栏（与详情共用可折叠 panel）。
+- Milvus auto-index：文档变更后自动触发，移除所有手动构建向量索引入口。
+- LightRAG 构建按钮显著化：空态 CTA + 大按钮 + 构建进度条。
+- Research Agent：移除顶部「Research Agent」标题，持久化集合选择。
+- 引用来源：绑定到用户当前查看的消息气泡；气泡点击触发白色辉光动画（×2圈）；侧边栏收起改为可折叠 bar。
+- 输入框焦点：移除橙色 border+ring，仅保留增强版轨道辉光动画。
+- 引用来源 → 点击展开显示上下文（NotebookLM 风格，命中段落加粗）。
+
+### Technical implementation path
+
+- [x] **Phase 1 — Bug 修复**：使用 `listCollections()` 替代 `listKbCollections()` 确保集合正确加载；图谱页 `listCollections()` 调用加 5s 超时保护（`Promise.race`）；从 Search 页完整删除图谱检索 tab。
+- [x] **Phase 2 — 搜索页重构**：后端 `search_kb` + `get_chunk_context(doc_id, chunk_id, window)` 扩展，`handle_kb_search` 内联前后文；前端 Search 页移除图谱 tab，结果卡片三段式（前文/命中/后文）。
+- [x] **Phase 3 — 图谱页增强**：无图谱时显示空态 CTA 大按钮；buildJob 进度条替代旧文字状态行；侧边栏新增「详情」/「图谱查询」双 Tab，查询区从底部移入侧边栏；工具栏构建按钮根据是否有图谱切换 primary/outline。
+- [x] **Phase 4 — RA 顶部栏**：移除 `{t("nav_ask")}` 标题；modeInfo 直接展示；集合选择写入/读取 `localStorage("kr_ask_collection")`。
+- [x] **Phase 5 — 引用来源重设计**：新增 `selectedMsgIndex` + `glowingMsgIndex` 状态；点击 assistant 气泡触发白色辉光动画（×1圈后 `onAnimationEnd` 清除）并切换 sources；SourcesPanel 关闭 X 改为折叠 bar。
+- [x] **Phase 6 — 输入框焦点辉光**：删除 `.ask-card:focus-within` 的 `border-color`/`box-shadow`；新增 `.ask-card:not(.ask-card--loading):focus-within::before` 轨道辉光（更亮白混橙，1.8s/圈）；`.msg-bubble--glow` 白色辉光动画（2圈后停止）。
+- [x] **Phase 7 — 移除手动索引入口**：文档页移除 auto-index toggle 按钮和手动重建按钮；清理相关 state（`autoIndexEnabled` / `pendingCount` / `rebuilding`）和 import。
+- [x] **Phase 8 — 引用来源展开上下文**：新增 `GET /api/kb/chunk-context` 端点 + `getChunkContext()` API 函数；`SourceCard` 组件点击展开显示前后文，命中 chunk 加粗显示。
+
+### Verification
+
+- `python -m pytest` → 210 passed, 267 warnings
+- `ruff check . && mypy` → All checks passed
+- `cd web/frontend && npm run build` → 11 static pages generated
+- `python tools/sync_frontend.py` → 149 文件同步至 pages/
+
 ## v0.18.0 Data-flow wizard + optional dependency management + capability registry (completed)
 
 ### User constraints / 约束

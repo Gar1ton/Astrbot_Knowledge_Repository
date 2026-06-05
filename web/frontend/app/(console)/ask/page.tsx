@@ -1,30 +1,30 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { Btn } from "@/components/ui/Btn";
 import { Tag } from "@/components/ui/Tag";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
   AskResult, AskSource, ApiError, EffectiveConfig, GraphBuildEstimate, GraphBuildJob,
+  ChatMessage, KbChunkContext,
   ask, buildGraph, estimateGraphBuild, getEffectiveConfig, getGraphBuildJob, listCollections,
-  listKbCollections,
+  listKbCollections, getChatHistory, clearChatHistory, getChunkContext,
 } from "@/lib/api";
-import { RetrievalProgress } from "@/components/fx/RetrievalProgress";
 
-type RetrievalMode = "default" | "high_precision";
+type RetrievalMode = "default" | "high_precision" | "graph_only";
 
 function retrievalModeLabel(mode?: string): string {
-  if (mode === "milvus_lightrag") return "高精度 · Milvus + LightRAG";
-  if (mode === "astrbot_lightrag") return "高精度 · AstrBot + LightRAG";
-  if (mode === "lexical_lightrag") return "高精度 · 词汇召回 + LightRAG";
-  if (mode === "lightrag") return "高精度 · 仅 LightRAG";
+  if (mode === "lightrag_only") return "图谱检索 · LightRAG";
+  if (mode === "milvus_lightrag") return "联合检索 · Milvus + 图谱";
+  if (mode === "astrbot_lightrag") return "联合检索 · AstrBot + 图谱";
+  if (mode === "lexical_lightrag") return "联合检索 · 词汇 + 图谱";
+  if (mode === "lightrag") return "联合检索 · LightRAG";
   if (mode === "astrbot_fallback") return "已回退 · AstrBot";
-  if (mode === "astrbot") return "AstrBot";
-  if (mode === "sqlite_lexical") return "SQLite 词汇召回";
+  if (mode === "astrbot") return "语义检索 · AstrBot";
+  if (mode === "sqlite_lexical") return "语义检索 · 词汇召回";
   if (mode === "none") return "未完成召回";
-  return "Milvus";
+  return "语义检索 · Milvus";
 }
 
 // ─── Markdown 渲染（轻量：仅处理 **bold**、[n] 角标、换行） ──
@@ -70,6 +70,91 @@ function renderAnswer(text: string, sources: AskSource[], activeN: number | null
   });
 }
 
+// ─── 来源卡片（可展开显示上下文） ────────────────────────────
+
+function SourceCard({ src, isActive }: { src: AskSource; isActive: boolean }) {
+  const [expanded, setExpanded] = React.useState(false);
+  const [loadingCtx, setLoadingCtx] = React.useState(false);
+  const [ctxBefore, setCtxBefore] = React.useState<KbChunkContext[]>([]);
+  const [ctxAfter, setCtxAfter] = React.useState<KbChunkContext[]>([]);
+
+  async function handleExpand() {
+    if (expanded) { setExpanded(false); return; }
+    setExpanded(true);
+    if (ctxBefore.length === 0 && ctxAfter.length === 0) {
+      setLoadingCtx(true);
+      try {
+        const ctx = await getChunkContext(src.doc_id, src.chunk_id, 2);
+        setCtxBefore(ctx.context_before);
+        setCtxAfter(ctx.context_after);
+      } catch { /* ignore */ } finally {
+        setLoadingCtx(false);
+      }
+    }
+  }
+
+  return (
+    <div
+      style={{
+        background: isActive ? "var(--accent-soft)" : "var(--bg-inset)",
+        border: `1px solid ${isActive ? "var(--accent-border)" : "var(--border)"}`,
+        borderRadius: 10, marginBottom: 8, overflow: "hidden",
+        transition: "all .15s",
+      }}
+    >
+      {/* 卡片头 */}
+      <div
+        onClick={handleExpand}
+        style={{ padding: "10px 12px", cursor: "pointer", userSelect: "none" }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: expanded ? 0 : 5 }}>
+          <span style={{ background: "var(--accent)", color: "#fff", borderRadius: 999, fontSize: 10, fontWeight: 700, width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            {src.n}
+          </span>
+          <span style={{ fontSize: 12, fontWeight: 600, color: "var(--heading)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+            {src.title}
+          </span>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="var(--fg-muted)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(180deg)" : "none", transition: "transform .15s" }}>
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </div>
+        {!expanded && (
+          <p style={{ margin: 0, fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
+            {src.text}
+          </p>
+        )}
+        {src.rrf_score !== undefined && !expanded && (
+          <div style={{ fontSize: 10, color: "var(--fg-subtle)", fontFamily: "var(--font-geist-mono)", marginTop: 5 }}>
+            RRF: {src.rrf_score.toFixed(4)}
+          </div>
+        )}
+      </div>
+
+      {/* 展开上下文 */}
+      {expanded && (
+        <div style={{ borderTop: "1px solid var(--border)", padding: "10px 12px", fontSize: 11, lineHeight: 1.65 }}>
+          {loadingCtx ? (
+            <div style={{ color: "var(--fg-muted)", display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ width: 10, height: 10, borderRadius: "50%", border: "2px solid var(--accent)", borderTopColor: "transparent", display: "inline-block", animation: "spin 0.6s linear infinite" }} />
+              加载上下文…
+            </div>
+          ) : (
+            <>
+              {ctxBefore.map((c) => (
+                <p key={c.chunk_id} style={{ margin: "0 0 8px", color: "var(--fg-muted)", paddingBottom: 8, borderBottom: "1px solid var(--border)" }}>{c.text}</p>
+              ))}
+              <p style={{ margin: "8px 0", color: "var(--fg)", fontWeight: 600 }}>{src.text}</p>
+              {ctxAfter.map((c) => (
+                <p key={c.chunk_id} style={{ margin: "8px 0 0", color: "var(--fg-muted)", paddingTop: 8, borderTop: "1px solid var(--border)" }}>{c.text}</p>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── 来源面板 ─────────────────────────────────────────────────
 
 function SourcesPanel({ sources, activeN, onClose }: { sources: AskSource[]; activeN: number | null; onClose: () => void }) {
@@ -82,88 +167,38 @@ function SourcesPanel({ sources, activeN, onClose }: { sources: AskSource[]; act
       }}
       className="fx-glass-edge"
     >
+      {/* 折叠 bar（替代 X 按钮） */}
       <div
         className="fx-glass"
         style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 2,
-          height: "var(--topbar-h)",
-          boxSizing: "border-box",
-          padding: "0 10px 0 16px",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
+          position: "sticky", top: 0, zIndex: 2,
+          height: "var(--topbar-h)", boxSizing: "border-box",
+          padding: "0 16px",
+          display: "flex", alignItems: "center", gap: 8,
+          cursor: "pointer",
         }}
+        onClick={onClose}
+        title="收起来源面板"
       >
         <div style={{ flex: 1, fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)", lineHeight: 1 }}>
           {t("ask_sources")}
         </div>
-        <button
-          onClick={onClose}
-          title="收起来源面板"
-          style={{
-            width: 24, height: 24, borderRadius: 6, border: "none",
-            background: "transparent", color: "var(--fg-subtle)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            cursor: "pointer", flexShrink: 0, transition: "all .15s",
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-inset)"; e.currentTarget.style.color = "var(--fg)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--fg-subtle)"; }}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        {/* 中间折叠指示器 */}
+        <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--fg-subtle)", opacity: 0.6 }}>
+          <div style={{ width: 20, height: 1, background: "var(--border-strong)", borderRadius: 1 }} />
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="15 18 9 12 15 6"/>
           </svg>
-        </button>
+          <div style={{ width: 20, height: 1, background: "var(--border-strong)", borderRadius: 1 }} />
+        </div>
       </div>
       <div style={{ flex: 1, overflowY: "auto", padding: "8px 10px" }}>
         {sources.length === 0 ? (
           <div style={{ color: "var(--fg-muted)", fontSize: 12, padding: 8 }}>暂无引用来源</div>
         ) : (
-          sources.map((src) => {
-            const isActive = activeN === src.n;
-            return (
-              <div
-                key={src.n}
-                style={{
-                  background: isActive ? "var(--accent-soft)" : "var(--bg-inset)",
-                  border: `1px solid ${isActive ? "var(--accent-border)" : "var(--border)"}`,
-                  borderRadius: 10, padding: "10px 12px", marginBottom: 8,
-                  transition: "all .15s",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
-                  <span
-                    style={{
-                      background: "var(--accent)", color: "#fff",
-                      borderRadius: 999, fontSize: 10, fontWeight: 700,
-                      width: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center",
-                      flexShrink: 0,
-                    }}
-                  >
-                    {src.n}
-                  </span>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: "var(--heading)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {src.title}
-                  </span>
-                </div>
-                <p style={{ margin: "0 0 6px", fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5, display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-                  {src.text}
-                </p>
-                {src.rrf_score !== undefined && (
-                  <div style={{ fontSize: 10, color: "var(--fg-subtle)", fontFamily: "var(--font-geist-mono)", marginBottom: 5 }}>
-                    RRF: {src.rrf_score.toFixed(4)}
-                  </div>
-                )}
-                <Link
-                  href={`/documents?doc_id=${src.doc_id}`}
-                  style={{ fontSize: 11, color: "var(--accent)", fontWeight: 500 }}
-                >
-                  {t("ask_open_doc")} →
-                </Link>
-              </div>
-            );
-          })
+          sources.map((src) => (
+            <SourceCard key={src.n} src={src} isActive={activeN === src.n} />
+          ))
         )}
       </div>
     </div>
@@ -179,8 +214,19 @@ interface Message {
   actualRetrievalMode?: string;
 }
 
-function MessageBubble({ msg, activeN, setActiveN }: { msg: Message; activeN: number | null; setActiveN: (n: number | null) => void }) {
+function MessageBubble({
+  msg, activeN, setActiveN, isSelected, isGlowing, onSelect, onGlowEnd,
+}: {
+  msg: Message;
+  activeN: number | null;
+  setActiveN: (n: number | null) => void;
+  isSelected: boolean;
+  isGlowing: boolean;
+  onSelect: () => void;
+  onGlowEnd: () => void;
+}) {
   const isUser = msg.role === "user";
+  const canSelect = !isUser && (msg.sources?.length ?? 0) > 0;
   return (
     <div
       style={{
@@ -190,16 +236,22 @@ function MessageBubble({ msg, activeN, setActiveN }: { msg: Message; activeN: nu
       }}
     >
       <div
+        className={isGlowing ? "msg-bubble--glow" : undefined}
+        onClick={canSelect ? onSelect : undefined}
+        onAnimationEnd={isGlowing ? onGlowEnd : undefined}
         style={{
           maxWidth: "80%",
           background: isUser ? "var(--accent)" : "var(--surface)",
           color: isUser ? "var(--accent-fg)" : "var(--fg)",
-          border: isUser ? "none" : "1px solid var(--border)",
+          border: isUser ? "none" : `1px solid ${isSelected ? "var(--accent-border)" : "var(--border)"}`,
           borderRadius: isUser ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
           padding: "10px 14px",
           fontSize: 13,
           lineHeight: 1.65,
-          boxShadow: "var(--shadow)",
+          boxShadow: isSelected ? "0 0 0 2px var(--ring), var(--shadow)" : "var(--shadow)",
+          cursor: canSelect ? "pointer" : "default",
+          position: "relative",
+          transition: "border-color .15s, box-shadow .15s",
         }}
       >
         {isUser ? msg.content : (
@@ -302,34 +354,102 @@ function PrecisionDialog({
   );
 }
 
+// ─── Toggle 开关行 ────────────────────────────────────────────
+
+function SettingRow({ label, checked, onToggle, borderTop }: {
+  label: string; checked: boolean; onToggle: () => void; borderTop?: boolean;
+}) {
+  return (
+    <div
+      onClick={onToggle}
+      style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "7px 8px", borderRadius: 8, cursor: "pointer",
+        fontSize: 12, color: "var(--fg)", userSelect: "none",
+        borderTop: borderTop ? "1px solid var(--border)" : undefined,
+        transition: "background .1s",
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-inset)")}
+      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+    >
+      <span style={{ fontWeight: checked ? 600 : 400, color: checked ? "var(--fg)" : "var(--fg-muted)" }}>
+        {label}
+      </span>
+      {/* 小 toggle 开关 */}
+      <div
+        style={{
+          width: 28, height: 16, borderRadius: 8, flexShrink: 0,
+          background: checked ? "var(--accent)" : "var(--border-strong)",
+          position: "relative",
+          transition: "background 0.2s",
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: 2,
+            left: checked ? 12 : 2,
+            width: 12, height: 12,
+            borderRadius: "50%",
+            background: "white",
+            boxShadow: "0 1px 3px rgba(0,0,0,0.18)",
+            transition: "left 0.18s cubic-bezier(0.4,0,0.2,1)",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 // ─── Ask Agent 主页 ───────────────────────────────────────────
 
 export default function AskPage() {
   const { t } = useI18n();
   const { toast } = useToast();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const historyLoadedRef = useRef<string | null>(null);
+  const settingsRef = useRef<HTMLDivElement>(null);
+  const collectionRef = useRef<HTMLDivElement>(null);
+
+  const _CONV_KEY = "kr_conversation_id";
+  const _COLL_KEY = "kr_ask_collection";
+
+  function _getOrCreateConvId(): string {
+    if (typeof window === "undefined") return crypto.randomUUID();
+    const stored = localStorage.getItem(_CONV_KEY);
+    if (stored) return stored;
+    const id = crypto.randomUUID();
+    localStorage.setItem(_CONV_KEY, id);
+    return id;
+  }
 
   const [localCollections, setLocalCollections] = useState<string[]>([]);
   const [defaultCollections, setDefaultCollections] = useState<string[]>([]);
   const [collection, setCollection] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
-  const [sources, setSources] = useState<AskSource[]>([]);
   const [activeN, setActiveN] = useState<number | null>(null);
+  // 用户当前选中的消息下标；null 表示默认展示最新 assistant 消息的来源
+  const [selectedMsgIndex, setSelectedMsgIndex] = useState<number | null>(null);
+  // 当前辉光中的气泡下标（动画结束后自动清除）
+  const [glowingMsgIndex, setGlowingMsgIndex] = useState<number | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [retrievalActive, setRetrievalActive] = useState(false);
   const [modeInfo, setModeInfo] = useState<string>("embedding + RRF");
   const [defaultRetrievalLabel, setDefaultRetrievalLabel] = useState("Milvus");
   const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("default");
   const [personaEnabled, setPersonaEnabled] = useState(false);
+  const [useEnglishRetrieval, setUseEnglishRetrieval] = useState(true);
+  const [answerLanguage, setAnswerLanguage] = useState<"auto" | "zh" | "en">("auto");
   const [showCollectionPicker, setShowCollectionPicker] = useState(false);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [showSources, setShowSources] = useState(true);
   const [precisionDialog, setPrecisionDialog] = useState<PrecisionDialogState | null>(null);
-  const highPrecisionCollectionReady = Boolean(
+  const graphModeCollectionReady = Boolean(
     collection && localCollections.includes(collection)
   );
+  // keep alias for places that still reference the old name
+  const highPrecisionCollectionReady = graphModeCollectionReady;
 
   useEffect(() => {
     Promise.all([
@@ -355,11 +475,52 @@ export default function AskPage() {
       setModeInfo(`${backendLabel} · ${providerLabel} · ${modeLabel}`);
       setDefaultRetrievalLabel(backend === "milvus" ? "Milvus" : "AstrBot");
     }).catch(() => {});
+
+    // 从 localStorage 恢复 conversationId（历史加载由独立 effect 处理）
+    const cid = _getOrCreateConvId();
+    setConversationId(cid);
+    // 恢复上次选择的集合
+    if (typeof window !== "undefined") {
+      const savedCol = localStorage.getItem(_COLL_KEY);
+      if (savedCol !== null) setCollection(savedCol || null);
+    }
   }, []);
+
+  // 集合选择持久化
+  useEffect(() => {
+    if (typeof window !== "undefined" && collection !== null) {
+      localStorage.setItem(_COLL_KEY, collection);
+    }
+  }, [collection]);
+
+  // conversationId 稳定后加载历史记录（每个会话只加载一次）
+  useEffect(() => {
+    if (!conversationId || historyLoadedRef.current === conversationId) return;
+    historyLoadedRef.current = conversationId;
+    getChatHistory(conversationId)
+      .then((msgs: ChatMessage[]) => {
+        if (msgs.length === 0) return;
+        setMessages(msgs.map((m) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          sources: m.sources,
+          actualRetrievalMode: m.retrieval_mode || undefined,
+        })));
+        // selectedMsgIndex=null 表示展示最新 assistant 消息来源（默认行为）
+        setSelectedMsgIndex(null);
+      })
+      .catch(console.error);
+  }, [conversationId]);
 
   useEffect(() => {
     if (!showCollectionPicker && !showSettingsMenu) return;
-    function onMouseDown() { setShowCollectionPicker(false); setShowSettingsMenu(false); }
+    function onMouseDown(e: MouseEvent) {
+      const t = e.target as Node;
+      // 点击在下拉组件内部时不关闭
+      if (settingsRef.current?.contains(t) || collectionRef.current?.contains(t)) return;
+      setShowCollectionPicker(false);
+      setShowSettingsMenu(false);
+    }
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") { setShowCollectionPicker(false); setShowSettingsMenu(false); }
     }
@@ -382,9 +543,9 @@ export default function AskPage() {
     appendUser: boolean,
   ) {
     if (loading) return;
-    if (mode === "high_precision" && !highPrecisionCollectionReady) {
+    if ((mode === "high_precision" || mode === "graph_only") && !graphModeCollectionReady) {
       setShowCollectionPicker(true);
-      toast("高精度召回需要先选择一个集合。", "info");
+      toast("图谱检索需要指定集合，请从下方选择一个集合后再发送", "info");
       return;
     }
     if (appendUser) {
@@ -392,7 +553,6 @@ export default function AskPage() {
       setMessages((prev) => [...prev, { role: "user", content: question }]);
     }
     setLoading(true);
-    setRetrievalActive(true);
     setActiveN(null);
 
     try {
@@ -403,11 +563,17 @@ export default function AskPage() {
         conversation_id: conversationId,
         persona_enabled: personaEnabled,
         retrieval_mode: mode,
+        use_english_retrieval: useEnglishRetrieval,
+        answer_language: answerLanguage,
       });
 
       setConversationId(result.conversation_id);
-      setSources(result.sources);
+      if (typeof window !== "undefined") {
+        localStorage.setItem(_CONV_KEY, result.conversation_id);
+      }
       if (result.sources.length > 0) setShowSources(true);
+      // 新消息到达后重置选中，展示最新来源
+      setSelectedMsgIndex(null);
       setMessages((prev) => [
         ...prev,
         {
@@ -419,7 +585,7 @@ export default function AskPage() {
       ]);
     } catch (err) {
       if (
-        mode === "high_precision"
+        (mode === "high_precision" || mode === "graph_only")
         && err instanceof ApiError
         && (err.body?.status === "lightrag_not_ready" || err.body?.status === "high_precision_failed")
         && collection
@@ -445,7 +611,6 @@ export default function AskPage() {
       }
     } finally {
       setLoading(false);
-      setRetrievalActive(false);
     }
   }
 
@@ -488,6 +653,15 @@ export default function AskPage() {
     }
   }
 
+  // 当前展示的来源：选中消息 > 最后一条 assistant 消息
+  const displayedSources: AskSource[] = (() => {
+    if (selectedMsgIndex !== null && messages[selectedMsgIndex]?.sources?.length) {
+      return messages[selectedMsgIndex].sources!;
+    }
+    const lastA = [...messages].reverse().find((m) => m.role === "assistant");
+    return lastA?.sources ?? [];
+  })();
+
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", position: "relative" }}>
       {precisionDialog && (
@@ -516,20 +690,28 @@ export default function AskPage() {
             gap: 10,
           }}
         >
-          <h1 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: "var(--heading)", flex: 1, display: "flex", alignItems: "center", gap: 8, lineHeight: 1 }}>
-            {t("nav_ask")}
-            <span style={{ color: "var(--accent)", fontSize: 11, lineHeight: 1 }}>●</span>
-            <span style={{ color: "var(--fg-subtle)", fontSize: 11, fontWeight: 500, lineHeight: 1 }}>{modeInfo}</span>
-            <Tag label={retrievalMode === "high_precision" ? "高精度召回" : `${defaultRetrievalLabel} 默认召回`} accent={retrievalMode === "high_precision"} />
-          </h1>
+          <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, lineHeight: 1, minWidth: 0 }}>
+            <span style={{ color: "var(--fg-subtle)", fontSize: 12, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{modeInfo}</span>
+            <Tag
+              label={retrievalMode === "graph_only" ? "图谱检索" : retrievalMode === "high_precision" ? "联合检索" : "语义检索"}
+              accent={retrievalMode !== "default"}
+            />
+          </div>
           {messages.length > 0 && (
             <Btn
               variant="ghost"
               size="sm"
               onClick={() => {
+                if (conversationId) {
+                  clearChatHistory(conversationId).catch(() => {});
+                }
+                const newId = crypto.randomUUID();
+                if (typeof window !== "undefined") {
+                  localStorage.setItem(_CONV_KEY, newId);
+                }
+                setConversationId(newId);
                 setMessages([]);
-                setSources([]);
-                setConversationId(null);
+                setSelectedMsgIndex(null);
               }}
             >
               新对话
@@ -611,7 +793,20 @@ export default function AskPage() {
             </div>
           ) : (
             messages.map((msg, i) => (
-              <MessageBubble key={i} msg={msg} activeN={activeN} setActiveN={setActiveN} />
+              <MessageBubble
+                key={i}
+                msg={msg}
+                activeN={activeN}
+                setActiveN={setActiveN}
+                isSelected={selectedMsgIndex === i}
+                isGlowing={glowingMsgIndex === i}
+                onSelect={() => {
+                  setSelectedMsgIndex(i);
+                  setGlowingMsgIndex(i);
+                  setShowSources(true);
+                }}
+                onGlowEnd={() => setGlowingMsgIndex(null)}
+              />
             ))
           )}
           {loading && (
@@ -631,18 +826,12 @@ export default function AskPage() {
             </div>
           )}
         </div>
-        {/* 辉光召回进度条（紧贴消息区底部内边缘） */}
-        <RetrievalProgress
-          conversationId={conversationId}
-          active={retrievalActive}
-          onDone={() => setRetrievalActive(false)}
-        />
         </div>{/* end position:relative wrapper */}
 
         {/* 输入框 */}
         <div style={{ padding: "10px 16px 14px", width: "100%", maxWidth: 900, margin: "0 auto" }}>
           <form onSubmit={handleSend}>
-            <div className="ask-card">
+            <div className={`ask-card${loading ? " ask-card--loading" : ""}`}>
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -661,10 +850,122 @@ export default function AskPage() {
                   color: "var(--fg)", boxShadow: "none",
                 }}
               />
-              {/* 底部操作行 */}
+              {/* 底部操作行：设置（齿轮）→ 集合选择 → 发送 */}
               <div style={{ display: "flex", alignItems: "center", padding: "6px 10px 10px", gap: 6 }}>
-                {/* 集合选择图标按钮 */}
-                <div style={{ position: "relative" }} onMouseDown={(e) => e.stopPropagation()}>
+                {/* ── 齿轮设置按钮（第 1 位）── */}
+                <div ref={settingsRef} style={{ position: "relative" }}>
+                  <button
+                    type="button"
+                    title="查询设置"
+                    onClick={() => { setShowSettingsMenu((v) => !v); setShowCollectionPicker(false); }}
+                    style={{
+                      width: 30, height: 30, borderRadius: 8,
+                      background: personaEnabled || retrievalMode !== "default" || useEnglishRetrieval || answerLanguage !== "auto" || showSettingsMenu ? "var(--accent-soft)" : "var(--bg-inset)",
+                      color: personaEnabled || retrievalMode !== "default" || useEnglishRetrieval || answerLanguage !== "auto" || showSettingsMenu ? "var(--accent)" : "var(--fg-subtle)",
+                      border: "1px solid var(--border)", cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      transition: "all .15s", flexShrink: 0,
+                    }}
+                  >
+                    {/* 齿轮图标 */}
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="3"/>
+                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                    </svg>
+                  </button>
+                  {showSettingsMenu && (
+                    <div
+                      style={{
+                        position: "absolute", bottom: "calc(100% + 8px)", left: 0,
+                        background: "var(--surface)", border: "1px solid var(--border)",
+                        borderRadius: 12, padding: "8px 6px", boxShadow: "var(--shadow-pop)",
+                        minWidth: 220, zIndex: 500,
+                      }}
+                    >
+                      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)", padding: "2px 8px 6px" }}>
+                        查询设置
+                      </div>
+                      <SettingRow label={t("ask_persona_toggle")} checked={personaEnabled} onToggle={() => setPersonaEnabled(v => !v)} />
+                      {/* 检索方式三选 */}
+                      <div style={{ padding: "8px 8px 4px", borderTop: "1px solid var(--border)" }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--fg-subtle)", marginBottom: 6 }}>检索方式</div>
+                        <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+                          {([
+                            { value: "default" as RetrievalMode, label: "语义检索", desc: "Milvus 向量相似度" },
+                            { value: "graph_only" as RetrievalMode, label: "图谱检索", desc: "LightRAG 实体关系推理" },
+                            { value: "high_precision" as RetrievalMode, label: "联合检索", desc: "向量 + 图谱 · 最全面" },
+                          ] as const).map(({ value, label, desc }, idx) => {
+                            const isSelected = retrievalMode === value;
+                            const needsCollection = value === "graph_only" || value === "high_precision";
+                            return (
+                              <button
+                                key={value}
+                                type="button"
+                                aria-pressed={isSelected}
+                                onClick={() => {
+                                  setRetrievalMode(value);
+                                  if (needsCollection && (!collection || !localCollections.includes(collection))) {
+                                    setCollection(null);
+                                    setShowSettingsMenu(false);
+                                    setShowCollectionPicker(true);
+                                  }
+                                }}
+                                style={{
+                                  display: "flex", alignItems: "center", gap: 10,
+                                  width: "100%", padding: "8px 10px", cursor: "pointer",
+                                  background: isSelected ? "var(--accent-soft)" : "transparent",
+                                  borderTop: idx > 0 ? "1px solid var(--border)" : "none",
+                                  border: "none", textAlign: "left", transition: "background .12s",
+                                }}
+                              >
+                                <span style={{
+                                  width: 14, height: 14, borderRadius: "50%", flexShrink: 0,
+                                  border: `2px solid ${isSelected ? "var(--accent)" : "var(--fg-subtle)"}`,
+                                  background: isSelected ? "var(--accent)" : "transparent",
+                                  display: "flex", alignItems: "center", justifyContent: "center",
+                                }}>
+                                  {isSelected && <span style={{ width: 5, height: 5, borderRadius: "50%", background: "white", display: "block" }} />}
+                                </span>
+                                <span style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                                  <span style={{ fontSize: 12, fontWeight: 600, color: isSelected ? "var(--accent)" : "var(--fg)", lineHeight: 1.2 }}>{label}</span>
+                                  <span style={{ fontSize: 10, color: "var(--fg-muted)", lineHeight: 1.3 }}>{desc}</span>
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      {/* 使用英语召回 */}
+                      <SettingRow label="使用英语召回" checked={useEnglishRetrieval} borderTop onToggle={() => setUseEnglishRetrieval(v => !v)} />
+                      {/* 回答语言 */}
+                      <div style={{ padding: "6px 8px 4px", borderTop: "1px solid var(--border)" }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--fg-subtle)", marginBottom: 5 }}>回答语言</div>
+                        <div style={{ display: "flex", gap: 4 }}>
+                          {(["auto", "zh", "en"] as const).map((lang) => (
+                            <button
+                              key={lang}
+                              type="button"
+                              onClick={() => setAnswerLanguage(lang)}
+                              style={{
+                                flex: 1, padding: "4px 0", fontSize: 11, borderRadius: 6, cursor: "pointer",
+                                border: "1px solid var(--border)",
+                                background: answerLanguage === lang ? "var(--accent-soft)" : "var(--bg-inset)",
+                                color: answerLanguage === lang ? "var(--accent)" : "var(--fg-subtle)",
+                                fontWeight: answerLanguage === lang ? 600 : 400,
+                                transition: "all .12s",
+                              }}
+                            >
+                              {{"auto": "自动", "zh": "中文", "en": "English"}[lang]}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── 集合选择按钮（第 2 位）── */}
+                <div ref={collectionRef} style={{ position: "relative" }}>
                   <button
                     type="button"
                     title="选择知识库集合"
@@ -684,14 +985,12 @@ export default function AskPage() {
                       <path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/>
                       <path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/>
                     </svg>
-                    {collection && (
-                      <span style={{
-                        fontSize: 11, fontWeight: 600, lineHeight: 1,
-                        maxWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                      }}>
-                        {collection}
-                      </span>
-                    )}
+                    <span style={{
+                      fontSize: 11, fontWeight: 600, lineHeight: 1,
+                      maxWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    }}>
+                      {collection ?? t("ask_collection_all")}
+                    </span>
                   </button>
                   {showCollectionPicker && (
                     <div
@@ -705,7 +1004,7 @@ export default function AskPage() {
                       <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)", padding: "2px 8px 6px" }}>
                         知识库集合
                       </div>
-                      {(retrievalMode === "high_precision" ? localCollections : [null, ...defaultCollections]).map((c) => (
+                      {((retrievalMode === "high_precision" || retrievalMode === "graph_only") ? localCollections : [null, ...defaultCollections]).map((c) => (
                         <button
                           key={c ?? "__all__"}
                           type="button"
@@ -730,108 +1029,15 @@ export default function AskPage() {
                   )}
                 </div>
 
-                {/* 设置图标按钮 */}
-                <div style={{ position: "relative" }} onMouseDown={(e) => e.stopPropagation()}>
-                  <button
-                    type="button"
-                    title="查询设置"
-                    onClick={() => { setShowSettingsMenu((v) => !v); setShowCollectionPicker(false); }}
-                    style={{
-                      width: 30, height: 30, borderRadius: 8,
-                      background: personaEnabled || retrievalMode === "high_precision" || showSettingsMenu ? "var(--accent-soft)" : "var(--bg-inset)",
-                      color: personaEnabled || retrievalMode === "high_precision" || showSettingsMenu ? "var(--accent)" : "var(--fg-subtle)",
-                      border: "1px solid var(--border)", cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      transition: "all .15s", flexShrink: 0,
-                    }}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="4" y1="6" x2="20" y2="6"/>
-                      <line x1="8" y1="12" x2="20" y2="12"/>
-                      <line x1="12" y1="18" x2="20" y2="18"/>
-                      <circle cx="4" cy="6" r="2" fill="currentColor" stroke="none"/>
-                      <circle cx="8" cy="12" r="2" fill="currentColor" stroke="none"/>
-                      <circle cx="12" cy="18" r="2" fill="currentColor" stroke="none"/>
-                    </svg>
-                  </button>
-                  {showSettingsMenu && (
-                    <div
-                      style={{
-                        position: "absolute", bottom: "calc(100% + 8px)", left: 0,
-                        background: "var(--surface)", border: "1px solid var(--border)",
-                        borderRadius: 12, padding: "8px 6px", boxShadow: "var(--shadow-pop)",
-                        minWidth: 180, zIndex: 500,
-                      }}
-                    >
-                      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--fg-subtle)", padding: "2px 8px 6px" }}>
-                        查询设置
-                      </div>
-                      <label
-                        style={{
-                          display: "flex", alignItems: "center", justifyContent: "space-between",
-                          padding: "6px 8px", borderRadius: 8, cursor: "pointer",
-                          fontSize: 12, color: "var(--fg)", userSelect: "none",
-                          transition: "background .1s",
-                        }}
-                        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-inset)")}
-                        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                      >
-                        <span>{t("ask_persona_toggle")}</span>
-                        <input
-                          type="checkbox"
-                          checked={personaEnabled}
-                          onChange={(e) => setPersonaEnabled(e.target.checked)}
-                          style={{ accentColor: "var(--accent)", cursor: "pointer", width: 14, height: 14 }}
-                        />
-                      </label>
-                      <label
-                        style={{
-                          display: "flex", alignItems: "center", justifyContent: "space-between",
-                          padding: "7px 8px", borderRadius: 8, cursor: "pointer",
-                          fontSize: 12, color: "var(--fg)", userSelect: "none",
-                          borderTop: "1px solid var(--border)",
-                        }}
-                      >
-                        <span>
-                          高精度召回
-                          <span style={{ display: "block", fontSize: 9, color: "var(--fg-subtle)", marginTop: 2 }}>
-                            Milvus + LightRAG · 需指定集合
-                          </span>
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={retrievalMode === "high_precision"}
-                          onChange={(e) => {
-                            const next = e.target.checked ? "high_precision" : "default";
-                            setRetrievalMode(next);
-                            if (
-                              next === "high_precision"
-                              && (!collection || !localCollections.includes(collection))
-                            ) {
-                              setCollection(null);
-                              setShowSettingsMenu(false);
-                              setShowCollectionPicker(true);
-                            }
-                          }}
-                          style={{ accentColor: "var(--accent)", cursor: "pointer", width: 14, height: 14 }}
-                        />
-                      </label>
-                      <div style={{ fontSize: 10, color: "var(--fg-subtle)", padding: "2px 8px 4px", marginTop: 2, borderTop: "1px solid var(--border)" }}>
-                        {retrievalMode === "high_precision" ? "Milvus + LightRAG 上下文" : `${defaultRetrievalLabel} + RRF 默认召回`}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
                 <span style={{ flex: 1 }} />
                 {/* 圆形发送按钮 */}
                 <button
                   type="submit"
-                  disabled={!input.trim() || loading || (retrievalMode === "high_precision" && !highPrecisionCollectionReady)}
+                  disabled={!input.trim() || loading}
                   style={{
                     width: 36, height: 36, borderRadius: "50%",
-                    background: input.trim() && !loading && (retrievalMode === "default" || highPrecisionCollectionReady) ? "var(--accent)" : "var(--bg-inset)",
-                    border: "none", cursor: input.trim() && !loading && (retrievalMode === "default" || highPrecisionCollectionReady) ? "pointer" : "default",
+                    background: input.trim() && !loading ? "var(--accent)" : "var(--bg-inset)",
+                    border: "none", cursor: input.trim() && !loading ? "pointer" : "default",
                     display: "flex", alignItems: "center", justifyContent: "center",
                     transition: "background 0.15s, transform 0.1s",
                     flexShrink: 0,
@@ -860,7 +1066,7 @@ export default function AskPage() {
 
       {/* 来源面板（可折叠） */}
       {showSources && (
-        <SourcesPanel sources={sources} activeN={activeN} onClose={() => setShowSources(false)} />
+        <SourcesPanel sources={displayedSources} activeN={activeN} onClose={() => setShowSources(false)} />
       )}
     </div>
   );

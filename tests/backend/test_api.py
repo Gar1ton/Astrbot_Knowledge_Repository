@@ -634,3 +634,169 @@ async def test_vector_db_sync_and_rebuild(tmp_path: Path) -> None:
     assert "chunk_A" in v_store._data
     await api.delete_collection("col1")
     assert "chunk_A" not in v_store._data
+
+
+# ── LightRAG API 层覆盖补充 ──────────────────────────────────────────
+
+async def test_lightrag_readiness_fully_ready(tmp_path: Path) -> None:
+    from core.index_compatibility import IndexCompatibilityStore
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return True
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    result = await api.get_lightrag_readiness("papers")
+
+    assert result["ready"] is True
+    assert result["build_available"] is False
+
+
+async def test_lightrag_readiness_partially_indexed(tmp_path: Path) -> None:
+    from core.index_compatibility import IndexCompatibilityStore
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return True
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.add_document(_doc("d2", "papers"))
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    # d2 未 indexed，状态缺失 → 计入 invalid
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    result = await api.get_lightrag_readiness("papers")
+
+    # 部分索引（d1 indexed，d2 未索引）→ 仍视为 ready（至少有一篇可用）
+    assert result["ready"] is True
+    assert result["indexed_docs"] == 1
+    assert result["unindexed_docs"] == 1
+
+
+async def test_build_graph_raises_when_not_confirmed() -> None:
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return False
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(ValueError):
+        await api.build_graph("papers", confirmed=False)
+
+
+async def test_build_graph_partial_failure_when_insert_raises(tmp_path: Path) -> None:
+    from core.lightrag_core import BuildJob
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return False
+
+        async def insert_document(self, collection: str, doc_id: str, text: str) -> None:
+            raise RuntimeError("LLM API timeout")
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "content", "h1")])
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+    )
+    api._graph_build_jobs["job"] = BuildJob(job_id="job", collection="papers")
+
+    await api._run_lightrag_build_job("job")
+
+    job = api._graph_build_jobs["job"]
+    assert job.status == "partial_failure"
+    assert job.failed_docs == 1
+
+
+async def test_probe_lightrag_core_delegates_to_registry() -> None:
+    received: dict = {}
+
+    class Registry:
+        async def manual_probe(
+            self, *, collection: str, text: str, doc_id: str, query: str
+        ) -> dict:
+            received.update(
+                {"collection": collection, "text": text, "doc_id": doc_id, "query": query}
+            )
+            return {"status": "success", "steps": []}
+
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+    )
+
+    result = await api.probe_lightrag_core("col", "text content", "doc_x", "test query")
+
+    assert result["status"] == "success"
+    assert received == {
+        "collection": "col",
+        "text": "text content",
+        "doc_id": "doc_x",
+        "query": "test query",
+    }
+
+
+async def test_query_graph_delegates_to_registry_when_ready(tmp_path: Path) -> None:
+    from core.index_compatibility import IndexCompatibilityStore
+
+    queries: list[str] = []
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return True
+
+        async def query(
+            self, collection: str, query: str, *, only_need_context: bool = False
+        ) -> dict:
+            queries.append(query)
+            return {"answer": "graph answer", "context": "", "entities": [], "relations": []}
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    result = await api.query_graph("transformer attention", collection="papers")
+
+    assert queries == ["transformer attention"]
+    assert result["status"] == "success"
+    assert result["answer"] == "graph answer"

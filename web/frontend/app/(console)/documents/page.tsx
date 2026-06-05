@@ -19,10 +19,6 @@ import {
   patchDocument,
   deleteDocument,
   downloadDocument,
-  getEffectiveConfig,
-  updateConfigValue,
-  rebuildIndexPending,
-  getPendingReindexCount,
 } from "@/lib/api";
 
 // ─── 工具函数 ─────────────────────────────────────────────────
@@ -541,9 +537,6 @@ export default function DocumentsPage() {
   const [sortKey, setSortKey] = useState<"title" | "tags" | "size" | "updated" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [deleteTarget, setDeleteTarget] = useState<Collection | null>(null);
-  const [autoIndexEnabled, setAutoIndexEnabled] = useState(true);
-  const [pendingCount, setPendingCount] = useState(0);
-  const [rebuilding, setRebuilding] = useState(false);
 
   // 初始化并监听 ?doc_id 跳转（来自 Ask Agent）
   useEffect(() => {
@@ -551,18 +544,12 @@ export default function DocumentsPage() {
     async function load() {
       setLoading(true);
       try {
-        const [cols, allDocs, cfg, pending] = await Promise.all([
+        const [cols, allDocs] = await Promise.all([
           listCollections(),
           listDocuments(),
-          getEffectiveConfig(),
-          getPendingReindexCount(),
         ]);
         setCollections(cols);
         setDocs(allDocs);
-        setPendingCount(pending.count);
-        if (cfg.vector_db?.auto_index_enabled !== undefined) {
-          setAutoIndexEnabled(Boolean(cfg.vector_db.auto_index_enabled));
-        }
         if (docId) {
           const target = allDocs.find((d) => d.doc_id === docId);
           if (target) setInspecting(target);
@@ -633,31 +620,6 @@ export default function DocumentsPage() {
     } catch (err) {
       toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
       setDeleteTarget(null);
-    }
-  }
-
-  async function handleToggleAutoIndex() {
-    const next = !autoIndexEnabled;
-    try {
-      await updateConfigValue("vector_db", "auto_index_enabled", next);
-      setAutoIndexEnabled(next);
-    } catch {
-      toast(t("error_generic"), "error");
-    }
-  }
-
-  async function handleRebuildIndex() {
-    setRebuilding(true);
-    try {
-      const result = await rebuildIndexPending();
-      const fresh = await getPendingReindexCount();
-      setPendingCount(fresh.count);
-      setDocs(await listDocuments());
-      toast(`已重建 ${result.rebuilt_docs} 个文档的索引`, "ok");
-    } catch {
-      toast(t("error_generic"), "error");
-    } finally {
-      setRebuilding(false);
     }
   }
 
@@ -911,55 +873,6 @@ export default function DocumentsPage() {
             <Btn size="sm" onClick={() => setShowUpload(true)}>
               {t("btn_upload")}
             </Btn>
-            {/* 索引模式 toggle */}
-            <button
-              onClick={handleToggleAutoIndex}
-              title={autoIndexEnabled ? "点击暂停自动索引" : "点击恢复自动索引"}
-              style={{
-                height: 28, borderRadius: 7, border: "1px solid var(--border)",
-                padding: "0 8px", gap: 4,
-                background: autoIndexEnabled ? "var(--bg-inset)" : "color-mix(in srgb, var(--warn, #e09a5b) 12%, transparent)",
-                color: autoIndexEnabled ? "var(--fg-subtle)" : "#e09a5b",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                cursor: "pointer", transition: "all .15s", flexShrink: 0, fontSize: 11, fontFamily: "inherit",
-              }}
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                {autoIndexEnabled
-                  ? <><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></>
-                  : <><circle cx="12" cy="12" r="10"/><line x1="10" y1="15" x2="10" y2="9"/><line x1="14" y1="15" x2="14" y2="9"/></>}
-              </svg>
-              <span>{autoIndexEnabled ? t("docs_index_mode_auto") : t("docs_index_mode_paused")}</span>
-            </button>
-            {/* 重建索引按钮 */}
-            {(!autoIndexEnabled || pendingCount > 0) && (
-              <button
-                onClick={handleRebuildIndex}
-                disabled={rebuilding}
-                title={t("docs_rebuild_index")}
-                style={{
-                  height: 28, borderRadius: 7, border: "1px solid var(--border)",
-                  padding: "0 8px", gap: 4,
-                  background: "var(--bg-inset)", color: rebuilding ? "var(--fg-subtle)" : "var(--fg)",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  cursor: rebuilding ? "default" : "pointer", transition: "all .15s", flexShrink: 0, fontSize: 11, fontFamily: "inherit",
-                }}
-              >
-                {rebuilding ? (
-                  <span style={{ width: 10, height: 10, borderRadius: "50%", border: "2px solid var(--fg-subtle)", borderTopColor: "transparent", display: "inline-block", animation: "spin 0.6s linear infinite" }} />
-                ) : (
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-                  </svg>
-                )}
-                <span>{t("docs_rebuild_index")}</span>
-                {pendingCount > 0 && (
-                  <span style={{ background: "var(--accent)", color: "var(--accent-fg)", borderRadius: 999, fontSize: 9, fontWeight: 700, padding: "1px 5px", lineHeight: "14px" }}>
-                    {pendingCount}
-                  </span>
-                )}
-              </button>
-            )}
             <button
               onClick={() => setShowInspector(v => !v)}
               title={showInspector ? "收起详情" : "展开详情"}

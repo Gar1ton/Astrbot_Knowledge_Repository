@@ -589,10 +589,12 @@ export default function SettingsPage() {
                 />
                 <span style={{ opacity: vectorBackend === "milvus" ? 1 : .5 }}>
                   <strong style={{ display: "block", color: "var(--fg)", fontSize: 12 }}>
-                    {lang === "zh" ? "上传后自动建立 Milvus 索引" : "Build Milvus index after upload"}
+                    {lang === "zh" ? "上传后立即建立 Milvus 向量索引" : "Build Milvus vector index immediately after upload"}
                   </strong>
                   <span style={{ display: "block", marginTop: 2, fontSize: 10, color: "var(--fg-subtle)" }}>
-                    {lang === "zh" ? "关闭后 PDF 与 SQLite 分块仍会保存并可词汇召回" : "PDFs and SQLite chunks remain available for lexical retrieval when off"}
+                    {lang === "zh"
+                      ? "关闭后文档写入 SQLite 但跳过 embedding，标记为待索引；可在工具栏手动触发批量重建，适合先批量上传后再统一索引的工作流"
+                      : "When off, documents are saved to SQLite but skip embedding and are marked for reindex; use the toolbar to trigger batch indexing later — ideal for bulk-upload workflows"}
                   </span>
                 </span>
               </label>

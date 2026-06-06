@@ -25,6 +25,11 @@
 
 ### 新增功能 (Added)
 
+- **数据流配置向导界面全面重构**：`FlowNode` 组件新增左侧 3px 彩色竖条（绿/橙/灰对应 ready/degraded/off）作为状态指示，`off` 节点施加 `opacity: 0.62 + filter: saturate(0.18)` 使其呈低饱和灰暗态；新增 `OptionTile` 并联瓦片组件，可切换后端（Embedding、向量库、问答模式）以并排高亮方式展示，激活瓦片为 accent 色实线边框，未激活瓦片为虚线低饱和，点击即切换；`Connector` 连接线颜色随目标节点状态自适应（就绪为 `--accent-border` 实线，off 为 `--border-strong` 虚线）；`DependencyPanel` 改为 `auto-fill` 2 列网格，每张 `DepCard` 更紧凑；页面头部新增 `● 就绪 / ⚠ 待处理 / ○ 未启用` 图例行；新增 `flow_legend_ready` / `flow_legend_off` 国际化键（`web/frontend/app/(console)/flow/page.tsx`, `web/frontend/lib/i18n.ts`）。
+
+- **Ask 页知识库选中高亮边与发送键灰态**：选中集合时输入卡片显示橙色高亮边（`--accent-border`）；加载期间边框退回普通色、仅保留旋转辉光；图谱检索模式下未选有效集合时发送键变灰，点击仍触发已有 toast 提示（`web/frontend/app/globals.css`, `web/frontend/app/(console)/ask/page.tsx`）。
+- **Milvus 自动索引开关说明文案优化**：label 改为「上传后立即建立 Milvus 向量索引」，说明文字补充延迟索引 / 批量重建工作流说明（`web/frontend/app/(console)/settings/page.tsx`）。
+
 - **LightRAG 构建进度升级为 LRAG chunk 级别**：`BuildJob` 新增 `processed_chunks` / `total_chunks` / `progress_basis` / `estimated_remaining_seconds` 等字段，`core/api.py` 在构建前按 LightRAG 等价切分规则生成 LRAG chunk plan，不复用 Milvus `DocumentChunk`；Graph/Ask 页优先展示 `LRAG chunk x / n`、真实已运行时间与动态剩余时间（`core/api.py`, `core/lightrag_core.py`, `web/frontend/lib/api.ts`, `web/frontend/app/(console)/graph/page.tsx`, `web/frontend/app/(console)/ask/page.tsx`）。
 - **Terminal 结构化事件流**：内存日志新增 `category` / `source` / `operation` / `status` / `metadata` 字段，新增 `POST /api/logs/events` 接收前端 toast 事件；Terminal 页支持 graph/llm/embedding/retrieval/web/toast/system 等分类过滤（`core/log_capture.py`, `web/server.py`, `web/frontend/app/(console)/terminal/page.tsx`, `web/frontend/components/ui/Toast.tsx`）。
 

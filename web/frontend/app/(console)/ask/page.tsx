@@ -466,6 +466,12 @@ export default function AskPage() {
   );
   // keep alias for places that still reference the old name
   const highPrecisionCollectionReady = graphModeCollectionReady;
+  // 图谱模式下未选集合：按钮视觉灰态，点击仍能触发 submitQuestion 内的 toast
+  const sendSoftBlocked =
+    Boolean(input.trim()) &&
+    !loading &&
+    (retrievalMode === "high_precision" || retrievalMode === "graph_only") &&
+    !graphModeCollectionReady;
 
   useEffect(() => {
     Promise.all([
@@ -847,7 +853,7 @@ export default function AskPage() {
         {/* 输入框 */}
         <div style={{ padding: "10px 16px 14px", width: "100%", maxWidth: 900, margin: "0 auto" }}>
           <form onSubmit={handleSend}>
-            <div className={`ask-card${loading ? " ask-card--loading" : ""}`}>
+            <div className={`ask-card${loading ? " ask-card--loading" : ""}${collection && !loading ? " ask-card--collection" : ""}`}>
               <textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -1052,8 +1058,8 @@ export default function AskPage() {
                   disabled={!input.trim() || loading}
                   style={{
                     width: 36, height: 36, borderRadius: "50%",
-                    background: input.trim() && !loading ? "var(--accent)" : "var(--bg-inset)",
-                    border: "none", cursor: input.trim() && !loading ? "pointer" : "default",
+                    background: input.trim() && !loading && !sendSoftBlocked ? "var(--accent)" : "var(--bg-inset)",
+                    border: "none", cursor: input.trim() && !loading && !sendSoftBlocked ? "pointer" : "default",
                     display: "flex", alignItems: "center", justifyContent: "center",
                     transition: "background 0.15s, transform 0.1s",
                     flexShrink: 0,
@@ -1068,7 +1074,7 @@ export default function AskPage() {
                       display: "inline-block", animation: "spin 0.6s linear infinite",
                     }} />
                   ) : (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={input.trim() ? "#fff" : "var(--fg-subtle)"} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={input.trim() && !sendSoftBlocked ? "#fff" : "var(--fg-subtle)"} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                       <line x1="22" y1="2" x2="11" y2="13" />
                       <polygon points="22 2 15 22 11 13 2 9 22 2" />
                     </svg>

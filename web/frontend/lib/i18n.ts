@@ -237,6 +237,10 @@ const zh = {
   reserved_prefix: "即将上线",
   error_generic: "请求失败，请重试",
   loading: "加载中...",
+
+  // 数据流图例
+  flow_legend_ready: "就绪",
+  flow_legend_off: "未启用",
 } as const;
 
 const en: Record<keyof typeof zh, string> = {
@@ -460,6 +464,10 @@ const en: Record<keyof typeof zh, string> = {
   reserved_prefix: "Coming in",
   error_generic: "Request failed, please retry",
   loading: "Loading...",
+
+  // Data flow legend
+  flow_legend_ready: "Ready",
+  flow_legend_off: "Not enabled",
 };
 
 export type I18nKey = keyof typeof zh;

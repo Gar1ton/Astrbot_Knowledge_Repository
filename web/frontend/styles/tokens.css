@@ -225,6 +225,21 @@
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+@keyframes dotPulse {
+  0%, 100% { transform: scale(1);   opacity: 1; }
+  50%       { transform: scale(1.8); opacity: 0.45; }
+}
+@keyframes dotGlow {
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 30%, transparent); }
+  50%       { box-shadow: 0 0 0 6px color-mix(in srgb, var(--warn)  8%, transparent); }
+}
+@keyframes connectorDraw {
+  to { stroke-dashoffset: 0; }
+}
+@keyframes tileActivate {
+  0%   { background-color: color-mix(in srgb, var(--accent) 34%, var(--surface)); }
+  100% { background-color: var(--accent-soft); }
+}
 
 /* ─── 无障碍：关闭所有动画 ───────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {

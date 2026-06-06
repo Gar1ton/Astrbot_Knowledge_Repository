@@ -154,6 +154,11 @@ select:focus {
   transition: border-color 0.18s, box-shadow 0.18s;
 }
 
+/* 选中集合时高亮边；loading 时被 ask-card--loading 覆盖 */
+.ask-card--collection {
+  border-color: var(--accent-border);
+}
+
 /* focus 时仅显示轨道辉光（非 loading 状态），不加橙色 border+ring */
 .ask-card:not(.ask-card--loading):focus-within::before {
   content: '';

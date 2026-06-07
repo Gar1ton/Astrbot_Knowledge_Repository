@@ -52,7 +52,7 @@ def test_dependency_statuses_cover_all_optional(monkeypatch: pytest.MonkeyPatch)
     _patch_modules(monkeypatch, set())
     deps = dependency_statuses()
     assert {d["key"] for d in deps} == {
-        "pdf_extract", "local_embedding", "milvus", "lightrag", "r2"
+        "local_embedding", "milvus", "lightrag", "r2"
     }
     assert all(d["installed"] is False for d in deps)
 
@@ -61,9 +61,20 @@ def test_dependency_statuses_cover_all_optional(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_pipeline_has_seven_ordered_stages(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_modules(monkeypatch, {"sentence_transformers", "pymilvus", "lightrag", "boto3"})
+    _patch_modules(
+        monkeypatch,
+        {"pymupdf4llm", "sentence_transformers", "pymilvus", "lightrag", "boto3"},
+    )
     ids = [s["id"] for s in detect_pipeline(_cfg(dim=384))]
     assert ids == ["ingest", "embedding", "vector_store", "retrieval", "graph", "ask", "sync"]
+
+
+def test_ingest_reports_core_pdf_dependency_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_modules(monkeypatch, set())
+    ingest = _stage(detect_pipeline(_cfg()), "ingest")
+    assert ingest["status"] == STATUS_DEGRADED
+    assert ingest["required_deps"] == []
+    assert ingest["detail"]["dependency_source"] == "requirements.txt"
 
 
 def test_local_embedding_degraded_without_dependency(monkeypatch: pytest.MonkeyPatch) -> None:

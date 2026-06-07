@@ -185,6 +185,17 @@
         "default": 30000,
         "hint": "限制原文长度可直接控制 LRAG chunk 数、LLM 调用次数和成本。"
       },
+      "lightrag_llm_provider": {
+        "description": "图谱构建 LLM 提供方式",
+        "type": "string",
+        "default": "main",
+        "options": [
+          "main",
+          "local",
+          "api"
+        ],
+        "hint": "main 复用 AstrBot 主 LLM；local/api 使用下方 OpenAI-compatible endpoint。旧配置填写 endpoint 但未设置 provider 时按 local 兼容。"
+      },
       "lightrag_llm_base_url": {
         "description": "图谱构建专用 OpenAI-compatible LLM endpoint",
         "type": "string",

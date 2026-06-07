@@ -7,6 +7,7 @@
     - R2 Secret Access Key：env `KR_R2_SECRET_ACCESS_KEY`
     - Web 控制台密码：env `KR_WEB_PASSWORD`
     - Embedding API Key：env `KR_EMBEDDING_API_KEY`
+    - LightRAG 专用 LLM API Key：env `KR_LIGHTRAG_LLM_API_KEY`
     Notion 不在此持有 token——同步经 AstrBot 已配置的 notion MCP server，token 由 MCP 侧管理。
 """
 
@@ -129,9 +130,10 @@ class GraphConfig:
     # LightRAG 以内部 ~2000 chars/chunk 分块并为每块调用 LLM，限制此值可直接控制 LLM 调用次数。
     # 默认 30000 chars ≈ 15 次 LLM 调用/文档；设为 0 表示不限制。
     max_doc_chars: int = 30000
-    # 图谱构建专用 LLM（可选）。设置后 LightRAG 的实体/关系抽取将调用此 endpoint，
+    # 图谱构建专用 LLM（可选）。main 复用 AstrBot 主 LLM；local/api 使用下方 endpoint，
     # 与答案生成所用的主 LLM（AstrBot context）完全独立。
     # 支持任意 OpenAI-compatible endpoint，例如 LM Studio: http://localhost:1234/v1
+    lightrag_llm_provider: str = "main"
     lightrag_llm_base_url: str = ""
     lightrag_llm_model: str = ""
     # 本地 phi4/LM Studio 推理慢，图谱构建必须给足时间并允许有限重试。
@@ -247,6 +249,7 @@ class Config:
                 "embedding_max_async": graph.embedding_max_async,
                 "working_dir": graph.working_dir,
                 "max_doc_chars": graph.max_doc_chars,
+                "lightrag_llm_provider": graph.lightrag_llm_provider,
                 "lightrag_llm_base_url": graph.lightrag_llm_base_url,
                 "lightrag_llm_model": graph.lightrag_llm_model,
                 "lightrag_llm_timeout_seconds": graph.lightrag_llm_timeout_seconds,
@@ -338,9 +341,17 @@ class Config:
                 "Milvus Lite requires optional dependencies from requirements-additional.txt; "
                 "SQLite/AstrBot fallback remains available."
             )
-        if self.get_graph_config().enabled and not _module_available("lightrag"):
+        graph = self.get_graph_config()
+        if graph.enabled and not _module_available("lightrag"):
             diagnostics.append(
                 "LightRAG requires optional dependencies from requirements-additional.txt."
+            )
+        if graph.enabled and graph.lightrag_llm_provider in {"local", "api"} and not (
+            graph.lightrag_llm_base_url and graph.lightrag_llm_model
+        ):
+            diagnostics.append(
+                "graph.lightrag_llm_base_url and graph.lightrag_llm_model are required "
+                f"when graph.lightrag_llm_provider={graph.lightrag_llm_provider}."
             )
         return diagnostics + list(self.runtime_diagnostics)
 
@@ -391,6 +402,13 @@ class Config:
         query_mode = str(s.get("query_mode", GraphConfig.query_mode))
         if query_mode not in {"local", "global", "hybrid", "naive", "mix", "bypass"}:
             query_mode = GraphConfig.query_mode
+        raw_llm_provider = str(s.get("lightrag_llm_provider", "")).strip().lower()
+        if raw_llm_provider not in {"main", "local", "api"}:
+            has_legacy_endpoint = bool(
+                str(s.get("lightrag_llm_base_url", "")).strip()
+                and str(s.get("lightrag_llm_model", "")).strip()
+            )
+            raw_llm_provider = "local" if has_legacy_endpoint else GraphConfig.lightrag_llm_provider
         return GraphConfig(
             enabled=bool(s.get("enabled", GraphConfig.enabled)),
             query_mode=query_mode,
@@ -398,6 +416,7 @@ class Config:
             embedding_max_async=int(s.get("embedding_max_async", GraphConfig.embedding_max_async)),
             working_dir=str(s.get("working_dir", GraphConfig.working_dir)),
             max_doc_chars=max(0, int(s.get("max_doc_chars", GraphConfig.max_doc_chars))),
+            lightrag_llm_provider=raw_llm_provider,
             lightrag_llm_base_url=str(
                 s.get("lightrag_llm_base_url", GraphConfig.lightrag_llm_base_url)
             ),
@@ -553,6 +572,7 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
             False, False, structural=True, consequence=CONSEQUENCE_RESTART
         ),
         "max_doc_chars": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
+        "lightrag_llm_provider": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "lightrag_llm_base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "lightrag_llm_model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "lightrag_llm_timeout_seconds": ConfigKeyPolicy(

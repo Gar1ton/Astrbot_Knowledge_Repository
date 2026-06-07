@@ -25,10 +25,92 @@
 
 ### 新增功能 (Added)
 
-- **数据流配置向导界面全面重构**：`FlowNode` 组件新增左侧 3px 彩色竖条（绿/橙/灰对应 ready/degraded/off）作为状态指示，`off` 节点施加 `opacity: 0.62 + filter: saturate(0.18)` 使其呈低饱和灰暗态；新增 `OptionTile` 并联瓦片组件，可切换后端（Embedding、向量库、问答模式）以并排高亮方式展示，激活瓦片为 accent 色实线边框，未激活瓦片为虚线低饱和，点击即切换；`Connector` 连接线颜色随目标节点状态自适应（就绪为 `--accent-border` 实线，off 为 `--border-strong` 虚线）；`DependencyPanel` 改为 `auto-fill` 2 列网格，每张 `DepCard` 更紧凑；页面头部新增 `● 就绪 / ⚠ 待处理 / ○ 未启用` 图例行；新增 `flow_legend_ready` / `flow_legend_off` 国际化键（`web/frontend/app/(console)/flow/page.tsx`, `web/frontend/lib/i18n.ts`）。
-
 - **Ask 页知识库选中高亮边与发送键灰态**：选中集合时输入卡片显示橙色高亮边（`--accent-border`）；加载期间边框退回普通色、仅保留旋转辉光；图谱检索模式下未选有效集合时发送键变灰，点击仍触发已有 toast 提示（`web/frontend/app/globals.css`, `web/frontend/app/(console)/ask/page.tsx`）。
 - **Milvus 自动索引开关说明文案优化**：label 改为「上传后立即建立 Milvus 向量索引」，说明文字补充延迟索引 / 批量重建工作流说明（`web/frontend/app/(console)/settings/page.tsx`）。
+
+## [v0.21.0] — 2026-06-07
+
+### 修复 (Fixed)
+
+- **LRAG 召回后零结果 bug（关键修复）**：`retrieve_lightrag_context()` 原本要求集合内所有文档均处于 `status="indexed"` 才允许查询，但 `get_lightrag_readiness()` 只要求至少一篇已索引即报告就绪，且构建失败后 `partial_failure` 任务仍标记索引兼容；两者逻辑矛盾导致部分失败后查询立即抛 "requires indexing" 而非走图谱。修复方案：删除 `retrieve_lightrag_context()` 中的逐文档状态循环，转而完全依赖 `has_workspace()` 与 `is_lightrag_compatible()` 判断可查询性，与 LightRAG 全图查询语义一致（`core/pipelines/retrieval_orchestrator.py`）。
+
+### 新增功能 (Added)
+
+- **图谱构建浮窗（全局常驻）**：新增 `BuildWidget` 组件，挂载在控制台 shell 层，切换任何页面均保持可见；实时轮询 `GET /api/graph/build/active`，显示进度条、已用时、剩余预估时间；支持**暂停 / 继续**按钮，一键跳转图谱页（`web/frontend/components/build/BuildWidget.tsx`, `web/frontend/app/(console)/layout.tsx`）。
+- **构建暂停 / 继续**：后端 `BuildJob` 新增 `paused` 字段，`KnowledgeRepositoryApi` 维护每个任务的 `asyncio.Event` 暂停信号；构建 asyncio 任务在每篇文档处理前 `await` 该信号，暂停时原地阻塞；新增 `POST /api/graph/build/{job_id}/pause`、`POST /api/graph/build/{job_id}/resume`、`GET /api/graph/build/active` 三个端点（`core/lightrag_core.py`, `core/api.py`, `web/server.py`, `web/frontend/lib/api.ts`）。
+- **构建任务持久化与断点恢复**：新增 SQLite 迁移 `migrations/008_graph_build_jobs.sql`，记录每次构建的状态与进度；启动时 `mark_interrupted_build_jobs()` 自动将前次中断任务标为 `interrupted` 并写日志提示；`SourceDocumentStore` 接口与 SQLite / 内存实现均新增 `upsert_build_job / list_build_jobs / mark_interrupted_build_jobs`（`migrations/008_graph_build_jobs.sql`, `core/repository/source_store/base.py`, `core/repository/source_store/sqlite.py`, `core/repository/source_store/memory.py`, `core/api.py`, `core/plugin_initializer.py`）。
+- **图谱页断点续建横幅**：图谱就绪面板加载历史任务，若检测到 `status=interrupted` 的记录，展示已处理文档数与续建提示；构建按钮文案切换为「续建知识图谱」；通过 `GET /api/graph/build/history` 获取数据（`web/frontend/app/(console)/graph/page.tsx`, `web/frontend/lib/api.ts`, `web/server.py`, `web/frontend/lib/i18n.ts`）。
+
+### 测试 (Tests)
+
+- **LRAG partial-failure 后仍可查询**：更新 `test_lightrag_context_rejects_pending_collection` 为 `test_lightrag_context_queries_workspace_regardless_of_doc_status`，验证 d1 已索引、d2 失败时查询仍正常到达 LightRAG；新增 `test_lightrag_context_rejects_missing_workspace` 确保 workspace 缺失时仍正确拒绝（`tests/backend/test_retrieval_orchestrator.py`）。
+
+### 构建与工程 (Build/CI)
+
+- **前端产物同步**：运行 Next.js 静态构建并同步 150 个文件至 `pages/`（`web/frontend/`, `pages/`, `tools/sync_frontend.py`）。
+
+## [v0.20.8] — 2026-06-06
+
+### 新增功能 (Added)
+
+- **LightRAG LLM 运行模式显式选择**：新增 `graph.lightrag_llm_provider = main/local/api`，正式插件、配置 schema、能力检测与 Flow 快速配置同步支持；本地 `run_dev_realtime.py` 与 `tests/mock_data/Config/config.example.py` 支持 `LLM_PROVIDER=api/local` 和 `LIGHTRAG_LLM_PROVIDER=main/local/api`，旧的 `LIGHTRAG_LLM_BASE_URL` + `LIGHTRAG_LLM_MODEL` 配置继续按 local 兼容（`core/config.py`, `_conf_schema.json`, `core/plugin_initializer.py`, `core/capabilities.py`, `tests/mocks/run_dev_realtime.py`, `tests/mock_data/Config/config.example.py`, `web/frontend/components/flow/QuickConfigPanel.tsx`, `web/frontend/lib/i18n.ts`）。
+
+### 修复 (Fixed)
+
+- **LightRAG Graph 未就绪状态不再误报即将上线**：`GET /api/graph` 在 LightRAG 未启用、依赖未就绪或 workspace 未构建时返回结构化 `not_ready` 状态；Graph 页据此展示真实原因与构建入口，保留对旧 reserved 响应的兼容但不再将正式功能宣称为未上线（`core/api.py`, `web/server.py`, `web/frontend/app/(console)/graph/page.tsx`, `web/frontend/lib/api.ts`）。
+
+### 测试 (Tests)
+
+- **LightRAG provider 与 not-ready 契约回归**：补充 `graph.lightrag_llm_provider` 默认/显式/旧字段兼容测试，并将 `/api/graph` 未配置 LightRAG 的断言从 reserved 501 调整为 not_ready 200（`tests/backend/test_config.py`, `tests/backend/test_web_server.py`）。
+
+### 构建与工程 (Build/CI)
+
+- **正式前端产物同步**：运行 Next.js 静态构建并通过 `tools/sync_frontend.py` 将 `web/frontend/out/` 同步到 AstrBot 运行时使用的 `pages/`，确保 Graph not-ready UI 与 Flow 快速配置在正式插件中可见（`web/frontend/`, `pages/`, `tools/sync_frontend.py`）。
+
+## [v0.20.7] — 2026-06-06
+
+### 修复 (Fixed)
+
+- **Flow 节点内部滚动条移除**：移除 `.flow-node-body` 与 `.flow-quick-config` 的内部滚动限制，网格行高改为 `minmax(340px, auto)`，让同一行节点按最高内容自动等高对齐，避免节点内部滚动与画布整体移动冲突（`web/frontend/styles/tokens.css`）。
+- **Flow 连线标签可读性提升**：放大“默认 / 高精度 / 备份旁路”连线标签字号、粗细和胶囊留白，并保持基于连线中点定位（`web/frontend/styles/tokens.css`）。
+
+## [v0.20.6] — 2026-06-06
+
+### 修复 (Fixed)
+
+- **Flow 背景拖拽误选文字修复**：背景开始 pan 时调用 `preventDefault()`，并在 Flow 画布/world 层禁用文本选择，保留快速配置输入框可编辑，避免长按拖动背景时选中文本导致拖拽卡住（`web/frontend/components/flow/FlowDiagram.tsx`, `web/frontend/styles/tokens.css`）。
+- **Flow 节点行高与横屏宽度优化**：拓扑网格改为更宽列宽和统一 `grid-auto-rows`，所有节点单元撑满所在行，减少横屏下文字挤压并保持每行节点高度对齐（`web/frontend/styles/tokens.css`）。
+- **Flow 快速配置移除手动最大 Token 项**：删除 `embedding.max_token_size` 的 Flow 节点快速配置字段、Flow 文案和 mock restart 标记，避免把自动适配项暴露为手动参数（`web/frontend/components/flow/QuickConfigPanel.tsx`, `web/frontend/lib/i18n.ts`, `web/frontend/lib/api.ts`）。
+
+## [v0.20.5] — 2026-06-06
+
+### 新增功能 (Added)
+
+- **Flow 节点快速配置**：`/flow` 同时读取 capabilities 与 effective config，在节点卡片内新增 embedding、Milvus auto-index、LightRAG、Sync、Ingest 的紧凑快速配置面板；保存复用 `updateConfigValue(section, key, value)`，逐节点锁定保存状态并按返回的 restart/rebuild 标记复用顶部 banner；API Key、R2/Notion 密钥与结构性 ID 仅显示配置提示，不在 Web UI 输入或保存（`web/frontend/app/(console)/flow/page.tsx`, `web/frontend/components/flow/QuickConfigPanel.tsx`, `web/frontend/components/flow/FlowNode.tsx`, `web/frontend/components/flow/FlowDiagram.tsx`, `web/frontend/lib/api.ts`, `web/frontend/lib/i18n.ts`, `web/frontend/styles/tokens.css`）。
+
+### 修复 (Fixed)
+
+- **Flow 并行分支节点高度对齐**：`retrieval` 与 `graph` 节点使用一致高度基准，保持连接点由真实节点中心重新测量，减少分支视觉高度差对连线稳定性的影响（`web/frontend/components/flow/FlowDiagram.tsx`, `web/frontend/styles/tokens.css`）。
+
+## [v0.20.4] — 2026-06-06
+
+### 修复 (Fixed)
+
+- **Flow 页面首帧闪乱与操作发糊修复**：`FlowDiagram` 在节点测量与首次 fit 完成前隐藏拓扑 world 层，避免进入 `/flow` 时暴露默认 `scale=1,x=0,y=0` 的错误首帧；默认进入视角改为清晰优先，尽量保持参考截图式 100% 视角，仅在小屏放不下时缩小；画布缩放由 `transform: scale()` 改为 CSS `zoom`，并将 fit/拖拽/滚轮缩放产生的平移坐标归整到整数像素，减少文字和节点在操作后被合成缩放导致的发糊（`web/frontend/components/flow/FlowDiagram.tsx`, `web/frontend/styles/tokens.css`）。
+
+## [v0.20.3] — 2026-06-06
+
+### 新增功能 (Added)
+
+- **Flow 页面 Langflow 拓扑重构**：`/flow` 从纵向堆叠流程改为横向固定分支拓扑，`ingest → embedding → vector_store` 后分叉到默认检索与 LightRAG 高精度路径并汇入 Ask，Sync 作为上传旁路；新增可平移/缩放/fit 的画布、节点真实位置测量、贝塞尔连线、端口 handle、ready 流动线与 off 虚线；删除旧 `DependencyPanel`，缺失依赖安装内联到节点；Ask/Sync 使用更显眼的入口节点并分别跳转 `/ask`、`/sync`，Graph 提供 `/graph` 次级入口；保持 `getCapabilities`、`updateConfigValue`、`installDependency`、`recheckDependencies` 网络契约不变（`web/frontend/app/(console)/flow/page.tsx`, `web/frontend/components/flow/`, `web/frontend/styles/tokens.css`, `web/frontend/lib/i18n.ts`）。
+
+### 测试 (Tests)
+
+- **Flow 页面拓扑重构验证**：通过前端类型检查、Next.js 静态构建与 capabilities/API 路由回归，确认新拓扑组件不改变现有能力检测、依赖安装、配置切换网络契约（`npx tsc --noEmit`, `npx -y node@20 node_modules/next/dist/bin/next build`, `python -m pytest tests/backend/test_api.py tests/backend/test_web_server.py -q`）。
+
+## [v0.20.2] — 2026-06-06
+
+### 新增功能 (Added)
 
 - **LightRAG 构建进度升级为 LRAG chunk 级别**：`BuildJob` 新增 `processed_chunks` / `total_chunks` / `progress_basis` / `estimated_remaining_seconds` 等字段，`core/api.py` 在构建前按 LightRAG 等价切分规则生成 LRAG chunk plan，不复用 Milvus `DocumentChunk`；Graph/Ask 页优先展示 `LRAG chunk x / n`、真实已运行时间与动态剩余时间（`core/api.py`, `core/lightrag_core.py`, `web/frontend/lib/api.ts`, `web/frontend/app/(console)/graph/page.tsx`, `web/frontend/app/(console)/ask/page.tsx`）。
 - **Terminal 结构化事件流**：内存日志新增 `category` / `source` / `operation` / `status` / `metadata` 字段，新增 `POST /api/logs/events` 接收前端 toast 事件；Terminal 页支持 graph/llm/embedding/retrieval/web/toast/system 等分类过滤（`core/log_capture.py`, `web/server.py`, `web/frontend/app/(console)/terminal/page.tsx`, `web/frontend/components/ui/Toast.tsx`）。
@@ -116,6 +198,12 @@
 - 前端所有变更均通过 `npm run build && python tools/sync_frontend.py` 同步至 `pages/`（`pages/`）。
 
 ---
+
+## [v0.18.1] — 2026-06-04
+
+### 修复 (Fixed)
+
+- **LightRAG 内存缓存脏数据泄露修复**：在重置工作区时不仅清空磁盘目录，还对所有 JsonKVStorage 和 JsonDocStatusStorage 的全局共享内存缓存执行 drop() 抛弃脏缓存，防止进程内图谱重建时静默跳过实体提取（`core/lightrag_core.py`）。
 
 ## [v0.18.0] — 2026-06-04
 

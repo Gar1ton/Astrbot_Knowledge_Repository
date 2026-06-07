@@ -5,6 +5,7 @@ import { Rail } from "@/components/rail/Rail";
 import { GrainOverlay } from "@/components/fx/GrainOverlay";
 import { Atmosphere } from "@/components/fx/Atmosphere";
 import { ToastProvider } from "@/components/ui/Toast";
+import { BuildWidget } from "@/components/build/BuildWidget";
 import { I18nContext, Lang, makeT } from "@/lib/i18n";
 import { initPalette } from "@/lib/theme";
 import { getAuth, login, logout } from "@/lib/api";
@@ -211,6 +212,7 @@ function ConsoleShell({ children }: { children: React.ReactNode }) {
         <Atmosphere follow={true} />
         {children}
       </main>
+      <BuildWidget />
     </div>
   );
 }

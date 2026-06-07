@@ -158,5 +158,18 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
     async def clear_chat_messages(self, conversation_id: str) -> None:
         pass
 
+    # ── 图谱构建任务持久化（内存实现：进程重启后丢失，仅用于测试）───
+
+    async def upsert_build_job(self, job: dict) -> None:
+        pass
+
+    async def list_build_jobs(
+        self, collection: str | None = None, limit: int = 20
+    ) -> list[dict]:
+        return []
+
+    async def mark_interrupted_build_jobs(self) -> int:
+        return 0
+
 
 __all__ = ["InMemorySourceDocumentStore"]

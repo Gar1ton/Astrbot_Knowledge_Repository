@@ -180,6 +180,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._sync_pipeline = sync_pipeline
         self._lightrag_registry = lightrag_registry
         self._graph_build_jobs: dict[str, BuildJob] = {}
+        self._build_pause_events: dict[str, asyncio.Event] = {}
         self._config = config
         self._config_persist = config_persist
         self._llm_adapter = llm_adapter
@@ -1132,7 +1133,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             chunks_by_doc,
             max_doc_chars=max_chars,
             is_local_lightrag_llm=bool(
-                graph_cfg and graph_cfg.lightrag_llm_base_url and graph_cfg.lightrag_llm_model
+                graph_cfg and graph_cfg.lightrag_llm_provider == "local"
             ),
             seconds_per_chunk_local=(
                 graph_cfg.lightrag_seconds_per_chunk_local if graph_cfg else 90.0
@@ -1159,6 +1160,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         docs = await self._lightrag_docs_for_build(col)
         job = BuildJob(job_id=job_id, collection=col, total_docs=len(docs))
         self._graph_build_jobs[job_id] = job
+        ev = asyncio.Event()
+        ev.set()
+        self._build_pause_events[job_id] = ev
         asyncio.create_task(self._run_lightrag_build_job(job_id))
         return {"job_id": job_id, "status": job.status, "engine": job.engine, "collection": col}
 
@@ -1166,11 +1170,62 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         job = self._graph_build_jobs.get(job_id)
         return job.to_dict() if job else None
 
+    async def get_active_build_job(self) -> dict | None:
+        """返回当前正在运行或暂停的构建任务，没有则返回 None。"""
+        for job in self._graph_build_jobs.values():
+            if job.status in ("queued", "running") or job.paused:
+                return job.to_dict()
+        return None
+
+    async def get_build_job_history(self, collection: str | None = None) -> list[dict]:
+        """返回构建任务历史（来自持久化表）。"""
+        return await self._source_store.list_build_jobs(collection=collection)
+
+    async def pause_build_job(self, job_id: str) -> None:
+        """暂停指定构建任务。"""
+        job = self._graph_build_jobs.get(job_id)
+        if job is None:
+            raise KeyError(f"Build job {job_id!r} not found")
+        if job.status not in ("queued", "running"):
+            raise ValueError(f"Job {job_id!r} is not active (status={job.status!r})")
+        job.paused = True
+        ev = self._build_pause_events.get(job_id)
+        if ev is not None:
+            ev.clear()
+
+    async def resume_build_job(self, job_id: str) -> None:
+        """继续被暂停的构建任务。"""
+        job = self._graph_build_jobs.get(job_id)
+        if job is None:
+            raise KeyError(f"Build job {job_id!r} not found")
+        job.paused = False
+        ev = self._build_pause_events.get(job_id)
+        if ev is not None:
+            ev.set()
+
+    def _build_job_db_snapshot(
+        self, job: BuildJob, started_iso: str, finished_iso: str | None = None
+    ) -> dict:
+        return {
+            "job_id": job.job_id, "collection": job.collection,
+            "status": job.status, "stage": job.stage,
+            "processed_docs": job.processed_docs, "failed_docs": job.failed_docs,
+            "total_docs": job.total_docs,
+            "processed_chunks": job.processed_chunks, "failed_chunks": job.failed_chunks,
+            "total_chunks": job.total_chunks,
+            "recent_error": job.recent_error,
+            "started_at": started_iso, "finished_at": finished_iso,
+        }
+
     async def _run_lightrag_build_job(self, job_id: str) -> None:
         job = self._graph_build_jobs[job_id]
         assert self._lightrag_registry is not None
         job.status = "running"
         job.stage = "reading_documents"
+        started_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        await self._source_store.upsert_build_job(
+            self._build_job_db_snapshot(job, started_iso)
+        )
         try:
             docs = await self._lightrag_docs_for_build(job.collection)
             job.total_docs = len(docs)
@@ -1211,6 +1266,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             )
 
             for doc, text, lrag_chunks, _basis in prepared:
+                pause_ev = self._build_pause_events.get(job_id)
+                if pause_ev is not None:
+                    await pause_ev.wait()
                 job.stage = "indexing"
                 job.current_doc_id = doc.doc_id
                 if not text.strip():
@@ -1275,6 +1333,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             logger.error("LightRAG build job %s failed: %s", job_id, exc)
         finally:
             job.finished_at = time.monotonic()
+            job.paused = False
+            self._build_pause_events.pop(job_id, None)
+            finished_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            await self._source_store.upsert_build_job(
+                self._build_job_db_snapshot(job, started_iso, finished_iso)
+            )
 
     async def _lightrag_text_for_doc(self, doc: SourceDocument) -> str:
         raw = _extract_raw_doc_text(doc)
@@ -1333,13 +1397,23 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         return payload
 
     async def get_graph(self, collection: str | None = None) -> dict:
-        """Export a valid existing LightRAG workspace for visualization."""
-        if self._lightrag_registry is None:
-            raise NotImplementedError("get_graph requires LightRAG Core")
+        """Export a graph or return a structured not-ready state.
+
+        LightRAG Core 已落地；未启用、依赖缺失或 workspace 未构建都不是 reserved
+        功能，而是运行态未就绪状态，供 WebUI 给出准确下一步。
+        """
         col = await self._resolve_collection(collection)
         readiness = await self.get_lightrag_readiness(col)
         if not readiness["ready"]:
-            raise RuntimeError(readiness["reason"])
+            return {
+                "status": "not_ready",
+                "ready": False,
+                "collection": col,
+                "engine": "lightrag_core",
+                "reason": readiness["reason"],
+                "build_available": readiness["build_available"],
+            }
+        assert self._lightrag_registry is not None
         return await self._lightrag_registry.export_graph(col)
 
     async def _resolve_collection(self, collection: str | None) -> str:

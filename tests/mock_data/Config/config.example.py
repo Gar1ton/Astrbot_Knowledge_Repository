@@ -6,11 +6,13 @@
 
 配置说明：
     主 LLM（答案生成，必填）：
-        用于 Ask 页最终答案生成，推荐 DeepSeek 等云端模型。
+        LLM_PROVIDER = "api"   → 使用云端 OpenAI-compatible API。
+        LLM_PROVIDER = "local" → 使用本地 LM Studio/Ollama OpenAI-compatible endpoint。
 
-    图谱构建 LLM（可选，留空则与主 LLM 共用）：
-        用于 LightRAG 在 build 阶段做实体/关系抽取，支持本地 LM Studio。
-        设置后，图谱构建打本地，答案生成仍走主 LLM，两者完全独立。
+    图谱构建 LLM（可选）：
+        LIGHTRAG_LLM_PROVIDER = "main"  → 复用主 LLM。
+        LIGHTRAG_LLM_PROVIDER = "local" → 使用本地 LM Studio/Ollama。
+        LIGHTRAG_LLM_PROVIDER = "api"   → 使用独立云端 OpenAI-compatible API。
 
     Embedding 有两种选择：
         EMBEDDING_PROVIDER = "local"    → sentence_transformers 本地运行，无需 key
@@ -18,13 +20,21 @@
 """
 
 # ── 主 LLM（答案生成，必填）────────────────────────────────────────
-# Ask 页的最终答案由此 LLM 生成，与图谱构建 LLM 相互独立
+# "api" 使用下方 LLM_API_URL / LLM_MODEL / DEEPSEEK_API_KEY。
+# "local" 使用 LOCAL_LLM_API_URL / LOCAL_LLM_MODEL / LOCAL_LLM_API_KEY。
+LLM_PROVIDER = "api"
+
+# Ask 页的最终答案由此 API LLM 生成。
 DEEPSEEK_API_KEY = "sk-your-key-here"
 LLM_MODEL = "deepseek-chat"
 LLM_API_URL = "https://api.deepseek.com/v1"
 
 # ── 图谱构建专用 LLM（可选）────────────────────────────────────────
-# LightRAG build 阶段的实体/关系抽取调用此 endpoint，留空则沿用主 LLM
+# "main" 复用主 LLM；"local" / "api" 使用下方 LIGHTRAG_LLM_* endpoint。
+# 旧配置未设置 LIGHTRAG_LLM_PROVIDER 但填写了 BASE_URL/MODEL 时，会按 "local" 兼容处理。
+LIGHTRAG_LLM_PROVIDER = "main"
+
+# LightRAG build 阶段的实体/关系抽取调用此 endpoint。
 # 典型值：LM Studio 本地服务（启动后在 LM Studio → Local Server 查看端口）
 LIGHTRAG_LLM_BASE_URL = ""          # 本机直接运行: "http://localhost:1234/v1"
                                     # devcontainer/Docker 内访问 Windows: "http://host.docker.internal:1234/v1"

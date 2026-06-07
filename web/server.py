@@ -396,12 +396,24 @@ async def handle_graph_build(request: web.Request) -> web.Response:
     except NotImplementedError as exc:
         return web.json_response(
             {
-                "status": "reserved",
-                "reserved": True,
-                "available_in": "v0.16.0+ LightRAG Core",
-                "detail": str(exc),
+                "status": "not_ready",
+                "ready": False,
+                "message": str(exc),
+                "collection": collection,
+                "build_available": False,
             },
-            status=501,
+            status=409,
+        )
+    except RuntimeError as exc:
+        return web.json_response(
+            {
+                "status": "not_ready",
+                "ready": False,
+                "message": str(exc),
+                "collection": collection,
+                "build_available": False,
+            },
+            status=409,
         )
     except Exception as exc:
         _mw_logger.error("Graph build failed: %s", exc, exc_info=True)
@@ -413,6 +425,37 @@ async def handle_graph_build_job(request: web.Request) -> web.Response:
     if result is None:
         return web.json_response({"status": "error", "message": "job not found"}, status=404)
     return web.json_response(result)
+
+
+async def handle_graph_build_active(request: web.Request) -> web.Response:
+    result = await _api(request).get_active_build_job()
+    return web.json_response({"job": result})
+
+
+async def handle_graph_build_history(request: web.Request) -> web.Response:
+    collection = request.rel_url.query.get("collection") or None
+    result = await _api(request).get_build_job_history(collection)
+    return web.json_response({"jobs": result})
+
+
+async def handle_graph_build_pause(request: web.Request) -> web.Response:
+    job_id = request.match_info["job_id"]
+    try:
+        await _api(request).pause_build_job(job_id)
+        return web.json_response({"status": "paused"})
+    except KeyError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=404)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
+async def handle_graph_build_resume(request: web.Request) -> web.Response:
+    job_id = request.match_info["job_id"]
+    try:
+        await _api(request).resume_build_job(job_id)
+        return web.json_response({"status": "resumed"})
+    except KeyError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=404)
 
 
 async def handle_graph_probe(request: web.Request) -> web.Response:
@@ -466,12 +509,13 @@ async def handle_graph_data(request: web.Request) -> web.Response:
     except NotImplementedError as exc:
         return web.json_response(
             {
-                "status": "reserved",
-                "reserved": True,
-                "available_in": "v0.16.0+ LightRAG Core",
-                "detail": str(exc),
-            },
-            status=501,
+                "status": "not_ready",
+                "ready": False,
+                "collection": collection,
+                "engine": "lightrag_core",
+                "reason": str(exc),
+                "build_available": False,
+            }
         )
     except Exception as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=500)
@@ -846,7 +890,11 @@ def build_app(
     app.router.add_post("/api/restore", handle_restore)
     app.router.add_post("/api/graph/build/estimate", handle_graph_build_estimate)
     app.router.add_post("/api/graph/build", handle_graph_build)
+    app.router.add_get("/api/graph/build/active", handle_graph_build_active)
+    app.router.add_get("/api/graph/build/history", handle_graph_build_history)
     app.router.add_get("/api/graph/build/{job_id}", handle_graph_build_job)
+    app.router.add_post("/api/graph/build/{job_id}/pause", handle_graph_build_pause)
+    app.router.add_post("/api/graph/build/{job_id}/resume", handle_graph_build_resume)
     app.router.add_post("/api/graph/probe", handle_graph_probe)
     app.router.add_get("/api/graph/query", handle_graph_query)
     app.router.add_get("/api/graph/stats", handle_graph_stats)

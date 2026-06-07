@@ -8,9 +8,9 @@
 
 ## 插件安装依赖
 
-AstrBot 自动安装的 [`requirements.txt`](./requirements.txt) 仅包含 PDF 上传、SQLite
-基础召回和 Web 控制台需要的轻量依赖。Milvus、本地 Embedding/PyTorch、LightRAG 与
-R2 均为真正的可选功能，并统一由
+AstrBot 自动安装的 [`requirements.txt`](./requirements.txt) 仅包含 PDF 上传、PyMuPDF4LLM
+清洗、SQLite 基础召回和 Web 控制台需要的轻量依赖。Milvus、本地 Embedding/PyTorch、
+LightRAG 与 R2 均为真正的可选功能，并统一由
 [`requirements-additional.txt`](./requirements-additional.txt) 手动安装；配置方法见
 [`docs/OPTIONAL_DEPENDENCIES.md`](./docs/OPTIONAL_DEPENDENCIES.md)。
 

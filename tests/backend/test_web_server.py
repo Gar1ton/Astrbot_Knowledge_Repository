@@ -740,7 +740,6 @@ async def test_capabilities_route_returns_pipeline_and_dependencies(tmp_path: Pa
             "ingest", "embedding", "vector_store", "retrieval", "graph", "ask", "sync",
         ]
         assert {d["key"] for d in data["dependencies"]} == {
-            "pdf_extract",
             "local_embedding",
             "milvus",
             "lightrag",

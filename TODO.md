@@ -44,6 +44,27 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.22.1 PDF 清洗核心依赖自动安装 (completed)
+
+### User constraints / 约束
+
+- PDF 清洗需要 `pymupdf4llm>=0.0.17,<0.1.0` 与 `PyMuPDF>=1.24,<2.0`。
+- 依赖必须直接列入插件自动安装的 requirements，而不是要求用户手动安装 additional requirements。
+- 不触碰无关用户改动；不手改 `pages/` 构建产物。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 自动安装入口修正**：将 PyMuPDF4LLM 与 PyMuPDF pin 收敛到根 `requirements.txt`，并从 `requirements-additional.txt` 移除重复声明。技术理由：AstrBot 插件安装器自动安装根 requirements，additional 文件只用于真正可选的大型运行时。
+- [x] **Phase 2 — 能力清单语义修正**：从可选依赖安装白名单移除 `pdf_extract`，ingest 环节只报告核心依赖就绪态。技术理由：PDF 清洗已是核心能力，不能继续显示为需要手动安装的可选功能。
+- [x] **Phase 3 — 回归验证与收尾**：更新相关测试断言并运行聚焦测试；测试通过后追加 CHANGELOG。技术理由：依赖清单属于安装契约，必须用 API/能力测试锁定。
+
+### Verification
+
+- `python -m pytest tests/backend/test_capabilities.py tests/backend/test_config.py -q` → 27 passed
+- `python -m pip install -r requirements.txt` → 安装 `PyMuPDF-1.27.2.3` 与 `pymupdf4llm-0.0.27` 成功
+- `python -m pytest tests/backend/test_capabilities.py tests/backend/test_config.py tests/backend/test_web_server.py -q` → 68 passed, 281 warnings（既有 aiohttp AppKey/cookie warning）
+- `python -m ruff check core/capabilities.py core/managers/markdown_extractor.py tests/backend/test_capabilities.py tests/backend/test_web_server.py` → 未执行：当前 Python 环境未安装 `ruff`
+
 ## v0.22.0 Zotero 镜像 + PyMuPDF4LLM 清洗内核 + 制品包数据模型 + 作用域检索 (completed)
 
 ### User constraints / 约束

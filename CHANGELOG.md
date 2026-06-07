@@ -28,6 +28,10 @@
 - **Ask 页知识库选中高亮边与发送键灰态**：选中集合时输入卡片显示橙色高亮边（`--accent-border`）；加载期间边框退回普通色、仅保留旋转辉光；图谱检索模式下未选有效集合时发送键变灰，点击仍触发已有 toast 提示（`web/frontend/app/globals.css`, `web/frontend/app/(console)/ask/page.tsx`）。
 - **Milvus 自动索引开关说明文案优化**：label 改为「上传后立即建立 Milvus 向量索引」，说明文字补充延迟索引 / 批量重建工作流说明（`web/frontend/app/(console)/settings/page.tsx`）。
 
+### 构建与工程 (Build/CI)
+
+- **PDF 清洗依赖改为插件自动安装**：将 `pymupdf4llm>=0.0.17,<0.1.0` 与 `PyMuPDF>=1.24,<2.0` 纳入 AstrBot 自动安装的根 `requirements.txt`，并从 `requirements-additional.txt` 移除重复声明；`pdf_extract` 不再出现在可选依赖白名单或手动安装面板中，ingest 环节改为报告核心依赖来源（`requirements.txt`, `requirements-additional.txt`, `core/capabilities.py`, `core/managers/markdown_extractor.py`, `web/frontend/lib/api.ts`, `tests/backend/test_capabilities.py`, `tests/backend/test_web_server.py`）。
+
 ## [v0.22.0] — 2026-06-07
 
 > Zotero 镜像 + PyMuPDF4LLM 清洗内核 + 制品包数据模型 + 作用域检索。引入以 `document_id = <library_id>_<item_key>_<attachment_key>` 为核心的制品包模型，打通 Zotero → 清洗 → 检索整体数据流。

@@ -8,7 +8,7 @@
     clean.md 的 Python str 偏移，可被下游 chunker 直接切片，杜绝 CRLF/局部偏移回推错误。
 
 依赖方向：仅依赖 stdlib + pinned `pymupdf4llm`（懒加载，缺失时抛带安装指引的错误）。
-版本治理：PYMUPDF4LLM_PINNED_VERSION 与 requirements-additional.txt 对齐；升级只改 pin。
+版本治理：PYMUPDF4LLM_PINNED_VERSION 与 requirements.txt 对齐；升级只改 pin。
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import importlib.metadata
 from dataclasses import dataclass, field
 from typing import Any
 
-# 与 requirements-additional.txt 的 `pymupdf4llm>=0.0.17,<0.1.0` 对齐的内置参考版本。
+# 与 requirements.txt 的 `pymupdf4llm>=0.0.17,<0.1.0` 对齐的内置参考版本。
 # 不 vendor 源码（规避 AGPL 分发义务），仅记录所依赖的精确版本号。
 PYMUPDF4LLM_PINNED_VERSION = "0.0.27"
 

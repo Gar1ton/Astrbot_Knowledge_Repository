@@ -71,16 +71,9 @@ class OptionalDependency:
     stages: tuple[str, ...]
 
 
-# 仅收录「用户可见运行时功能」的依赖；numpy/pytest/ruff/mypy 等开发工具不在面板内。
+# 仅收录「用户可见可选功能」的依赖；核心安装依赖（如 pymupdf4llm）不在手动安装面板内。
+# numpy/pytest/ruff/mypy 等开发工具同样不在面板内。
 OPTIONAL_DEPENDENCIES: tuple[OptionalDependency, ...] = (
-    OptionalDependency(
-        key="pdf_extract",
-        import_name="pymupdf4llm",
-        dist_name="pymupdf4llm",
-        pip_spec="pymupdf4llm>=0.0.17,<0.1.0",
-        feature="pdf_extract",
-        stages=("ingest",),
-    ),
     OptionalDependency(
         key="local_embedding",
         import_name="sentence_transformers",
@@ -188,7 +181,7 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
     dim = config.runtime_embedding_dimension
     embedding_runtime_ready = dim is not None and dim > 0
 
-    # ① 上传 / 分块：txt/md 基础安装即用；PDF 清洗需 pymupdf4llm（pinned）。
+    # ① 上传 / 分块：txt/md 基础安装即用；PDF 清洗需根 requirements.txt 自动安装的 pymupdf4llm。
     ingest = {
         "id": "ingest",
         "current": "pymupdf4llm",
@@ -196,12 +189,13 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         "status": STATUS_READY if has_pdf else STATUS_DEGRADED,
         "switchable": False,
         "consequence": CONSEQUENCE_NONE,
-        "required_deps": ["pdf_extract"],
+        "required_deps": [],
         "configured": has_pdf,
         "detail": {
             "ocr_enabled": source_cfg.ocr_enabled,
             "pdf_converter": "pymupdf4llm",
             "pdf_converter_ready": has_pdf,
+            "dependency_source": "requirements.txt",
         },
     }
 

@@ -7,7 +7,8 @@ import aiosqlite
 import pytest
 
 from core.config import Config
-from core.domain.models import DocumentChunk, SourceDocument
+from core.domain.models import Collection, DocumentChunk, SourceDocument
+from core.migration_runner import run_migrations
 from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
 from core.repository.kb_reader.base import KnowledgeBaseReader
 from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
@@ -42,35 +43,14 @@ async def sqlite_store(temp_dir):
     db_path = os.path.join(temp_dir, "test_source.db")
     db = await aiosqlite.connect(db_path)
     await db.execute("PRAGMA foreign_keys = ON")
-    
-    # Run the SQL migrations / tables setup manually or just basic schema
-    await db.execute("""
-    CREATE TABLE IF NOT EXISTS documents (
-        doc_id TEXT PRIMARY KEY,
-        title TEXT,
-        file_path TEXT,
-        content_type TEXT,
-        size_bytes INTEGER,
-        content_hash TEXT,
-        collection TEXT,
-        tags TEXT,
-        created_at TEXT,
-        updated_at TEXT,
-        needs_reindex INTEGER NOT NULL DEFAULT 0
-    )
-    """)
-    await db.execute("""
-    CREATE TABLE IF NOT EXISTS chunks (
-        chunk_id TEXT PRIMARY KEY,
-        doc_id TEXT REFERENCES documents(doc_id) ON DELETE CASCADE,
-        ordinal INTEGER,
-        text TEXT,
-        content_hash TEXT,
-        metadata TEXT DEFAULT '{}'
-    )
-    """)
-    
+
+    # 跑真实迁移以获得与生产一致的 schema（含制品包/Zotero 镜像列）。
+    await run_migrations(db)
+
     store = SQLiteSourceDocumentStore(db)
+    # documents.collection 外键指向 collections(name)
+    await store.upsert_collection(Collection(name="default"))
+    await store.upsert_collection(Collection(name="papers"))
     yield store
     await db.close()
 

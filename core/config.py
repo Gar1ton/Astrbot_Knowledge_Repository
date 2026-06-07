@@ -26,6 +26,7 @@ ENV_R2_SECRET_ACCESS_KEY = "KR_R2_SECRET_ACCESS_KEY"
 ENV_WEB_PASSWORD = "KR_WEB_PASSWORD"
 ENV_EMBEDDING_API_KEY = "KR_EMBEDDING_API_KEY"
 ENV_LIGHTRAG_LLM_API_KEY = "KR_LIGHTRAG_LLM_API_KEY"
+ENV_ZOTERO_API_KEY = "KR_ZOTERO_API_KEY"
 
 
 def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
@@ -169,6 +170,39 @@ class AskAgentConfig:
     """Ask Agent 的会话增强和回答配置。"""
 
     conversation_enhancement_mode: str = "inject"
+
+
+# Zotero 同步模式常量（杜绝魔法字面量散落）。
+ZOTERO_STORAGE_MANAGED = "managed_copy"
+ZOTERO_STORAGE_LINKED = "linked"
+ZOTERO_SYNC_STRICT = "strict_mirror"
+ZOTERO_SYNC_CONSERVATIVE = "conservative"
+ZOTERO_SYNC_ARCHIVE = "archive"
+
+
+@dataclass
+class ZoteroSyncConfig:
+    """Zotero 单向 Pull 同步配置（本地优先；云端字段预留，本轮不启用）。
+
+    storage_mode 与 sync_mode 正交：
+        - storage_mode: managed_copy（PDF 进插件制品包）/ linked（PDF 留 Zotero storage 根，
+          仅 clean.md/pages.json 在插件内）。linked 模式须配 linked_root 并通过探针校验。
+        - sync_mode: strict_mirror（强制覆盖 + collection 增删 + Milvus rebuild + 禁用 LRAG）
+          / conservative（默认；删本地 doc 但 collection 只增不减 + 轻量 LRAG 重建）
+          / archive（只增不删，最不触发 rebuild）。
+    cloud_api_key 仅经环境变量注入；本轮不走云端拉取。
+    """
+
+    enabled: bool = False
+    zotero_data_dir: str = ""  # 覆盖默认 Zotero 数据目录；空=自动探测
+    api_port: int = 23119
+    storage_mode: str = ZOTERO_STORAGE_MANAGED
+    linked_root: str = ""  # storage_mode=linked 时的 Zotero storage 根目录
+    sync_mode: str = ZOTERO_SYNC_CONSERVATIVE
+    auto_sync_enabled: bool = False
+    auto_sync_interval_sec: int = 3600
+    cloud_user_id: str = ""  # 预留：云端 user id
+    cloud_api_key: str = ""  # 预留：云端 api key（env 注入）
 
 
 # ── 解析门面 ────────────────────────────────────────────────────
@@ -465,6 +499,29 @@ class Config:
             ),
         )
 
+    def get_zotero_sync_config(self) -> ZoteroSyncConfig:
+        s = _section(self.raw, "zotero_sync")
+        storage_mode = str(s.get("storage_mode", ZoteroSyncConfig.storage_mode))
+        if storage_mode not in {ZOTERO_STORAGE_MANAGED, ZOTERO_STORAGE_LINKED}:
+            storage_mode = ZoteroSyncConfig.storage_mode
+        sync_mode = str(s.get("sync_mode", ZoteroSyncConfig.sync_mode))
+        if sync_mode not in {ZOTERO_SYNC_STRICT, ZOTERO_SYNC_CONSERVATIVE, ZOTERO_SYNC_ARCHIVE}:
+            sync_mode = ZoteroSyncConfig.sync_mode
+        return ZoteroSyncConfig(
+            enabled=bool(s.get("enabled", ZoteroSyncConfig.enabled)),
+            zotero_data_dir=str(s.get("zotero_data_dir", ZoteroSyncConfig.zotero_data_dir)),
+            api_port=int(s.get("api_port", ZoteroSyncConfig.api_port)),
+            storage_mode=storage_mode,
+            linked_root=str(s.get("linked_root", ZoteroSyncConfig.linked_root)),
+            sync_mode=sync_mode,
+            auto_sync_enabled=bool(s.get("auto_sync_enabled", ZoteroSyncConfig.auto_sync_enabled)),
+            auto_sync_interval_sec=max(
+                60, int(s.get("auto_sync_interval_sec", ZoteroSyncConfig.auto_sync_interval_sec))
+            ),
+            cloud_user_id=str(s.get("cloud_user_id", ZoteroSyncConfig.cloud_user_id)),
+            cloud_api_key=_secret(s.get("cloud_api_key"), ENV_ZOTERO_API_KEY),
+        )
+
     def get_vector_db_config(self) -> VectorDbConfig:
         s = _section(self.raw, "vector_db")
         raw_auto = s.get("auto_index_enabled", VectorDbConfig.auto_index_enabled)
@@ -599,6 +656,17 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
     "source_store": {
         "ocr_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
     },
+    "zotero_sync": {
+        "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "zotero_data_dir": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "api_port": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "storage_mode": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
+        "linked_root": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
+        "sync_mode": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
+        "auto_sync_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "auto_sync_interval_sec": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "cloud_user_id": ConfigKeyPolicy(False, True),
+    },
 }
 
 
@@ -660,6 +728,12 @@ __all__ = [
     "ENV_WEB_PASSWORD",
     "ENV_EMBEDDING_API_KEY",
     "ENV_LIGHTRAG_LLM_API_KEY",
+    "ENV_ZOTERO_API_KEY",
+    "ZOTERO_STORAGE_MANAGED",
+    "ZOTERO_STORAGE_LINKED",
+    "ZOTERO_SYNC_STRICT",
+    "ZOTERO_SYNC_CONSERVATIVE",
+    "ZOTERO_SYNC_ARCHIVE",
     "CONSEQUENCE_NONE",
     "CONSEQUENCE_RESTART",
     "CONSEQUENCE_REBUILD",
@@ -678,5 +752,6 @@ __all__ = [
     "VectorDbConfig",
     "EmbeddingConfig",
     "AskAgentConfig",
+    "ZoteroSyncConfig",
     "Config",
 ]

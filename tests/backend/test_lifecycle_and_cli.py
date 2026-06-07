@@ -288,7 +288,7 @@ async def test_fresh_install_uploads_and_lexically_retrieves_when_embedding_prob
         )
         stored = await initializer.source_store.get_document(doc_id)
         assert stored is not None
-        assert Path(stored.file_path) == temp_dir / "documents" / f"{doc_id}.pdf"
+        assert Path(stored.file_path) == temp_dir / "library" / doc_id / "original.pdf"
         assert Path(stored.file_path).exists()
 
         result = await initializer.retrieval_orchestrator.retrieve_with_outcome(

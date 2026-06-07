@@ -51,7 +51,9 @@ def test_resolve_install_spec_rejects_unknown() -> None:
 def test_dependency_statuses_cover_all_optional(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_modules(monkeypatch, set())
     deps = dependency_statuses()
-    assert {d["key"] for d in deps} == {"local_embedding", "milvus", "lightrag", "r2"}
+    assert {d["key"] for d in deps} == {
+        "pdf_extract", "local_embedding", "milvus", "lightrag", "r2"
+    }
     assert all(d["installed"] is False for d in deps)
 
 

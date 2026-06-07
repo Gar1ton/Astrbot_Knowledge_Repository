@@ -314,5 +314,70 @@
         "hint": "inject: 召回注入模式（将片段作为 Grounded Context 注入 system prompt，由原生 LLM 组织作答）；query_agent: 代理问答模式（直接由 Standalone Ask Agent 闭环生成纯学术级严谨回答并进行指令级绝对代理代理输出，强制关闭 persona 防止过拟合）"
       }
     }
+  },
+  "zotero_sync": {
+    "description": "Zotero 单向 Pull 同步（本地优先）",
+    "type": "object",
+    "hint": "镜像本地 Zotero（只读 zotero.sqlite）的条目/集合/标签/PDF 附件，用 PyMuPDF4LLM 清洗为干净 Markdown。云端字段预留，本轮以本地为主。机密 cloud_api_key 仅经环境变量 KR_ZOTERO_API_KEY 注入。",
+    "items": {
+      "enabled": {
+        "description": "启用 Zotero 同步",
+        "type": "bool",
+        "default": false
+      },
+      "zotero_data_dir": {
+        "description": "Zotero 数据目录（留空自动探测默认 ~/Zotero）",
+        "type": "string",
+        "default": "",
+        "hint": "含 zotero.sqlite 的目录；自定义过 Zotero 数据目录时在此显式填写"
+      },
+      "api_port": {
+        "description": "Zotero 本地 API 端口（仅连接状态探测）",
+        "type": "int",
+        "default": 23119
+      },
+      "storage_mode": {
+        "description": "PDF 存储模式",
+        "type": "string",
+        "default": "managed_copy",
+        "options": [
+          "managed_copy",
+          "linked"
+        ],
+        "hint": "managed_copy：复制 PDF 进插件制品包；linked：PDF 留在 Zotero storage 根（仅 clean.md/pages.json 入插件），需配 linked_root"
+      },
+      "linked_root": {
+        "description": "linked 模式的 Zotero storage 根目录",
+        "type": "string",
+        "default": "",
+        "hint": "storage_mode=linked 时必填；设置后会发探针校验目录是否 valid"
+      },
+      "sync_mode": {
+        "description": "Pull 同步模式",
+        "type": "string",
+        "default": "conservative",
+        "options": [
+          "strict_mirror",
+          "conservative",
+          "archive"
+        ],
+        "hint": "strict_mirror 严格镜像：强制覆盖+集合增删+Milvus 重建，禁用 LRAG；conservative 保守同步（默认）：删本地文档但集合只增不减，保住 LRAG；archive 归档堆栈：只增不删"
+      },
+      "auto_sync_enabled": {
+        "description": "自动同步（重启 + 定时）",
+        "type": "bool",
+        "default": false
+      },
+      "auto_sync_interval_sec": {
+        "description": "自动同步间隔（秒）",
+        "type": "int",
+        "default": 3600
+      },
+      "cloud_user_id": {
+        "description": "云端 Zotero user id（预留，本轮不启用）",
+        "type": "string",
+        "default": ""
+      }
+    }
   }
 }

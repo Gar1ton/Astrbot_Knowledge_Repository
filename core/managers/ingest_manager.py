@@ -1,28 +1,75 @@
-"""本地 PDF 文档摄入管理器的实现。
+"""本地文档摄入管理器（制品包模型 + PyMuPDF4LLM 清洗内核）。
 
-负责原件注册、基于 PyMuPDF (fitz) 的本地免成本文本抽取、
-高度稳定的「物理页隔离 + 动态段落合并」切块算法，以及持久化写入。
+职责：把一个 PDF/文本原件转为「制品包」——在 `data_dir/library/<document_id>/` 下集中存放
+original.pdf / clean.md（无可见页码）/ pages.json（页→字符偏移）/ meta.json（归一化 + 原始元数据），
+并在 clean.md 上做字符区间分块（保证 `clean.md[start:end] == chunk.text` 的 offset 不变量）。
+
+标识：本地上传以 Zotero 格式镜像——合成 `LOCAL` 库 + 8 位 item/attachment key，
+`document_id = LOCAL_<item_key>_<attachment_key>`，origin=LOCAL（可编辑）。同时写入 Zotero 镜像表，
+使作用域检索/同步对本地与 Zotero 来源一视同仁。
+
+不再保留 fitz 手写抽取路径：PDF 一律走 `markdown_extractor.extract_pdf_markdown`。
 """
 from __future__ import annotations
 
 import hashlib
+import json
+import re
+import secrets
 import shutil
-import uuid
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.domain.models import DocumentChunk, SourceDocument
+from core.domain.models import (
+    DocumentChunk,
+    DocumentOrigin,
+    PageChunk,
+    SourceDocument,
+    ZoteroAttachment,
+    ZoteroItem,
+    ZoteroLibrary,
+)
 from core.managers.base import BaseIngestManager
+from core.managers.markdown_extractor import (
+    MarkdownArtifact,
+    build_single_page_artifact,
+    extract_pdf_markdown,
+)
 
 if TYPE_CHECKING:
     from core.config import SourceStoreConfig
     from core.repository.source_store.base import SourceDocumentStore
 
+# 本地合成库标识（与 SourceDocument.library_id 默认值一致）。
+LOCAL_LIBRARY_ID = "LOCAL"
+
+# Zotero 风格 key 字母表（去除易混淆字符），8 位。
+_ZKEY_ALPHABET = "23456789ABCDEFGHIJKLMNPQRSTUVWXYZ"
+
+# 制品包内固定文件名。
+_ARTIFACT_PDF = "original.pdf"
+_ARTIFACT_MD = "clean.md"
+_ARTIFACT_PAGES = "pages.json"
+_ARTIFACT_META = "meta.json"
+
+# 句末切分符（中英文）。
+_SENTENCE_ENDERS = "。？！.?!"
+
+
+def gen_zotero_key() -> str:
+    """生成一个 8 位 Zotero 风格 key。"""
+    return "".join(secrets.choice(_ZKEY_ALPHABET) for _ in range(8))
+
+
+def make_document_id(library_id: str, item_key: str, attachment_key: str) -> str:
+    """制品包 canonical ID：<library_id>_<item_key>_<attachment_key>。"""
+    return f"{library_id}_{item_key}_{attachment_key}"
+
 
 class IngestManager(BaseIngestManager):
-    """具体的 PDF 文档摄入与切块管理器。"""
+    """具体的文档摄入与切块管理器（制品包 + clean.md offset 分块）。"""
 
     def __init__(
         self,
@@ -35,10 +82,11 @@ class IngestManager(BaseIngestManager):
         self._source_store = source_store
         self._config = config
         self._data_dir = data_dir
+        # 制品包根目录：每文档一子目录 library/<document_id>/。
+        self._library_dir = self._data_dir / "library"
+        self._library_dir.mkdir(parents=True, exist_ok=True)
 
-        # 确保文档原件存储专用子目录存在
-        self._docs_dir = self._data_dir / "documents"
-        self._docs_dir.mkdir(parents=True, exist_ok=True)
+    # ── 公开入口：本地上传 ────────────────────────────────────────
 
     async def ingest(
         self,
@@ -50,6 +98,10 @@ class IngestManager(BaseIngestManager):
         collection: str,
         tags: list[str] | None = None,
     ) -> str:
+        """登记一个本地上传原件，返回 document_id。
+
+        本地上传以 Zotero 格式镜像（LOCAL 库 + 合成 key），origin=LOCAL 可编辑。
+        """
         self.logger.info(
             "Ingest start: title=%r collection=%r size=%d", title, collection, size_bytes
         )
@@ -57,221 +109,334 @@ class IngestManager(BaseIngestManager):
         if not source_path.exists():
             raise FileNotFoundError(f"Source file not found: {file_path}")
 
-        # 1) 生成稳定的外部 ID
-        doc_id = uuid.uuid4().hex
+        item_key = gen_zotero_key()
+        attachment_key = gen_zotero_key()
+        document_id = make_document_id(LOCAL_LIBRARY_ID, item_key, attachment_key)
 
-        # 2) 物理拷贝至插件管理的原件库目录，防止外部临时文件被删
-        dest_path = self._docs_dir / f"{doc_id}.pdf"
-        copied = source_path.resolve() != dest_path.resolve()
+        # 本地上传同样写入 Zotero 镜像（origin=local），使作用域检索/同步一视同仁。
+        await self._source_store.upsert_zotero_library(
+            ZoteroLibrary(library_id=LOCAL_LIBRARY_ID, library_type="LOCAL", name="本地上传")
+        )
+        await self._source_store.upsert_zotero_item(
+            ZoteroItem(
+                item_key=item_key,
+                library_id=LOCAL_LIBRARY_ID,
+                item_type="attachment",
+                title=title,
+                origin=DocumentOrigin.LOCAL,
+            )
+        )
+        await self._source_store.upsert_zotero_attachment(
+            ZoteroAttachment(
+                attachment_key=attachment_key,
+                parent_item_key=item_key,
+                library_id=LOCAL_LIBRARY_ID,
+                content_type=content_type,
+                filename=source_path.name,
+            )
+        )
+
+        await self.process_attachment(
+            document_id=document_id,
+            library_id=LOCAL_LIBRARY_ID,
+            item_key=item_key,
+            attachment_key=attachment_key,
+            origin=DocumentOrigin.LOCAL,
+            read_only=False,
+            title=title,
+            content_type=content_type,
+            src_path=source_path,
+            collection=collection,
+            tags=list(tags or []),
+        )
+        return document_id
+
+    # ── 可复用：把一个附件原件处理为制品包 ────────────────────────
+
+    async def process_attachment(
+        self,
+        *,
+        document_id: str,
+        library_id: str,
+        item_key: str,
+        attachment_key: str,
+        origin: DocumentOrigin,
+        read_only: bool,
+        title: str,
+        content_type: str,
+        src_path: Path,
+        collection: str,
+        tags: list[str],
+        zotero_version: int = 0,
+        meta_extra: dict[str, Any] | None = None,
+        last_synced_at: datetime | None = None,
+        link_original: bool = False,
+    ) -> SourceDocument:
+        """把 src_path 处理为 document_id 的制品包并持久化（document + chunks + page_chunks）。
+
+        供本地上传与 Zotero 同步共用。失败时回滚制品包目录与已写文档。
+
+        link_original=True（Zotero linked 存储模式）：不拷贝原件，file_path 指向 Zotero 外部路径，
+        但 clean.md/pages.json/meta.json 仍写入插件制品包目录；回滚不删除外部原件。
+        """
+        bundle_dir = self._library_dir / document_id
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        dest_pdf = bundle_dir / _ARTIFACT_PDF
         document_added = False
         try:
-            if copied:
-                shutil.copy2(source_path, dest_path)
+            if link_original:
+                source_pdf = src_path  # 原件留在 Zotero storage
+            else:
+                if src_path.resolve() != dest_pdf.resolve():
+                    shutil.copy2(src_path, dest_pdf)
+                source_pdf = dest_pdf
 
-            # 3) 计算文件内容哈希 (SHA-256)
-            with open(dest_path, "rb") as f:
+            with open(source_pdf, "rb") as f:
                 content_bytes = f.read()
             file_hash = hashlib.sha256(content_bytes).hexdigest()
 
-            # 4) 抽取文本与分块
-            chunks = self._extract_and_chunk(dest_path, doc_id)
+            # 1) 抽取干净 Markdown + 页面字符偏移
+            artifact = self._extract_artifact(source_pdf, content_type)
 
-            # 5) 创建文档领域实体
-            now = datetime.now(timezone.utc)
-            doc = SourceDocument(
-                doc_id=doc_id,
-                title=title,
-                file_path=str(dest_path),
-                content_type=content_type,
-                size_bytes=size_bytes,
-                content_hash=file_hash,
-                collection=collection,
-                tags=list(tags or []),
-                created_at=now,
-                updated_at=now,
+            # 2) 落盘 clean.md / pages.json / meta.json
+            (bundle_dir / _ARTIFACT_MD).write_text(artifact.clean_markdown, encoding="utf-8")
+            pages_payload = [
+                {"page": s.page, "markdown_start_char": s.start, "markdown_end_char": s.end}
+                for s in artifact.page_spans
+            ]
+            (bundle_dir / _ARTIFACT_PAGES).write_text(
+                json.dumps(pages_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            meta_payload = {
+                "document_id": document_id,
+                "library_id": library_id,
+                "item_key": item_key,
+                "attachment_key": attachment_key,
+                "origin": origin.value,
+                "title": title,
+                "converter": artifact.converter,
+                "converter_version": artifact.converter_version,
+                "pdf_metadata": artifact.pdf_metadata,
+            }
+            if meta_extra:
+                meta_payload.update(meta_extra)
+            (bundle_dir / _ARTIFACT_META).write_text(
+                json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 
-            # 6) 写入仓储 (事务级，先加文档元数据，再写入分块)
-            await self._source_store.add_document(doc)
-            document_added = True
-            await self._source_store.replace_chunks(doc_id, chunks)
+            # 3) clean.md 上的字符区间分块（offset 不变量）
+            chunks = self._chunk_artifact(
+                document_id=document_id,
+                library_id=library_id,
+                item_key=item_key,
+                attachment_key=attachment_key,
+                artifact=artifact,
+            )
+            page_chunks = [
+                PageChunk(
+                    document_id=document_id,
+                    page=s.page,
+                    markdown_start_char=s.start,
+                    markdown_end_char=s.end,
+                )
+                for s in artifact.page_spans
+            ]
+
+            # 4) 持久化领域对象
+            now = datetime.now(timezone.utc)
+            doc = SourceDocument(
+                doc_id=document_id,
+                title=title,
+                file_path=str(source_pdf),
+                content_type=content_type,
+                size_bytes=len(content_bytes),
+                content_hash=file_hash,
+                collection=collection,
+                tags=list(tags),
+                created_at=now,
+                updated_at=now,
+                library_id=library_id,
+                zotero_item_key=item_key,
+                attachment_key=attachment_key,
+                origin=origin,
+                read_only=read_only,
+                zotero_version=zotero_version,
+                markdown_rel_path=_ARTIFACT_MD,
+                pages_rel_path=_ARTIFACT_PAGES,
+                converter=artifact.converter,
+                converter_version=artifact.converter_version,
+                last_synced_at=last_synced_at,
+            )
+            # 幂等：本地首次为 add；Zotero 重同步为 update（覆盖已存在制品包）。
+            existing = await self._source_store.get_document(document_id)
+            if existing is None:
+                await self._source_store.add_document(doc)
+            else:
+                await self._source_store.update_document(doc)
+            document_added = existing is None
+            await self._source_store.replace_chunks(document_id, chunks)
+            await self._source_store.replace_page_chunks(document_id, page_chunks)
         except Exception:
             if document_added:
-                await self._source_store.delete_document(doc_id)
-            if copied:
-                dest_path.unlink(missing_ok=True)
+                await self._source_store.delete_document(document_id)
+            # 制品包目录仅含派生制品（link 模式原件在外部 Zotero storage），可安全整体清理。
+            shutil.rmtree(bundle_dir, ignore_errors=True)
             raise
 
         self.logger.info(
-            f"Successfully ingested document {title} (ID: {doc_id}) with {len(chunks)} chunks."
+            "Ingested %s (%s) with %d chunks, %d pages.",
+            title,
+            document_id,
+            len(chunks),
+            len(artifact.page_spans),
         )
-        return doc_id
+        return doc
 
-    def _extract_and_chunk(self, pdf_path: Path, doc_id: str) -> list[DocumentChunk]:
-        """使用 PyMuPDF 抽取文本并按「物理页隔离 + 动态段落合并」执行高稳定性切分，
-        同时生成页码、定位符等元数据。
-        """
-        # 触发 OCR/LLM 可选功能警示提示
+    # ── 抽取 ──────────────────────────────────────────────────────
+
+    def _extract_artifact(self, path: Path, content_type: str) -> MarkdownArtifact:
+        """PDF → PyMuPDF4LLM 清洗；txt/md → 单页纯文本制品。"""
         if self._config.ocr_enabled:
             warnings.warn(
                 "OCR/LLM extraction is enabled which may incur substantial computation/API costs.",
                 UserWarning,
+                stacklevel=2,
             )
+        suffix = path.suffix.lower()
+        is_pdf = content_type == "application/pdf" or suffix == ".pdf"
+        if is_pdf:
+            return extract_pdf_markdown(str(path))
+        if suffix in (".txt", ".md", ".markdown"):
+            return build_single_page_artifact(path.read_text(encoding="utf-8", errors="replace"))
+        # 其它类型暂按纯文本兜底（避免摄入直接失败）。
+        return build_single_page_artifact(path.read_text(encoding="utf-8", errors="replace"))
 
-        try:
-            import fitz  # PyMuPDF
-        except ImportError as exc:
-            raise RuntimeError(
-                "PDF 文本抽取需要 PyMuPDF，请在运行环境中执行：pip install PyMuPDF"
-            ) from exc
+    # ── clean.md 字符区间分块 ─────────────────────────────────────
 
-        doc = fitz.open(pdf_path)
-        pages_text: list[str] = []
-
-        for page in doc:
-            # 基础文本抽取。后续可引入 block/结构识别以过滤页眉页脚
-            text = page.get_text("text")
-            pages_text.append(text)
-
-        doc.close()
-
-        # 切分参数计算
+    def _chunk_artifact(
+        self,
+        *,
+        document_id: str,
+        library_id: str,
+        item_key: str,
+        attachment_key: str,
+        artifact: MarkdownArtifact,
+    ) -> list[DocumentChunk]:
+        md = artifact.clean_markdown
         chunk_size = getattr(self._config, "chunk_size", 1000)
-        chunk_by_page = getattr(self._config, "chunk_by_page", True)
+        target_min = int(chunk_size * 0.8)
+        target_max = int(chunk_size * 1.2)
+        hard_limit = int(chunk_size * 1.5)
 
-        target_min = int(chunk_size * 0.8)   # 默认 800 字
-        target_max = int(chunk_size * 1.2)   # 默认 1200 字
-        hard_limit = int(chunk_size * 1.5)   # 默认 1500 字
+        spans = self._chunk_spans(md, target_min, target_max, hard_limit)
+        is_zotero = library_id != LOCAL_LIBRARY_ID
 
-        chunk_entries: list[tuple[str, dict[str, Any]]] = []
-
-        if chunk_by_page:
-            # 方案 A: 物理页物理边界隔离，独立切分，哈希变动仅局限单页
-            for page_idx, page_text in enumerate(pages_text):
-                page_num = page_idx + 1
-                paras = self._split_into_paragraphs(page_text, target_min, target_max, hard_limit)
-                for para_idx, text in enumerate(paras):
-                    chunk_entries.append((
-                        text,
-                        {
-                            "page_number": page_num,
-                            "locator": f"page_{page_num}_p{para_idx + 1}",
-                            "paragraph": para_idx + 1,
-                        }
-                    ))
-        else:
-            # 方案 B: 全文打散合并，无边界连续段落合并
-            all_text = "\n\n".join(pages_text)
-            paras = self._split_into_paragraphs(all_text, target_min, target_max, hard_limit)
-            for para_idx, text in enumerate(paras):
-                # 启发式页码定位：在 pages_text 中搜索该文本的前 100 个字符
-                page_num = 1
-                sample = text[:100].strip()
-                if sample:
-                    for p_idx, p_txt in enumerate(pages_text):
-                        if sample in p_txt:
-                            page_num = p_idx + 1
-                            break
-                chunk_entries.append((
-                    text,
-                    {
-                        "page_number": page_num,
-                        "locator": f"page_{page_num}_p{para_idx + 1}",
-                        "paragraph": para_idx + 1,
-                    }
-                ))
-
-        # 构造领域 DocumentChunk 对象
-        chunks = []
-        for idx, (text, meta) in enumerate(chunk_entries):
-            chunk_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        chunks: list[DocumentChunk] = []
+        for idx, (cs, ce) in enumerate(spans):
+            text = md[cs:ce]
+            pages = [s.page for s in artifact.page_spans if s.start < ce and s.end > cs]
+            page_number = pages[0] if pages else 1
+            metadata: dict[str, Any] = {
+                "pages": pages,
+                "page_number": page_number,
+                "start_char": cs,
+                "end_char": ce,
+                "locator": f"page_{page_number}_o{cs}",
+            }
+            # Zotero 跳转链接仅对真实 Zotero 库有意义；本地合成 key 不构造。
+            if is_zotero:
+                metadata["zotero_item_uri"] = (
+                    f"zotero://select/library/items/{item_key}"
+                )
+                metadata["zotero_pdf_uri"] = (
+                    f"zotero://open-pdf/library/items/{attachment_key}?page={page_number}"
+                )
             chunks.append(
                 DocumentChunk(
-                    chunk_id=f"{doc_id}-c{idx}",
-                    doc_id=doc_id,
+                    chunk_id=f"{document_id}_c{idx:04d}",
+                    doc_id=document_id,
                     ordinal=idx,
                     text=text,
-                    content_hash=chunk_hash,
-                    metadata=meta,
+                    content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    metadata=metadata,
                 )
             )
         return chunks
 
+    @staticmethod
+    def _paragraph_spans(md: str) -> list[tuple[int, int]]:
+        """把 clean.md 切为段落字符区间（按空行分隔；退化时按单换行）。
 
+        返回的每个 [start,end) 都是 md 的精确子串区间（不做文本变换），保证 offset 不变量。
+        """
+        if not md.strip():
+            return []
+        spans: list[tuple[int, int]] = []
+        pos = 0
+        for m in re.finditer(r"\n[ \t]*\n[ \t\n]*", md):
+            if m.start() > pos:
+                spans.append((pos, m.start()))
+            pos = m.end()
+        if pos < len(md):
+            spans.append((pos, len(md)))
+        # 退化：整篇没有空行分隔（单段），改按单换行切。
+        if len(spans) <= 1 and "\n" in md:
+            spans = []
+            pos = 0
+            for m in re.finditer(r"\n+", md):
+                if m.start() > pos:
+                    spans.append((pos, m.start()))
+                pos = m.end()
+            if pos < len(md):
+                spans.append((pos, len(md)))
+        return spans
 
-    def _split_into_paragraphs(
-        self, text: str, target_min: int, target_max: int, hard_limit: int
-    ) -> list[str]:
-        """动态段落合并算法核心。"""
-        # 以双换行符分割自然段落
-        raw_paras = [p.strip() for p in text.split("\n\n")]
-        # 如果双换行分割失败（可能部分PDF只有单换行），退而使用单换行，并合并过短的行
-        if len(raw_paras) <= 1:
-            raw_paras = [p.strip() for p in text.split("\n") if p.strip()]
+    def _chunk_spans(
+        self, md: str, target_min: int, target_max: int, hard_limit: int
+    ) -> list[tuple[int, int]]:
+        """段落区间贪心合并为分块区间；超长单段按句末切分。返回连续字符区间列表。"""
+        paras = self._paragraph_spans(md)
+        chunks: list[tuple[int, int]] = []
+        cur_start: int | None = None
+        cur_end: int | None = None
 
-        paragraphs = [p for p in raw_paras if p]
-
-        chunks: list[str] = []
-        current_block: list[str] = []
-        current_len = 0
-
-        def _flush(blocks: list[str]):
-            txt = "\n\n".join(blocks).strip()
-            if txt:
-                chunks.append(txt)
-
-        for para in paragraphs:
-            para_len = len(para)
-
-            # 超长单段安全保护，强制句号切分
-            if para_len > hard_limit:
-                if current_block:
-                    _flush(current_block)
-                    current_block = []
-                    current_len = 0
-
-                # 按中英文句号/问号/感叹号分句
-                sentences = []
-                curr_sent = ""
-                for char in para:
-                    curr_sent += char
-                    if char in ("。", "？", "！", ".", "?", "!"):
-                        sentences.append(curr_sent.strip())
-                        curr_sent = ""
-                if curr_sent.strip():
-                    sentences.append(curr_sent.strip())
-
-                sent_blocks: list[str] = []
-                sent_len = 0
-                for sent in sentences:
-                    if sent_len + len(sent) > target_max and sent_blocks:
-                        chunks.append(" ".join(sent_blocks))
-                        sent_blocks = [sent]
-                        sent_len = len(sent)
-                    else:
-                        sent_blocks.append(sent)
-                        sent_len += len(sent)
-                if sent_blocks:
-                    chunks.append(" ".join(sent_blocks))
-
+        for s, e in paras:
+            if (e - s) > hard_limit:
+                if cur_start is not None and cur_end is not None:
+                    chunks.append((cur_start, cur_end))
+                    cur_start = cur_end = None
+                chunks.extend(self._sentence_spans(md, s, e, target_max))
+                continue
+            if cur_start is None:
+                cur_start, cur_end = s, e
+            elif (e - cur_start) > target_max:
+                chunks.append((cur_start, cur_end))  # type: ignore[arg-type]
+                cur_start, cur_end = s, e
             else:
-                # 正常段落，动态合并
-                if current_len + para_len > target_max and current_block:
-                    _flush(current_block)
-                    current_block = [para]
-                    current_len = para_len
-                else:
-                    current_block.append(para)
-                    current_len += para_len
-                    # 当累加达到黄金字数区间，且后续有超出风险时在段落末尾切分
-                    if current_len >= target_min and current_len <= target_max:
-                        # 这是一个完美的切分点
-                        pass
-
-        if current_block:
-            _flush(current_block)
-
+                cur_end = e
+        if cur_start is not None and cur_end is not None:
+            chunks.append((cur_start, cur_end))
         return chunks
 
+    @staticmethod
+    def _sentence_spans(
+        md: str, start: int, end: int, target_max: int
+    ) -> list[tuple[int, int]]:
+        """把超长段落 [start,end) 按句末贪心切为 <= target_max 的连续区间。"""
+        enders = [i + 1 for i in range(start, end) if md[i] in _SENTENCE_ENDERS]
+        if not enders or enders[-1] != end:
+            enders.append(end)
+        spans: list[tuple[int, int]] = []
+        cs = start
+        prev = start
+        for cut in enders:
+            if (cut - cs) > target_max and prev > cs:
+                spans.append((cs, prev))
+                cs = prev
+            prev = cut
+        if cs < end:
+            spans.append((cs, end))
+        return spans
 
-__all__ = ["IngestManager"]
+
+__all__ = ["IngestManager", "gen_zotero_key", "make_document_id", "LOCAL_LIBRARY_ID"]

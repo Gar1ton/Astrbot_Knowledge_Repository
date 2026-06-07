@@ -10,6 +10,19 @@ export interface Collection {
   name: string;
   description?: string;
   is_system?: boolean;
+  origin?: "local" | "zotero";
+  read_only?: boolean;
+  zotero_collection_key?: string;
+}
+
+export interface ZoteroMeta {
+  item_type?: string;
+  creators?: string[];
+  year?: string;
+  venue?: string;
+  doi?: string;
+  url?: string;
+  abstract?: string;
 }
 
 export interface KrDocument {
@@ -24,6 +37,16 @@ export interface KrDocument {
   ext?: string;
   needs_reindex?: boolean;
   lightrag_index_status?: { status: string; collection: string; last_error?: string } | null;
+  // 制品包 / 来源 / 三指示元数据（v0.22.0）
+  origin?: "local" | "zotero";
+  read_only?: boolean;
+  lifecycle_state?: "active" | "detached";
+  library_id?: string;
+  zotero_item_key?: string;
+  attachment_key?: string;
+  last_synced_at?: string | null;
+  milvus_covered?: boolean;
+  zotero_meta?: ZoteroMeta;
 }
 
 export interface KbChunkContext {
@@ -65,7 +88,41 @@ export interface EffectiveConfig {
   ask?: Record<string, unknown>;
   vector_db?: Record<string, unknown>;
   embedding?: Record<string, unknown>;
+  zotero_sync?: Record<string, unknown>;
   diagnostics?: string[];
+}
+
+export interface ZoteroConfig {
+  enabled: boolean;
+  zotero_data_dir: string;
+  api_port: number;
+  storage_mode: "managed_copy" | "linked";
+  linked_root: string;
+  sync_mode: "strict_mirror" | "conservative" | "archive";
+  auto_sync_enabled: boolean;
+  auto_sync_interval_sec: number;
+  connection?: { connected: boolean; port: number; detail: string };
+  availability?: { available: boolean; reason?: string; data_dir?: string };
+  linked_probe?: { valid: boolean; reason: string; resolved: string };
+}
+
+export interface ZoteroSyncResult {
+  sync_mode?: string;
+  storage_mode?: string;
+  started_at?: string;
+  finished_at?: string | null;
+  items_mirrored?: number;
+  collections_mirrored?: number;
+  new?: string[];
+  changed?: string[];
+  removed?: string[];
+  detached?: string[];
+  reattached?: string[];
+  skipped_unchanged?: number;
+  needs_milvus_rebuild?: boolean;
+  errors?: string[];
+  status?: string;
+  message?: string;
 }
 
 export interface GraphNode {
@@ -892,6 +949,42 @@ export async function syncDocuments(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(docIds ? { doc_ids: docIds } : {}),
   });
+}
+
+// ─────────────────────────────────────────────────────────────
+// Zotero 单向 Pull 同步
+// ─────────────────────────────────────────────────────────────
+
+export async function getZoteroConfig(): Promise<ZoteroConfig> {
+  if (isMock()) {
+    return {
+      enabled: false,
+      zotero_data_dir: "",
+      api_port: 23119,
+      storage_mode: "managed_copy",
+      linked_root: "",
+      sync_mode: "conservative",
+      auto_sync_enabled: false,
+      auto_sync_interval_sec: 3600,
+      connection: { connected: false, port: 23119, detail: "mock" },
+      availability: { available: false, reason: "mock" },
+    };
+  }
+  return apiFetch<ZoteroConfig>("/api/zotero/config");
+}
+
+export async function syncZoteroPull(incremental = true): Promise<ZoteroSyncResult> {
+  if (isMock()) return { status: "success", new: [], changed: [], skipped_unchanged: 0 };
+  return apiFetch<ZoteroSyncResult>("/api/sync/zotero/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ incremental }),
+  });
+}
+
+export async function getZoteroSyncStatus(): Promise<ZoteroSyncResult> {
+  if (isMock()) return {};
+  return apiFetch<ZoteroSyncResult>("/api/sync/zotero/status");
 }
 
 export async function backupNow(): Promise<MaybeReserved<unknown>> {

@@ -87,6 +87,27 @@ async def pipeline(
     )
 
 
+async def test_sync_backs_up_artifact_bundle(
+    pipeline: SyncPipeline,
+    tmp_path: Path,
+) -> None:
+    """制品包派生制品（clean.md/pages.json/meta.json）应随同步纳入 R2 备份。"""
+    bundle = tmp_path / "library" / "d1"
+    bundle.mkdir(parents=True)
+    (bundle / "clean.md").write_text("clean markdown", encoding="utf-8")
+    (bundle / "pages.json").write_text("[]", encoding="utf-8")
+    (bundle / "meta.json").write_text("{}", encoding="utf-8")
+
+    await pipeline.sync(SyncTargetKind.R2)
+
+    target = pipeline._sync_targets[SyncTargetKind.R2]  # type: ignore[attr-defined]
+    objects = target._objects  # type: ignore[attr-defined]
+    assert "artifacts/papers/d1/clean.md" in objects
+    assert "artifacts/papers/d1/pages.json" in objects
+    assert "artifacts/papers/d1/meta.json" in objects
+    assert objects["artifacts/papers/d1/clean.md"] == b"clean markdown"
+
+
 async def test_full_pipeline_sync_success(
     pipeline: SyncPipeline,
     store: InMemorySourceDocumentStore,

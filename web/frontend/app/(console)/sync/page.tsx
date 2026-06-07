@@ -8,7 +8,18 @@ import {
   ApiError, isReserved,
   SyncRecord, notionInit, syncNotionPull, syncDocuments, getSyncStatus,
   backupNow, restoreBackup,
+  ZoteroConfig, getZoteroConfig, syncZoteroPull,
 } from "@/lib/api";
+
+const ZOTERO_SYNC_MODE_LABEL: Record<string, string> = {
+  strict_mirror: "严格镜像",
+  conservative: "保守同步",
+  archive: "归档堆栈",
+};
+const ZOTERO_STORAGE_LABEL: Record<string, string> = {
+  managed_copy: "副本托管",
+  linked: "链接 Zotero",
+};
 
 interface ActionCardProps {
   title: string;
@@ -60,6 +71,8 @@ export default function SyncPage() {
   const { t } = useI18n();
   const { toast } = useToast();
   const [records, setRecords] = useState<SyncRecord[]>([]);
+  const [zotero, setZotero] = useState<ZoteroConfig | null>(null);
+  const [zoteroLoading, setZoteroLoading] = useState(false);
 
   useEffect(() => {
     getSyncStatus()
@@ -67,7 +80,25 @@ export default function SyncPage() {
         if (!isReserved(res)) setRecords(res);
       })
       .catch(() => {});
+    getZoteroConfig().then(setZotero).catch(() => {});
   }, []);
+
+  async function handleZoteroPull() {
+    setZoteroLoading(true);
+    try {
+      const res = await syncZoteroPull(true);
+      if (res.status === "error") {
+        toast(res.message || "Zotero 同步失败", "error");
+      } else {
+        const n = (res.new?.length ?? 0) + (res.changed?.length ?? 0);
+        toast(`Zotero 同步完成：新增/更新 ${n}，跳过 ${res.skipped_unchanged ?? 0}`, "ok");
+      }
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
+    } finally {
+      setZoteroLoading(false);
+    }
+  }
 
   async function handlePush(target: "r2" | "notion") {
     try {
@@ -143,6 +174,56 @@ export default function SyncPage() {
         <h1 style={{ margin: "0 0 20px", fontSize: 24, fontWeight: 700, color: "var(--heading)", letterSpacing: "-0.04em" }}>
           {t("nav_sync")}
         </h1>
+
+        {/* Zotero 单向 Pull */}
+        <div style={{ marginBottom: 24 }}>
+          <h2 style={{ margin: "0 0 12px", fontSize: 13, fontWeight: 700, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+            Zotero 文献库
+          </h2>
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "14px 18px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: "var(--heading)", marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
+                  从 Zotero 同步
+                  {zotero && (
+                    <span style={{
+                      fontSize: 11, fontWeight: 600, padding: "1px 8px", borderRadius: 999,
+                      background: zotero.connection?.connected ? "rgba(52,168,83,0.14)" : "rgba(150,150,150,0.14)",
+                      color: zotero.connection?.connected ? "#2e7d4f" : "var(--fg-muted)",
+                    }}>
+                      {zotero.connection?.connected ? "● 已连接" : "○ 未连接"}
+                    </span>
+                  )}
+                </div>
+                <p style={{ margin: 0, fontSize: 12, color: "var(--fg-muted)" }}>
+                  {zotero
+                    ? zotero.enabled
+                      ? `${ZOTERO_SYNC_MODE_LABEL[zotero.sync_mode] ?? zotero.sync_mode} · ${ZOTERO_STORAGE_LABEL[zotero.storage_mode] ?? zotero.storage_mode}${zotero.availability && !zotero.availability.available ? ` · ${zotero.availability.reason ?? "数据目录不可用"}` : ""}`
+                      : "Zotero 同步未启用（在 AstrBot 插件配置中开启 zotero_sync.enabled）"
+                    : "加载中…"}
+                </p>
+                {zotero?.storage_mode === "linked" && zotero.linked_probe && !zotero.linked_probe.valid && (
+                  <p style={{ margin: "4px 0 0", fontSize: 12, color: "#c0392b" }}>
+                    链接目录无效：{zotero.linked_probe.reason}
+                  </p>
+                )}
+              </div>
+              <Btn
+                variant="primary"
+                size="sm"
+                loading={zoteroLoading}
+                disabled={!zotero?.enabled}
+                onClick={handleZoteroPull}
+                style={{ flexShrink: 0 }}
+              >
+                从 Zotero 同步
+              </Btn>
+            </div>
+          </div>
+          <p style={{ margin: "8px 2px 0", fontSize: 11, color: "var(--fg-subtle)" }}>
+            单向 Pull：镜像 Zotero 条目/集合/标签/PDF 附件并用 PyMuPDF4LLM 清洗；同步来源在文档系统中只读。
+          </p>
+        </div>
 
         {/* Notion */}
         <div style={{ marginBottom: 24 }}>

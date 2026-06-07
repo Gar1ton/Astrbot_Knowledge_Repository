@@ -26,11 +26,30 @@ from core.config import (
     change_consequence,
     structural_keys,
 )
-from core.domain.models import Collection, SourceDocument, SyncTargetKind
+from core.domain.models import Collection, DocumentOrigin, SourceDocument, SyncTargetKind
+from core.pipelines.retrieval_orchestrator import RetrievalScope
 
 logger = logging.getLogger("KnowledgeRepositoryApi")
 
 SYSTEM_COLLECTION_UNCATEGORIZED = "_uncategorized"
+
+
+def _build_scope(scope_type: str, scope_key: str, scope_library_id: str) -> RetrievalScope | None:
+    """构造检索作用域；scope_type 为空返回 None（无 doc 级硬过滤）。"""
+    if not scope_type:
+        return None
+    return RetrievalScope(
+        scope_type=scope_type, scope_key=scope_key, library_id=scope_library_id
+    )
+
+
+def _assert_doc_writable(doc: SourceDocument) -> None:
+    """service 层只读强制：Zotero 同步来源禁止用户侧修改/删除（review #7）。"""
+    if doc.read_only or doc.origin is DocumentOrigin.ZOTERO:
+        raise ReadOnlyError(
+            f"文档 {doc.doc_id} 来自 Zotero 同步，处于只读状态；"
+            "请在 Zotero 中修改后重新同步，或切换同步模式。"
+        )
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -108,32 +127,37 @@ class HighPrecisionQueryError(RuntimeError):
         self.reason = reason
 
 
+class ReadOnlyError(RuntimeError):
+    """Zotero 同步来源（只读）被尝试修改/删除时抛出。
+
+    本轮单向同步保证：origin=zotero 的文档/集合/标签在文档系统中只读，
+    仅 Zotero Pull 这一特权服务可变更；用户侧 delete/classify/移动一律拒绝。
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _extract_raw_doc_text(doc: SourceDocument) -> str | None:
-    """从文档原始文件提取全文，供 LightRAG 使用（避免双重切块）。
+    """读取制品包内的干净 Markdown（clean.md），供 LightRAG 使用（避免双重切块）。
 
-    与 Milvus 路径（使用预切 chunk）完全分离：LightRAG 拿到连续原始文本后
-    由其内部切块器决定粒度，不会引入 chunk overlap 带来的重复内容。
+    与 Milvus 路径（预切 chunk）完全分离：LightRAG 拿到连续的 clean.md 文本后由其内部切块器
+    决定粒度，且 clean.md 已由 PyMuPDF4LLM 清洗（无可见页码/页眉页脚噪声），实体边界更干净。
 
-    降级策略：文件不存在 / fitz 未安装 / 格式不支持 → 返回 None，
-    由调用方回退到 chunk 拼接路径。
+    降级策略：制品包缺 markdown_rel_path / clean.md 不存在 → 返回 None，
+    由调用方回退到 chunk 拼接路径。不再回退 fitz 手写抽取。
     """
     from pathlib import Path
 
-    path = Path(doc.file_path)
-    if not path.exists():
+    rel = getattr(doc, "markdown_rel_path", "") or ""
+    if not rel:
+        return None
+    md_path = Path(doc.file_path).parent / rel
+    if not md_path.exists():
         return None
     try:
-        suffix = path.suffix.lower()
-        if doc.content_type == "application/pdf" or suffix == ".pdf":
-            try:
-                import fitz  # type: ignore[import-untyped]  # noqa: PLC0415
-            except ImportError:
-                return None
-            with fitz.open(str(path)) as pdf_doc:
-                return "\n".join(page.get_text() for page in pdf_doc)
-        if suffix in {".txt", ".md"}:
-            return path.read_text(encoding="utf-8", errors="replace")
-        return None
+        return md_path.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return None
 
@@ -189,6 +213,13 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._progress_store = progress_store
         self._index_compatibility = index_compatibility
         self._embedding_fingerprint = embedding_fingerprint
+        # Zotero 同步管线（组合根在 api 构造后注入，避免回调循环依赖）。
+        self._zotero_pipeline: Any | None = None
+        self._last_zotero_sync: dict[str, Any] = {}
+
+    def attach_zotero_pipeline(self, pipeline: Any) -> None:
+        """组合根注入 ZoteroSyncPipeline（其回调引用本 api 的索引/LRAG 助手）。"""
+        self._zotero_pipeline = pipeline
 
     # ── 集合（分类）────────────────────────────────────────────
 
@@ -216,9 +247,18 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         )
 
     async def delete_collection(self, name: str) -> bool:
-        """删除集合。非空集合的文档将迁入 _uncategorized 系统集合。返回 False 表示 name 不存在。"""
+        """删除集合。非空集合的文档将迁入 _uncategorized 系统集合。返回 False 表示 name 不存在。
+
+        只读保护：Zotero 同步来源的集合（origin=zotero）禁止用户侧删除，仅允许删除手动创建的集合。
+        """
         if name == SYSTEM_COLLECTION_UNCATEGORIZED:
             raise ValueError(f"系统集合 '{SYSTEM_COLLECTION_UNCATEGORIZED}' 不可删除。")
+        existing = {c.name: c for c in await self._source_store.list_collections()}
+        target = existing.get(name)
+        if target is not None and target.origin is DocumentOrigin.ZOTERO:
+            raise ReadOnlyError(
+                f"集合 '{name}' 来自 Zotero 同步，处于只读状态，不能手动删除。"
+            )
 
         await self._ensure_system_collections()
         moving_docs = await self._source_store.list_documents(collection=name)
@@ -273,6 +313,23 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     async def list_document_chunks(self, doc_id: str) -> list[DocumentChunk]:
         """列出单个文档的本地文本分块，供管理端展示摘要统计。"""
         return await self._source_store.list_chunks(doc_id)
+
+    async def get_zotero_item_meta(self, library_id: str, item_key: str) -> dict[str, Any] | None:
+        """返回某 Zotero 条目的归一化引用字段（供文档界面一等展示）。"""
+        if not library_id or not item_key:
+            return None
+        item = await self._source_store.get_zotero_item(library_id, item_key)
+        if item is None:
+            return None
+        return {
+            "item_type": item.item_type,
+            "creators": item.creators,
+            "year": item.year,
+            "venue": item.venue,
+            "doi": item.doi,
+            "url": item.url,
+            "abstract": item.abstract,
+        }
 
     async def get_lightrag_index_status(self, doc_id: str) -> dict[str, str] | None:
         return await self._source_store.get_lightrag_index_status(doc_id)
@@ -356,6 +413,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         old_doc = await self._source_store.get_document(doc_id)
         if old_doc is None:
             return False
+        _assert_doc_writable(old_doc)
         old_collection = old_doc.collection
         if (
             collection is not None
@@ -399,10 +457,14 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         return updated
 
     async def delete_document(self, doc_id: str) -> bool:
-        """删除文档、图谱贡献、远端镜像和插件托管原件。"""
+        """删除文档、图谱贡献、远端镜像和插件托管原件。
+
+        只读保护：Zotero 同步来源（origin=zotero）禁止用户侧删除（仅 Zotero Pull 可变更）。
+        """
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             return False
+        _assert_doc_writable(doc)
 
         chunks = await self._source_store.list_chunks(doc_id)
         if self._lightrag_registry is not None and self._lightrag_index_is_compatible(
@@ -452,10 +514,19 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         """列出 AstrBot 知识库中的集合名。"""
         return await self._kb_reader.list_collections()
 
-    async def search_kb(self, collection: str, query: str, top_k: int) -> list[DocumentChunk]:
-        """在某 AstrBot 知识库集合内检索。"""
+    async def search_kb(
+        self,
+        collection: str,
+        query: str,
+        top_k: int,
+        scope_type: str = "",
+        scope_key: str = "",
+        scope_library_id: str = "",
+    ) -> list[DocumentChunk]:
+        """在某 AstrBot 知识库集合内检索，可选 item/collection/tag/library 作用域硬过滤。"""
         if self._retrieval_orchestrator is not None:
-            return await self._retrieval_orchestrator.retrieve(collection, query, top_k)
+            scope = _build_scope(scope_type, scope_key, scope_library_id)
+            return await self._retrieval_orchestrator.retrieve(collection, query, top_k, scope)
         return await self._kb_reader.search(collection, query, top_k)
 
     async def get_chunk_context(
@@ -581,8 +652,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         retrieval_mode: str = "default",
         use_english_retrieval: bool = False,
         answer_language: str = "auto",
+        scope_type: str = "",
+        scope_key: str = "",
+        scope_library_id: str = "",
     ) -> dict:
         """Retrieve evidence and generate one final answer."""
+        scope = _build_scope(scope_type, scope_key, scope_library_id)
         if retrieval_mode not in {"default", "high_precision", "graph_only"}:
             raise ValueError("retrieval_mode must be 'default', 'high_precision', or 'graph_only'")
         if retrieval_mode in {"high_precision", "graph_only"} and not collection:
@@ -651,7 +726,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 if self._retrieval_orchestrator is None:
                     raise RuntimeError("RetrievalOrchestrator is not configured")
                 lightrag_context = await self._retrieval_orchestrator.retrieve_lightrag_context(
-                    collection or "", question
+                    collection or "", question, scope
                 )
                 engines.append("lightrag")
             except Exception as exc:
@@ -702,7 +777,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             try:
                 if self._retrieval_orchestrator is not None:
                     outcome = await self._retrieval_orchestrator.retrieve_with_outcome(
-                        col, retrieval_question, top_k
+                        col, retrieval_question, top_k, scope
                     )
                     current_chunks = outcome.chunks
                     engines.extend(outcome.engines)
@@ -733,7 +808,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 if self._retrieval_orchestrator is None:
                     raise RuntimeError("RetrievalOrchestrator is not configured")
                 lightrag_context = await self._retrieval_orchestrator.retrieve_lightrag_context(
-                    collection or "", question
+                    collection or "", question, scope
                 )
                 engines.append("lightrag")
             except Exception as exc:
@@ -748,17 +823,30 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             n = i + 1
             doc = await self.get_document(chunk.doc_id)
             title = doc.title if doc else chunk.doc_id
-            sources.append(
-                {
-                    "n": n,
-                    "doc_id": chunk.doc_id,
-                    "title": title,
-                    "chunk_id": chunk.chunk_id,
-                    "ordinal": chunk.ordinal,
-                    "text": chunk.text,
-                    "metadata": chunk.metadata,
-                }
-            )
+            meta = chunk.metadata or {}
+            source = {
+                "n": n,
+                "doc_id": chunk.doc_id,
+                "document_id": chunk.doc_id,
+                "title": title,
+                "chunk_id": chunk.chunk_id,
+                "ordinal": chunk.ordinal,
+                "text": chunk.text,
+                "metadata": meta,
+                "pages": meta.get("pages", []),
+                "origin": doc.origin.value if doc else "local",
+            }
+            # Zotero provenance：跳转链接 + 归一化引用（Li 2025）。
+            if doc and doc.origin is DocumentOrigin.ZOTERO:
+                source["zotero_item_uri"] = meta.get("zotero_item_uri", "")
+                source["zotero_pdf_uri"] = meta.get("zotero_pdf_uri", "")
+                zmeta = await self.get_zotero_item_meta(doc.library_id, doc.zotero_item_key)
+                if zmeta:
+                    first_author = (zmeta["creators"][0].split(",")[0] if zmeta["creators"] else "")
+                    source["citation"] = " ".join(
+                        x for x in [first_author, zmeta["year"]] if x
+                    ).strip()
+            sources.append(source)
             has_page = chunk.metadata and "page_number" in chunk.metadata
             page_info = f" (Page {chunk.metadata['page_number']})" if has_page else ""
             context_parts.append(f"[{n}] {title}{page_info}\n{chunk.text}")
@@ -1475,7 +1563,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "cwd": str(Path.cwd()),
             "data_dir": str(data_dir.resolve()),
             "db_file": db_file,
-            "docs_dir": str((data_dir / "documents").resolve()),
+            "docs_dir": str((data_dir / "library").resolve()),
             "python_version": sys.version.split()[0],
             "platform": sys.platform,
         }
@@ -1633,6 +1721,98 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     async def _mark_lightrag_pending(self, doc_id: str, collection: str) -> None:
         await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
 
+    # ── Zotero 同步副作用回调（供 ZoteroSyncPipeline 注入）──────────
+
+    async def _index_document(self, doc_id: str, collection: str) -> None:
+        """把某文档的 chunk 嵌入并写入 Milvus（与 register_document 自动索引同语义）。"""
+        if not (self._config and self._milvus_index_is_compatible()):
+            await self._mark_document_needs_reindex(doc_id)
+            return
+        vdb = self._config.get_vector_db_config()
+        if vdb.backend != "milvus" or not self._vector_store or not self._embedding_provider:
+            return
+        try:
+            if hasattr(self._vector_store, "set_doc_collection_mapping"):
+                self._vector_store.set_doc_collection_mapping(doc_id, collection)
+            chunks = await self._source_store.list_chunks(doc_id)
+            if chunks:
+                embeddings = await self._embedding_provider.embed_documents(
+                    [c.text for c in chunks]
+                )
+                await self._vector_store.upsert_chunks(chunks, embeddings)
+        except Exception as exc:
+            logger.error("Zotero index failed for %s: %s", doc_id, exc)
+            await self._mark_document_needs_reindex(doc_id)
+
+    async def _remove_document_index(self, doc_id: str) -> None:
+        """从 Milvus 移除某文档的全部 chunk（strict 脱管 / conservative 删除时调用）。"""
+        if not self._vector_store:
+            return
+        try:
+            chunks = await self._source_store.list_chunks(doc_id)
+            ids = [c.chunk_id for c in chunks]
+            if ids:
+                await self._vector_store.delete_chunks(ids)
+        except Exception as exc:
+            logger.warning("Zotero remove index failed for %s: %s", doc_id, exc)
+
+    async def _lightrag_cleanup(self, doc_id: str, collection: str) -> None:
+        """删除某文档在 LightRAG workspace 的贡献（conservative 硬删除时调用）。"""
+        if self._lightrag_registry is None:
+            return
+        try:
+            await self._lightrag_registry.delete_doc(collection, doc_id)
+        except Exception as exc:
+            logger.warning("Zotero LRAG cleanup failed for %s: %s", doc_id, exc)
+
+    # ── Zotero 同步公开门面 ──────────────────────────────────────
+
+    async def get_zotero_config(self) -> dict[str, Any]:
+        """返回 Zotero 同步配置 + 连接/数据目录/linked 探针状态（供设置与 sync 页）。"""
+        from core.adapters.zotero import local_api
+        from core.config import ZOTERO_STORAGE_LINKED
+
+        if self._config is None:
+            return {"enabled": False, "available": False}
+        cfg = self._config.get_zotero_sync_config()
+        out: dict[str, Any] = {
+            "enabled": cfg.enabled,
+            "zotero_data_dir": cfg.zotero_data_dir,
+            "api_port": cfg.api_port,
+            "storage_mode": cfg.storage_mode,
+            "linked_root": cfg.linked_root,
+            "sync_mode": cfg.sync_mode,
+            "auto_sync_enabled": cfg.auto_sync_enabled,
+            "auto_sync_interval_sec": cfg.auto_sync_interval_sec,
+            "connection": local_api.probe_connection(cfg.api_port),
+        }
+        if self._zotero_pipeline is not None:
+            out["availability"] = self._zotero_pipeline.is_available()
+        if cfg.storage_mode == ZOTERO_STORAGE_LINKED:
+            from core.adapters.zotero import paths as zpaths
+
+            out["linked_probe"] = zpaths.probe_linked_root(cfg.linked_root)
+        return out
+
+    async def sync_zotero_pull(self, incremental: bool = True) -> dict[str, Any]:
+        """执行一次 Zotero Pull；strict 模式变化后触发 Milvus 全量重建。"""
+        if self._zotero_pipeline is None:
+            return {"status": "error", "message": "Zotero 同步未启用或未装配"}
+        result = await self._zotero_pipeline.pull(incremental=incremental)
+        payload = result.to_dict()
+        if result.needs_milvus_rebuild:
+            try:
+                payload["milvus_rebuild"] = await self.rebuild_vector_store()
+            except Exception as exc:
+                logger.warning("Zotero strict rebuild failed: %s", exc)
+                payload["milvus_rebuild_error"] = str(exc)
+        self._last_zotero_sync = payload
+        return payload
+
+    async def get_zotero_sync_status(self) -> dict[str, Any]:
+        """返回上一次 Zotero Pull 的结果摘要（无则空）。"""
+        return dict(self._last_zotero_sync)
+
     async def _sync_milvus_collection_move(self, doc_id: str, collection: str) -> None:
         if not self._config or self._config.get_vector_db_config().backend != "milvus":
             return
@@ -1670,12 +1850,25 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             )
 
     def _unlink_managed_document(self, file_path: str) -> None:
+        """删除制品包：移除 library/<document_id>/ 整个目录（含 clean.md/pages.json/meta.json）。
+
+        安全边界：仅当原件路径落在 managed 根（library/）内才删除；删除其所在制品包目录，
+        而非仅删 original.pdf，避免残留派生制品。
+        """
         if self._managed_documents_dir is None:
             return
+        import shutil
+
+        managed_root = self._managed_documents_dir.resolve()
         try:
             path = Path(file_path).resolve()
-            path.relative_to(self._managed_documents_dir.resolve())
-            path.unlink(missing_ok=True)
+            path.relative_to(managed_root)
+            bundle_dir = path.parent
+            # 仅当 parent 是 managed 根下的子目录（制品包目录）时整体删除。
+            if bundle_dir != managed_root and bundle_dir.parent == managed_root:
+                shutil.rmtree(bundle_dir, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
         except (OSError, ValueError) as exc:
             logger.warning("Failed to remove managed document %s: %s", file_path, exc)
 

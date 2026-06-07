@@ -13,9 +13,16 @@ if TYPE_CHECKING:
     from core.domain.models import (
         Collection,
         DocumentChunk,
+        PageChunk,
         SourceDocument,
         SyncRecord,
         SyncTargetKind,
+        ZoteroAttachment,
+        ZoteroCollection,
+        ZoteroItem,
+        ZoteroLibrary,
+        ZoteroRelation,
+        ZoteroTag,
     )
 
 
@@ -166,6 +173,108 @@ class SourceDocumentStore(ABC):
     @abstractmethod
     async def mark_interrupted_build_jobs(self) -> int:
         """将所有 status=queued/running 的任务标记为 interrupted；返回受影响行数。"""
+        ...
+
+    # ── Zotero 逻辑镜像（单向 Pull）───────────────────────────────
+    #
+    # 这些方法持久化 Zotero 上游的只读镜像（含本地上传的合成 LOCAL 库）。
+    # 标识约定：Zotero key 仅在单个 library 内稳定，故所有方法都以 (library_id, key) 复合定位。
+
+    @abstractmethod
+    async def upsert_zotero_library(self, library: ZoteroLibrary) -> None:
+        """按 library_id 主键 upsert 一个库（含 LOCAL 合成库）。"""
+        ...
+
+    @abstractmethod
+    async def upsert_zotero_collection(self, collection: ZoteroCollection) -> None:
+        """按 (library_id, collection_key) upsert 一个 Zotero 集合节点（树状）。"""
+        ...
+
+    @abstractmethod
+    async def upsert_zotero_item(self, item: ZoteroItem) -> None:
+        """按 (library_id, item_key) upsert 一个条目（归一化字段 + raw json）。"""
+        ...
+
+    @abstractmethod
+    async def upsert_zotero_attachment(self, attachment: ZoteroAttachment) -> None:
+        """按 (library_id, attachment_key) upsert 一个附件。"""
+        ...
+
+    @abstractmethod
+    async def set_item_collections(
+        self, library_id: str, item_key: str, collection_keys: list[str]
+    ) -> None:
+        """整体替换某条目的集合归属（先删该 item 旧映射 → 再插入新集合 key 列表）。"""
+        ...
+
+    @abstractmethod
+    async def replace_item_tags(
+        self, library_id: str, item_key: str, tags: list[ZoteroTag]
+    ) -> None:
+        """整体替换某条目的标签集合（先删旧 → 再插入）。"""
+        ...
+
+    @abstractmethod
+    async def upsert_zotero_relation(self, relation: ZoteroRelation, library_id: str) -> None:
+        """upsert 一条条目间关系（复合键去重）。"""
+        ...
+
+    @abstractmethod
+    async def list_zotero_items(self, library_id: str | None = None) -> list[ZoteroItem]:
+        """列出条目，可按库过滤；按 (library_id, item_key) 升序。"""
+        ...
+
+    @abstractmethod
+    async def get_zotero_item(self, library_id: str, item_key: str) -> ZoteroItem | None:
+        """取一个条目；不存在返回 None。"""
+        ...
+
+    @abstractmethod
+    async def list_zotero_attachments(
+        self, library_id: str, parent_item_key: str | None = None
+    ) -> list[ZoteroAttachment]:
+        """列出附件，可按父条目过滤。"""
+        ...
+
+    @abstractmethod
+    async def list_item_tags(self, library_id: str, item_key: str) -> list[ZoteroTag]:
+        """列出某条目的标签。"""
+        ...
+
+    @abstractmethod
+    async def get_collection_descendants(
+        self, library_id: str, collection_key: str
+    ) -> list[str]:
+        """返回某集合及其所有后代集合的 collection_key（含自身）。
+
+        Zotero 集合是树状；作用域检索 collection scope 需要含后代（design §5）。
+        """
+        ...
+
+    @abstractmethod
+    async def get_items_in_collections(
+        self, library_id: str, collection_keys: list[str]
+    ) -> list[str]:
+        """返回属于给定集合（任一）的去重 item_key 列表。"""
+        ...
+
+    @abstractmethod
+    async def get_items_with_tag(self, library_id: str, tag: str) -> list[str]:
+        """返回带指定标签的 item_key 列表。"""
+        ...
+
+    # ── 页面级 provenance（clean.md 字符偏移）────────────────────
+
+    @abstractmethod
+    async def replace_page_chunks(
+        self, document_id: str, page_chunks: list[PageChunk]
+    ) -> None:
+        """整体替换某文档的页面偏移表（先删旧 → 再插入）。"""
+        ...
+
+    @abstractmethod
+    async def list_page_chunks(self, document_id: str) -> list[PageChunk]:
+        """列出某文档的页面偏移表，按 page 升序。"""
         ...
 
 

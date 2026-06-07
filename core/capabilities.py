@@ -74,6 +74,14 @@ class OptionalDependency:
 # 仅收录「用户可见运行时功能」的依赖；numpy/pytest/ruff/mypy 等开发工具不在面板内。
 OPTIONAL_DEPENDENCIES: tuple[OptionalDependency, ...] = (
     OptionalDependency(
+        key="pdf_extract",
+        import_name="pymupdf4llm",
+        dist_name="pymupdf4llm",
+        pip_spec="pymupdf4llm>=0.0.17,<0.1.0",
+        feature="pdf_extract",
+        stages=("ingest",),
+    ),
+    OptionalDependency(
         key="local_embedding",
         import_name="sentence_transformers",
         dist_name="sentence-transformers",
@@ -175,21 +183,26 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
     has_milvus = module_available("pymilvus")
     has_lightrag = module_available("lightrag")
     has_boto3 = module_available("boto3")
+    has_pdf = module_available("pymupdf4llm")
     has_api_key = bool(os.environ.get(ENV_EMBEDDING_API_KEY))
     dim = config.runtime_embedding_dimension
     embedding_runtime_ready = dim is not None and dim > 0
 
-    # ① 上传 / 分块：基础安装即用，OCR 仅配置文件级开关。
+    # ① 上传 / 分块：txt/md 基础安装即用；PDF 清洗需 pymupdf4llm（pinned）。
     ingest = {
         "id": "ingest",
-        "current": "sqlite",
-        "candidates": ["sqlite"],
-        "status": STATUS_READY,
+        "current": "pymupdf4llm",
+        "candidates": ["pymupdf4llm"],
+        "status": STATUS_READY if has_pdf else STATUS_DEGRADED,
         "switchable": False,
         "consequence": CONSEQUENCE_NONE,
-        "required_deps": [],
-        "configured": True,
-        "detail": {"ocr_enabled": source_cfg.ocr_enabled},
+        "required_deps": ["pdf_extract"],
+        "configured": has_pdf,
+        "detail": {
+            "ocr_enabled": source_cfg.ocr_enabled,
+            "pdf_converter": "pymupdf4llm",
+            "pdf_converter_ready": has_pdf,
+        },
     }
 
     # ② 向量化 Embedding：local 需 sentence-transformers；external 需 API Key。

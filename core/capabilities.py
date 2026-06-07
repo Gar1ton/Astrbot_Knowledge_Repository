@@ -275,7 +275,10 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         "consequence": CONSEQUENCE_REBUILD,
         "required_deps": ["lightrag"],
         "configured": graph_cfg.enabled,
-        "detail": {"query_mode": graph_cfg.query_mode},
+        "detail": {
+            "query_mode": graph_cfg.query_mode,
+            "llm_provider": graph_cfg.lightrag_llm_provider,
+        },
     }
 
     # ⑥ 问答模式：纯配置，无依赖，即时生效。

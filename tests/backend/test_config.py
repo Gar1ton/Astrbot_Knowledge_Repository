@@ -17,6 +17,7 @@ def test_defaults_when_empty() -> None:
     assert cfg.get_notion_sync_config().mcp_server_name == "notion"
     assert cfg.get_web_console_config().port == 6520
     assert cfg.get_graph_config().query_mode == "mix"
+    assert cfg.get_graph_config().lightrag_llm_provider == "main"
     assert cfg.get_vector_db_config().backend == "milvus"
     assert cfg.get_embedding_config().model == "intfloat/multilingual-e5-small"
     assert cfg.get_embedding_config().max_token_size == 512
@@ -71,6 +72,32 @@ def test_malformed_section_falls_back_to_defaults() -> None:
     # 子配置类型不符（非 dict）时应安全回退默认值
     cfg = Config({"graph": "not-a-dict"})
     assert cfg.get_graph_config().query_mode == "mix"
+
+def test_graph_lightrag_llm_provider_modes_and_legacy_endpoint() -> None:
+    explicit = Config(
+        {
+            "graph": {
+                "lightrag_llm_provider": "api",
+                "lightrag_llm_base_url": "https://llm.example/v1",
+                "lightrag_llm_model": "model-a",
+            }
+        }
+    ).get_graph_config()
+    assert explicit.lightrag_llm_provider == "api"
+
+    legacy = Config(
+        {
+            "graph": {
+                "lightrag_llm_base_url": "http://localhost:1234/v1",
+                "lightrag_llm_model": "phi4",
+            }
+        }
+    ).get_graph_config()
+    assert legacy.lightrag_llm_provider == "local"
+
+    invalid = Config({"graph": {"lightrag_llm_provider": "bad"}}).get_graph_config()
+    assert invalid.lightrag_llm_provider == "main"
+
 
 
 def test_public_config_masks_secrets() -> None:
@@ -133,6 +160,12 @@ def test_embedding_diagnostics_report_unsupported_or_unconfigured_provider(
     assert (
         "KR_EMBEDDING_API_KEY is required when embedding.provider=external."
         in Config({"embedding": {"provider": "external"}}).get_diagnostics()
+    )
+    assert any(
+        "graph.lightrag_llm_base_url and graph.lightrag_llm_model are required" in item
+        for item in Config(
+            {"graph": {"enabled": True, "lightrag_llm_provider": "api"}}
+        ).get_diagnostics()
     )
 
 

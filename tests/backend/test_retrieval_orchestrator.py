@@ -192,7 +192,8 @@ async def test_retrieval_orchestrator_lexical_fallback_supports_chinese_query(sq
 
 
 @pytest.mark.asyncio
-async def test_lightrag_context_rejects_pending_collection(tmp_path):
+async def test_lightrag_context_queries_workspace_regardless_of_doc_status(tmp_path):
+    """构建完成（含部分失败）后查询不应因单文档状态而阻断。"""
     from core.index_compatibility import IndexCompatibilityStore
     from core.repository.source_store.memory import InMemorySourceDocumentStore
 
@@ -212,7 +213,12 @@ async def test_lightrag_context_rejects_pending_collection(tmp_path):
     await store.add_document(
         SourceDocument("d1", "Doc", "/d1.pdf", "application/pdf", 1, "h", "papers")
     )
-    await store.set_lightrag_index_status("d1", "papers", "pending")
+    await store.add_document(
+        SourceDocument("d2", "Doc2", "/d2.pdf", "application/pdf", 1, "h2", "papers")
+    )
+    # d1 indexed, d2 failed — 模拟 partial_failure 构建场景
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    await store.set_lightrag_index_status("d2", "papers", "error", "LLM timeout")
     compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
     compatibility.mark_lightrag_compatible("papers", "fp")
     registry = Registry()
@@ -225,10 +231,40 @@ async def test_lightrag_context_rejects_pending_collection(tmp_path):
         embedding_fingerprint="fp",
     )
 
-    with pytest.raises(RuntimeError, match="requires indexing"):
-        await orchestrator.retrieve_lightrag_context("papers", "q")
-    assert registry.calls == 0
-
-    await store.set_lightrag_index_status("d1", "papers", "indexed")
-    assert await orchestrator.retrieve_lightrag_context("papers", "q") == "graph context"
+    # 即使 d2 失败，查询仍应正常到达 LightRAG
+    result = await orchestrator.retrieve_lightrag_context("papers", "q")
+    assert result == "graph context"
     assert registry.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_lightrag_context_rejects_missing_workspace(tmp_path):
+    """workspace 不存在时应拒绝查询。"""
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.source_store.memory import InMemorySourceDocumentStore
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return False
+
+        async def query(self, collection: str, query: str, **kwargs) -> dict:
+            return {"context": "should not reach"}
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(
+        SourceDocument("d1", "Doc", "/d1.pdf", "application/pdf", 1, "h", "papers")
+    )
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
+    orchestrator = RetrievalOrchestrator(
+        source_store=store,
+        kb_reader=MockKnowledgeBaseReader(),
+        config=Config({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    with pytest.raises(RuntimeError, match="workspace has not been built"):
+        await orchestrator.retrieve_lightrag_context("papers", "q")

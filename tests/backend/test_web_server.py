@@ -991,7 +991,7 @@ async def test_ask_progress_route_found(tmp_path: Path) -> None:
 
 
 async def test_graph_data_requires_lightrag(tmp_path: Path) -> None:
-    """GET /api/graph 在未配置 LightRAG 时返回保留能力提示。"""
+    """GET /api/graph 在未配置 LightRAG 时返回运行态未就绪状态。"""
     api = KnowledgeRepositoryApi(
         source_store=InMemorySourceDocumentStore(),
         kb_reader=InMemoryKnowledgeBaseReader({}),
@@ -1006,9 +1006,12 @@ async def test_graph_data_requires_lightrag(tmp_path: Path) -> None:
     await client.start_server()
     try:
         resp = await client.get("/api/graph")
-        assert resp.status == 501
+        assert resp.status == 200
         body = await resp.json()
-        assert body["reserved"] is True
+        assert body["status"] == "not_ready"
+        assert body["ready"] is False
+        assert body["build_available"] is False
+        assert "LightRAG Core" in body["reason"]
     finally:
         await client.close()
 

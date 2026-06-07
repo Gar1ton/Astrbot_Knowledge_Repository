@@ -44,6 +44,173 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.21.0 LRAG recall bug fix, build persistence & floating widget (in progress)
+
+### User constraints / 约束
+
+- 修复 LRAG 召回后提示"未召回任何内容/构建失败"的严重 bug，保证构建成本不被浪费。
+- LRAG 构建切出界面不能中断，需在右下角常驻浮窗，支持实时暂停与继续。
+- LRAG 构建需要断点重连机制，重启后自动识别中断任务并从断点续建。
+- 新建专用 graph_build_jobs 持久化表，保障计算资源不被重复消耗。
+- 不手动修改 `pages/` 构建产物；CHANGELOG 使用中文。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 修复 LRAG 召回 bug**：删除 `retrieve_lightrag_context()` 中逐文档状态循环（`retrieval_orchestrator.py:165–175`）。技术理由：LightRAG 是全图查询，不依赖单文档状态；现有 `has_workspace()` 与 `is_lightrag_compatible()` 已足够把关；部分失败后仍可查询已构建内容。补充 partial_failure 后仍可查询的测试。
+- [x] **Phase 2 — 构建浮窗 + 暂停/继续**：后端 `BuildJob` 增加 `paused` 字段与 `asyncio.Event` 暂停信号；新增 `GET /api/graph/build/active`、`POST /api/graph/build/{job_id}/pause/resume` 端点；前端新建 `BuildWidget.tsx` 右下角浮窗，挂载在 `(console)/layout.tsx`，全局轮询活跃任务。技术理由：构建 asyncio task 本身不会因导航中断，只需前端全局感知任务状态。
+- [x] **Phase 3 — 构建任务持久化 + 断点恢复**：新增 migration `008_graph_build_jobs.sql`；source store 增加 `upsert_build_job / list_build_jobs / mark_interrupted_build_jobs`；启动时自动将 `status=running` 的历史任务标记为 `interrupted` 并日志提示；Graph 页 readiness panel 展示"上次构建被中断"横幅。技术理由：`lightrag_index_status` 表本身即天然断点，新任务只重建 pending/error 文档。
+
+### Verification
+
+- `python -m pytest tests/backend/test_lightrag_core.py tests/backend/test_api.py tests/backend/test_web_server.py tests/backend/test_retrieval_orchestrator.py -q` → 89 passed
+- `python -m pytest -q` → 216 passed
+- `python -m ruff check core/ web/ && python -m mypy` → All checks passed
+- `cd web/frontend && npx tsc --noEmit` → passed
+- `npx -y node@20 node_modules/next/dist/bin/next build` → 11 static pages generated
+- `python tools/sync_frontend.py` → 150 文件同步至 pages/
+
+## v0.20.8 LightRAG runtime mode parity and readiness UX (completed)
+
+### User constraints / 约束
+
+- `tests/mocks/run_dev_realtime.py` 与本地 `config.py` 需要支持显式切换本地或 API 大模型。
+- 检查正式 AstrBot 插件中的 LightRAG 能力是否与测试脚本一样跑通，移除误导性的“暂未上线/即将上线”状态。
+- 遵循 `AGENTS.md` → `CLAUDE.md`：Plan-First、先更新 TODO、测试通过后再标完成、收尾追加 CHANGELOG。
+- 不手动修改 `pages/` 构建产物；不覆盖已有用户改动。
+
+### Technical implementation path
+
+- [x] **Phase 1 — Dev realtime LLM mode selector**：为本地 dev 脚本与配置模板增加主 LLM、LightRAG 专用 LLM 的 `local/api/main` 显式选择，并保持旧字段兼容。技术理由：避免通过“base_url 是否为空”隐式推断运行时，便于在 LM Studio/Ollama 与云端 API 间切换。
+- [x] **Phase 2 — Formal config parity**：在正式 typed config 与 `_conf_schema.json` 中增加 LightRAG LLM runtime mode 字段，并让耗时估算按 mode 判断 local/remote。技术理由：正式 AstrBot 配置应与测试脚本具备同等可见性，避免本地 endpoint 与远程 API 混淆。
+- [x] **Phase 3 — Graph readiness UX**：将未启用/未安装/未构建的 Graph API 响应改为结构化 not-ready 状态，前端 Graph 页展示真实原因与构建入口，不再显示“即将上线”。技术理由：LightRAG Core 已实现，reserved 语义会误导用户判断功能未发布。
+- [x] **Phase 4 — Verification + release notes**：补充/调整相关测试，运行后端与前端类型验证，测试通过后更新 TODO 与 CHANGELOG。技术理由：`[x]` 只代表代码落地且相关验证通过。
+
+### Verification
+
+- `python -m pytest tests/backend/test_config.py tests/backend/test_capabilities.py tests/backend/test_web_server.py tests/backend/test_api.py tests/backend/test_lifecycle_and_cli.py -q` → passed, 111 passed
+- `python -m pytest -q` → passed, 215 passed
+- `python -m ruff check core/config.py core/plugin_initializer.py core/api.py core/capabilities.py web/server.py tests/backend/test_config.py tests/backend/test_web_server.py tests/mocks/run_dev_realtime.py` → All checks passed
+- `python -m mypy` → Success: no issues found
+- `npx tsc --noEmit` → passed
+- `npx -y node@20 node_modules/next/dist/bin/next build` → passed, 13 static pages generated
+- `python tools/sync_frontend.py` → passed, 150 files synced to `pages/`
+
+
+## v0.18.1 LightRAG reset workspace memory cache leak fix (completed)
+
+### User constraints / 约束
+
+- 修复在 run_dev_realtime.py 运行时重置工作区后 LightRAG 指标与实体提取因内存缓存残留而静默跳过的问题。
+
+### Technical implementation path
+
+- [x] **Phase 1 — Clear memory caches in reset_workspace**：在 reset_workspace 中，在销毁 workspace 磁盘目录前，对 rag 所有的 JsonKVStorage 与 JsonDocStatusStorage 属性执行 drop()。技术理由：由于第三方库 LightRAG 的共享内存机制，仅调用 finalize 和删除物理文件并不能清空在内存中的数据缓存，重新实例化时会读取脏缓存而误认为文档已被处理。
+- [x] **Phase 2 — Verification**：运行 python -m pytest 与 mocks 测试，确认无异常。
+
+### Verification
+
+- `python -m pytest` → passed
+
+## v0.20.7 Flow node no internal scroll follow-up (completed)
+
+### User constraints / 约束
+
+- Flow 每个节点块内部不要出现滚动条。
+- 滚动/移动应跟随整个画面，不与节点内部滚动冲突。
+- 移除内部滚动后重新对齐节点高度。
+- 不手动修改 `pages/` 构建产物。
+
+### Technical implementation path
+
+- [x] **Phase 1 — Remove node internal scroll**：移除 `.flow-node-body` 与 `.flow-quick-config` 的内部滚动限制。技术理由：避免节点内部滚动与画布整体拖拽/移动互相抢交互。
+- [x] **Phase 2 — Re-align rows by fixed taller cells**：提高 Flow 网格统一行高，让节点撑满行高承载快速配置内容。技术理由：去掉内部滚动后仍保持每行节点高度一致、连线端点稳定。
+- [x] **Phase 3 — Edge label readability**：放大 Flow 连线标签字号与留白，保持基于连线中点定位。技术理由：提高“默认 / 高精度 / 备份旁路”提示可读性，同时不引入额外布局占位。
+- [x] **Phase 4 — Verification + release notes**：运行前端类型检查并追加 CHANGELOG。技术理由：确认样式调整不破坏前端类型契约。
+
+### Verification
+
+- `npx tsc --noEmit` → passed
+
+## v0.20.6 Flow drag and layout follow-up (completed)
+
+### User constraints / 约束
+
+- 优先修复背景长按拖动时文字被全选、导致画布卡住不能拖的问题。
+- 每一行节点高度都对齐；横屏适配下允许拓扑整体更宽，减少文字挤压。
+- 移除 Flow 快速配置里的 `max_token_size` 手动调整，最大 Token 应自动适配。
+- 不手动修改 `pages/` 构建产物。
+
+### Technical implementation path
+
+- [x] **Phase 1 — Drag selection guard**：背景开始拖拽时阻止浏览器文本选择，并在 Flow 画布/节点主体上禁用选择；输入框和 select 保持可交互。技术理由：拖拽平移应独占背景 pointer 行为，不能被文本选择打断。
+- [x] **Phase 2 — Wider aligned rows**：扩大 Flow 网格列宽并用统一行高/节点撑满对齐每一行，超出内容在节点内部滚动。技术理由：横屏下用宽度换可读性，同时稳定连线中心点。
+- [x] **Phase 3 — Remove manual max token quick field**：从 Flow 快速配置删除 `embedding.max_token_size` 字段及相关 Flow 文案/mock restart 标记。技术理由：该值应由系统自动适配，不应在快速配置中误导用户手动调参。
+- [x] **Phase 4 — Verification + release notes**：运行前端类型检查并追加 CHANGELOG。技术理由：确认交互与类型契约不被破坏。
+
+### Verification
+
+- `npx tsc --noEmit` → passed
+
+## v0.20.5 Flow quick config and branch alignment (completed)
+
+### User constraints / 约束
+
+- 保持当前 Langflow 风格拓扑设计，不改数据流结构和已有切换逻辑。
+- 在 Flow 节点内加入高频、非机密、API 可写的快速配置项。
+- 机密与结构性配置只提示环境变量或完整设置页，不在 Flow 中保存。
+- 不新增后端 API，不改 `PipelineStage` / `CapabilitiesData` / `DependencyStatus` 契约。
+- 不手动修改 `pages/` 构建产物。
+
+### Technical implementation path
+
+- [x] **Phase 1 — Effective config + quick-config model**：`/flow` 同时读取 `getCapabilities()` 与 `getEffectiveConfig()`，将有效配置快照传入 Flow 组件，并新增 Flow 内部快速配置字段模型。技术理由：复用现有配置读取/写入能力，不扩展后端接口。
+- [x] **Phase 2 — Node quick-config UI + save flow**：在节点卡片内渲染 embedding/vector_store/graph/sync/ingest 的紧凑配置面板，逐节点保存脏字段并按返回值展示 restart/rebuild banner。技术理由：高频配置就地完成，同时保持保存边界清晰。
+- [x] **Phase 3 — Parallel branch visual alignment**：统一 `retrieval` 与 `graph` 并行节点高度基准，超出内容在节点 body 内滚动并重新测量连线端点。技术理由：减少分支高度差导致的视觉跳动和连接线不稳。
+- [x] **Phase 4 — Verification + release notes**：运行前端类型检查并更新 CHANGELOG。技术理由：确认 Flow 内部类型和 UI 状态不破坏现有前端契约。
+
+### Verification
+
+- `npx tsc --noEmit` → passed
+
+## v0.20.4 Flow page first paint stabilization (completed)
+
+### User constraints / 约束
+
+- 修复进入数据流页面瞬间画面错位/闪乱的问题。
+- 修复拖拽、缩放、fit 等操作后文字和节点发糊的问题。
+- 只修画布渲染稳定性，不改 Flow 功能与 API 契约。
+
+### Technical implementation path
+
+- [x] **Phase 1 — First paint + transform stabilization**：在拓扑图完成节点测量与首次 fit 前隐藏 world 层；画布缩放改为 `zoom`，平移坐标归整到整数像素，进入页默认视角优先保持 100% 清晰。技术理由：避免默认 `scale=1,x=0,y=0` 被浏览器先绘制一帧，同时减少 transform 缩放文字造成的发糊。
+- [x] **Phase 2 — Verification + release notes**：运行前端类型检查并更新 CHANGELOG。技术理由：确保首帧修复不破坏类型契约，同时避免再次污染 `pages/` 禁改区。
+
+### Verification
+
+- `npx tsc --noEmit` → passed
+
+## v0.20.3 Flow page Langflow topology redesign (completed)
+
+### User constraints / 约束
+
+- 根据 `docs/Flow Page Redesign/` 的参考文件与重构 prompt 重构当前 Flow 页面。
+- 尽可能遵循参考设计：横向固定分支拓扑、节点化参数区、内联依赖管理、画布平移缩放。
+- 参数功能与网络契约不变，不改 `lib/api.ts` 数据类型与后端 API。
+- 不手改 `pages/` 构建产物，不触碰用户已有 docs 变更。
+
+### Technical implementation path
+
+- [x] **Phase 1 — Flow topology components**：抽出 `components/flow/` 节点、连线、分段控件、依赖行与图标组件，并按真实节点测量绘制拓扑。技术理由：将复杂交互从页面状态机中拆出，避免单文件继续膨胀。
+- [x] **Phase 2 — Page integration**：重写 `/flow` 呈现层，保留 `getCapabilities`、`updateConfigValue`、`installDependency`、`recheckDependencies` 与现有状态机。技术理由：只换 UI，不改变配置写入与能力检测契约。
+- [x] **Phase 3 — Tokens and i18n**：补齐 Flow 专用 token、动画与中英文展示文案。技术理由：参考设计要求中性 token 驱动，并保持双语控制台一致性。
+- [x] **Phase 4 — Verification + release notes**：运行前端类型检查与构建，测试通过后更新 TODO 与 CHANGELOG。技术理由：`[x]` 必须代表代码落地且相关验证通过。
+
+### Verification
+
+- `npx tsc --noEmit` → passed
+- `npx -y node@20 node_modules/next/dist/bin/next build` → passed，13 static pages generated
+- `python -m pytest tests/backend/test_api.py tests/backend/test_web_server.py -q` → 73 passed, 274 warnings
+
 ## v0.20.2 LightRAG local runtime observability (completed)
 
 ### User constraints / 约束

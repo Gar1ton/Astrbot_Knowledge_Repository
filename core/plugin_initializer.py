@@ -123,6 +123,13 @@ class PluginInitializer:
         await run_migrations(db)
 
         self.source_store = SQLiteSourceDocumentStore(db)
+        interrupted = await self.source_store.mark_interrupted_build_jobs()
+        if interrupted > 0:
+            logger.warning(
+                "%d 个图谱构建任务因进程重启被中断。"
+                "重新发起构建将自动从断点续建（仅处理 pending/error 文档）。",
+                interrupted,
+            )
         existing_collections = {
             collection.name for collection in await self.source_store.list_collections()
         }
@@ -311,29 +318,42 @@ class PluginInitializer:
             else:
                 from core.lightrag_core import LightRAGCoreRegistry
 
-                # 图谱构建专用 LLM 选择：
-                # 若配置了 lightrag_llm_base_url + lightrag_llm_model，则使用本地 LM Studio，
-                # 与答案生成所用的主 LLM（llm_adapter / AstrBot context）完全独立。
-                if graph_cfg.lightrag_llm_base_url and graph_cfg.lightrag_llm_model:
-                    import os
+                # 图谱构建专用 LLM 选择：main 复用 AstrBot 主 LLM；local/api 使用
+                # OpenAI-compatible endpoint，与答案生成 LLM 完全独立。
+                lightrag_llm_adapter = llm_adapter
+                if graph_cfg.lightrag_llm_provider in {"local", "api"}:
+                    if graph_cfg.lightrag_llm_base_url and graph_cfg.lightrag_llm_model:
+                        import os
 
-                    from core.adapters.llm import LMStudioLLMAdapter
-                    from core.config import ENV_LIGHTRAG_LLM_API_KEY
-                    lightrag_llm_adapter = LMStudioLLMAdapter(
-                        base_url=graph_cfg.lightrag_llm_base_url,
-                        model=graph_cfg.lightrag_llm_model,
-                        api_key=os.environ.get(ENV_LIGHTRAG_LLM_API_KEY, ""),
-                        timeout_seconds=graph_cfg.lightrag_llm_timeout_seconds,
-                        max_retries=graph_cfg.lightrag_llm_max_retries,
-                        retry_backoff_seconds=graph_cfg.lightrag_llm_retry_backoff_seconds,
-                    )
-                    logger.info(
-                        "LightRAG 图谱构建将使用本地 LM Studio：%s  model=%s",
-                        graph_cfg.lightrag_llm_base_url,
-                        graph_cfg.lightrag_llm_model,
-                    )
+                        from core.adapters.llm import LMStudioLLMAdapter
+                        from core.config import ENV_LIGHTRAG_LLM_API_KEY
+
+                        lightrag_llm_adapter = LMStudioLLMAdapter(
+                            base_url=graph_cfg.lightrag_llm_base_url,
+                            model=graph_cfg.lightrag_llm_model,
+                            api_key=os.environ.get(ENV_LIGHTRAG_LLM_API_KEY, ""),
+                            timeout_seconds=graph_cfg.lightrag_llm_timeout_seconds,
+                            max_retries=graph_cfg.lightrag_llm_max_retries,
+                            retry_backoff_seconds=graph_cfg.lightrag_llm_retry_backoff_seconds,
+                        )
+                        logger.info(
+                            "LightRAG 图谱构建将使用 %s OpenAI-compatible LLM：%s  model=%s",
+                            graph_cfg.lightrag_llm_provider,
+                            graph_cfg.lightrag_llm_base_url,
+                            graph_cfg.lightrag_llm_model,
+                        )
+                    else:
+                        logger.warning(
+                            "graph.lightrag_llm_provider=%s 但 endpoint/model 未完整配置，"
+                            "LightRAG 图谱构建回退使用主 LLM。",
+                            graph_cfg.lightrag_llm_provider,
+                        )
+                        self._config.add_diagnostic(
+                            "LightRAG LLM provider is set but endpoint/model is incomplete; "
+                            "falling back to main LLM."
+                        )
                 else:
-                    lightrag_llm_adapter = llm_adapter
+                    logger.info("LightRAG 图谱构建将复用 AstrBot 主 LLM。")
 
                 self.lightrag_registry = LightRAGCoreRegistry(
                     config=graph_cfg,

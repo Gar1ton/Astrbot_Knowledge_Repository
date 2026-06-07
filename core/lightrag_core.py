@@ -58,6 +58,7 @@ class BuildJob:
     started_at: float = field(default_factory=time.monotonic)
     finished_at: float | None = None
     recent_error: str = ""
+    paused: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         elapsed = (self.finished_at or time.monotonic()) - self.started_at
@@ -70,6 +71,7 @@ class BuildJob:
             "engine": self.engine,
             "status": self.status,
             "stage": self.stage,
+            "paused": self.paused,
             "processed_docs": self.processed_docs,
             "failed_docs": self.failed_docs,
             "total_docs": self.total_docs,
@@ -228,6 +230,24 @@ class LightRAGCoreRegistry:
         """Delete one derived workspace after an explicit rebuild/delete action."""
         rag = self._instances.pop(collection, None)
         if rag is not None:
+            # Clear shared in-memory data for all JsonKVStorage & JsonDocStatusStorage instances
+            for attr in [
+                "text_chunks",
+                "full_docs",
+                "full_entities",
+                "full_relations",
+                "entity_chunks",
+                "relation_chunks",
+                "doc_status",
+            ]:
+                storage = getattr(rag, attr, None)
+                if storage is not None and hasattr(storage, "drop"):
+                    try:
+                        await storage.drop()
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to drop storage %s during workspace reset: %s", attr, exc
+                        )
             _terminal(f"finalize_storages collection={collection!r} before reset")
             await rag.finalize_storages()
         safe = self._workspace_map.get(collection)

@@ -6,8 +6,8 @@ import { Btn } from "@/components/ui/Btn";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
-  GraphData, GraphNode, GraphEdge, ApiError, GraphBuildJob,
-  getGraph, buildGraph, estimateGraphBuild, getGraphBuildJob, isReserved, listCollections,
+  GraphData, GraphNode, GraphEdge, ApiError, GraphBuildJob, GraphNotReady, BuildJobRecord,
+  getGraph, buildGraph, estimateGraphBuild, getGraphBuildJob, isReserved, isGraphNotReady, listCollections, getBuildJobHistory,
 } from "@/lib/api";
 import { Select } from "@/components/ui/Select";
 
@@ -473,22 +473,53 @@ function BuildEstimateModal({ estimate, onConfirm, onCancel }: BuildEstimateModa
   );
 }
 
-// ─── 预留横幅 ─────────────────────────────────────────────────
+// ─── 未就绪状态 ───────────────────────────────────────────────
 
-function ReservedBanner({ availableIn }: { availableIn: string }) {
+function GraphReadinessPanel({
+  state,
+  onBuild,
+  building,
+  interruptedJob,
+}: {
+  state: GraphNotReady;
+  onBuild: () => void;
+  building: boolean;
+  interruptedJob: BuildJobRecord | null;
+}) {
+  const reason = state.reason || state.message || "LightRAG 图谱尚未就绪。";
   return (
-    <div
-      style={{
-        background: "var(--warn-soft)",
-        border: "1px solid var(--warn)",
-        borderRadius: 10,
-        padding: "10px 14px",
-        fontSize: 12,
-        color: "var(--warn)",
-        fontWeight: 600,
-      }}
-    >
-      ⏳ 即将上线（{availableIn}）
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 14, textAlign: "center" }}>
+      <div style={{ width: 56, height: 56, borderRadius: "50%", background: "var(--warn-soft)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--warn)", fontWeight: 800 }}>
+        LR
+      </div>
+      <div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: "var(--heading)", marginBottom: 6 }}>LightRAG 图谱未就绪</div>
+        <div style={{ fontSize: 13, color: "var(--fg-muted)", lineHeight: 1.6, maxWidth: 420 }}>
+          当前集合：<strong style={{ color: "var(--fg)" }}>{state.collection || "（未选择）"}</strong><br />
+          {reason}
+        </div>
+      </div>
+      {interruptedJob && (
+        <div style={{
+          padding: "10px 16px",
+          borderRadius: 10,
+          background: "color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent)",
+          border: "1px solid color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent)",
+          fontSize: 12, color: "var(--fg-muted)", maxWidth: 360, lineHeight: 1.6,
+        }}>
+          ⚠️ 上次构建因进程重启被中断（已处理 {interruptedJob.processed_docs}/{interruptedJob.total_docs} 篇）。<br />
+          重新发起构建将自动从断点续建，仅处理未完成文档。
+        </div>
+      )}
+      {state.build_available ? (
+        <Btn onClick={onBuild} loading={building}>
+          {interruptedJob ? "续建知识图谱" : "预估并构建知识图谱"}
+        </Btn>
+      ) : (
+        <div style={{ fontSize: 12, color: "var(--warn)", lineHeight: 1.6, maxWidth: 420 }}>
+          请先在数据流或设置中启用 LightRAG，安装可选依赖并重启插件；集合为空时请先上传文档。
+        </div>
+      )}
     </div>
   );
 }
@@ -505,12 +536,13 @@ export default function GraphPage() {
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
   const [buildJob, setBuildJob] = useState<GraphBuildJob | null>(null);
-  const [graphReserved, setGraphReserved] = useState<string | null>(null);
+  const [graphNotReady, setGraphNotReady] = useState<GraphNotReady | null>(null);
   const [showEstimateModal, setShowEstimateModal] = useState(false);
   const [pendingEstimate, setPendingEstimate] = useState<import("@/lib/api").GraphBuildEstimate | null>(null);
   const [collections, setCollections] = useState<string[]>([]);
   const [collection, setCollection] = useState("");
   const [entitySearch, setEntitySearch] = useState("");
+  const [interruptedJob, setInterruptedJob] = useState<BuildJobRecord | null>(null);
 
   const matchingNodes = React.useMemo(() => {
     if (!graphData || !entitySearch.trim()) return [];
@@ -562,14 +594,34 @@ export default function GraphPage() {
   async function loadGraph(selectedCollection: string = collection) {
     setLoading(true);
     try {
-      const res = await getGraph(selectedCollection || undefined);
+      const [res, history] = await Promise.all([
+        getGraph(selectedCollection || undefined),
+        getBuildJobHistory(selectedCollection || undefined).catch(() => [] as BuildJobRecord[]),
+      ]);
+      const lastInterrupted = history.find(j => j.status === "interrupted") ?? null;
+      setInterruptedJob(lastInterrupted);
       if (isReserved(res)) {
-        setGraphReserved(res.available_in);
+        setGraphData(null);
+        setGraphNotReady({
+          status: "not_ready",
+          ready: false,
+          collection: selectedCollection || collection || undefined,
+          engine: "lightrag_core",
+          reason: `旧服务端返回 reserved：${res.available_in}`,
+          build_available: false,
+        });
+      } else if (isGraphNotReady(res)) {
+        setGraphData(null);
+        setGraphNotReady(res);
       } else {
         setGraphData(res);
+        setGraphNotReady(null);
       }
+      setSelectedNode(null);
+      setSelectedEdge(null);
     } catch (err) {
       setGraphData(null);
+      setGraphNotReady(null);
       toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
     } finally {
       setLoading(false);
@@ -668,6 +720,7 @@ export default function GraphPage() {
             variant={graphData ? "outline" : "primary"}
             size="sm"
             loading={building}
+            disabled={Boolean(graphNotReady && !graphNotReady.build_available)}
             onClick={handleBuild}
           >
             {graphData ? "重建图谱" : t("graph_build")}
@@ -678,10 +731,8 @@ export default function GraphPage() {
         <div style={{ flex: 1, padding: "12px 16px", overflow: "hidden" }}>
           {loading ? (
             <div style={{ padding: 40, textAlign: "center", color: "var(--fg-muted)", fontSize: 13 }}>{t("loading")}</div>
-          ) : graphReserved ? (
-            <div style={{ padding: 40 }}>
-              <ReservedBanner availableIn={graphReserved} />
-            </div>
+          ) : graphNotReady ? (
+            <GraphReadinessPanel state={graphNotReady} onBuild={handleBuild} building={building} interruptedJob={interruptedJob} />
           ) : graphData && graphData.nodes.length > 0 ? (
             <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
               {selectedNode ? (

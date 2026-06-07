@@ -380,6 +380,80 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 "updated_at": row[3],
             }
 
+    # ── 图谱构建任务持久化 ─────────────────────────────────────────
+
+    async def upsert_build_job(self, job: dict) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO graph_build_jobs
+                (job_id, collection, status, stage,
+                 processed_docs, failed_docs, total_docs,
+                 processed_chunks, failed_chunks, total_chunks,
+                 recent_error, started_at, finished_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                status = excluded.status, stage = excluded.stage,
+                processed_docs = excluded.processed_docs,
+                failed_docs = excluded.failed_docs,
+                total_docs = excluded.total_docs,
+                processed_chunks = excluded.processed_chunks,
+                failed_chunks = excluded.failed_chunks,
+                total_chunks = excluded.total_chunks,
+                recent_error = excluded.recent_error,
+                finished_at = excluded.finished_at
+            """,
+            (
+                job["job_id"], job["collection"], job["status"], job.get("stage", ""),
+                job.get("processed_docs", 0), job.get("failed_docs", 0),
+                job.get("total_docs", 0),
+                job.get("processed_chunks", 0), job.get("failed_chunks", 0),
+                job.get("total_chunks", 0),
+                job.get("recent_error", ""),
+                job.get("started_at", ""), job.get("finished_at"),
+            ),
+        )
+        await self._db.commit()
+
+    async def list_build_jobs(
+        self, collection: str | None = None, limit: int = 20
+    ) -> list[dict]:
+        if collection is not None:
+            async with self._db.execute(
+                "SELECT job_id, collection, status, stage, processed_docs, failed_docs, "
+                "total_docs, processed_chunks, failed_chunks, total_chunks, recent_error, "
+                "started_at, finished_at, created_at "
+                "FROM graph_build_jobs WHERE collection = ? ORDER BY created_at DESC LIMIT ?",
+                (collection, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        else:
+            async with self._db.execute(
+                "SELECT job_id, collection, status, stage, processed_docs, failed_docs, "
+                "total_docs, processed_chunks, failed_chunks, total_chunks, recent_error, "
+                "started_at, finished_at, created_at "
+                "FROM graph_build_jobs ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [
+            {
+                "job_id": r[0], "collection": r[1], "status": r[2], "stage": r[3],
+                "processed_docs": r[4], "failed_docs": r[5], "total_docs": r[6],
+                "processed_chunks": r[7], "failed_chunks": r[8], "total_chunks": r[9],
+                "recent_error": r[10], "started_at": r[11],
+                "finished_at": r[12], "created_at": r[13],
+            }
+            for r in rows
+        ]
+
+    async def mark_interrupted_build_jobs(self) -> int:
+        cursor = await self._db.execute(
+            "UPDATE graph_build_jobs SET status = 'interrupted', stage = 'interrupted' "
+            "WHERE status IN ('queued', 'running')"
+        )
+        await self._db.commit()
+        return cursor.rowcount
+
     # ── 同步状态 ──────────────────────────────────────────────────
 
     async def get_sync_record(self, doc_id: str, target: SyncTargetKind) -> SyncRecord | None:

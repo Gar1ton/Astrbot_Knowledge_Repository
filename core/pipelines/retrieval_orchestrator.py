@@ -162,17 +162,6 @@ class RetrievalOrchestrator:
             raise RuntimeError("LightRAG index is incompatible with the active embedding")
         if not self._lightrag_registry.has_workspace(collection):
             raise RuntimeError("LightRAG workspace has not been built")
-        docs = await self._source_store.list_documents(collection=collection)
-        if not docs:
-            raise RuntimeError("The collection has no documents")
-        for doc in docs:
-            status = await self._source_store.get_lightrag_index_status(doc.doc_id)
-            if (
-                status is None
-                or status.get("collection") != collection
-                or status.get("status") != "indexed"
-            ):
-                raise RuntimeError("LightRAG collection requires indexing")
         result = await self._lightrag_registry.query(
             collection,
             query,

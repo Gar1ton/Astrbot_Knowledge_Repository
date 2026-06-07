@@ -149,5 +149,24 @@ class SourceDocumentStore(ABC):
         """列出同步记录，可按目标进行过滤；按 synced_at 升序。"""
         ...
 
+    # ── 图谱构建任务持久化 ─────────────────────────────────────────
+
+    @abstractmethod
+    async def upsert_build_job(self, job: dict) -> None:
+        """持久化或更新构建任务快照（以 job_id 为主键 upsert）。"""
+        ...
+
+    @abstractmethod
+    async def list_build_jobs(
+        self, collection: str | None = None, limit: int = 20
+    ) -> list[dict]:
+        """列出构建任务历史；可按 collection 过滤，按创建时间倒序，最多返回 limit 条。"""
+        ...
+
+    @abstractmethod
+    async def mark_interrupted_build_jobs(self) -> int:
+        """将所有 status=queued/running 的任务标记为 interrupted；返回受影响行数。"""
+        ...
+
 
 __all__ = ["SourceDocumentStore"]

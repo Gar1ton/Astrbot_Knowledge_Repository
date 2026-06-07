@@ -93,6 +93,18 @@ export interface GraphData {
   edges: GraphEdge[];
 }
 
+export interface GraphNotReady {
+  status: "not_ready";
+  ready: false;
+  collection?: string;
+  engine?: string;
+  reason?: string;
+  message?: string;
+  build_available: boolean;
+}
+
+export type GraphResponse = GraphData | GraphNotReady;
+
 export interface GraphQueryResult {
   status: string;
   query: string;
@@ -128,6 +140,7 @@ export interface GraphBuildJob {
   engine: "lightrag_core";
   status: string;
   stage?: string;
+  paused?: boolean;
   processed_docs?: number;
   failed_docs?: number;
   total_docs?: number;
@@ -237,6 +250,15 @@ export function isReserved(x: unknown): x is ReservedResult {
     x !== null &&
     "reserved" in x &&
     (x as ReservedResult).reserved === true
+  );
+}
+
+export function isGraphNotReady(x: unknown): x is GraphNotReady {
+  return (
+    typeof x === "object" &&
+    x !== null &&
+    (x as { status?: unknown }).status === "not_ready" &&
+    (x as { ready?: unknown }).ready === false
   );
 }
 
@@ -354,7 +376,7 @@ const MOCK_CONFIG: EffectiveConfig = {
   r2_sync: { enabled: true, bucket: "kr-bucket", account_id: "ac****nt", access_key_id: "ak****id", secret_access_key: "****", free_tier_gb: 10, warn_threshold: 0.8 },
   notion_sync: { enabled: true, database_id: "db-****", max_upload_mib: 5 },
   web_console: { enabled: true, host: "0.0.0.0", port: 6520, username: "admin", password: "****" },
-  graph: { enabled: false, query_mode: "mix", llm_max_async: 4, embedding_max_async: 8, working_dir: "lightrag_workspaces" },
+  graph: { enabled: false, query_mode: "mix", llm_max_async: 4, embedding_max_async: 8, working_dir: "lightrag_workspaces", max_doc_chars: 30000, lightrag_llm_provider: "main", lightrag_llm_base_url: "", lightrag_llm_model: "", lightrag_llm_timeout_seconds: 900 },
   ask: { conversation_enhancement_mode: "inject" },
   vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true },
   embedding: { provider: "local", model: "intfloat/multilingual-e5-small", base_url: "https://api.openai.com/v1", max_token_size: 512, actual_dimension: 384, api_key: "" },
@@ -563,12 +585,100 @@ export async function getEffectiveConfig(): Promise<EffectiveConfig> {
   return apiFetch<EffectiveConfig>("/api/config/effective");
 }
 
+const MOCK_REBUILD_KEYS = new Set([
+  "embedding.provider",
+  "embedding.model",
+  "embedding.base_url",
+  "graph.max_doc_chars",
+]);
+
+const MOCK_RESTART_KEYS = new Set([
+  "vector_db.backend",
+  "vector_db.auto_index_enabled",
+  "graph.enabled",
+  "graph.query_mode",
+  "graph.llm_max_async",
+  "graph.embedding_max_async",
+  "graph.lightrag_llm_provider",
+  "graph.lightrag_llm_base_url",
+  "graph.lightrag_llm_model",
+  "graph.lightrag_llm_timeout_seconds",
+  "r2_sync.enabled",
+  "notion_sync.enabled",
+  "source_store.ocr_enabled",
+]);
+
+function applyMockConfigUpdate(section: string, key: string, value: unknown): void {
+  const configSection = (MOCK_CONFIG as Record<string, Record<string, unknown>>)[section];
+  if (configSection) configSection[key] = value;
+
+  const stage = (id: string) => MOCK_CAPABILITIES.pipeline.find((item) => item.id === id);
+  const embedding = stage("embedding");
+  const vectorStore = stage("vector_store");
+  const graph = stage("graph");
+  const ask = stage("ask");
+  const sync = stage("sync");
+  const ingest = stage("ingest");
+
+  if (section === "embedding" && embedding) {
+    if (key === "provider") embedding.current = String(value);
+    if (key === "model") embedding.detail.model = value;
+    if (key === "max_token_size") embedding.detail.max_token_size = value;
+  }
+
+  if (section === "vector_db" && vectorStore) {
+    if (key === "backend") vectorStore.current = String(value);
+    if (key === "auto_index_enabled") vectorStore.detail.auto_index_enabled = Boolean(value);
+  }
+
+  if (section === "ask" && key === "conversation_enhancement_mode" && ask) {
+    ask.current = String(value);
+  }
+
+  if (section === "graph" && graph) {
+    if (key === "enabled") {
+      const enabled = Boolean(value);
+      graph.current = enabled ? "on" : "off";
+      graph.status = enabled ? "degraded" : "off";
+      graph.configured = enabled;
+    } else {
+      graph.detail[key] = value;
+    }
+  }
+
+  if ((section === "r2_sync" || section === "notion_sync") && key === "enabled" && sync) {
+    sync.detail[section === "r2_sync" ? "r2_enabled" : "notion_enabled"] = Boolean(value);
+    const r2Enabled = Boolean(MOCK_CONFIG.r2_sync?.enabled);
+    const notionEnabled = Boolean(MOCK_CONFIG.notion_sync?.enabled);
+    sync.current = r2Enabled || notionEnabled ? "on" : "off";
+    sync.status = r2Enabled || notionEnabled ? "ready" : "off";
+    sync.configured = r2Enabled || notionEnabled;
+  }
+
+  if (section === "source_store" && key === "ocr_enabled" && ingest) {
+    ingest.detail.ocr_enabled = Boolean(value);
+  }
+}
+
+function mockConfigResult(section: string, key: string): ConfigUpdateResult {
+  const fullKey = `${section}.${key}`;
+  return {
+    status: "success",
+    restart_required: MOCK_RESTART_KEYS.has(fullKey),
+    rebuild_required: MOCK_REBUILD_KEYS.has(fullKey),
+    message: "Configuration saved.",
+  };
+}
+
 export async function updateConfigValue(
   section: string,
   key: string,
   value: unknown
 ): Promise<ConfigUpdateResult> {
-  if (isMock()) return { status: "success", restart_required: false, rebuild_required: false, message: "Configuration saved." };
+  if (isMock()) {
+    applyMockConfigUpdate(section, key, value);
+    return mockConfigResult(section, key);
+  }
   return apiFetch<ConfigUpdateResult>("/api/config/update", {
     method: "POST",
     headers: {
@@ -644,10 +754,10 @@ export async function testEmbeddingConnection(
 
 export async function getGraph(
   collection?: string
-): Promise<MaybeReserved<GraphData>> {
+): Promise<MaybeReserved<GraphResponse>> {
   if (isMock()) return { ...MOCK_GRAPH };
   const qs = collection ? `?collection=${encodeURIComponent(collection)}` : "";
-  return apiFetch<MaybeReserved<GraphData>>(`/api/graph${qs}`);
+  return apiFetch<MaybeReserved<GraphResponse>>(`/api/graph${qs}`);
 }
 
 export async function queryGraph(
@@ -703,6 +813,45 @@ export async function getGraphBuildJob(jobId: string): Promise<GraphBuildJob> {
     elapsed_seconds: 840, average_seconds_per_chunk: 70, estimated_remaining_seconds: 0,
   };
   return apiFetch<GraphBuildJob>(`/api/graph/build/${encodeURIComponent(jobId)}`);
+}
+
+export async function getActiveBuildJob(): Promise<GraphBuildJob | null> {
+  if (isMock()) return null;
+  const res = await apiFetch<{ job: GraphBuildJob | null }>("/api/graph/build/active");
+  return res.job;
+}
+
+export interface BuildJobRecord {
+  job_id: string;
+  collection: string;
+  status: string;
+  stage: string;
+  processed_docs: number;
+  failed_docs: number;
+  total_docs: number;
+  processed_chunks: number;
+  total_chunks: number;
+  recent_error: string;
+  started_at: string;
+  finished_at: string | null;
+  created_at: string;
+}
+
+export async function getBuildJobHistory(collection?: string): Promise<BuildJobRecord[]> {
+  if (isMock()) return [];
+  const qs = collection ? `?collection=${encodeURIComponent(collection)}` : "";
+  const res = await apiFetch<{ jobs: BuildJobRecord[] }>(`/api/graph/build/history${qs}`);
+  return res.jobs;
+}
+
+export async function pauseBuildJob(jobId: string): Promise<void> {
+  if (isMock()) return;
+  await apiFetch(`/api/graph/build/${encodeURIComponent(jobId)}/pause`, { method: "POST" });
+}
+
+export async function resumeBuildJob(jobId: string): Promise<void> {
+  if (isMock()) return;
+  await apiFetch(`/api/graph/build/${encodeURIComponent(jobId)}/resume`, { method: "POST" });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -934,7 +1083,7 @@ const MOCK_CAPABILITIES: CapabilitiesData = {
     { id: "embedding", current: "local", candidates: ["local", "external"], status: "ready", switchable: true, consequence: "rebuild", required_deps: ["local_embedding"], configured: true, detail: { model: "intfloat/multilingual-e5-small", actual_dimension: 384 } },
     { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true } },
     { id: "retrieval", current: "rrf_fusion", candidates: ["rrf_fusion"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { engines: ["milvus", "sqlite_lexical"] } },
-    { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix" } },
+    { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix", llm_provider: "main" } },
     { id: "ask", current: "inject", candidates: ["inject", "query_agent"], status: "ready", switchable: true, consequence: "none", required_deps: [], configured: true, detail: {} },
     { id: "sync", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { r2_enabled: false, notion_enabled: false } },
   ],

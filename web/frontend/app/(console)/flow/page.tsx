@@ -12,6 +12,7 @@ import { useI18n } from "@/lib/i18n";
 import {
   getCapabilities,
   getEffectiveConfig,
+  getZoteroConfig,
   installDependency,
   recheckDependencies,
   updateConfigValue,
@@ -19,6 +20,7 @@ import {
   type DependencyStatus,
   type EffectiveConfig,
   type PipelineStage,
+  type ZoteroConfig,
 } from "@/lib/api";
 
 type Banner = { kind: "restart" | "rebuild" | "install"; msg?: string } | null;
@@ -28,6 +30,7 @@ export default function FlowPage() {
   const { toast } = useToast();
   const [caps, setCaps] = useState<CapabilitiesData | null>(null);
   const [config, setConfig] = useState<EffectiveConfig | null>(null);
+  const [zotero, setZotero] = useState<ZoteroConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [installingKey, setInstallingKey] = useState<string | null>(null);
@@ -46,6 +49,7 @@ export default function FlowPage() {
     refreshFlow()
       .catch(() => {})
       .finally(() => setLoading(false));
+    getZoteroConfig().then(setZotero).catch(() => {});
     return () => {
       if (flashTimer.current) clearTimeout(flashTimer.current);
     };
@@ -176,6 +180,42 @@ export default function FlowPage() {
           </div>
         )}
       </header>
+
+      {/* Zotero：数据流最左端的可选来源（连入 ingest）。有无 Zotero 插件均可运作。 */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 24px 4px", flexWrap: "wrap" }}>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "8px 14px", borderRadius: 12,
+          border: `1px solid ${zotero?.enabled ? "var(--accent)" : "var(--border)"}`,
+          background: "var(--surface)",
+          opacity: zotero?.enabled ? 1 : 0.7,
+        }}>
+          <span style={{
+            width: 26, height: 26, borderRadius: 7, flexShrink: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: "rgba(140,90,200,0.16)", color: "#7a3fb0", fontWeight: 700, fontSize: 12,
+          }}>Z</span>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--heading)" }}>Zotero 文献库</div>
+            <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+              {zotero == null
+                ? "加载中…"
+                : !zotero.enabled
+                  ? "可选来源 · 未启用"
+                  : zotero.connection?.connected
+                    ? "已连接 · 单向 Pull → 上传/分块"
+                    : (zotero.availability && !zotero.availability.available)
+                      ? `未就绪 · ${zotero.availability.reason ?? "数据目录不可用"}`
+                      : "已启用 · 未连接"}
+            </div>
+          </div>
+          <Link href="/sync" className="flow-terminal-link" style={{ marginLeft: 4 }}>配置同步</Link>
+        </div>
+        <span style={{ fontSize: 20, color: "var(--fg-subtle)" }} aria-hidden>→</span>
+        <span style={{ fontSize: 11, color: "var(--fg-subtle)" }}>
+          汇入数据流入口（上传/分块）；无 Zotero 时插件仍可本地上传运作
+        </span>
+      </div>
 
       {loading ? (
         <div className="flow-state-panel">{t("flow_loading")}</div>

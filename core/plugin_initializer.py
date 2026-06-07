@@ -72,6 +72,8 @@ class PluginInitializer:
         self._config = Config(self._runtime_config.merged_with(raw_config))
         self._exit_stack: AsyncExitStack | None = None
         self._backup_task: asyncio.Task[Any] | None = None
+        self._zotero_sync_task: asyncio.Task[Any] | None = None
+        self.zotero_sync_pipeline: Any | None = None
         self._web_runner: Any | None = None
 
         # 子系统句柄 —— 在 initialize() 中按依赖顺序赋值，供 event_handler / web 引用。
@@ -410,7 +412,7 @@ class PluginInitializer:
             config=self._config,
             config_persist=self._persist_config_value,
             llm_adapter=llm_adapter,
-            managed_documents_dir=self._data_dir / "documents",
+            managed_documents_dir=self._data_dir / "library",
             vector_store=self.vector_store,
             embedding_provider=self.embedding_provider,
             retrieval_orchestrator=self.retrieval_orchestrator,
@@ -420,10 +422,31 @@ class PluginInitializer:
             embedding_fingerprint=self.embedding_fingerprint,
         )
 
+        # 5.5) Zotero 单向 Pull 管线（api 构造后注入，回调引用 api 的索引/LRAG 助手）。
+        from core.pipelines.zotero_sync_pipeline import ZoteroSyncPipeline
+
+        self.zotero_sync_pipeline = ZoteroSyncPipeline(
+            source_store=self.source_store,
+            ingest_manager=self.ingest_manager,
+            config=self._config,
+            index_document=self.api._index_document,
+            remove_index=self.api._remove_document_index,
+            lightrag_cleanup=self.api._lightrag_cleanup,
+            lightrag_mark_pending=self.api._mark_lightrag_pending,
+        )
+        self.api.attach_zotero_pipeline(self.zotero_sync_pipeline)
+
         # 6) 周期任务（如 R2 周期备份，v0.3.0 起注册）。
         if r2_cfg.enabled and r2_cfg.backup_interval_sec > 0:
             self._backup_task = asyncio.create_task(
                 self._periodic_backup(r2_cfg.backup_interval_sec)
+            )
+
+        # 6.1) Zotero 自动同步：启用时重启即增量拉取一次 + 可选定时增量拉取。
+        zotero_cfg = self._config.get_zotero_sync_config()
+        if zotero_cfg.enabled and zotero_cfg.auto_sync_enabled:
+            self._zotero_sync_task = asyncio.create_task(
+                self._periodic_zotero_sync(zotero_cfg.auto_sync_interval_sec)
             )
 
         # 6.5) 启动摘要——记录各关键组件激活状态，方便终端页快速诊断。
@@ -518,6 +541,20 @@ class PluginInitializer:
         except Exception as e:
             logger.error(f"Error in background periodic backup: {e}")
 
+    async def _periodic_zotero_sync(self, interval_sec: int) -> None:
+        """Zotero 自动同步：启动即增量拉取一次，之后每 interval_sec 再增量拉取。"""
+        logger.info("Zotero auto-sync scheduled (restart + every %ss).", interval_sec)
+        try:
+            while True:
+                if self.api is not None:
+                    try:
+                        await self.api.sync_zotero_pull(incremental=True)
+                    except Exception as exc:
+                        logger.error("Zotero auto-sync failed: %s", exc)
+                await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            logger.info("Zotero auto-sync task cancelled.")
+
     async def _mark_all_documents_needs_reindex(self) -> None:
         if self.source_store is None:
             return
@@ -540,6 +577,14 @@ class PluginInitializer:
             except Exception:
                 pass
             self._backup_task = None
+
+        if self._zotero_sync_task is not None:
+            self._zotero_sync_task.cancel()
+            try:
+                await self._zotero_sync_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._zotero_sync_task = None
 
         if self._web_runner is not None:
             try:

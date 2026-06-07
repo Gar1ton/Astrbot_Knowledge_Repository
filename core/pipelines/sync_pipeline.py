@@ -118,6 +118,9 @@ class SyncPipeline:
                 # 执行底层仓储上传
                 remote_ref = await target.push(doc, payload)
 
+                # 制品包派生制品（clean.md/pages.json/meta.json）一并纳入 R2 备份。
+                await self._backup_artifact_bundle(target_kind, doc)
+
                 # 同步成功，修改记账
                 status = SyncStatus.SYNCED
                 msg = "同步成功"
@@ -191,6 +194,36 @@ class SyncPipeline:
         if not callable(pull):
             return {"status": "error", "message": "Notion 目标不支持反向同步"}
         return await pull()
+
+    async def _backup_artifact_bundle(self, target_kind: SyncTargetKind, doc) -> None:
+        """把某文档制品包内的派生制品上传至 R2（key: artifacts/<collection>/<doc_id>/<name>）。
+
+        原件 PDF 由 push() 负责；本方法补传 clean.md/pages.json/meta.json，使两种存储模式下
+        制品包都纳入 R2 备份范围（恢复后可由制品包 + SQLite 重建）。
+        """
+        if target_kind != SyncTargetKind.R2 or self._db_path is None:
+            return
+        push_backup = getattr(self._sync_targets.get(target_kind), "push_backup", None)
+        if not callable(push_backup):
+            return
+        bundle = self._db_path.parent / "library" / doc.doc_id
+        artifacts = (
+            ("clean.md", "text/markdown"),
+            ("pages.json", "application/json"),
+            ("meta.json", "application/json"),
+        )
+        for name, content_type in artifacts:
+            f = bundle / name
+            if not f.exists():
+                continue
+            try:
+                await push_backup(
+                    f"artifacts/{doc.collection}/{doc.doc_id}/{name}",
+                    f.read_bytes(),
+                    content_type,
+                )
+            except Exception as exc:
+                logger.warning("Failed to backup artifact %s for %s: %s", name, doc.doc_id, exc)
 
     async def _backup_db_snapshot(self, target_kind: SyncTargetKind) -> None:
         """打包本地 SQLite 数据库快照备份至 R2 归档槽。"""

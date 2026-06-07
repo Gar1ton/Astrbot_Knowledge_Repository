@@ -44,6 +44,38 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.22.0 Zotero 镜像 + PyMuPDF4LLM 清洗内核 + 制品包数据模型 + 作用域检索 (completed)
+
+### User constraints / 约束
+
+- 引入 Zotero 单向 Pull 同步：Zotero 为上游事实源，镜像 items/collections/tags/attachments；存储格式 push-ready（未来双向），本轮不做 push/note 写回。
+- PyMuPDF4LLM 为 **pinned 依赖**（不 vendor 源码，规避 AGPL 分发义务与版本耦合），**完全替换 fitz 手写抽取**；所有后端适配（Ask 原文展示、chunk 源文本、LightRAG 原文）改读 clean.md。
+- 制品包模型：`doc_id = document_id = <library_id>_<item_key>_<attachment_key>`（无 UUID 兼容层，插件未发行）；每文档一目录 `data_dir/library/<document_id>/{original.pdf,clean.md,pages.json,meta.json}`，整体纳入 R2 备份。
+- 本地上传也以 Zotero 格式存入镜像库（`LOCAL` 库 + 合成 key，`origin=local` 可编辑）；Zotero 同步来源 `origin=zotero` 在文档系统中**只读**，repository/service 层强制。
+- 元数据一等字段：creators、year/venue、item_type+DOI/URL、abstract（raw json 整体存 meta.json）。
+- 作用域检索 item/collection/tag/library：orchestrator 层硬过滤覆盖所有通道（Milvus/SQLite lexical/LightRAG），先满足 allowed_document_ids 再 rerank/RRF。
+- 不手改 `pages/` 构建产物；迁移只追加幂等；CHANGELOG 中文。
+
+### Technical implementation path
+
+- [x] **Phase 0 — pinned 依赖 + 治理**：requirements-additional 固定 `pymupdf4llm`/`PyMuPDF`；`core/capabilities.py` 登记 `pdf_extract` 依赖与 ingest 环节 PDF 清洗就绪态；`metadata.yaml` → v0.22.0。
+- [x] **Phase 1 — Zotero 镜像数据模型**：domain 新增 Zotero* 值对象 + `DocumentOrigin` + `PageChunk`；SourceDocument 改造（document_id/library_id/origin/read_only/markdown_rel/pages_rel/converter）；migrations 009-011（zotero 镜像表 + documents 加列 + page_chunks + collections origin）；store 接口/sqlite/memory 同步实现 + 接口对换测试（test_zotero_mirror.py 16 passed）。
+- [x] **Phase 2 — PyMuPDF4LLM 清洗内核**：新增 `markdown_extractor.py` 产出 clean.md + pages.json（LF 归一化 + 写盘后 str 字符 offset 不变量）；重写 IngestManager 切块于 clean.md 并落制品包（library/<document_id>/）；删除 fitz 手写路径；`_extract_raw_doc_text` 改读 clean.md；删除文档级联清制品包目录。test_ingest_manager.py offset 不变量通过，全套 232 passed。
+- [x] **Phase 3 — Zotero 客户端 + 单向 Pull**：`core/adapters/zotero/`（sqlite_reader 主路径 / local_api 状态探测 / paths + linked 探针）；`zotero_sync_pipeline.py`（三种 sync_mode strict/conservative/archive + 两种 storage_mode managed/linked + detached 生命态 + 增量）；`ZoteroSyncConfig` + `_conf_schema.json` + CONFIG_KEY_POLICY；migration 012（lifecycle_state/last_synced_at）；api 门面 `sync_zotero_pull/get_zotero_config/get_zotero_sync_status` + 索引/LRAG 回调；组合根注入 + 重启/定时自动同步；web 路由 `/api/zotero/config`、`/api/sync/zotero/pull|status`。test_zotero_sync.py（reader + 3 模式 + linked，6 passed）+ test_zotero_routes（route）。全套 239 passed。
+- [x] **Phase 4 — 作用域检索**：`resolve_scope`（item/collection 后代/tag/library）+ orchestrator 硬过滤契约覆盖所有通道（Milvus/SQLite lexical/LightRAG）；item/tag 子作用域禁用图谱防越界；ask/search_kb + web 路由接受 scope。test_retrieval_scope.py 8 passed。
+- [x] **Phase 5 — 后端读写边界 + provenance**：service 层 `ReadOnlyError` 强制（delete/classify/delete_collection），web 403；sources 携带 document_id/pages/zotero URI/引用；文档序列化新增来源/只读/生命态/last_synced_at/Milvus 覆盖/LRAG/zotero_meta。test_readonly_enforcement.py 4 passed。
+- [x] **Phase 6 — 前端**：api.ts 类型 + zotero 函数；documents 来源徽章/只读/三指示/文献元数据；sync 页 Zotero 状态卡 + 同步按钮；flow 最左端 Zotero 来源节点。tsc 通过。
+- [x] **Phase 7 — R2 备份纳入制品包**：sync_pipeline 上传 clean.md/pages.json/meta.json 至 `artifacts/<collection>/<doc_id>/`。test_sync_pipeline.py 制品包备份测试通过。
+- [x] **Phase 8 — 测试 + 验证 + 收尾**：全套测试 + ruff + mypy + 前端构建 + sync_frontend + CHANGELOG。
+
+### Verification
+
+- `python -m pytest -q` → 252 passed
+- `python -m ruff check . && python -m mypy` → All checks passed / Success（domain 严格域无误）
+- `cd web/frontend && npx tsc --noEmit` → passed
+- `npx -y node@20 node_modules/next/dist/bin/next build` → passed，13 static pages generated
+- `python tools/sync_frontend.py` → 150 文件同步至 `pages/`
+
 ## v0.21.0 LRAG recall bug fix, build persistence & floating widget (in progress)
 
 ### User constraints / 约束

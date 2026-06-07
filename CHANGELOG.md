@@ -28,6 +28,37 @@
 - **Ask 页知识库选中高亮边与发送键灰态**：选中集合时输入卡片显示橙色高亮边（`--accent-border`）；加载期间边框退回普通色、仅保留旋转辉光；图谱检索模式下未选有效集合时发送键变灰，点击仍触发已有 toast 提示（`web/frontend/app/globals.css`, `web/frontend/app/(console)/ask/page.tsx`）。
 - **Milvus 自动索引开关说明文案优化**：label 改为「上传后立即建立 Milvus 向量索引」，说明文字补充延迟索引 / 批量重建工作流说明（`web/frontend/app/(console)/settings/page.tsx`）。
 
+## [v0.22.0] — 2026-06-07
+
+> Zotero 镜像 + PyMuPDF4LLM 清洗内核 + 制品包数据模型 + 作用域检索。引入以 `document_id = <library_id>_<item_key>_<attachment_key>` 为核心的制品包模型，打通 Zotero → 清洗 → 检索整体数据流。
+
+### 新增功能 (Added)
+
+- **Zotero 单向 Pull 同步**：只读 `zotero.sqlite`（主路径）镜像本地 Zotero 的 libraries/collections/items/creators/tags/attachments/relations；三种同步模式（`strict_mirror` 严格镜像 / `conservative` 保守同步（默认）/ `archive` 归档堆栈）× 两种存储模式（`managed_copy` 副本托管 / `linked` 链接 Zotero storage）；strict 脱管文档保留 LRAG workspace 标 `detached`，切回兼容模式自动 reattach；增量（zotero version 跳过未变）；手动（sync 页）+ 自动（重启 + 定时间隔）触发（`core/adapters/zotero/{sqlite_reader,local_api,paths}.py`, `core/pipelines/zotero_sync_pipeline.py`, `core/plugin_initializer.py`）。
+- **PyMuPDF4LLM 清洗内核**：PDF → 干净 Markdown（无可见页码）+ pages.json（写盘 LF 归一化后的字符偏移），**完全替换 fitz 手写抽取**；IngestManager 改为「制品包 + clean.md 字符区间分块」，保证 `clean.md[start:end] == chunk.text` 的 offset 不变量；本地上传以 `LOCAL` 库 + 合成 key 镜像（`core/managers/markdown_extractor.py`, `core/managers/ingest_manager.py`）。
+- **制品包数据模型**：每文档一目录 `data_dir/library/<document_id>/{original.pdf, clean.md, pages.json, meta.json}`；新增 Zotero 镜像表与 `page_chunks`、文档 `origin`/`read_only`/`lifecycle_state`/`last_synced_at`/`library_id` 等列（migrations 009-012）；domain 新增 `DocumentOrigin`/`DocumentLifecycle`/`Zotero*`/`PageChunk`（`core/domain/models.py`, `migrations/009-012_*.sql`, `core/repository/source_store/{base,sqlite,memory}.py`）。
+- **作用域检索（item/collection/tag/library）**：orchestrator 新增 `resolve_scope` + **硬过滤契约**——任何候选 chunk 必须先满足 `allowed_document_ids` 才进入 RRF（覆盖 Milvus/SQLite lexical/LightRAG）；item/tag 子作用域禁用图谱通道防越界；`ask`/`search_kb` 与 `/api/ask`、`/api/kb/search` 接受 scope 参数（`core/pipelines/retrieval_orchestrator.py`, `core/api.py`, `web/server.py`）。
+- **三指示元数据 + provenance**：文档序列化新增来源徽章、只读、生命态、`last_synced_at`、Milvus 覆盖、LRAG 索引状态与 Zotero 归一化引用（creators/year/venue/DOI/abstract）；Ask sources 携带 `document_id`/`pages`/Zotero 跳转 URI/引用（`web/server.py`, `core/api.py`）。
+- **前端 Zotero UX**：sync 页 Zotero 连接状态卡 + 「从 Zotero 同步」按钮；documents 页来源徽章/只读详情/三指示/文献元数据；flow 页最左端 Zotero 来源节点；`lib/api.ts` 新增 `ZoteroConfig`/`ZoteroSyncResult` 类型与 `getZoteroConfig`/`syncZoteroPull`/`getZoteroSyncStatus`（`web/frontend/lib/api.ts`, `web/frontend/app/(console)/{sync,documents,flow}/page.tsx`）。
+- **配置**：新增 `ZoteroSyncConfig` + `_conf_schema.json` 的 `zotero_sync` 段（storage_mode/sync_mode/linked_root/auto_sync 等；机密 `cloud_api_key` 仅经 `KR_ZOTERO_API_KEY` 环境变量）+ `CONFIG_KEY_POLICY` 登记（`core/config.py`, `_conf_schema.json`）。
+- **R2 备份纳入制品包**：同步时把 clean.md/pages.json/meta.json 一并上传至 R2（key `artifacts/<collection>/<doc_id>/<name>`），两种存储模式下 PDF 均纳入备份（`core/pipelines/sync_pipeline.py`）。
+
+### 安全 (Security)
+
+- **Zotero 同步来源只读强制（service 层）**：`origin=zotero` 的文档/集合在 `delete_document`/`classify_document`/`delete_collection` 处抛 `ReadOnlyError`，web 层返回 403；仅 Zotero Pull 这一特权服务可变更，前端隐藏仅为第二层防护（`core/api.py`, `web/server.py`）。
+
+### 架构健康 (Refactor)
+
+- **移除 fitz 手写抽取路径**：`_extract_raw_doc_text` 改读 clean.md；删除文档级联清理整个 `library/<id>/` 制品包目录（`core/api.py`, `core/plugin_initializer.py`）。
+
+### 构建与工程 (Build/CI)
+
+- **PyMuPDF4LLM pinned 依赖**：`requirements-additional.txt` 固定 `pymupdf4llm>=0.0.17,<0.1.0` 与 `PyMuPDF>=1.24,<2.0`（不 vendor 源码，规避 AGPL 分发义务）；`core/capabilities.py` 登记 `pdf_extract` 依赖与 ingest 环节清洗就绪态；`metadata.yaml` → v0.22.0。
+
+### 测试 (Tests)
+
+- 新增 `test_zotero_mirror.py`（镜像/scope 助手/page_chunks 接口对换 16）、`test_ingest_manager.py`（offset 不变量重写）、`test_zotero_sync.py`（reader + 3 模式 + linked 6）、`test_retrieval_scope.py`（scope 解析 + 硬过滤 8）、`test_readonly_enforcement.py`（只读 4）+ web 路由/能力测试调整；全套 252 passed，ruff + mypy 干净，Next.js build 13 页 + sync_frontend 150 文件。
+
 ## [v0.21.0] — 2026-06-07
 
 ### 修复 (Fixed)

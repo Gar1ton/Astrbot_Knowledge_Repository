@@ -11,6 +11,11 @@ sentence-transformers>=3,<6
 # LightRAG 高精度召回
 lightrag-hku>=1.5.0rc1,<2.0.0
 
+# PDF → 干净 Markdown 清洗内核（pinned，不 vendor 源码；pymupdf 为其运行时依赖）。
+# 版本号同步备注于 core/managers/markdown_extractor.py::PYMUPDF4LLM_PINNED_VERSION。
+pymupdf4llm>=0.0.17,<0.1.0
+PyMuPDF>=1.24,<2.0
+
 # Cloudflare R2
 boto3
 

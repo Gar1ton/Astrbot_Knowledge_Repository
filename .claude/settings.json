@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import pymupdf4llm, pymupdf; print\\('pymupdf4llm', pymupdf4llm.__version__ if hasattr\\(pymupdf4llm,'__version__'\\) else '?'\\); print\\('pymupdf', pymupdf.__version__\\)\")",
+      "Bash(python -c \"import fitz; print\\('fitz ok', fitz.__doc__[:40]\\)\")",
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/backend/test_sqlite_source_store.py tests/backend/test_zotero_mirror.py tests/backend/test_ingest_manager.py -q)",
+      "Bash(python -m mypy)",
+      "Bash(python -m pytest tests/backend/test_zotero_sync.py -q)",
+      "Bash(python -m pytest tests/backend/test_readonly_enforcement.py -q)",
+      "Bash(python -m ruff check tests/backend/test_readonly_enforcement.py)",
+      "Bash(python -m pytest tests/backend -q)",
+      "Bash(python -m ruff check core/pipelines/sync_pipeline.py)",
+      "Bash(python -m pytest tests/backend/test_sync_pipeline.py tests/backend/test_r2_target.py -q)"
+    ]
+  }
+}

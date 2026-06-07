@@ -46,6 +46,30 @@ class QuotaLevel(str, Enum):
     BLOCK = "block"
 
 
+class DocumentOrigin(str, Enum):
+    """文档/集合/标签的来源。
+
+    ZOTERO 表示由 Zotero 单向 Pull 镜像而来——在文档系统中**只读**（不可删/改），
+    以保证本轮单向同步不污染上游；LOCAL 表示用户在插件内手动上传，可编辑可删除。
+    继承 str 以便直接序列化进持久化键。
+    """
+
+    ZOTERO = "zotero"
+    LOCAL = "local"
+
+
+class DocumentLifecycle(str, Enum):
+    """文档生命态。
+
+    ACTIVE 为正常参与检索的文档；DETACHED 为 strict_mirror 同步模式下被脱管的文档——
+    其制品/Milvus 索引已移除但 **LRAG workspace 保留**，切回 conservative/archive 模式重扫后
+    可恢复为 ACTIVE。检索默认过滤 DETACHED。
+    """
+
+    ACTIVE = "active"
+    DETACHED = "detached"
+
+
 # ── 知识库源 ────────────────────────────────────────────────────
 
 
@@ -54,21 +78,37 @@ class Collection:
     """集合：一组文档的逻辑分类，对应 AstrBot 的一个知识库（collection）。
 
     name 是集合的稳定标识（同时用作 R2 key 前缀与 AstrBot collection 名），全局唯一。
+
+    来源契约：
+        - origin=LOCAL 为用户手动创建，可改可删；origin=ZOTERO 由同步镜像而来，**只读**
+          （不可手动删除/改名），zotero_collection_key 回链 Zotero 原集合 key。
+        - read_only 是 origin 的派生便捷标志（origin=ZOTERO 时为 True），由 service 层强制。
     """
 
     name: str
     description: str = ""
     created_at: datetime | None = None
+    origin: DocumentOrigin = DocumentOrigin.LOCAL
+    zotero_collection_key: str = ""
+    read_only: bool = False
 
 
 @dataclass
 class SourceDocument:
-    """源文档（原件，如 PDF）。原件是备份与管理的一等公民，不做 LLM 转换。
+    """源文档（制品包，如一个 Zotero PDF 附件或本地上传文件）。
+
+    这是「制品包模型」的核心：`doc_id == document_id == <library_id>_<item_key>_<attachment_key>`，
+    其下集中存放全部派生制品（original.pdf / clean.md / pages.json / meta.json / chunks / 向量）。
+    无独立 UUID、无兼容层（插件未发行，无旧行）。
 
     契约：
-        - doc_id 为稳定外部标识（UUID）；content_hash 为原件字节的哈希，用于增量同步判定。
-        - file_path 指向本地原件位置（插件数据目录内的相对/绝对路径）。
-        - collection 指定所属集合名；tags 为自由标签集合（手动分类，去重由调用方保证）。
+        - doc_id 即 document_id，是制品包目录名与跨系统稳定主键；content_hash 为原件字节哈希。
+        - file_path 指向本地原件位置；markdown_rel_path / pages_rel_path 为制品包内相对路径
+          （相对 data_dir/library/<doc_id>/），clean.md 无可见页码，pages.json 存页→字符偏移。
+        - origin=ZOTERO 时 read_only=True：文档系统只读，由 service 层强制；LOCAL 可编辑。
+        - library_id / zotero_item_key / attachment_key 为 Zotero 标识体系
+          （本地上传用 LOCAL 库 + 合成 key）。
+        - collection 指定所属集合名；tags 为自由标签集合（去重由调用方保证）。
     """
 
     doc_id: str
@@ -82,6 +122,24 @@ class SourceDocument:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     needs_reindex: bool = False
+    # ── 制品包 / Zotero 镜像扩展 ──
+    library_id: str = "LOCAL"
+    zotero_item_key: str = ""
+    attachment_key: str = ""
+    origin: DocumentOrigin = DocumentOrigin.LOCAL
+    read_only: bool = False
+    zotero_version: int = 0
+    markdown_rel_path: str = ""
+    pages_rel_path: str = ""
+    converter: str = ""
+    converter_version: str = ""
+    lifecycle_state: DocumentLifecycle = DocumentLifecycle.ACTIVE
+    last_synced_at: datetime | None = None
+
+    @property
+    def document_id(self) -> str:
+        """制品包 ID 的语义别名（与 doc_id 同值）。"""
+        return self.doc_id
 
 
 @dataclass
@@ -98,6 +156,119 @@ class DocumentChunk:
     text: str
     content_hash: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# ── Zotero 逻辑镜像（上游事实源的本地只读镜像）────────────────────
+#
+# 镜像 Zotero 的逻辑组织模型（library/collection/item/attachment/tag/relation），
+# 而非 Zotero 内部 SQLite schema。每个值对象都保留 raw_zotero_json 原样备份，便于未来扩展
+# 与 push-ready；归一化字段用于快速查询与 UI 展示。本地上传统一用合成 LOCAL 库表示。
+
+
+@dataclass
+class ZoteroLibrary:
+    """Zotero 库。library_type 为 user/group/LOCAL（本地上传合成库）。"""
+
+    library_id: str
+    library_type: str
+    name: str = ""
+    raw_zotero_json: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ZoteroCollection:
+    """Zotero 集合（树状，item 可属于多个集合）。
+
+    collection_key 在单个 library 内稳定；parent_collection_key 为空表示顶层。
+    origin 标识来源（同步=ZOTERO 只读 / 本地=LOCAL）。
+    """
+
+    collection_key: str
+    library_id: str
+    name: str
+    parent_collection_key: str = ""
+    origin: DocumentOrigin = DocumentOrigin.ZOTERO
+    raw_zotero_json: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ZoteroItem:
+    """Zotero 条目（journalArticle/book…）的归一化镜像 + 原始 JSON。
+
+    item_key 在单个 library 内稳定；归一化的 creators/year/venue/doi/url/abstract 供引用与 UI 展示，
+    完整字段以 raw_zotero_json 保真存档。version/deleted 用于增量同步判定（design §9）。
+    """
+
+    item_key: str
+    library_id: str
+    item_type: str
+    version: int = 0
+    deleted: bool = False
+    title: str = ""
+    creators: list[str] = field(default_factory=list)
+    year: str = ""
+    venue: str = ""
+    doi: str = ""
+    url: str = ""
+    abstract: str = ""
+    origin: DocumentOrigin = DocumentOrigin.ZOTERO
+    date_added: datetime | None = None
+    date_modified: datetime | None = None
+    raw_zotero_json: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ZoteroAttachment:
+    """Zotero 附件（PDF 等子条目）。
+
+    resolved_path 为解析后的本地绝对路径（由 zotero.sqlite/storage 解析）；md5 用于附件变更判定。
+    """
+
+    attachment_key: str
+    parent_item_key: str
+    library_id: str
+    content_type: str = ""
+    filename: str = ""
+    path: str = ""
+    resolved_path: str = ""
+    link_mode: str = ""
+    md5: str = ""
+    raw_zotero_json: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ZoteroTag:
+    """条目标签。type=0 为手动标签，type=1 为自动标签。origin 标识来源。"""
+
+    item_key: str
+    tag: str
+    type: int = 0
+    origin: DocumentOrigin = DocumentOrigin.ZOTERO
+
+
+@dataclass
+class ZoteroRelation:
+    """条目间关系（如 dc:relation）。"""
+
+    source_item_key: str
+    relation_type: str
+    target_item_key: str
+
+
+@dataclass
+class PageChunk:
+    """页面级 provenance：clean.md 中某一页的字符偏移区间。
+
+    契约（offset 不变量，见 ingest 清洗内核）：
+        - markdown_start_char / markdown_end_char 是**写盘归一化（统一 LF）后** clean.md 的
+          Python str 字符偏移（左闭右开），非每页局部偏移。
+        - 语义分块的 pages 列表由 chunk 的 [start_char,end_char) 与各页区间求交得出。
+    """
+
+    document_id: str
+    page: int
+    markdown_start_char: int
+    markdown_end_char: int
 
 
 # ── 在线同步 ────────────────────────────────────────────────────
@@ -171,9 +342,18 @@ __all__ = [
     "SyncTargetKind",
     "SyncStatus",
     "QuotaLevel",
+    "DocumentOrigin",
+    "DocumentLifecycle",
     "Collection",
     "SourceDocument",
     "DocumentChunk",
+    "ZoteroLibrary",
+    "ZoteroCollection",
+    "ZoteroItem",
+    "ZoteroAttachment",
+    "ZoteroTag",
+    "ZoteroRelation",
+    "PageChunk",
     "SyncRecord",
     "QuotaUsage",
     "QuotaWarning",

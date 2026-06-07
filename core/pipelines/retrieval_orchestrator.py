@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from core.domain.models import DocumentChunk
+from core.domain.models import DocumentChunk, DocumentLifecycle
 
 if TYPE_CHECKING:
     from core.config import Config
@@ -18,6 +18,32 @@ if TYPE_CHECKING:
     from core.repository.vector_store.base import VectorStore
 
 logger = logging.getLogger("RetrievalOrchestrator")
+
+# 作用域类型常量（杜绝魔法字面量）。
+SCOPE_COLLECTION = "collection"
+SCOPE_ITEM = "item"
+SCOPE_TAG = "tag"
+SCOPE_LIBRARY = "library"
+# 子作用域（item/tag）窄于 collection workspace，禁用 LightRAG 图谱通道以防越界泄漏。
+_GRAPH_BLOCKED_SCOPES = frozenset({SCOPE_ITEM, SCOPE_TAG})
+
+
+@dataclass
+class RetrievalScope:
+    """检索作用域（Zotero item/collection/tag/library 维度的硬过滤约束）。
+
+    scope_type 为空表示「按 KB collection 检索」（无额外 doc 级硬过滤，沿用原行为）。
+    其余类型经 zotero 镜像解析为 allowed_document_ids，在 RRF 前对所有通道强制过滤（review #3）。
+    """
+
+    scope_type: str = ""
+    scope_key: str = ""
+    library_id: str = ""
+
+    @property
+    def blocks_graph(self) -> bool:
+        """item/tag 子作用域窄于 collection，应禁用 LightRAG 图谱通道。"""
+        return self.scope_type in _GRAPH_BLOCKED_SCOPES
 
 
 @dataclass
@@ -66,18 +92,59 @@ class RetrievalOrchestrator:
         collection: str,
         query: str,
         top_k: int = 5,
+        scope: RetrievalScope | None = None,
     ) -> list[DocumentChunk]:
         """Keep the existing chunk-only public contract."""
-        return (await self.retrieve_with_outcome(collection, query, top_k)).chunks
+        return (await self.retrieve_with_outcome(collection, query, top_k, scope)).chunks
+
+    async def resolve_scope(self, scope: RetrievalScope | None) -> set[str] | None:
+        """把作用域解析为 allowed_document_ids（None 表示不施加 doc 级硬过滤）。
+
+        item → 该 item_key 的文档；collection → 含后代集合的全部条目文档；
+        tag → 带该标签的条目文档；library → 该库全部文档。均仅取 ACTIVE（排除 detached）。
+        """
+        if scope is None or not scope.scope_type:
+            return None
+        store = self._source_store
+        lib = scope.library_id or "1"
+        if scope.scope_type == SCOPE_LIBRARY:
+            docs = await store.list_documents()
+            return {
+                d.doc_id
+                for d in docs
+                if d.library_id == lib and d.lifecycle_state == DocumentLifecycle.ACTIVE
+            }
+        if scope.scope_type == SCOPE_ITEM:
+            item_keys: set[str] = {scope.scope_key}
+        elif scope.scope_type == SCOPE_COLLECTION:
+            descendants = await store.get_collection_descendants(lib, scope.scope_key)
+            item_keys = set(await store.get_items_in_collections(lib, descendants))
+        elif scope.scope_type == SCOPE_TAG:
+            item_keys = set(await store.get_items_with_tag(lib, scope.scope_key))
+        else:
+            return None
+        docs = await store.list_documents()
+        return {
+            d.doc_id
+            for d in docs
+            if d.library_id == lib
+            and d.zotero_item_key in item_keys
+            and d.lifecycle_state == DocumentLifecycle.ACTIVE
+        }
 
     async def retrieve_with_outcome(
         self,
         collection: str,
         query: str,
         top_k: int = 5,
+        scope: RetrievalScope | None = None,
     ) -> RetrievalOutcome:
         if top_k <= 0:
             return RetrievalOutcome([])
+
+        allowed_doc_ids = await self.resolve_scope(scope)
+        if allowed_doc_ids is not None and not allowed_doc_ids:
+            return RetrievalOutcome([])  # 作用域内无文档，直接空。
 
         dense_chunks: list[DocumentChunk] = []
         engines: list[str] = []
@@ -130,6 +197,11 @@ class RetrievalOrchestrator:
         except Exception as exc:
             logger.error("SQLite lexical search failed: %s", exc)
 
+        # 硬过滤契约（review #3）：任何候选 chunk 必须先满足 allowed_doc_ids 才进入 RRF。
+        if allowed_doc_ids is not None:
+            dense_chunks = [c for c in dense_chunks if c.doc_id in allowed_doc_ids]
+            lexical_chunks = [c for c in lexical_chunks if c.doc_id in allowed_doc_ids]
+
         rrf_scores: dict[str, tuple[DocumentChunk, float]] = {}
         rrf_k = 60
 
@@ -151,7 +223,12 @@ class RetrievalOrchestrator:
             fallback_reason=fallback_reason,
         )
 
-    async def retrieve_lightrag_context(self, collection: str, query: str) -> str:
+    async def retrieve_lightrag_context(
+        self, collection: str, query: str, scope: RetrievalScope | None = None
+    ) -> str:
+        # item/tag 子作用域窄于 collection workspace，图谱上下文无法按 doc 硬过滤 → 拒绝以防泄漏。
+        if scope is not None and scope.blocks_graph:
+            raise RuntimeError("LightRAG graph context unavailable for item/tag scope")
         if self._lightrag_registry is None:
             raise RuntimeError("LightRAG Core registry is not configured")
         if not self._embedding_fingerprint or not self._index_compatibility:
@@ -184,8 +261,10 @@ class RetrievalOrchestrator:
             return []
 
         doc_ids: list[str] = []
+        # 排除 detached 文档（strict 脱管），避免词汇召回越过生命态。
         async with db_conn.execute(
-            "SELECT doc_id FROM documents WHERE collection = ?", (collection,)
+            "SELECT doc_id FROM documents WHERE collection = ? AND lifecycle_state = 'active'",
+            (collection,),
         ) as cursor:
             async for row in cursor:
                 doc_ids.append(row[0])
@@ -245,4 +324,12 @@ class RetrievalOrchestrator:
         return None
 
 
-__all__ = ["RetrievalOrchestrator", "RetrievalOutcome"]
+__all__ = [
+    "RetrievalOrchestrator",
+    "RetrievalOutcome",
+    "RetrievalScope",
+    "SCOPE_COLLECTION",
+    "SCOPE_ITEM",
+    "SCOPE_TAG",
+    "SCOPE_LIBRARY",
+]

@@ -117,8 +117,12 @@ async def handle_create_collection(request: web.Request) -> web.Response:
 
 
 async def handle_delete_collection(request: web.Request) -> web.Response:
+    from core.api import ReadOnlyError
+
     try:
         ok = await _api(request).delete_collection(request.match_info["name"])
+    except ReadOnlyError as exc:
+        return web.json_response({"status": "read_only", "message": str(exc)}, status=403)
     except ValueError as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
     return web.json_response({"ok": ok}, status=200 if ok else 404)
@@ -185,13 +189,18 @@ async def handle_upload_document(request: web.Request) -> web.Response:
 
 
 async def handle_classify_document(request: web.Request) -> web.Response:
+    from core.api import ReadOnlyError
+
     body = await request.json()
     tags = body.get("tags")
-    ok = await _api(request).classify_document(
-        request.match_info["doc_id"],
-        collection=body.get("collection"),
-        tags=[str(t) for t in tags] if isinstance(tags, list) else None,
-    )
+    try:
+        ok = await _api(request).classify_document(
+            request.match_info["doc_id"],
+            collection=body.get("collection"),
+            tags=[str(t) for t in tags] if isinstance(tags, list) else None,
+        )
+    except ReadOnlyError as exc:
+        return web.json_response({"status": "read_only", "message": str(exc)}, status=403)
     if not ok:
         return web.json_response({"error": "document not found"}, status=404)
     doc = await _api(request).get_document(request.match_info["doc_id"])
@@ -201,9 +210,14 @@ async def handle_classify_document(request: web.Request) -> web.Response:
 
 
 async def handle_delete_document(request: web.Request) -> web.Response:
+    from core.api import ReadOnlyError
+
     doc_id = request.match_info["doc_id"]
     _mw_logger.info("Delete document: doc_id=%s", doc_id)
-    ok = await _api(request).delete_document(doc_id)
+    try:
+        ok = await _api(request).delete_document(doc_id)
+    except ReadOnlyError as exc:
+        return web.json_response({"status": "read_only", "message": str(exc)}, status=403)
     return web.json_response({"ok": ok}, status=200 if ok else 404)
 
 
@@ -232,7 +246,14 @@ async def handle_kb_search(request: web.Request) -> web.Response:
     query = request.query.get("q", "")
     top_k = int(request.query.get("top_k", "5"))
     window = int(request.query.get("window", "2"))
-    chunks = await _api(request).search_kb(collection, query, top_k)
+    chunks = await _api(request).search_kb(
+        collection,
+        query,
+        top_k,
+        scope_type=request.query.get("scope_type", ""),
+        scope_key=request.query.get("scope_key", ""),
+        scope_library_id=request.query.get("scope_library_id", ""),
+    )
     result = []
     for c in chunks:
         ctx = await _api(request).get_chunk_context(c.doc_id, c.chunk_id, window)
@@ -360,6 +381,23 @@ async def handle_test_embedding(request: web.Request) -> web.Response:
 
 async def handle_sync_status(request: web.Request) -> web.Response:
     return await _reserved(_api(request).get_sync_status(), "v0.3.0")
+
+
+async def handle_zotero_config(request: web.Request) -> web.Response:
+    return web.json_response(await _api(request).get_zotero_config())
+
+
+async def handle_zotero_pull(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    incremental = bool(body.get("incremental", True)) if isinstance(body, dict) else True
+    try:
+        return web.json_response(await _api(request).sync_zotero_pull(incremental=incremental))
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_zotero_status(request: web.Request) -> web.Response:
+    return web.json_response(await _api(request).get_zotero_sync_status())
 
 
 async def handle_backup(request: web.Request) -> web.Response:
@@ -718,6 +756,9 @@ async def handle_ask(request: web.Request) -> web.Response:
             retrieval_mode=retrieval_mode,
             use_english_retrieval=use_english_retrieval,
             answer_language=answer_language,
+            scope_type=str(body.get("scope_type") or ""),
+            scope_key=str(body.get("scope_key") or ""),
+            scope_library_id=str(body.get("scope_library_id") or ""),
         )
     except LightRAGNotReadyError as exc:
         return web.json_response(
@@ -749,10 +790,15 @@ async def handle_ask(request: web.Request) -> web.Response:
 def _collection_dict(c: object) -> dict:
     from core.api import SYSTEM_COLLECTION_UNCATEGORIZED
 
+    origin = getattr(c, "origin", None)
+    origin_val = origin.value if origin is not None else "local"
     return {
         "name": c.name,  # type: ignore[attr-defined]
         "description": c.description,  # type: ignore[attr-defined]
         "is_system": c.name == SYSTEM_COLLECTION_UNCATEGORIZED,  # type: ignore[attr-defined]
+        "origin": origin_val,
+        "read_only": bool(getattr(c, "read_only", False)) or origin_val == "zotero",
+        "zotero_collection_key": getattr(c, "zotero_collection_key", ""),
     }
 
 
@@ -762,7 +808,16 @@ async def _document_dict(api: KnowledgeRepositoryApi, d: object) -> dict:
     updated_at = d.updated_at.isoformat() if d.updated_at else None  # type: ignore[attr-defined]
     filename = Path(d.file_path).name  # type: ignore[attr-defined]
     ext = Path(filename).suffix.lstrip(".").lower()
-    return {
+    origin = getattr(d, "origin", None)
+    origin_val = origin.value if origin is not None else "local"
+    lifecycle = getattr(d, "lifecycle_state", None)
+    lifecycle_val = lifecycle.value if lifecycle is not None else "active"
+    last_synced = getattr(d, "last_synced_at", None)
+    last_synced_iso = last_synced.isoformat() if last_synced else None
+    needs_reindex = getattr(d, "needs_reindex", False)
+    # Milvus 覆盖指示：active + 有 chunk + 未待重索引（无 bug 时应全勾）。
+    milvus_covered = bool(chunks) and not needs_reindex and lifecycle_val == "active"
+    result = {
         "doc_id": d.doc_id,  # type: ignore[attr-defined]
         "title": d.title,  # type: ignore[attr-defined]
         "filename": filename,
@@ -776,9 +831,25 @@ async def _document_dict(api: KnowledgeRepositoryApi, d: object) -> dict:
         "updated_at": updated_at,
         "updated": updated_at,
         "ext": ext,
-        "needs_reindex": getattr(d, "needs_reindex", False),
+        "needs_reindex": needs_reindex,
         "lightrag_index_status": lightrag_status,
+        # ── 制品包 / 来源 / 三指示元数据 ──
+        "origin": origin_val,
+        "read_only": bool(getattr(d, "read_only", False)),
+        "lifecycle_state": lifecycle_val,
+        "library_id": getattr(d, "library_id", "LOCAL"),
+        "zotero_item_key": getattr(d, "zotero_item_key", ""),
+        "attachment_key": getattr(d, "attachment_key", ""),
+        "last_synced_at": last_synced_iso,
+        "milvus_covered": milvus_covered,
     }
+    if origin_val == "zotero":
+        meta = await api.get_zotero_item_meta(
+            getattr(d, "library_id", ""), getattr(d, "zotero_item_key", "")
+        )
+        if meta:
+            result["zotero_meta"] = meta
+    return result
 
 
 def _chunk_dict(c: object) -> dict:
@@ -886,6 +957,9 @@ def build_app(
     app.router.add_post("/api/notion/init", handle_notion_init)
     app.router.add_post("/api/sync/notion/pull", handle_notion_pull)
     app.router.add_get("/api/sync/status", handle_sync_status)
+    app.router.add_get("/api/zotero/config", handle_zotero_config)
+    app.router.add_post("/api/sync/zotero/pull", handle_zotero_pull)
+    app.router.add_get("/api/sync/zotero/status", handle_zotero_status)
     app.router.add_post("/api/backup", handle_backup)
     app.router.add_post("/api/restore", handle_restore)
     app.router.add_post("/api/graph/build/estimate", handle_graph_build_estimate)

@@ -14,10 +14,19 @@ from typing import TYPE_CHECKING
 from core.domain.models import (
     Collection,
     DocumentChunk,
+    DocumentLifecycle,
+    DocumentOrigin,
+    PageChunk,
     SourceDocument,
     SyncRecord,
     SyncStatus,
     SyncTargetKind,
+    ZoteroAttachment,
+    ZoteroCollection,
+    ZoteroItem,
+    ZoteroLibrary,
+    ZoteroRelation,
+    ZoteroTag,
 )
 from core.repository.source_store.base import SourceDocumentStore
 
@@ -44,6 +53,53 @@ def _format_dt(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
+def _loads_list(val: str | None) -> list:
+    """安全解析 JSON 数组，失败回退空列表。"""
+    try:
+        parsed = json.loads(val) if val else []
+        return parsed if isinstance(parsed, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+# 文档列清单（唯一真相源，杜绝多处 SELECT 列错位）。
+_DOC_COLUMNS = (
+    "doc_id, title, file_path, content_type, size_bytes, content_hash, collection, tags, "
+    "created_at, updated_at, needs_reindex, library_id, zotero_item_key, attachment_key, "
+    "origin, read_only, zotero_version, markdown_rel_path, pages_rel_path, "
+    "converter, converter_version, lifecycle_state, last_synced_at"
+)
+
+
+def _row_to_document(row: tuple) -> SourceDocument:
+    """把 documents 表一行（列顺序同 _DOC_COLUMNS）映射为领域对象。"""
+    return SourceDocument(
+        doc_id=row[0],
+        title=row[1],
+        file_path=row[2],
+        content_type=row[3],
+        size_bytes=row[4],
+        content_hash=row[5],
+        collection=row[6],
+        tags=_loads_list(row[7]),
+        created_at=_parse_dt(row[8]),
+        updated_at=_parse_dt(row[9]),
+        needs_reindex=bool(row[10]),
+        library_id=row[11],
+        zotero_item_key=row[12],
+        attachment_key=row[13],
+        origin=DocumentOrigin(row[14]),
+        read_only=bool(row[15]),
+        zotero_version=row[16],
+        markdown_rel_path=row[17],
+        pages_rel_path=row[18],
+        converter=row[19],
+        converter_version=row[20],
+        lifecycle_state=DocumentLifecycle(row[21]),
+        last_synced_at=_parse_dt(row[22]),
+    )
+
+
 class SQLiteSourceDocumentStore(SourceDocumentStore):
     """基于 SQLite/aiosqlite 的生产 SourceDocumentStore 实现。"""
 
@@ -56,18 +112,30 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         created_at_str = _format_dt(collection.created_at or datetime.now(timezone.utc))
         await self._db.execute(
             """
-            INSERT INTO collections (name, description, created_at)
-            VALUES (?, ?, ?)
+            INSERT INTO collections
+                (name, description, created_at, origin, zotero_collection_key, read_only)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
-                description = excluded.description
+                description = excluded.description,
+                origin = excluded.origin,
+                zotero_collection_key = excluded.zotero_collection_key,
+                read_only = excluded.read_only
             """,
-            (collection.name, collection.description, created_at_str),
+            (
+                collection.name,
+                collection.description,
+                created_at_str,
+                collection.origin.value,
+                collection.zotero_collection_key,
+                int(collection.read_only),
+            ),
         )
         await self._db.commit()
 
     async def list_collections(self) -> list[Collection]:
         async with self._db.execute(
-            "SELECT name, description, created_at FROM collections ORDER BY name ASC"
+            "SELECT name, description, created_at, origin, zotero_collection_key, read_only "
+            "FROM collections ORDER BY name ASC"
         ) as cursor:
             rows = await cursor.fetchall()
             return [
@@ -75,6 +143,9 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                     name=row[0],
                     description=row[1],
                     created_at=_parse_dt(row[2]),
+                    origin=DocumentOrigin(row[3]),
+                    zotero_collection_key=row[4],
+                    read_only=bool(row[5]),
                 )
                 for row in rows
             ]
@@ -102,11 +173,9 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
         try:
             await self._db.execute(
-                """
-                INSERT INTO documents (
-                    doc_id, title, file_path, content_type, size_bytes,
-                    content_hash, collection, tags, created_at, updated_at, needs_reindex
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                f"""
+                INSERT INTO documents ({_DOC_COLUMNS})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document.doc_id,
@@ -120,6 +189,18 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                     created_at_str,
                     updated_at_str,
                     int(document.needs_reindex),
+                    document.library_id,
+                    document.zotero_item_key,
+                    document.attachment_key,
+                    document.origin.value,
+                    int(document.read_only),
+                    document.zotero_version,
+                    document.markdown_rel_path,
+                    document.pages_rel_path,
+                    document.converter,
+                    document.converter_version,
+                    document.lifecycle_state.value,
+                    _format_dt(document.last_synced_at),
                 ),
             )
             await self._db.commit()
@@ -130,46 +211,16 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     async def get_document(self, doc_id: str) -> SourceDocument | None:
         async with self._db.execute(
-            """
-            SELECT title, file_path, content_type, size_bytes, content_hash,
-                   collection, tags, created_at, updated_at, needs_reindex
-              FROM documents WHERE doc_id = ?
-            """,
+            f"SELECT {_DOC_COLUMNS} FROM documents WHERE doc_id = ?",
             (doc_id,),
         ) as cursor:
             row = await cursor.fetchone()
-            if row is None:
-                return None
-
-            try:
-                tags = json.loads(row[6])
-                if not isinstance(tags, list):
-                    tags = []
-            except (json.JSONDecodeError, TypeError):
-                tags = []
-
-            return SourceDocument(
-                doc_id=doc_id,
-                title=row[0],
-                file_path=row[1],
-                content_type=row[2],
-                size_bytes=row[3],
-                content_hash=row[4],
-                collection=row[5],
-                tags=tags,
-                created_at=_parse_dt(row[7]),
-                updated_at=_parse_dt(row[8]),
-                needs_reindex=bool(row[9]),
-            )
+            return _row_to_document(row) if row is not None else None
 
     async def list_documents(
         self, collection: str | None = None, tag: str | None = None
     ) -> list[SourceDocument]:
-        query = """
-            SELECT doc_id, title, file_path, content_type, size_bytes,
-                   content_hash, collection, tags, created_at, updated_at, needs_reindex
-              FROM documents
-        """
+        query = f"SELECT {_DOC_COLUMNS} FROM documents"
         params = []
         conditions = []
 
@@ -190,67 +241,16 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
         async with self._db.execute(query, tuple(params)) as cursor:
             rows = await cursor.fetchall()
-            results = []
-            for row in rows:
-                try:
-                    tags = json.loads(row[7])
-                    if not isinstance(tags, list):
-                        tags = []
-                except (json.JSONDecodeError, TypeError):
-                    tags = []
-
-                results.append(
-                    SourceDocument(
-                        doc_id=row[0],
-                        title=row[1],
-                        file_path=row[2],
-                        content_type=row[3],
-                        size_bytes=row[4],
-                        content_hash=row[5],
-                        collection=row[6],
-                        tags=tags,
-                        created_at=_parse_dt(row[8]),
-                        updated_at=_parse_dt(row[9]),
-                        needs_reindex=bool(row[10]),
-                    )
-                )
-            return results
+            return [_row_to_document(row) for row in rows]
 
     async def list_pending_reindex_documents(self) -> list[SourceDocument]:
         """列出所有标记为待重建索引的文档。"""
         async with self._db.execute(
-            """
-            SELECT doc_id, title, file_path, content_type, size_bytes,
-                   content_hash, collection, tags, created_at, updated_at, needs_reindex
-              FROM documents WHERE needs_reindex = 1
-             ORDER BY created_at ASC, doc_id ASC
-            """
+            f"SELECT {_DOC_COLUMNS} FROM documents WHERE needs_reindex = 1 "
+            "ORDER BY created_at ASC, doc_id ASC"
         ) as cursor:
             rows = await cursor.fetchall()
-            results = []
-            for row in rows:
-                try:
-                    tags = json.loads(row[7])
-                    if not isinstance(tags, list):
-                        tags = []
-                except (json.JSONDecodeError, TypeError):
-                    tags = []
-                results.append(
-                    SourceDocument(
-                        doc_id=row[0],
-                        title=row[1],
-                        file_path=row[2],
-                        content_type=row[3],
-                        size_bytes=row[4],
-                        content_hash=row[5],
-                        collection=row[6],
-                        tags=tags,
-                        created_at=_parse_dt(row[8]),
-                        updated_at=_parse_dt(row[9]),
-                        needs_reindex=bool(row[10]),
-                    )
-                )
-            return results
+            return [_row_to_document(row) for row in rows]
 
     async def update_document(self, document: SourceDocument) -> bool:
         updated_at_str = _format_dt(document.updated_at or datetime.now(timezone.utc))
@@ -260,7 +260,10 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             """
             UPDATE documents SET
                 title = ?, file_path = ?, content_type = ?, size_bytes = ?,
-                content_hash = ?, collection = ?, tags = ?, updated_at = ?, needs_reindex = ?
+                content_hash = ?, collection = ?, tags = ?, updated_at = ?, needs_reindex = ?,
+                library_id = ?, zotero_item_key = ?, attachment_key = ?, origin = ?,
+                read_only = ?, zotero_version = ?, markdown_rel_path = ?, pages_rel_path = ?,
+                converter = ?, converter_version = ?, lifecycle_state = ?, last_synced_at = ?
             WHERE doc_id = ?
             """,
             (
@@ -273,6 +276,18 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 tags_str,
                 updated_at_str,
                 int(document.needs_reindex),
+                document.library_id,
+                document.zotero_item_key,
+                document.attachment_key,
+                document.origin.value,
+                int(document.read_only),
+                document.zotero_version,
+                document.markdown_rel_path,
+                document.pages_rel_path,
+                document.converter,
+                document.converter_version,
+                document.lifecycle_state.value,
+                _format_dt(document.last_synced_at),
                 document.doc_id,
             ),
         ) as cursor:
@@ -579,6 +594,335 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             (conversation_id,),
         )
         await self._db.commit()
+
+    # ── Zotero 逻辑镜像 ──────────────────────────────────────────
+
+    async def upsert_zotero_library(self, library: ZoteroLibrary) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO zotero_libraries (library_id, library_type, name, raw_zotero_json)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(library_id) DO UPDATE SET
+                library_type = excluded.library_type, name = excluded.name,
+                raw_zotero_json = excluded.raw_zotero_json
+            """,
+            (
+                library.library_id,
+                library.library_type,
+                library.name,
+                json.dumps(library.raw_zotero_json),
+            ),
+        )
+        await self._db.commit()
+
+    async def upsert_zotero_collection(self, collection: ZoteroCollection) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO zotero_collections
+                (collection_key, library_id, name, parent_collection_key, origin, raw_zotero_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(library_id, collection_key) DO UPDATE SET
+                name = excluded.name, parent_collection_key = excluded.parent_collection_key,
+                origin = excluded.origin, raw_zotero_json = excluded.raw_zotero_json
+            """,
+            (
+                collection.collection_key,
+                collection.library_id,
+                collection.name,
+                collection.parent_collection_key,
+                collection.origin.value,
+                json.dumps(collection.raw_zotero_json),
+            ),
+        )
+        await self._db.commit()
+
+    async def upsert_zotero_item(self, item: ZoteroItem) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO zotero_items
+                (item_key, library_id, item_type, version, deleted, title, creators,
+                 year, venue, doi, url, abstract, origin, date_added, date_modified,
+                 raw_zotero_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(library_id, item_key) DO UPDATE SET
+                item_type = excluded.item_type, version = excluded.version,
+                deleted = excluded.deleted, title = excluded.title,
+                creators = excluded.creators, year = excluded.year, venue = excluded.venue,
+                doi = excluded.doi, url = excluded.url, abstract = excluded.abstract,
+                origin = excluded.origin, date_added = excluded.date_added,
+                date_modified = excluded.date_modified, raw_zotero_json = excluded.raw_zotero_json
+            """,
+            (
+                item.item_key,
+                item.library_id,
+                item.item_type,
+                item.version,
+                int(item.deleted),
+                item.title,
+                json.dumps(item.creators),
+                item.year,
+                item.venue,
+                item.doi,
+                item.url,
+                item.abstract,
+                item.origin.value,
+                _format_dt(item.date_added),
+                _format_dt(item.date_modified),
+                json.dumps(item.raw_zotero_json),
+            ),
+        )
+        await self._db.commit()
+
+    async def upsert_zotero_attachment(self, attachment: ZoteroAttachment) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO zotero_attachments
+                (attachment_key, library_id, parent_item_key, content_type, filename,
+                 path, resolved_path, link_mode, md5, raw_zotero_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(library_id, attachment_key) DO UPDATE SET
+                parent_item_key = excluded.parent_item_key,
+                content_type = excluded.content_type, filename = excluded.filename,
+                path = excluded.path, resolved_path = excluded.resolved_path,
+                link_mode = excluded.link_mode, md5 = excluded.md5,
+                raw_zotero_json = excluded.raw_zotero_json
+            """,
+            (
+                attachment.attachment_key,
+                attachment.library_id,
+                attachment.parent_item_key,
+                attachment.content_type,
+                attachment.filename,
+                attachment.path,
+                attachment.resolved_path,
+                attachment.link_mode,
+                attachment.md5,
+                json.dumps(attachment.raw_zotero_json),
+            ),
+        )
+        await self._db.commit()
+
+    async def set_item_collections(
+        self, library_id: str, item_key: str, collection_keys: list[str]
+    ) -> None:
+        try:
+            await self._db.execute(
+                "DELETE FROM zotero_collection_items WHERE library_id = ? AND item_key = ?",
+                (library_id, item_key),
+            )
+            for key in collection_keys:
+                await self._db.execute(
+                    "INSERT OR IGNORE INTO zotero_collection_items "
+                    "(library_id, collection_key, item_key) VALUES (?, ?, ?)",
+                    (library_id, key, item_key),
+                )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
+
+    async def replace_item_tags(
+        self, library_id: str, item_key: str, tags: list[ZoteroTag]
+    ) -> None:
+        try:
+            await self._db.execute(
+                "DELETE FROM zotero_item_tags WHERE library_id = ? AND item_key = ?",
+                (library_id, item_key),
+            )
+            for t in tags:
+                await self._db.execute(
+                    "INSERT OR IGNORE INTO zotero_item_tags "
+                    "(library_id, item_key, tag, type, origin) VALUES (?, ?, ?, ?, ?)",
+                    (library_id, item_key, t.tag, t.type, t.origin.value),
+                )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
+
+    async def upsert_zotero_relation(self, relation: ZoteroRelation, library_id: str) -> None:
+        await self._db.execute(
+            "INSERT OR IGNORE INTO zotero_relations "
+            "(library_id, source_item_key, relation_type, target_item_key) VALUES (?, ?, ?, ?)",
+            (
+                library_id,
+                relation.source_item_key,
+                relation.relation_type,
+                relation.target_item_key,
+            ),
+        )
+        await self._db.commit()
+
+    async def list_zotero_items(self, library_id: str | None = None) -> list[ZoteroItem]:
+        query = (
+            "SELECT item_key, library_id, item_type, version, deleted, title, creators, "
+            "year, venue, doi, url, abstract, origin, date_added, date_modified, raw_zotero_json "
+            "FROM zotero_items"
+        )
+        params: tuple = ()
+        if library_id is not None:
+            query += " WHERE library_id = ?"
+            params = (library_id,)
+        query += " ORDER BY library_id ASC, item_key ASC"
+        async with self._db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+            return [self._row_to_zotero_item(r) for r in rows]
+
+    async def get_zotero_item(self, library_id: str, item_key: str) -> ZoteroItem | None:
+        async with self._db.execute(
+            "SELECT item_key, library_id, item_type, version, deleted, title, creators, "
+            "year, venue, doi, url, abstract, origin, date_added, date_modified, raw_zotero_json "
+            "FROM zotero_items WHERE library_id = ? AND item_key = ?",
+            (library_id, item_key),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return self._row_to_zotero_item(row) if row is not None else None
+
+    @staticmethod
+    def _row_to_zotero_item(row: tuple) -> ZoteroItem:
+        return ZoteroItem(
+            item_key=row[0],
+            library_id=row[1],
+            item_type=row[2],
+            version=row[3],
+            deleted=bool(row[4]),
+            title=row[5],
+            creators=_loads_list(row[6]),
+            year=row[7],
+            venue=row[8],
+            doi=row[9],
+            url=row[10],
+            abstract=row[11],
+            origin=DocumentOrigin(row[12]),
+            date_added=_parse_dt(row[13]),
+            date_modified=_parse_dt(row[14]),
+            raw_zotero_json=json.loads(row[15]) if row[15] else {},
+        )
+
+    async def list_zotero_attachments(
+        self, library_id: str, parent_item_key: str | None = None
+    ) -> list[ZoteroAttachment]:
+        query = (
+            "SELECT attachment_key, library_id, parent_item_key, content_type, filename, "
+            "path, resolved_path, link_mode, md5, raw_zotero_json FROM zotero_attachments "
+            "WHERE library_id = ?"
+        )
+        params: list = [library_id]
+        if parent_item_key is not None:
+            query += " AND parent_item_key = ?"
+            params.append(parent_item_key)
+        query += " ORDER BY attachment_key ASC"
+        async with self._db.execute(query, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                ZoteroAttachment(
+                    attachment_key=r[0],
+                    library_id=r[1],
+                    parent_item_key=r[2],
+                    content_type=r[3],
+                    filename=r[4],
+                    path=r[5],
+                    resolved_path=r[6],
+                    link_mode=r[7],
+                    md5=r[8],
+                    raw_zotero_json=json.loads(r[9]) if r[9] else {},
+                )
+                for r in rows
+            ]
+
+    async def list_item_tags(self, library_id: str, item_key: str) -> list[ZoteroTag]:
+        async with self._db.execute(
+            "SELECT item_key, tag, type, origin FROM zotero_item_tags "
+            "WHERE library_id = ? AND item_key = ? ORDER BY tag ASC",
+            (library_id, item_key),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                ZoteroTag(item_key=r[0], tag=r[1], type=r[2], origin=DocumentOrigin(r[3]))
+                for r in rows
+            ]
+
+    async def get_collection_descendants(
+        self, library_id: str, collection_key: str
+    ) -> list[str]:
+        # 递归 CTE 自顶向下遍历集合树，含自身。
+        async with self._db.execute(
+            """
+            WITH RECURSIVE descendants(ck) AS (
+                SELECT collection_key FROM zotero_collections
+                 WHERE library_id = ? AND collection_key = ?
+                UNION
+                SELECT c.collection_key FROM zotero_collections c
+                  JOIN descendants d ON c.parent_collection_key = d.ck
+                 WHERE c.library_id = ?
+            )
+            SELECT ck FROM descendants
+            """,
+            (library_id, collection_key, library_id),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
+
+    async def get_items_in_collections(
+        self, library_id: str, collection_keys: list[str]
+    ) -> list[str]:
+        if not collection_keys:
+            return []
+        placeholders = ",".join("?" for _ in collection_keys)
+        async with self._db.execute(
+            f"SELECT DISTINCT item_key FROM zotero_collection_items "
+            f"WHERE library_id = ? AND collection_key IN ({placeholders}) ORDER BY item_key ASC",
+            (library_id, *collection_keys),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
+
+    async def get_items_with_tag(self, library_id: str, tag: str) -> list[str]:
+        async with self._db.execute(
+            "SELECT DISTINCT item_key FROM zotero_item_tags "
+            "WHERE library_id = ? AND tag = ? ORDER BY item_key ASC",
+            (library_id, tag),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
+
+    # ── 页面级 provenance ────────────────────────────────────────
+
+    async def replace_page_chunks(
+        self, document_id: str, page_chunks: list[PageChunk]
+    ) -> None:
+        try:
+            await self._db.execute(
+                "DELETE FROM page_chunks WHERE document_id = ?", (document_id,)
+            )
+            for pc in page_chunks:
+                await self._db.execute(
+                    "INSERT INTO page_chunks "
+                    "(document_id, page, markdown_start_char, markdown_end_char) "
+                    "VALUES (?, ?, ?, ?)",
+                    (document_id, pc.page, pc.markdown_start_char, pc.markdown_end_char),
+                )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
+
+    async def list_page_chunks(self, document_id: str) -> list[PageChunk]:
+        async with self._db.execute(
+            "SELECT page, markdown_start_char, markdown_end_char FROM page_chunks "
+            "WHERE document_id = ? ORDER BY page ASC",
+            (document_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                PageChunk(
+                    document_id=document_id,
+                    page=r[0],
+                    markdown_start_char=r[1],
+                    markdown_end_char=r[2],
+                )
+                for r in rows
+            ]
 
 
 __all__ = ["SQLiteSourceDocumentStore"]

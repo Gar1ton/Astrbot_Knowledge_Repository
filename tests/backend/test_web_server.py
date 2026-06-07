@@ -215,8 +215,10 @@ async def test_upload_moves_staging_file_into_managed_pdf_repository(tmp_path: P
 
         stored = await initializer.api.get_document(doc_id)
         assert stored is not None
-        assert Path(stored.file_path) == data_dir / "documents" / f"{doc_id}.pdf"
+        # 制品包模型：原件落在 library/<document_id>/original.pdf
+        assert Path(stored.file_path) == data_dir / "library" / doc_id / "original.pdf"
         assert Path(stored.file_path).exists()
+        assert (data_dir / "library" / doc_id / "clean.md").exists()
         assert list((data_dir / "uploads").iterdir()) == []
     finally:
         await client.close()
@@ -738,12 +740,31 @@ async def test_capabilities_route_returns_pipeline_and_dependencies(tmp_path: Pa
             "ingest", "embedding", "vector_store", "retrieval", "graph", "ask", "sync",
         ]
         assert {d["key"] for d in data["dependencies"]} == {
+            "pdf_extract",
             "local_embedding",
             "milvus",
             "lightrag",
             "r2",
         }
         assert isinstance(data["diagnostics"], list)
+    finally:
+        await client.close()
+
+
+async def test_zotero_routes_respond(tmp_path: Path) -> None:
+    """Zotero 路由：未装配管线时 config 返回结构、pull 返回错误、status 为空。"""
+    client = await _client(tmp_path)
+    try:
+        cfg = await (await client.get("/api/zotero/config")).json()
+        assert cfg["enabled"] is False
+        assert cfg["sync_mode"] == "conservative"
+        assert cfg["storage_mode"] == "managed_copy"
+
+        pull = await (await client.post("/api/sync/zotero/pull", json={})).json()
+        assert pull["status"] == "error"  # 未启用/未装配
+
+        status = await (await client.get("/api/sync/zotero/status")).json()
+        assert status == {}
     finally:
         await client.close()
 

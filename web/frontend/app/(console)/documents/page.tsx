@@ -314,6 +314,9 @@ function Inspector({ doc, collections, onClose, onUpdate, onDelete }: InspectorP
     editCollection !== doc.collection ||
     JSON.stringify(editTags.sort()) !== JSON.stringify([...doc.tags].sort());
 
+  const readOnly = doc.origin === "zotero" || !!doc.read_only;
+  const zmeta = doc.zotero_meta;
+
   return (
     <div
       style={{
@@ -373,7 +376,28 @@ function Inspector({ doc, collections, onClose, onUpdate, onDelete }: InspectorP
 
       {/* 滚动内容 */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px" }}>
-        {/* 元数据 */}
+        {/* 来源徽章 + 只读提示 */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+          <span style={{
+            fontSize: 11, fontWeight: 600, padding: "2px 9px", borderRadius: 999,
+            background: doc.origin === "zotero" ? "rgba(140,90,200,0.14)" : "rgba(52,120,200,0.12)",
+            color: doc.origin === "zotero" ? "#7a3fb0" : "#2e6bb0",
+          }}>
+            {doc.origin === "zotero" ? "Zotero 同步" : "本地上传"}
+          </span>
+          {readOnly && (
+            <span style={{ fontSize: 11, fontWeight: 600, padding: "2px 9px", borderRadius: 999, background: "rgba(150,150,150,0.16)", color: "var(--fg-muted)" }}>
+              只读
+            </span>
+          )}
+          {doc.lifecycle_state === "detached" && (
+            <span style={{ fontSize: 11, fontWeight: 600, padding: "2px 9px", borderRadius: 999, background: "rgba(200,120,40,0.16)", color: "#b8761f" }}>
+              已脱管
+            </span>
+          )}
+        </div>
+
+        {/* 元数据 + 三指示 */}
         <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14 }}>
           <tbody>
             {[
@@ -381,6 +405,11 @@ function Inspector({ doc, collections, onClose, onUpdate, onDelete }: InspectorP
               ["分块数", doc.chunks ?? "—"],
               ["更新时间", fmtDate(doc.updated)],
               ["类型", doc.ext?.toUpperCase() ?? "—"],
+              ["末次同步", doc.last_synced_at ? fmtDate(doc.last_synced_at) : "—"],
+              ["Milvus 索引", doc.milvus_covered ? "✓ 已覆盖" : "✗ 未覆盖"],
+              ["LRAG 索引", doc.lightrag_index_status?.status === "indexed" ? "✓ 已建立"
+                : doc.lightrag_index_status?.status === "needs_rebuild" ? "⟳ 需重构"
+                : "○ 未建立"],
             ].map(([k, v]) => (
               <tr key={k as string}>
                 <td style={{ padding: "4px 0", fontSize: 12, color: "var(--fg-muted)", width: 70 }}>{k}</td>
@@ -390,16 +419,42 @@ function Inspector({ doc, collections, onClose, onUpdate, onDelete }: InspectorP
           </tbody>
         </table>
 
+        {/* Zotero 文献元数据 */}
+        {zmeta && (
+          <div style={{ marginBottom: 14, padding: "8px 10px", background: "var(--bg-inset)", borderRadius: 10 }}>
+            {zmeta.creators && zmeta.creators.length > 0 && (
+              <div style={{ fontSize: 12, color: "var(--fg)", marginBottom: 3 }}>{zmeta.creators.join("; ")}</div>
+            )}
+            <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+              {[zmeta.year, zmeta.venue, zmeta.item_type].filter(Boolean).join(" · ")}
+            </div>
+            {zmeta.doi && (
+              <a href={`https://doi.org/${zmeta.doi}`} target="_blank" rel="noreferrer" style={{ fontSize: 11, color: "var(--accent)", wordBreak: "break-all" }}>
+                DOI: {zmeta.doi}
+              </a>
+            )}
+            {zmeta.abstract && (
+              <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5, maxHeight: 88, overflow: "hidden" }}>{zmeta.abstract}</p>
+            )}
+          </div>
+        )}
+
         {/* 集合编辑 */}
         <label style={{ fontSize: 12, color: "var(--fg-muted)", display: "block", marginBottom: 4 }}>
           {t("docs_collection")}
         </label>
-        <Select
-          value={editCollection}
-          onChange={setEditCollection}
-          options={collections.map((c) => ({ value: c.name, label: c.name }))}
-          style={{ width: "100%", marginBottom: 12 }}
-        />
+        {readOnly ? (
+          <div style={{ width: "100%", marginBottom: 12, padding: "7px 10px", fontSize: 13, color: "var(--fg-muted)", background: "var(--bg-inset)", borderRadius: 8 }}>
+            {doc.collection}
+          </div>
+        ) : (
+          <Select
+            value={editCollection}
+            onChange={setEditCollection}
+            options={collections.map((c) => ({ value: c.name, label: c.name }))}
+            style={{ width: "100%", marginBottom: 12 }}
+          />
+        )}
 
         {/* 标签编辑 */}
         <label style={{ fontSize: 12, color: "var(--fg-muted)", display: "block", marginBottom: 6 }}>
@@ -415,21 +470,33 @@ function Inspector({ doc, collections, onClose, onUpdate, onDelete }: InspectorP
           onChange={(e) => setTagInput(e.target.value)}
           onKeyDown={addTag}
           placeholder="输入标签后按 Enter"
+          disabled={readOnly}
           style={{ width: "100%", marginBottom: 14 }}
         />
 
         {/* 操作按钮 */}
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {dirty && (
-            <Btn size="sm" loading={saving} onClick={handleSave}>{t("btn_save")}</Btn>
-          )}
-          <Btn size="sm" variant="ghost" title={t("docs_download")} onClick={() => downloadDocument(doc.doc_id)}>
-            ↓ 下载
-          </Btn>
-          <Btn size="sm" variant="danger" onClick={handleDelete}>
-            {t("btn_delete")}
-          </Btn>
-        </div>
+        {readOnly ? (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <Btn size="sm" variant="ghost" title={t("docs_download")} onClick={() => downloadDocument(doc.doc_id)}>
+              ↓ 下载
+            </Btn>
+            <span style={{ fontSize: 11, color: "var(--fg-subtle)" }}>
+              Zotero 同步来源只读，请在 Zotero 中修改后重新同步。
+            </span>
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {dirty && (
+              <Btn size="sm" loading={saving} onClick={handleSave}>{t("btn_save")}</Btn>
+            )}
+            <Btn size="sm" variant="ghost" title={t("docs_download")} onClick={() => downloadDocument(doc.doc_id)}>
+              ↓ 下载
+            </Btn>
+            <Btn size="sm" variant="danger" onClick={handleDelete}>
+              {t("btn_delete")}
+            </Btn>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -998,6 +1065,19 @@ export default function DocumentsPage() {
                           >
                             {docTitle(doc)}
                           </span>
+                          {doc.origin === "zotero" && (
+                            <span
+                              title={doc.lifecycle_state === "detached" ? "Zotero 同步（已脱管）" : "Zotero 同步（只读）"}
+                              style={{
+                                flexShrink: 0, fontSize: 9, fontWeight: 700, padding: "1px 5px", borderRadius: 4,
+                                background: doc.lifecycle_state === "detached" ? "rgba(200,120,40,0.16)" : "rgba(140,90,200,0.16)",
+                                color: doc.lifecycle_state === "detached" ? "#b8761f" : "#7a3fb0",
+                                letterSpacing: "0.04em",
+                              }}
+                            >
+                              {doc.lifecycle_state === "detached" ? "ZOT·脱管" : "ZOT"}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td style={{ padding: "8px 10px" }}>

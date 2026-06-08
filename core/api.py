@@ -32,6 +32,8 @@ from core.pipelines.retrieval_orchestrator import RetrievalScope
 logger = logging.getLogger("KnowledgeRepositoryApi")
 
 SYSTEM_COLLECTION_UNCATEGORIZED = "_uncategorized"
+MILVUS_INDEX_MAX_ATTEMPTS = 3
+MILVUS_INDEX_RETRY_DELAYS = (0.5, 1.5)
 
 
 def _build_scope(scope_type: str, scope_key: str, scope_library_id: str) -> RetrievalScope | None:
@@ -367,15 +369,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 vdb = self._config.get_vector_db_config()
                 if vdb.backend == "milvus" and self._vector_store and self._embedding_provider:
                     try:
-                        if hasattr(self._vector_store, "set_doc_collection_mapping"):
-                            self._vector_store.set_doc_collection_mapping(doc_id, collection)
-                        chunks = await self._source_store.list_chunks(doc_id)
-                        if chunks:
-                            texts = [c.text for c in chunks]
-                            embeddings = await self._embedding_provider.embed_documents(texts)
-                            await self._vector_store.upsert_chunks(chunks, embeddings)
+                        await self._index_document_chunks_with_retry(
+                            doc_id, collection, context="auto upload"
+                        )
+                        await self._clear_document_needs_reindex(doc_id)
                     except Exception as exc:
-                        logger.error("Milvus indexing failed for %s: %s", doc_id, exc)
+                        logger.error(
+                            "Milvus indexing failed after retries for %s: %s",
+                            doc_id,
+                            exc,
+                        )
                         await self._mark_document_needs_reindex(doc_id)
             elif not auto_index or (
                 self._config.get_vector_db_config().backend == "milvus"
@@ -554,7 +557,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "matched_chunk_id": chunk_id,
         }
 
-    async def rebuild_vector_store(self) -> dict[str, int]:
+    async def rebuild_vector_store(self) -> dict[str, Any]:
         """清除并从 SQLite 事实源全量 rebuild 本地向量数据库。"""
         if not self._config or not self._vector_store or not self._embedding_provider:
             raise RuntimeError("VectorStore or EmbeddingProvider is not configured.")
@@ -567,29 +570,42 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         # 2. 从 SQLite 中读取所有的文档
         docs = await self._source_store.list_documents()
         total_chunks = 0
+        errors: list[dict[str, str]] = []
 
         # 3. 逐个文档批量进行 Embedding 计算与 upsert
         for doc in docs:
-            chunks = await self._source_store.list_chunks(doc.doc_id)
-            if chunks:
-                if hasattr(self._vector_store, "set_doc_collection_mapping"):
-                    self._vector_store.set_doc_collection_mapping(doc.doc_id, doc.collection)
-                texts = [c.text for c in chunks]
-                embeddings = await self._embedding_provider.embed_documents(texts)
-                await self._vector_store.upsert_chunks(chunks, embeddings)
-                total_chunks += len(chunks)
+            try:
+                total_chunks += await self._index_document_chunks_with_retry(
+                    doc.doc_id, doc.collection, context="full rebuild"
+                )
+            except Exception as exc:
+                logger.error(
+                    "Milvus indexing failed after retries for %s during full rebuild: %s",
+                    doc.doc_id,
+                    exc,
+                )
+                await self._mark_document_needs_reindex(doc.doc_id)
+                errors.append({"doc_id": doc.doc_id, "error": str(exc)})
+
+        if errors:
+            reason = f"Milvus rebuild failed for {len(errors)} document(s)."
+            self._mark_milvus_incompatible(reason)
+            logger.error("Milvus indexing failed after retries: %s", reason)
+            return {
+                "rebuilt_chunks": total_chunks,
+                "failed_docs": len(errors),
+                "errors": errors[:5],
+            }
 
         for doc in docs:
-            if doc.needs_reindex:
-                doc.needs_reindex = False
-                await self._source_store.update_document(doc)
+            await self._clear_document_needs_reindex(doc.doc_id)
 
         logger.info("Successfully rebuilt vector store index: %d chunks", total_chunks)
         if self._index_compatibility and self._embedding_fingerprint:
             self._index_compatibility.mark_milvus_compatible(self._embedding_fingerprint)
-        return {"rebuilt_chunks": total_chunks}
+        return {"rebuilt_chunks": total_chunks, "failed_docs": 0, "errors": []}
 
-    async def rebuild_index_pending(self) -> dict[str, int]:
+    async def rebuild_index_pending(self) -> dict[str, Any]:
         """仅对 needs_reindex=True 的文档进行增量索引重建，完成后清除标记。"""
         if not self._vector_store or not self._embedding_provider:
             raise RuntimeError(
@@ -611,23 +627,38 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         docs = await self._source_store.list_pending_reindex_documents()
         total_chunks = 0
+        rebuilt_docs = 0
+        errors: list[dict[str, str]] = []
         logger.info("rebuild_index_pending: %d 个文档待重建", len(docs))
 
         for doc in docs:
-            chunks = await self._source_store.list_chunks(doc.doc_id)
-            if chunks:
-                if hasattr(self._vector_store, "set_doc_collection_mapping"):
-                    self._vector_store.set_doc_collection_mapping(doc.doc_id, doc.collection)
-                texts = [c.text for c in chunks]
-                logger.info("  嵌入 %d 个 chunk: doc=%s", len(chunks), doc.doc_id)
-                embeddings = await self._embedding_provider.embed_documents(texts)
-                await self._vector_store.upsert_chunks(chunks, embeddings)
-                total_chunks += len(chunks)
-            doc.needs_reindex = False
-            await self._source_store.update_document(doc)
+            try:
+                total_chunks += await self._index_document_chunks_with_retry(
+                    doc.doc_id, doc.collection, context="pending rebuild"
+                )
+                await self._clear_document_needs_reindex(doc.doc_id)
+                rebuilt_docs += 1
+            except Exception as exc:
+                logger.error(
+                    "Milvus indexing failed after retries for %s during pending rebuild: %s",
+                    doc.doc_id,
+                    exc,
+                )
+                await self._mark_document_needs_reindex(doc.doc_id)
+                errors.append({"doc_id": doc.doc_id, "error": str(exc)})
 
-        logger.info("rebuild_index_pending 完成: %d docs, %d chunks", len(docs), total_chunks)
-        return {"rebuilt_docs": len(docs), "rebuilt_chunks": total_chunks}
+        logger.info(
+            "rebuild_index_pending 完成: %d docs, %d chunks, %d failed",
+            rebuilt_docs,
+            total_chunks,
+            len(errors),
+        )
+        return {
+            "rebuilt_docs": rebuilt_docs,
+            "rebuilt_chunks": total_chunks,
+            "failed_docs": len(errors),
+            "errors": errors[:5],
+        }
 
     async def get_pending_reindex_count(self) -> int:
         """返回待重建索引的文档数量。"""
@@ -718,6 +749,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         chunks: list[DocumentChunk] = []
         engines: list[str] = []
         fallback_reason: str | None = None
+        milvus_fallback_reason = await self._milvus_retrieval_fallback_reason()
 
         # graph_only: 跳过向量/词法召回，仅走图谱路径
         if retrieval_mode == "graph_only":
@@ -783,6 +815,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     engines.extend(outcome.engines)
                     fallback_reason = fallback_reason or outcome.fallback_reason
                 else:
+                    fallback_reason = fallback_reason or milvus_fallback_reason
                     current_chunks = await self._kb_reader.search(col, retrieval_question, top_k)
                     engines.append("astrbot")
             except Exception as exc:
@@ -1693,6 +1726,19 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             and self._index_compatibility.is_milvus_compatible(self._embedding_fingerprint)
         )
 
+    async def _milvus_retrieval_fallback_reason(self) -> str | None:
+        if not self._config or self._config.get_vector_db_config().backend != "milvus":
+            return None
+        pending_count = len(await self._source_store.list_pending_reindex_documents())
+        if not self._milvus_index_is_compatible():
+            reason = ""
+            if self._index_compatibility is not None:
+                reason = self._index_compatibility.reason("milvus")
+            return reason or "Milvus index is not compatible; rebuild index required."
+        if pending_count:
+            return f"{pending_count} document(s) still require Milvus reindex."
+        return None
+
     def _lightrag_index_is_compatible(self, collection: str) -> bool:
         return bool(
             self._lightrag_registry
@@ -1718,6 +1764,71 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         doc.needs_reindex = True
         await self._source_store.update_document(doc)
 
+    async def _clear_document_needs_reindex(self, doc_id: str) -> None:
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return
+        if doc.needs_reindex:
+            doc.needs_reindex = False
+            await self._source_store.update_document(doc)
+
+    async def _index_document_chunks_with_retry(
+        self, doc_id: str, collection: str, *, context: str
+    ) -> int:
+        chunks = await self._source_store.list_chunks(doc_id)
+        if not chunks:
+            return 0
+        return await self._upsert_milvus_chunks_with_retry(
+            chunks,
+            collection=collection,
+            context=f"{context}: doc={doc_id}",
+        )
+
+    async def _upsert_milvus_chunks_with_retry(
+        self, chunks: list[DocumentChunk], *, collection: str, context: str
+    ) -> int:
+        if not self._vector_store or not self._embedding_provider:
+            raise RuntimeError("VectorStore or EmbeddingProvider is not configured.")
+
+        doc_ids = sorted({chunk.doc_id for chunk in chunks})
+        if hasattr(self._vector_store, "set_doc_collection_mapping"):
+            for doc_id in doc_ids:
+                self._vector_store.set_doc_collection_mapping(doc_id, collection)
+
+        last_exc: Exception | None = None
+        for attempt in range(1, MILVUS_INDEX_MAX_ATTEMPTS + 1):
+            try:
+                embeddings = await self._embedding_provider.embed_documents(
+                    [chunk.text for chunk in chunks]
+                )
+                await self._vector_store.upsert_chunks(chunks, embeddings)
+                if attempt > 1:
+                    logger.info(
+                        "Milvus indexing retry succeeded on attempt %d/%d: %s",
+                        attempt,
+                        MILVUS_INDEX_MAX_ATTEMPTS,
+                        context,
+                    )
+                return len(chunks)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= MILVUS_INDEX_MAX_ATTEMPTS:
+                    break
+                delay = MILVUS_INDEX_RETRY_DELAYS[
+                    min(attempt - 1, len(MILVUS_INDEX_RETRY_DELAYS) - 1)
+                ]
+                logger.warning(
+                    "Milvus indexing attempt %d/%d failed for %s: %s; retrying in %.1fs",
+                    attempt,
+                    MILVUS_INDEX_MAX_ATTEMPTS,
+                    context,
+                    exc,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        raise RuntimeError(f"Milvus indexing failed after retries ({context}): {last_exc}")
+
     async def _mark_lightrag_pending(self, doc_id: str, collection: str) -> None:
         await self._source_store.set_lightrag_index_status(doc_id, collection, "pending")
 
@@ -1732,16 +1843,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         if vdb.backend != "milvus" or not self._vector_store or not self._embedding_provider:
             return
         try:
-            if hasattr(self._vector_store, "set_doc_collection_mapping"):
-                self._vector_store.set_doc_collection_mapping(doc_id, collection)
-            chunks = await self._source_store.list_chunks(doc_id)
-            if chunks:
-                embeddings = await self._embedding_provider.embed_documents(
-                    [c.text for c in chunks]
-                )
-                await self._vector_store.upsert_chunks(chunks, embeddings)
+            await self._index_document_chunks_with_retry(doc_id, collection, context="zotero")
+            await self._clear_document_needs_reindex(doc_id)
         except Exception as exc:
-            logger.error("Zotero index failed for %s: %s", doc_id, exc)
+            logger.error("Milvus indexing failed after retries for Zotero doc %s: %s", doc_id, exc)
             await self._mark_document_needs_reindex(doc_id)
 
     async def _remove_document_index(self, doc_id: str) -> None:
@@ -1826,12 +1931,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         assert self._embedding_provider is not None
         try:
             await self._vector_store.delete_chunks([chunk.chunk_id for chunk in chunks])
-            if hasattr(self._vector_store, "set_doc_collection_mapping"):
-                self._vector_store.set_doc_collection_mapping(doc_id, collection)
-            embeddings = await self._embedding_provider.embed_documents(
-                [chunk.text for chunk in chunks]
+            await self._upsert_milvus_chunks_with_retry(
+                chunks,
+                collection=collection,
+                context=f"collection move: doc={doc_id}",
             )
-            await self._vector_store.upsert_chunks(chunks, embeddings)
+            await self._clear_document_needs_reindex(doc_id)
         except Exception as exc:
             logger.error("Milvus collection move sync failed for %s: %s", doc_id, exc)
             await self._mark_document_needs_reindex(doc_id)

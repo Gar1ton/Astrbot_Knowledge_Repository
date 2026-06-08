@@ -1,8 +1,7 @@
-"""能力 / 可选依赖管理 API 子门面（mixin，见 ../ARCHITECTURE.md §7 与 api.README.md）。
+"""能力与可选依赖管理 API 子门面。
 
-把「系统能力查询 + 一键安装/重检可选依赖」从巨型业务门面中分离：单一职责、便于阅读。
-`KnowledgeRepositoryApi` 通过组合本 mixin 暴露这些方法；运行时依赖（如 self._config）由
-`KnowledgeRepositoryApi.__init__` 注入，本 mixin 自身不持状态、不创建依赖。
+本 mixin 只暴露系统能力查询、依赖列表、安装与重检能力；运行时依赖由
+KnowledgeRepositoryApi 通过构造器注入。
 """
 
 from __future__ import annotations
@@ -13,8 +12,12 @@ from typing import TYPE_CHECKING, Any
 
 from core.capabilities import dependency_statuses, detect_capabilities, resolve_install_spec
 
-if TYPE_CHECKING:  # 仅类型提示：实际实例属性由组合类的 __init__ 注入。
+if TYPE_CHECKING:
     from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.embedding.base import EmbeddingProvider
+    from core.repository.source_store.base import SourceDocumentStore
+    from core.repository.vector_store.base import VectorStore
 
 logger = logging.getLogger("KnowledgeRepositoryApi")
 
@@ -23,38 +26,109 @@ class CapabilitiesApiMixin:
     """系统能力查询与可选依赖安装/重检；组合进 KnowledgeRepositoryApi 使用。"""
 
     _config: Config | None
+    _source_store: SourceDocumentStore
+    _vector_store: VectorStore | None
+    _embedding_provider: EmbeddingProvider | None
+    _index_compatibility: IndexCompatibilityStore | None
+    _embedding_fingerprint: str | None
 
-    def get_capabilities(self) -> dict[str, Any]:
-        """数据流各环节状态 + 可选依赖安装状态 + 诊断，供向导页渲染（取代前端字符串匹配）。"""
+    async def get_capabilities(self) -> dict[str, Any]:
+        """返回数据流各环节、依赖状态与运行态诊断。"""
         if self._config is None:
             raise NotImplementedError("get_capabilities: config unavailable")
-        return detect_capabilities(self._config)
+        data = detect_capabilities(self._config)
+        await self._overlay_milvus_runtime_health(data)
+        return data
 
     def list_dependencies(self) -> list[dict[str, Any]]:
-        """列出可选依赖及其安装/版本状态，供依赖管理面板渲染。"""
+        """列出可选依赖及其安装版本状态。"""
         return dependency_statuses()
 
-    def recheck_dependencies(self) -> dict[str, Any]:
-        """清除 import 缓存后重新探测，返回最新能力 + 依赖状态（新装包无需重启即可被检出）。"""
+    async def recheck_dependencies(self) -> dict[str, Any]:
+        """清除 import 缓存后重新探测，并返回最新能力快照。"""
         import importlib
 
         importlib.invalidate_caches()
         if self._config is None:
             return {"dependencies": dependency_statuses()}
-        return detect_capabilities(self._config)
+        data = detect_capabilities(self._config)
+        await self._overlay_milvus_runtime_health(data)
+        return data
+
+    async def _overlay_milvus_runtime_health(self, data: dict[str, Any]) -> None:
+        """把 Milvus 的真实可检索状态叠加到静态能力快照。"""
+        if self._config is None or self._config.get_vector_db_config().backend != "milvus":
+            return
+
+        health = await self._milvus_runtime_health()
+        for stage in data.get("pipeline", []):
+            if not isinstance(stage, dict):
+                continue
+            detail = stage.setdefault("detail", {})
+            if not isinstance(detail, dict):
+                detail = {}
+                stage["detail"] = detail
+
+            if stage.get("id") == "vector_store":
+                detail.update(health)
+                if health["rebuild_required"]:
+                    stage["status"] = "degraded"
+            elif stage.get("id") == "retrieval":
+                detail["milvus_reason"] = health["reason"]
+                detail["milvus_rebuild_required"] = health["rebuild_required"]
+                if health["rebuild_required"]:
+                    engines = detail.get("engines")
+                    if isinstance(engines, list):
+                        detail["engines"] = [engine for engine in engines if engine != "milvus"]
+                    stage["status"] = "degraded"
+            elif stage.get("id") == "ask" and health["rebuild_required"]:
+                detail["fallback_reason"] = health["reason"]
+
+    async def _milvus_runtime_health(self) -> dict[str, Any]:
+        docs = await self._source_store.list_documents()
+        pending_count = sum(1 for doc in docs if getattr(doc, "needs_reindex", False))
+        chunk_count = 0
+        for doc in docs:
+            chunk_count += len(await self._source_store.list_chunks(doc.doc_id))
+
+        compatible = bool(
+            self._vector_store
+            and self._embedding_provider
+            and self._index_compatibility
+            and self._embedding_fingerprint
+            and self._index_compatibility.is_milvus_compatible(self._embedding_fingerprint)
+        )
+        reason = ""
+        if self._vector_store is None:
+            reason = "Milvus vector store is not initialized."
+        elif self._embedding_provider is None:
+            reason = "Embedding provider is not initialized."
+        elif self._index_compatibility is None or not self._embedding_fingerprint:
+            reason = "Milvus index compatibility state is unavailable."
+        elif not compatible:
+            reason = (
+                self._index_compatibility.reason("milvus")
+                or "Milvus index is not compatible with the active embedding."
+            )
+        elif pending_count:
+            reason = f"{pending_count} document(s) still require Milvus reindex."
+
+        return {
+            "compatible": compatible,
+            "rebuild_required": bool(reason or pending_count),
+            "pending_reindex_count": pending_count,
+            "document_count": len(docs),
+            "chunk_count": chunk_count,
+            "reason": reason,
+        }
 
     async def install_dependency(self, package: str) -> dict[str, Any]:
-        """一键安装清单内的可选依赖；输出实时写入日志缓冲，终端日志页可见。
-
-        package 可为依赖 key（如 "milvus"）或白名单内 pip 规格；非白名单一律拒绝（防注入）。
-        运行时已构造的 embedding/vector 单例不会热加载，故安装成功返回 restart_required=True。
-        Docker 部署下容器重建可能丢失，建议写入镜像或挂载卷（前端会提示）。
-        """
-        spec = resolve_install_spec(package)  # 命中白名单，否则抛 ValueError
+        """安装白名单内可选依赖，并把 pip 输出转发到 logger。"""
+        spec = resolve_install_spec(package)
         return await self._run_pip_install(spec)
 
     async def _run_pip_install(self, spec: str) -> dict[str, Any]:
-        """以 `sys.executable -m pip install <spec>` 安装，逐行把输出转发到 logger。"""
+        """以当前解释器运行 pip install。"""
         import sys
 
         logger.info("Installing optional dependency: %s", spec)
@@ -68,7 +142,7 @@ class CapabilitiesApiMixin:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
-        except Exception as exc:  # 子进程都拉不起来（极少见）
+        except Exception as exc:
             logger.error("Failed to launch pip for %s: %s", spec, exc)
             return {"status": "error", "package": spec, "message": str(exc)}
 
@@ -89,9 +163,9 @@ class CapabilitiesApiMixin:
             "returncode": returncode,
             "restart_required": ok,
             "message": (
-                "已安装，需重启插件生效（Docker 部署请注意依赖持久化）"
+                "已安装，需重启插件生效；Docker 部署请注意依赖持久化。"
                 if ok
-                else f"安装失败，退出码 {returncode}，详见终端日志"
+                else f"安装失败，退出码 {returncode}，详见终端日志。"
             ),
         }
 

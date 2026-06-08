@@ -577,7 +577,7 @@ async def test_embedding_change_marks_docs_pending_and_rebuilds_incompatible_mil
 
     rebuilt = await api.rebuild_index_pending()
 
-    assert rebuilt == {"rebuilt_docs": 1, "rebuilt_chunks": 1}
+    assert rebuilt == {"rebuilt_docs": 1, "rebuilt_chunks": 1, "failed_docs": 0, "errors": []}
     assert vector_store.clear_calls == 1
     assert await store.list_pending_reindex_documents() == []
     assert compatibility.is_milvus_compatible("fp")
@@ -650,6 +650,85 @@ async def test_vector_db_sync_and_rebuild(tmp_path: Path) -> None:
     assert "chunk_A" in v_store._data
     await api.delete_collection("col1")
     assert "chunk_A" not in v_store._data
+
+
+async def test_capabilities_reports_milvus_rebuild_required(tmp_path: Path) -> None:
+    from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "papers")
+    doc.needs_reindex = True
+    await store.add_document(doc)
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "evidence", "h1")])
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=InMemoryVectorStore(),
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    caps = await api.get_capabilities()
+    vector_stage = next(stage for stage in caps["pipeline"] if stage["id"] == "vector_store")
+
+    assert vector_stage["status"] == "degraded"
+    assert vector_stage["detail"]["compatible"] is False
+    assert vector_stage["detail"]["rebuild_required"] is True
+    assert vector_stage["detail"]["pending_reindex_count"] == 1
+    assert vector_stage["detail"]["document_count"] == 1
+    assert vector_stage["detail"]["chunk_count"] == 1
+
+
+async def test_rebuild_index_pending_retries_transient_embedding_failure(tmp_path: Path) -> None:
+    from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.vector_store.memory import InMemoryVectorStore
+
+    class FlakyEmbedding:
+        dimension = 4
+        calls = 0
+
+        async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("model warming up")
+            return [[0.1] * self.dimension for _ in texts]
+
+        async def embed_query(self, text: str) -> list[float]:
+            return [0.1] * self.dimension
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "papers")
+    doc.needs_reindex = True
+    await store.add_document(doc)
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "evidence", "h1")])
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+    vector_store = InMemoryVectorStore()
+    embedding = FlakyEmbedding()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=vector_store,
+        embedding_provider=embedding,  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    result = await api.rebuild_index_pending()
+
+    assert result == {"rebuilt_docs": 1, "rebuilt_chunks": 1, "failed_docs": 0, "errors": []}
+    assert embedding.calls == 2
+    assert await store.list_pending_reindex_documents() == []
+    assert "c1" in vector_store._data
 
 
 # ── LightRAG API 层覆盖补充 ──────────────────────────────────────────

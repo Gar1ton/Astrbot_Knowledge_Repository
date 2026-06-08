@@ -752,8 +752,17 @@ export interface ConfigUpdateResult {
   message: string;
 }
 
-export async function rebuildIndexPending(): Promise<{ rebuilt_docs: number; rebuilt_chunks: number }> {
-  if (isMock()) return { rebuilt_docs: 0, rebuilt_chunks: 0 };
+export interface RebuildIndexResult {
+  status?: string;
+  rebuilt_docs: number;
+  rebuilt_chunks: number;
+  failed_docs?: number;
+  errors?: Array<{ doc_id: string; error: string }>;
+  message?: string;
+}
+
+export async function rebuildIndexPending(): Promise<RebuildIndexResult> {
+  if (isMock()) return { status: "ok", rebuilt_docs: 0, rebuilt_chunks: 0, failed_docs: 0, errors: [] };
   return apiFetch("/api/documents/rebuild-index", { method: "POST" });
 }
 
@@ -1174,7 +1183,7 @@ const MOCK_CAPABILITIES: CapabilitiesData = {
   pipeline: [
     { id: "ingest", current: "pymupdf4llm", candidates: ["pymupdf4llm"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { ocr_enabled: false, pdf_converter: "pymupdf4llm", pdf_converter_ready: true, dependency_source: "requirements.txt" } },
     { id: "embedding", current: "local", candidates: ["local", "external"], status: "ready", switchable: true, consequence: "rebuild", required_deps: ["local_embedding"], configured: true, detail: { model: "intfloat/multilingual-e5-small", actual_dimension: 384 } },
-    { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true } },
+    { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true, compatible: true, rebuild_required: false, pending_reindex_count: 0, document_count: 0, chunk_count: 0, reason: "" } },
     { id: "retrieval", current: "rrf_fusion", candidates: ["rrf_fusion"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { engines: ["milvus", "sqlite_lexical"] } },
     { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix", llm_provider: "main" } },
     { id: "ask", current: "inject", candidates: ["inject", "query_agent"], status: "ready", switchable: true, consequence: "none", required_deps: [], configured: true, detail: {} },

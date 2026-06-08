@@ -138,12 +138,14 @@ export function FlowNode({
   saving,
   installing,
   justActivatedValue,
+  rebuildingIndex,
   selected,
   onSelect,
   config,
   onSwitch,
   onQuickConfigSave,
   onInstall,
+  onRebuildIndex,
 }: {
   stage: PipelineStage;
   depMap: Map<string, DependencyStatus>;
@@ -152,12 +154,14 @@ export function FlowNode({
   saving: boolean;
   installing: string | null;
   justActivatedValue: string | null;
+  rebuildingIndex: boolean;
   selected: boolean;
   config: FlowConfigSnapshot;
   onSelect: () => void;
   onSwitch: (stage: PipelineStage, value: string) => void;
   onQuickConfigSave: (stageId: FlowStageId, updates: QuickConfigUpdate[]) => void;
   onInstall: (dep: DependencyStatus) => void;
+  onRebuildIndex: () => void;
 }) {
   if (!isFlowStageId(stage.id)) return null;
 
@@ -171,6 +175,15 @@ export function FlowNode({
     .map((key) => depMap.get(key))
     .filter((dep): dep is DependencyStatus => Boolean(dep && !dep.installed));
   const fieldKey = FIELD_LABEL_KEYS[id] ?? "flow_current";
+  const needsMilvusRebuild =
+    id === "vector_store" &&
+    stage.current === "milvus" &&
+    (stage.detail.rebuild_required === true ||
+      Number(stage.detail.pending_reindex_count ?? 0) > 0);
+  const milvusReason =
+    typeof stage.detail.reason === "string" && stage.detail.reason
+      ? stage.detail.reason
+      : "";
 
   return (
     <div
@@ -238,6 +251,27 @@ export function FlowNode({
         {missingDeps.map((dep) => (
           <DepRow key={dep.key} dep={dep} installing={installing} t={t} onInstall={onInstall} />
         ))}
+
+        {needsMilvusRebuild && (
+          <div className="flow-dep-row" onClick={(event) => event.stopPropagation()}>
+            <span className="flow-dep-icon"><AlertIcon /></span>
+            <div className="flow-dep-text">
+              <span className="flow-dep-name">{t("flow_milvus_rebuild_required")}</span>
+              {milvusReason && <code className="flow-dep-pip">{milvusReason}</code>}
+            </div>
+            <button
+              type="button"
+              className="flow-dep-button"
+              disabled={rebuildingIndex}
+              onClick={(event) => {
+                event.stopPropagation();
+                onRebuildIndex();
+              }}
+            >
+              {rebuildingIndex ? t("flow_milvus_rebuild_running") : t("flow_milvus_rebuild")}
+            </button>
+          </div>
+        )}
 
         {meta.link && (
           <Link

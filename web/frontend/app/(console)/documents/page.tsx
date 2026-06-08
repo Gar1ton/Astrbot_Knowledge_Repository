@@ -19,6 +19,7 @@ import {
   patchDocument,
   deleteDocument,
   downloadDocument,
+  rebuildIndexPending,
 } from "@/lib/api";
 
 // ─── 工具函数 ─────────────────────────────────────────────────
@@ -604,6 +605,7 @@ export default function DocumentsPage() {
   const [sortKey, setSortKey] = useState<"title" | "tags" | "size" | "updated" | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [deleteTarget, setDeleteTarget] = useState<Collection | null>(null);
+  const [rebuildingIndex, setRebuildingIndex] = useState(false);
 
   // 初始化并监听 ?doc_id 跳转（来自 Ask Agent）
   useEffect(() => {
@@ -687,6 +689,35 @@ export default function DocumentsPage() {
     } catch (err) {
       toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
       setDeleteTarget(null);
+    }
+  }
+
+  async function refreshDocuments() {
+    const allDocs = await listDocuments();
+    setDocs(allDocs);
+    if (inspecting) {
+      setInspecting(allDocs.find((doc) => doc.doc_id === inspecting.doc_id) ?? null);
+    }
+  }
+
+  async function handleRebuildMilvusIndex() {
+    setRebuildingIndex(true);
+    toast("正在重建 Milvus 索引", "info");
+    try {
+      const result = await rebuildIndexPending();
+      await refreshDocuments();
+      if ((result.failed_docs ?? 0) > 0) {
+        toast(
+          `Milvus 索引仍需重建：${result.errors?.[0]?.error || result.message || `${result.failed_docs} 个文档失败`}`,
+          "error",
+        );
+      } else {
+        toast(`已重建 ${result.rebuilt_docs} 个文档 / ${result.rebuilt_chunks} 个 chunk`, "ok");
+      }
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
+    } finally {
+      setRebuildingIndex(false);
     }
   }
 
@@ -939,6 +970,9 @@ export default function DocumentsPage() {
             </span>
             <Btn size="sm" onClick={() => setShowUpload(true)}>
               {t("btn_upload")}
+            </Btn>
+            <Btn size="sm" variant="ghost" loading={rebuildingIndex} onClick={handleRebuildMilvusIndex}>
+              重建 Milvus 索引
             </Btn>
             <button
               onClick={() => setShowInspector(v => !v)}

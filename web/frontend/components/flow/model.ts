@@ -172,11 +172,21 @@ export function buildDetailParts(stage: PipelineStage, lang: Lang, flowEnginesLa
   const model = stage.detail.model;
   const dim = stage.detail.actual_dimension;
   const engines = stage.detail.engines;
+  const pending = stage.detail.pending_reindex_count;
+  const docs = stage.detail.document_count;
+  const chunks = stage.detail.chunk_count;
 
   if (typeof model === "string" && model) parts.push(model);
   if (typeof dim === "number" || typeof dim === "string") parts.push(`${dim}d`);
   if (stage.id === "retrieval" && Array.isArray(engines) && engines.length > 0) {
     parts.push(`${flowEnginesLabel} ${engines.map((e) => backendLabel(String(e), lang)).join(" + ")}`);
+  }
+  if (stage.id === "vector_store") {
+    if (typeof docs === "number") parts.push(lang === "zh" ? `${docs} 文档` : `${docs} docs`);
+    if (typeof chunks === "number") parts.push(lang === "zh" ? `${chunks} chunks` : `${chunks} chunks`);
+    if (typeof pending === "number" && pending > 0) {
+      parts.push(lang === "zh" ? `${pending} 待重建` : `${pending} pending`);
+    }
   }
   return parts;
 }

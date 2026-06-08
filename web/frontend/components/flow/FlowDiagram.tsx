@@ -65,10 +65,12 @@ export function FlowDiagram({
   savingId,
   installingKey,
   justActivatedId,
+  rebuildingIndex,
   config,
   onSwitch,
   onQuickConfigSave,
   onInstall,
+  onRebuildIndex,
 }: {
   stages: PipelineStage[];
   dependencies: DependencyStatus[];
@@ -77,10 +79,12 @@ export function FlowDiagram({
   savingId: string | null;
   installingKey: string | null;
   justActivatedId: string | null;
+  rebuildingIndex: boolean;
   config: FlowConfigSnapshot;
   onSwitch: (stage: PipelineStage, value: string) => void;
   onQuickConfigSave: (stageId: FlowStageId, updates: QuickConfigUpdate[]) => void;
   onInstall: (dep: DependencyStatus) => void;
+  onRebuildIndex: () => void;
 }) {
   const knownStages = useMemo(
     () => stages.filter((stage) => isFlowStageId(stage.id)).sort((a, b) => STAGE_META[a.id as FlowStageId].idx - STAGE_META[b.id as FlowStageId].idx),
@@ -342,12 +346,14 @@ export function FlowDiagram({
                   saving={savingId === stage.id}
                   installing={installingKey}
                   justActivatedValue={justActivatedValue}
+                  rebuildingIndex={rebuildingIndex}
                   selected={selectedId === stage.id}
                   config={config}
                   onSelect={() => setSelectedId(stage.id)}
                   onSwitch={onSwitch}
                   onQuickConfigSave={onQuickConfigSave}
                   onInstall={onInstall}
+                  onRebuildIndex={onRebuildIndex}
                 />
               </div>
             );

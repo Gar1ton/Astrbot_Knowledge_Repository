@@ -14,6 +14,7 @@ import {
   getEffectiveConfig,
   getZoteroConfig,
   installDependency,
+  rebuildIndexPending,
   recheckDependencies,
   updateConfigValue,
   type CapabilitiesData,
@@ -35,6 +36,7 @@ export default function FlowPage() {
   const [savingId, setSavingId] = useState<string | null>(null);
   const [installingKey, setInstallingKey] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
+  const [rebuildingIndex, setRebuildingIndex] = useState(false);
   const [banner, setBanner] = useState<Banner>(null);
   const [justActivatedId, setJustActivatedId] = useState<string | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -134,6 +136,33 @@ export default function FlowPage() {
     }
   }, []);
 
+  const handleRebuildIndex = useCallback(async () => {
+    setRebuildingIndex(true);
+    toast(t("flow_milvus_rebuild_running"), "info");
+    try {
+      const result = await rebuildIndexPending();
+      await refreshFlow();
+      if ((result.failed_docs ?? 0) > 0) {
+        const firstError = result.errors?.[0]?.error;
+        toast(
+          `${t("flow_milvus_rebuild_failed")}: ${firstError || result.message || `${result.failed_docs} failed`}`,
+          "error",
+        );
+      } else {
+        toast(
+          t("flow_milvus_rebuild_done")
+            .replace("{docs}", String(result.rebuilt_docs))
+            .replace("{chunks}", String(result.rebuilt_chunks)),
+          "ok",
+        );
+      }
+    } catch (err: unknown) {
+      toast(`${t("flow_milvus_rebuild_failed")}: ${err instanceof Error ? err.message : String(err)}`, "error");
+    } finally {
+      setRebuildingIndex(false);
+    }
+  }, [refreshFlow, t, toast]);
+
   const bannerText =
     banner?.kind === "rebuild" ? t("flow_rebuild_banner") :
     banner?.kind === "install" ? (banner.msg || t("flow_deps_restart_hint")) :
@@ -231,9 +260,11 @@ export default function FlowPage() {
           savingId={savingId}
           installingKey={installingKey}
           justActivatedId={justActivatedId}
+          rebuildingIndex={rebuildingIndex}
           onSwitch={handleSwitch}
           onQuickConfigSave={handleQuickConfigSave}
           onInstall={handleInstall}
+          onRebuildIndex={handleRebuildIndex}
         />
       )}
     </div>

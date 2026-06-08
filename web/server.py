@@ -650,7 +650,7 @@ async def handle_delete_local_model(request: web.Request) -> web.Response:
 async def handle_capabilities(request: web.Request) -> web.Response:
     """GET /api/capabilities — 数据流各环节状态 + 依赖状态 + 诊断（向导页唯一数据源）。"""
     try:
-        return web.json_response(_api(request).get_capabilities())
+        return web.json_response(await _api(request).get_capabilities())
     except NotImplementedError as exc:
         return web.json_response({"error": str(exc)}, status=503)
     except Exception as exc:
@@ -684,7 +684,7 @@ async def handle_dependency_install(request: web.Request) -> web.Response:
 async def handle_dependency_recheck(request: web.Request) -> web.Response:
     """POST /api/dependencies/recheck — 清 import 缓存后重新探测并返回最新状态。"""
     try:
-        return web.json_response(_api(request).recheck_dependencies())
+        return web.json_response(await _api(request).recheck_dependencies())
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
 

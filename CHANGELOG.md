@@ -25,8 +25,14 @@
 
 ### 新增功能 (Added)
 
+- **Milvus 运行态覆盖状态与手动重建入口**：`/api/capabilities` 的 vector_store/retrieval/ask 环节现在叠加 Milvus 运行态信息（`compatible`、`rebuild_required`、`pending_reindex_count`、`document_count`、`chunk_count`、`reason`）；Flow 在待重建时显示 degraded 和“重建索引”按钮，Documents 工具栏增加“重建 Milvus 索引”入口，均复用 `/api/documents/rebuild-index` 并展示失败摘要（`core/api_capabilities.py`, `web/server.py`, `web/frontend/components/flow/{FlowDiagram,FlowNode,model}.tsx`, `web/frontend/app/(console)/{flow,documents}/page.tsx`, `web/frontend/lib/{api,i18n}.ts`）。
 - **Ask 页知识库选中高亮边与发送键灰态**：选中集合时输入卡片显示橙色高亮边（`--accent-border`）；加载期间边框退回普通色、仅保留旋转辉光；图谱检索模式下未选有效集合时发送键变灰，点击仍触发已有 toast 提示（`web/frontend/app/globals.css`, `web/frontend/app/(console)/ask/page.tsx`）。
 - **Milvus 自动索引开关说明文案优化**：label 改为「上传后立即建立 Milvus 向量索引」，说明文字补充延迟索引 / 批量重建工作流说明（`web/frontend/app/(console)/settings/page.tsx`）。
+
+### 修复 (Fixed)
+
+- **Milvus ready 语义不再只等于依赖可用**：当 compatibility 缺失/不匹配或 SQLite 仍有 `needs_reindex=1` 文档时，capabilities 会把 Milvus 标为需重建，Ask 的 `fallback_reason` 会携带 Milvus 未覆盖/需重建原因，避免 UI 只显示 AstrBot 回退而隐藏真实问题（`core/api.py`, `core/api_capabilities.py`）。
+- **Milvus 索引失败自动重试**：上传自动索引、Zotero 索引回调、collection move、待重建索引和全量重建统一走 retry helper，覆盖 embedding 生成与 Milvus upsert；全部失败后才保留/标记 `needs_reindex=1` 并返回失败统计与错误摘要（`core/api.py`, `tests/backend/test_api.py`）。
 
 ### 构建与工程 (Build/CI)
 

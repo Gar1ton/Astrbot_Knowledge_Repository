@@ -44,6 +44,28 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.22.2 Milvus index coverage status and rebuild retry (completed)
+
+### User constraints / 约束
+
+- Flow 不能只因为 Milvus 依赖可用就显示完全 ready；必须反映索引覆盖、兼容性文件、collection 与待重建文档状态。
+- 前端需要补回手动“重建 Milvus 索引”入口，复用现有 `/api/documents/rebuild-index`。
+- Milvus 自动索引失败时后端需要有限重试；全部失败后才标记 `needs_reindex=1` 并把原因暴露给前端。
+- 不在启动时自动全量重建，避免重启后意外消耗 embedding 资源；不手改 `pages/` 构建产物。
+
+### Technical implementation path
+
+- [x] **Phase 1 - Runtime Milvus health**：在 capabilities 响应中叠加运行态 Milvus 覆盖信息，包括 compatible、rebuild_required、pending_reindex_count、document_count、chunk_count 与 reason。技术理由：`vector_store.status=ready` 应表示当前可检索，而不是仅表示依赖已安装。
+- [x] **Phase 2 - Milvus indexing retry helper**：抽出统一 retry helper，覆盖 embedding 生成与 Milvus upsert，并用于上传自动索引、待重建索引和全量重建。技术理由：本地模型加载、Milvus Lite 状态和 gRPC 瞬态异常都需要在单次任务内短退避重试。
+- [x] **Phase 3 - Frontend rebuild entry**：Flow Milvus 节点与 Documents 工具栏增加重建按钮，调用既有 rebuild API，运行中禁用重复提交，成功后刷新 capabilities/documents/pending 状态。技术理由：当自动索引因兼容性或瞬态失败留下待重建文档时，用户需要明确入口修复覆盖。
+- [x] **Phase 4 - Verification and release notes**：补充后端与前端测试，验证 capabilities degraded、retry 成功/失败、重建按钮调用与状态刷新；测试通过后更新 CHANGELOG。技术理由：`[x]` 只代表代码落地且相关验证已通过。
+
+### Verification
+
+- `python -m pytest tests/backend/test_api.py tests/backend/test_web_server.py tests/backend/test_capabilities.py -q` → 87 passed, 281 warnings（既有 aiohttp AppKey/cookie warning）。
+- `node node_modules/eslint/bin/eslint.js 'app/(console)/flow/page.tsx' 'app/(console)/documents/page.tsx' components/flow/FlowDiagram.tsx components/flow/FlowNode.tsx components/flow/model.ts lib/api.ts lib/i18n.ts` → 0 errors, 3 existing Documents page warnings。
+- `node node_modules/next/dist/bin/next build --webpack` → 编译阶段通过；TypeScript/worker 阶段因当前 Windows WASM SWC 环境报 `invalid type: unit value`，未同步 `pages/`。
+
 ## v0.22.1 PDF 清洗核心依赖自动安装 (completed)
 
 ### User constraints / 约束

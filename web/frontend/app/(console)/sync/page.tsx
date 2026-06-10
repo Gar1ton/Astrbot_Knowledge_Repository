@@ -2,6 +2,8 @@
 
 import React, { useEffect, useState } from "react";
 import { Btn } from "@/components/ui/Btn";
+import { Select } from "@/components/ui/Select";
+import { Toggle } from "@/components/ui/Toggle";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
@@ -9,6 +11,7 @@ import {
   SyncRecord, notionInit, syncNotionPull, syncDocuments, getSyncStatus,
   backupNow, restoreBackup,
   ZoteroConfig, getZoteroConfig, syncZoteroPull,
+  updateConfigValue,
 } from "@/lib/api";
 
 const ZOTERO_SYNC_MODE_LABEL: Record<string, string> = {
@@ -20,6 +23,20 @@ const ZOTERO_STORAGE_LABEL: Record<string, string> = {
   managed_copy: "副本托管",
   linked: "链接 Zotero",
 };
+
+const ZOTERO_SYNC_MODES = ["strict_mirror", "conservative", "archive"] as const;
+const ZOTERO_STORAGE_MODES = ["managed_copy", "linked"] as const;
+
+interface ZoteroDraft {
+  enabled: boolean;
+  zotero_data_dir: string;
+  sync_mode: string;
+  storage_mode: string;
+  linked_root: string;
+  auto_sync_enabled: boolean;
+  auto_sync_interval_sec: number;
+  api_port: number;
+}
 
 interface ActionCardProps {
   title: string;
@@ -73,6 +90,9 @@ export default function SyncPage() {
   const [records, setRecords] = useState<SyncRecord[]>([]);
   const [zotero, setZotero] = useState<ZoteroConfig | null>(null);
   const [zoteroLoading, setZoteroLoading] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draft, setDraft] = useState<ZoteroDraft | null>(null);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     getSyncStatus()
@@ -82,6 +102,21 @@ export default function SyncPage() {
       .catch(() => {});
     getZoteroConfig().then(setZotero).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (zotero && draft === null) {
+      setDraft({
+        enabled: zotero.enabled,
+        zotero_data_dir: zotero.zotero_data_dir ?? "",
+        sync_mode: zotero.sync_mode ?? "conservative",
+        storage_mode: zotero.storage_mode ?? "managed_copy",
+        linked_root: zotero.linked_root ?? "",
+        auto_sync_enabled: zotero.auto_sync_enabled ?? false,
+        auto_sync_interval_sec: zotero.auto_sync_interval_sec ?? 3600,
+        api_port: zotero.api_port ?? 23119,
+      });
+    }
+  }, [zotero, draft]);
 
   async function handleZoteroPull() {
     setZoteroLoading(true);
@@ -97,6 +132,39 @@ export default function SyncPage() {
       toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
     } finally {
       setZoteroLoading(false);
+    }
+  }
+
+  async function handleZoteroSave() {
+    if (!draft) return;
+    setSaving(true);
+    try {
+      const pairs: Array<[string, unknown]> = [
+        ["enabled", draft.enabled],
+        ["zotero_data_dir", draft.zotero_data_dir],
+        ["sync_mode", draft.sync_mode],
+        ["storage_mode", draft.storage_mode],
+        ["linked_root", draft.linked_root],
+        ["auto_sync_enabled", draft.auto_sync_enabled],
+        ["auto_sync_interval_sec", draft.auto_sync_interval_sec],
+        ["api_port", draft.api_port],
+      ];
+      let restartRequired = false;
+      let rebuildRequired = false;
+      for (const [key, value] of pairs) {
+        const res = await updateConfigValue("zotero_sync", key, value);
+        if (res.restart_required) restartRequired = true;
+        if (res.rebuild_required) rebuildRequired = true;
+      }
+      if (rebuildRequired) toast("配置已保存，需重建索引", "info");
+      else if (restartRequired) toast("配置已保存，需重启生效", "info");
+      else toast("Zotero 配置已保存", "ok");
+      const updated = await getZoteroConfig();
+      setZotero(updated);
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -220,6 +288,115 @@ export default function SyncPage() {
               </Btn>
             </div>
           </div>
+
+          {/* Zotero 配置面板 */}
+          <div style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={() => setSettingsOpen((o) => !o)}
+              style={{
+                background: "none", border: "none", cursor: "pointer",
+                fontSize: 12, color: "var(--fg-muted)", padding: "4px 2px",
+                display: "flex", alignItems: "center", gap: 4,
+              }}
+            >
+              <span style={{
+                display: "inline-block", transition: "transform 0.15s",
+                transform: settingsOpen ? "rotate(90deg)" : "none",
+              }}>▶</span>
+              ⚙ Zotero 配置
+            </button>
+
+            {settingsOpen && draft && (
+              <div style={{
+                background: "var(--surface)", border: "1px solid var(--border)",
+                borderRadius: 14, padding: "14px 18px", marginTop: 6,
+                display: "flex", flexDirection: "column", gap: 10,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 13 }}>
+                  <span style={{ fontWeight: 500 }}>启用 Zotero 同步</span>
+                  <Toggle
+                    checked={draft.enabled}
+                    disabled={saving}
+                    onChange={(v) => setDraft((d) => d && ({ ...d, enabled: v }))}
+                  />
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13 }}>
+                  <span>Zotero 数据目录<span style={{ color: "var(--fg-subtle)", marginLeft: 4 }}>（空 = 自动探测 ~/Zotero）</span></span>
+                  <input
+                    type="text" value={draft.zotero_data_dir} disabled={saving}
+                    placeholder="留空自动探测"
+                    style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "5px 8px", fontSize: 13, background: "var(--surface)", color: "var(--fg)" }}
+                    onChange={(e) => setDraft((d) => d && ({ ...d, zotero_data_dir: e.target.value }))} />
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 13 }}>
+                  <span>同步模式</span>
+                  <Select
+                    value={draft.sync_mode}
+                    disabled={saving}
+                    onChange={(v) => setDraft((d) => d && ({ ...d, sync_mode: v }))}
+                    options={ZOTERO_SYNC_MODES.map((m) => ({ value: m, label: ZOTERO_SYNC_MODE_LABEL[m] ?? m }))}
+                    size="sm"
+                  />
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 13 }}>
+                  <span>存储模式</span>
+                  <Select
+                    value={draft.storage_mode}
+                    disabled={saving}
+                    onChange={(v) => setDraft((d) => d && ({ ...d, storage_mode: v }))}
+                    options={ZOTERO_STORAGE_MODES.map((m) => ({ value: m, label: ZOTERO_STORAGE_LABEL[m] ?? m }))}
+                    size="sm"
+                  />
+                </div>
+
+                {draft.storage_mode === "linked" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 13 }}>
+                    <span>链接根目录</span>
+                    <input
+                      type="text" value={draft.linked_root} disabled={saving}
+                      style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "5px 8px", fontSize: 13, background: "var(--surface)", color: "var(--fg)" }}
+                      onChange={(e) => setDraft((d) => d && ({ ...d, linked_root: e.target.value }))} />
+                  </div>
+                )}
+
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 13 }}>
+                  <span>自动同步</span>
+                  <Toggle
+                    checked={draft.auto_sync_enabled}
+                    disabled={saving}
+                    onChange={(v) => setDraft((d) => d && ({ ...d, auto_sync_enabled: v }))}
+                  />
+                </div>
+
+                {draft.auto_sync_enabled && (
+                  <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 13 }}>
+                    <span>同步间隔（秒，最小 60）</span>
+                    <input type="number" min={60} value={draft.auto_sync_interval_sec} disabled={saving}
+                      style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "4px 8px", fontSize: 13, width: 90 }}
+                      onChange={(e) => setDraft((d) => d && ({ ...d, auto_sync_interval_sec: Number(e.target.value) }))} />
+                  </label>
+                )}
+
+                <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 13 }}>
+                  <span>Zotero API 端口<span style={{ color: "var(--fg-subtle)", marginLeft: 4 }}>（连接探测用，默认 23119）</span></span>
+                  <input type="number" min={1} max={65535} value={draft.api_port} disabled={saving}
+                    style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "4px 8px", fontSize: 13, width: 90 }}
+                    onChange={(e) => setDraft((d) => d && ({ ...d, api_port: Number(e.target.value) }))} />
+                </label>
+
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 2 }}>
+                  <Btn variant="primary" size="sm" loading={saving} onClick={handleZoteroSave}>
+                    保存
+                  </Btn>
+                </div>
+              </div>
+            )}
+          </div>
+
           <p style={{ margin: "8px 2px 0", fontSize: 11, color: "var(--fg-subtle)" }}>
             单向 Pull：镜像 Zotero 条目/集合/标签/PDF 附件并用 PyMuPDF4LLM 清洗；同步来源在文档系统中只读。
           </p>

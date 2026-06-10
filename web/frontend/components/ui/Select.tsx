@@ -14,9 +14,10 @@ interface SelectProps {
   placeholder?: string;
   style?: React.CSSProperties;
   size?: "sm" | "md";
+  disabled?: boolean;
 }
 
-export function Select({ value, onChange, options, placeholder, style, size = "sm" }: SelectProps) {
+export function Select({ value, onChange, options, placeholder, style, size = "sm", disabled }: SelectProps) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const height = size === "sm" ? 32 : 36;
@@ -46,7 +47,8 @@ export function Select({ value, onChange, options, placeholder, style, size = "s
       {/* 触发按钮 */}
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+        onClick={() => !disabled && setOpen((v) => !v)}
         style={{
           height,
           paddingLeft: 11,
@@ -58,7 +60,7 @@ export function Select({ value, onChange, options, placeholder, style, size = "s
           fontSize,
           fontWeight: 500,
           fontFamily: "inherit",
-          cursor: "pointer",
+          cursor: disabled ? "not-allowed" : "pointer",
           display: "flex",
           alignItems: "center",
           whiteSpace: "nowrap",
@@ -68,6 +70,7 @@ export function Select({ value, onChange, options, placeholder, style, size = "s
           boxShadow: open ? `0 0 0 3px var(--ring)` : "var(--shadow)",
           transition: "border-color .15s, box-shadow .15s, background .15s",
           position: "relative",
+          opacity: disabled ? 0.55 : 1,
         }}
       >
         <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>

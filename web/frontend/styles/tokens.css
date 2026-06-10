@@ -159,25 +159,34 @@
   --color-fd-ring: var(--ring);
 }
 
-/* ─── 色系 swatch（占位，由 data-palette 切换） ──────────────── */
-[data-palette="moirai"] {
-  --accent: #6b7adb;
-  --accent-soft: rgba(107, 122, 219, 0.15);
-  --accent-border: rgba(107, 122, 219, 0.35);
-  --accent-fg: #ffffff;
-}
-[data-palette="forest"] {
-  --accent: #3d8a4f;
-  --accent-soft: rgba(61, 138, 79, 0.15);
-  --accent-border: rgba(61, 138, 79, 0.35);
-  --accent-fg: #ffffff;
-}
-[data-palette="graphite"] {
-  --accent: #6e7480;
-  --accent-soft: rgba(110, 116, 128, 0.15);
-  --accent-border: rgba(110, 116, 128, 0.35);
-  --accent-fg: #ffffff;
-}
+/* ─── 色系 swatch（由 data-palette 切换，亮/暗双模式） ─────── */
+/* Moirai — 淡薰衣草 + 古金 */
+[data-palette="moirai"]       { --accent: oklch(0.53 0.130 295); --accent-fg: #ffffff; }
+.dark [data-palette="moirai"] { --accent: oklch(0.64 0.105 295); }
+
+/* Venus — 象牙石材 + 绯红 + 金色 */
+[data-palette="venus"]       { --accent: oklch(0.52 0.205 25); --accent-fg: #ffffff; }
+.dark [data-palette="venus"] { --accent: oklch(0.62 0.22  25); }
+
+/* Nox — 黑白灰标准色 */
+[data-palette="nox"]       { --accent: oklch(0.205 0 0); --accent-fg: #ffffff; }
+.dark [data-palette="nox"] { --accent: oklch(0.922 0 0); --accent-fg: #000000; }
+
+/* Juno (Cirrus) — 云感 SaaS 蓝灰 + 橙 */
+[data-palette="juno"]       { --accent: oklch(0.56 0.08 240); --accent-fg: #ffffff; }
+.dark [data-palette="juno"] { --accent: oklch(0.65 0.09 240); }
+
+/* Augustus — 象牙白 + 靛蓝 + 金橙 */
+[data-palette="augustus"]       { --accent: oklch(0.65 0.155 80); --accent-fg: #ffffff; }
+.dark [data-palette="augustus"] { --accent: oklch(0.76 0.168 81); }
+
+/* Selune (Aether) — 暗色科技 + 钢蓝灰 + 薄荷绿 */
+[data-palette="selune"]       { --accent: oklch(0.63 0.11 175); --accent-fg: #ffffff; }
+.dark [data-palette="selune"] { --accent: oklch(0.63 0.11 175); }
+
+/* Folio — 纸浆米色 + 石墨灰 */
+[data-palette="folio"]       { --accent: oklch(0.38 0.015 265); --accent-fg: #ffffff; }
+.dark [data-palette="folio"] { --accent: oklch(0.78 0.025 86);  }
 
 /* ─── 全局视效工具类 ──────────────────────────────────────────── */
 .fx-glass {
@@ -523,10 +532,10 @@
 .flow-diagram-grid {
   position: relative;
   display: grid;
-  grid-template-columns: 300px 324px 324px 340px 360px;
+  grid-template-columns: 248px 300px 324px 324px 340px 360px;
   grid-auto-rows: minmax(340px, auto);
   column-gap: 60px;
-  row-gap: 42px;
+  row-gap: 18px;
   align-items: stretch;
   padding: 16px;
 }
@@ -1157,6 +1166,328 @@
   color: color-mix(in srgb, var(--flow-st-warn) 78%, var(--flow-ink));
   background: color-mix(in srgb, var(--flow-st-warn) 10%, var(--flow-node));
   border: 1px solid color-mix(in srgb, var(--flow-st-warn) 25%, transparent);
+}
+
+/* ── Flow custom select (替代 native <select>) ─────────────────── */
+
+.flow-custom-select {
+  position: relative;
+  width: 100%;
+}
+
+.flow-custom-select-trigger {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 28px 5px 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--flow-node-bd);
+  border-radius: 7px;
+  background: var(--flow-node);
+  color: var(--flow-ink);
+  font-family: var(--font-geist-mono);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  outline: none;
+  transition: border-color .15s, box-shadow .15s;
+  position: relative;
+  gap: 5px;
+}
+
+.flow-custom-select-trigger:focus-visible,
+.flow-custom-select-trigger.is-open {
+  border-color: color-mix(in srgb, var(--flow-st) 46%, var(--flow-node-bd));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--flow-st) 12%, transparent);
+}
+
+.flow-custom-select-trigger.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.flow-custom-select-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-custom-select-chevron {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%) rotate(0deg);
+  transition: transform .18s;
+  pointer-events: none;
+  color: var(--flow-faint);
+  flex-shrink: 0;
+}
+
+.flow-custom-select-chevron.is-open {
+  transform: translateY(-50%) rotate(180deg);
+}
+
+.flow-custom-select-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  min-width: 100%;
+  background: var(--flow-node);
+  border: 1px solid var(--flow-node-bd);
+  border-radius: 8px;
+  box-shadow: var(--flow-shadow-pop);
+  padding: 3px;
+  z-index: 700;
+  animation: selectIn .12s cubic-bezier(0.4,0,0.2,1) both;
+}
+
+.flow-custom-select-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--flow-ink);
+  font-family: var(--font-geist-mono);
+  font-size: 11px;
+  font-weight: 400;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  transition: background .1s;
+}
+
+.flow-custom-select-opt:hover {
+  background: color-mix(in srgb, var(--flow-st) 8%, var(--flow-inset));
+}
+
+.flow-custom-select-opt.is-active {
+  background: color-mix(in srgb, var(--flow-st) 13%, var(--flow-inset));
+  color: color-mix(in srgb, var(--flow-st) 80%, var(--flow-ink));
+  font-weight: 600;
+}
+
+.flow-custom-select-check {
+  flex-shrink: 0;
+  width: 10px;
+  display: inline-block;
+}
+
+/* ── Dir-picker row (folder input + browse btn) ───────────────── */
+
+.flow-quick-dir-row {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+
+.flow-quick-dir-row .flow-quick-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.flow-quick-dir-btn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--flow-node-bd);
+  border-radius: 7px;
+  background: var(--flow-node);
+  color: var(--flow-muted);
+  cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s;
+}
+
+.flow-quick-dir-btn:hover {
+  border-color: color-mix(in srgb, var(--flow-st) 46%, var(--flow-node-bd));
+  color: var(--flow-ink);
+  background: var(--flow-inset);
+}
+
+.flow-quick-dir-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ── Dir picker dialog ───────────────────────────────────────────── */
+
+.dir-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--flow-ink) 38%, transparent);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.dir-picker-dialog {
+  display: flex;
+  flex-direction: column;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  max-height: 72vh;
+  border-radius: 14px;
+  background: var(--flow-node);
+  border: 1px solid var(--flow-node-bd);
+  box-shadow: var(--flow-shadow-dest);
+  overflow: hidden;
+}
+
+.dir-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 14px 11px;
+  border-bottom: 1px solid var(--flow-node-bd);
+  flex-shrink: 0;
+}
+
+.dir-picker-title {
+  font-family: var(--font-geist-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--flow-faint);
+}
+
+.dir-picker-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--flow-muted);
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+
+.dir-picker-close:hover {
+  background: var(--flow-inset-2);
+  color: var(--flow-ink);
+}
+
+.dir-picker-path {
+  padding: 8px 14px 7px;
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+  color: var(--flow-faint);
+  background: var(--flow-inset);
+  border-bottom: 1px solid var(--flow-node-bd);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+
+.dir-picker-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+  min-height: 0;
+}
+
+.dir-picker-status {
+  padding: 12px 10px;
+  font-size: 11.5px;
+  color: var(--flow-muted);
+  font-family: var(--font-geist-mono);
+  text-align: center;
+}
+
+.dir-picker-status--error {
+  color: color-mix(in srgb, var(--flow-st-warn) 78%, var(--flow-ink));
+}
+
+.dir-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--flow-ink);
+  font-family: var(--font-geist-mono);
+  font-size: 11.5px;
+  cursor: pointer;
+  text-align: left;
+  transition: background .1s;
+}
+
+.dir-picker-item:hover {
+  background: var(--flow-inset);
+}
+
+.dir-picker-item--up {
+  color: var(--flow-muted);
+  font-size: 10.5px;
+}
+
+.dir-picker-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--flow-node-bd);
+  flex-shrink: 0;
+}
+
+.dir-picker-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, opacity .12s;
+}
+
+.dir-picker-btn--ghost {
+  border: 1px solid var(--flow-node-bd);
+  background: transparent;
+  color: var(--flow-muted);
+}
+
+.dir-picker-btn--ghost:hover {
+  background: var(--flow-inset);
+  color: var(--flow-ink);
+}
+
+.dir-picker-btn--primary {
+  border: 1px solid color-mix(in srgb, var(--flow-st) 34%, var(--flow-node-bd));
+  background: color-mix(in srgb, var(--flow-st) 13%, var(--flow-node));
+  color: color-mix(in srgb, var(--flow-st) 72%, var(--flow-ink));
+}
+
+.dir-picker-btn--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--flow-st) 20%, var(--flow-node));
+}
+
+.dir-picker-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .flow-dep-row {

@@ -73,6 +73,15 @@ export function StageIcon({ name }: { name: string }) {
       </IconFrame>
     );
   }
+  if (name === "book") {
+    return (
+      <IconFrame>
+        <path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H18a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1H6.5A1.5 1.5 0 0 1 5 18.5z" />
+        <path d="M5 17.5A1.5 1.5 0 0 1 6.5 16H19" />
+        <path d="M9 7h6M9 10h4" />
+      </IconFrame>
+    );
+  }
   return (
     <IconFrame>
       <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />

@@ -15,6 +15,7 @@ from core.capabilities import dependency_statuses, detect_capabilities, resolve_
 if TYPE_CHECKING:
     from core.config import Config
     from core.index_compatibility import IndexCompatibilityStore
+    from core.pipelines.zotero_sync_pipeline import ZoteroSyncPipeline
     from core.repository.embedding.base import EmbeddingProvider
     from core.repository.source_store.base import SourceDocumentStore
     from core.repository.vector_store.base import VectorStore
@@ -31,6 +32,7 @@ class CapabilitiesApiMixin:
     _embedding_provider: EmbeddingProvider | None
     _index_compatibility: IndexCompatibilityStore | None
     _embedding_fingerprint: str | None
+    _zotero_pipeline: ZoteroSyncPipeline | None
 
     async def get_capabilities(self) -> dict[str, Any]:
         """返回数据流各环节、依赖状态与运行态诊断。"""
@@ -38,6 +40,7 @@ class CapabilitiesApiMixin:
             raise NotImplementedError("get_capabilities: config unavailable")
         data = detect_capabilities(self._config)
         await self._overlay_milvus_runtime_health(data)
+        self._overlay_zotero_availability(data)
         return data
 
     def list_dependencies(self) -> list[dict[str, Any]]:
@@ -53,7 +56,25 @@ class CapabilitiesApiMixin:
             return {"dependencies": dependency_statuses()}
         data = detect_capabilities(self._config)
         await self._overlay_milvus_runtime_health(data)
+        self._overlay_zotero_availability(data)
         return data
+
+    def _overlay_zotero_availability(self, data: dict[str, Any]) -> None:
+        """若 Zotero 已启用但数据目录探针未就绪，将状态降为 degraded（黄色）。"""
+        if getattr(self, "_zotero_pipeline", None) is None:
+            return
+        for stage in data.get("pipeline", []):
+            if not isinstance(stage, dict) or stage.get("id") != "zotero":
+                continue
+            if stage.get("status") != "ready":
+                return
+            avail = self._zotero_pipeline.is_available()
+            if not avail.get("available", False):
+                stage["status"] = "degraded"
+                detail = stage.setdefault("detail", {})
+                if isinstance(detail, dict):
+                    detail["availability_reason"] = avail.get("reason", "")
+            return
 
     async def _overlay_milvus_runtime_health(self, data: dict[str, Any]) -> None:
         """把 Milvus 的真实可检索状态叠加到静态能力快照。"""

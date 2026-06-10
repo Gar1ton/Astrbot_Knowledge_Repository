@@ -11,7 +11,10 @@
       "Bash(python -m ruff check tests/backend/test_readonly_enforcement.py)",
       "Bash(python -m pytest tests/backend -q)",
       "Bash(python -m ruff check core/pipelines/sync_pipeline.py)",
-      "Bash(python -m pytest tests/backend/test_sync_pipeline.py tests/backend/test_r2_target.py -q)"
+      "Bash(python -m pytest tests/backend/test_sync_pipeline.py tests/backend/test_r2_target.py -q)",
+      "Bash(pkill -f \"next dev\")",
+      "Bash(pkill -f \"next-server\")",
+      "Bash(npm run *)"
     ]
   }
 }

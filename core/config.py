@@ -86,11 +86,16 @@ class R2SyncConfig:
         return self.free_tier_gb * 1024 * 1024 * 1024
 
 
+# Notion API 平台硬上限，不暴露给用户配置。
+_NOTION_RATE_LIMIT_RPS: int = 3
+
+
 @dataclass
 class NotionSyncConfig:
     """Notion 单向镜像配置。经 mcp_server_name 指向的 MCP server 调用，本侧不持 token。
 
     max_upload_mib 固定为 Notion API 限制（5 MiB），不暴露给用户配置。
+    rate_limit_rps 固定为平台限速（3 req/s），不暴露给用户配置（改高会触发 429）。
     """
 
     enabled: bool = False
@@ -99,7 +104,7 @@ class NotionSyncConfig:
     parent_page_id: str = ""
     database_title: str = "Knowledge Repository"
     max_upload_mib: int = 5
-    rate_limit_rps: int = 3
+    rate_limit_rps: int = _NOTION_RATE_LIMIT_RPS
 
     @property
     def max_upload_bytes(self) -> int:
@@ -116,6 +121,13 @@ class WebConsoleConfig:
     port: int = 6520
     username: str = "admin"
     password: str = ""
+
+
+# LightRAG 图谱构建内部固定参数（不暴露给用户）。
+_GRAPH_LLM_MAX_RETRIES: int = 2
+_GRAPH_LLM_RETRY_BACKOFF_SECONDS: float = 2.0
+_GRAPH_SECONDS_PER_CHUNK_LOCAL: float = 90.0
+_GRAPH_SECONDS_PER_CHUNK_REMOTE: float = 20.0
 
 
 @dataclass
@@ -139,11 +151,12 @@ class GraphConfig:
     lightrag_llm_model: str = ""
     # 本地 phi4/LM Studio 推理慢，图谱构建必须给足时间并允许有限重试。
     lightrag_llm_timeout_seconds: int = 900
-    lightrag_llm_max_retries: int = 2
-    lightrag_llm_retry_backoff_seconds: float = 2.0
-    # 构建耗时估算参数。云端 API 一般较快，本地模型按 chunk 级长耗时估算。
-    lightrag_seconds_per_chunk_local: float = 90.0
-    lightrag_seconds_per_chunk_remote: float = 20.0
+    # 内部参数（固定值，不从配置读取）。
+    lightrag_llm_max_retries: int = _GRAPH_LLM_MAX_RETRIES
+    lightrag_llm_retry_backoff_seconds: float = _GRAPH_LLM_RETRY_BACKOFF_SECONDS
+    # 构建耗时估算参数（固定值，不从配置读取）。
+    lightrag_seconds_per_chunk_local: float = _GRAPH_SECONDS_PER_CHUNK_LOCAL
+    lightrag_seconds_per_chunk_remote: float = _GRAPH_SECONDS_PER_CHUNK_REMOTE
 
 
 @dataclass
@@ -201,7 +214,6 @@ class ZoteroSyncConfig:
     sync_mode: str = ZOTERO_SYNC_CONSERVATIVE
     auto_sync_enabled: bool = False
     auto_sync_interval_sec: int = 3600
-    cloud_user_id: str = ""  # 预留：云端 user id
     cloud_api_key: str = ""  # 预留：云端 api key（env 注入）
 
 
@@ -267,7 +279,6 @@ class Config:
                 "database_id": notion.database_id,
                 "parent_page_id": notion.parent_page_id,
                 "database_title": notion.database_title,
-                "rate_limit_rps": notion.rate_limit_rps,
             },
             "web_console": {
                 "enabled": web.enabled,
@@ -287,10 +298,6 @@ class Config:
                 "lightrag_llm_base_url": graph.lightrag_llm_base_url,
                 "lightrag_llm_model": graph.lightrag_llm_model,
                 "lightrag_llm_timeout_seconds": graph.lightrag_llm_timeout_seconds,
-                "lightrag_llm_max_retries": graph.lightrag_llm_max_retries,
-                "lightrag_llm_retry_backoff_seconds": graph.lightrag_llm_retry_backoff_seconds,
-                "lightrag_seconds_per_chunk_local": graph.lightrag_seconds_per_chunk_local,
-                "lightrag_seconds_per_chunk_remote": graph.lightrag_seconds_per_chunk_remote,
             },
             "vector_db": {
                 "backend": vector_db.backend,
@@ -418,7 +425,7 @@ class Config:
             database_id=s.get("database_id", NotionSyncConfig.database_id),
             parent_page_id=s.get("parent_page_id", NotionSyncConfig.parent_page_id),
             database_title=s.get("database_title", NotionSyncConfig.database_title),
-            rate_limit_rps=int(s.get("rate_limit_rps", NotionSyncConfig.rate_limit_rps)),
+            # rate_limit_rps 固定为平台上限，不从配置读取。
         )
 
     def get_web_console_config(self) -> WebConsoleConfig:
@@ -466,37 +473,7 @@ class Config:
                     )
                 ),
             ),
-            lightrag_llm_max_retries=max(
-                0,
-                int(s.get("lightrag_llm_max_retries", GraphConfig.lightrag_llm_max_retries)),
-            ),
-            lightrag_llm_retry_backoff_seconds=max(
-                0.0,
-                float(
-                    s.get(
-                        "lightrag_llm_retry_backoff_seconds",
-                        GraphConfig.lightrag_llm_retry_backoff_seconds,
-                    )
-                ),
-            ),
-            lightrag_seconds_per_chunk_local=max(
-                1.0,
-                float(
-                    s.get(
-                        "lightrag_seconds_per_chunk_local",
-                        GraphConfig.lightrag_seconds_per_chunk_local,
-                    )
-                ),
-            ),
-            lightrag_seconds_per_chunk_remote=max(
-                1.0,
-                float(
-                    s.get(
-                        "lightrag_seconds_per_chunk_remote",
-                        GraphConfig.lightrag_seconds_per_chunk_remote,
-                    )
-                ),
-            ),
+            # 以下为内部固定参数，不从用户配置读取。
         )
 
     def get_zotero_sync_config(self) -> ZoteroSyncConfig:
@@ -518,7 +495,6 @@ class Config:
             auto_sync_interval_sec=max(
                 60, int(s.get("auto_sync_interval_sec", ZoteroSyncConfig.auto_sync_interval_sec))
             ),
-            cloud_user_id=str(s.get("cloud_user_id", ZoteroSyncConfig.cloud_user_id)),
             cloud_api_key=_secret(s.get("cloud_api_key"), ENV_ZOTERO_API_KEY),
         )
 
@@ -606,15 +582,11 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
     "vector_db": {
         "backend": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "auto_index_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
-        "db_filename": ConfigKeyPolicy(
-            False, True, structural=True, consequence=CONSEQUENCE_RESTART
-        ),
     },
     "embedding": {
         "provider": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
-        "max_token_size": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
     },
     "ask": {
         "conversation_enhancement_mode": ConfigKeyPolicy(True, True),
@@ -635,14 +607,6 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "lightrag_llm_timeout_seconds": ConfigKeyPolicy(
             True, True, consequence=CONSEQUENCE_RESTART
         ),
-        "lightrag_llm_max_retries": ConfigKeyPolicy(
-            True, True, consequence=CONSEQUENCE_RESTART
-        ),
-        "lightrag_llm_retry_backoff_seconds": ConfigKeyPolicy(
-            True, True, consequence=CONSEQUENCE_RESTART
-        ),
-        "lightrag_seconds_per_chunk_local": ConfigKeyPolicy(True, True),
-        "lightrag_seconds_per_chunk_remote": ConfigKeyPolicy(True, True),
     },
     "notion_sync": {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
@@ -665,7 +629,6 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "sync_mode": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "auto_sync_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "auto_sync_interval_sec": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
-        "cloud_user_id": ConfigKeyPolicy(False, True),
     },
 }
 

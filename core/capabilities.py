@@ -165,6 +165,7 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
     纯函数式读取 config，无副作用；单测可只构造 Config 即可断言各环节状态。
     """
     source_cfg = config.get_source_store_config()
+    zotero_cfg = config.get_zotero_sync_config()
     embedding_cfg = config.get_embedding_config()
     vdb_cfg = config.get_vector_db_config()
     graph_cfg = config.get_graph_config()
@@ -180,6 +181,28 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
     has_api_key = bool(os.environ.get(ENV_EMBEDDING_API_KEY))
     dim = config.runtime_embedding_dimension
     embedding_runtime_ready = dim is not None and dim > 0
+
+    # ⓪ Zotero 可选来源：数据流最左端。enabled 时需 pymupdf4llm 清洗就绪；未启用为可选关闭态。
+    if not zotero_cfg.enabled:
+        zotero_status = STATUS_OFF
+    elif has_pdf:
+        zotero_status = STATUS_READY
+    else:
+        zotero_status = STATUS_DEGRADED
+    zotero = {
+        "id": "zotero",
+        "current": "on" if zotero_cfg.enabled else "off",
+        "candidates": ["on", "off"],
+        "status": zotero_status,
+        "switchable": True,
+        "consequence": CONSEQUENCE_RESTART,
+        "required_deps": [],
+        "configured": zotero_cfg.enabled,
+        "detail": {
+            "sync_mode": zotero_cfg.sync_mode,
+            "storage_mode": zotero_cfg.storage_mode,
+        },
+    }
 
     # ① 上传 / 分块：txt/md 基础安装即用；PDF 清洗需根 requirements.txt 自动安装的 pymupdf4llm。
     ingest = {
@@ -325,7 +348,7 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         },
     }
 
-    return [ingest, embedding, vector_store, retrieval, graph, ask, sync]
+    return [zotero, ingest, embedding, vector_store, retrieval, graph, ask, sync]
 
 
 def detect_capabilities(config: Config) -> dict[str, Any]:

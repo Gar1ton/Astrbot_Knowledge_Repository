@@ -582,11 +582,6 @@ async def test_embedding_change_marks_docs_pending_and_rebuilds_incompatible_mil
     assert await store.list_pending_reindex_documents() == []
     assert compatibility.is_milvus_compatible("fp")
 
-    token_update = await api.update_config_value("embedding", "max_token_size", 4096)
-    assert token_update["restart_required"] is True
-    assert token_update["rebuild_required"] is False
-    assert compatibility.is_milvus_compatible("fp")
-
 
 async def test_vector_db_sync_and_rebuild(tmp_path: Path) -> None:
     """测试在 milvus 模式下

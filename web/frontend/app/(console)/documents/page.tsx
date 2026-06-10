@@ -1017,9 +1017,10 @@ export default function DocumentsPage() {
                   {([
                     { label: "标题", key: "title" },
                     { label: "标签", key: "tags" },
+                    { label: "索引/状态", key: null },
                     { label: "大小", key: "size" },
                     { label: "更新时间", key: "updated" },
-                  ] as { label: string; key: typeof sortKey }[]).map(({ label, key }) => (
+                  ] as { label: string; key: typeof sortKey | null }[]).map(({ label, key }) => (
                     <th
                       key={label}
                       style={{
@@ -1027,24 +1028,30 @@ export default function DocumentsPage() {
                         borderBottom: "1px solid var(--border)",
                       }}
                     >
-                      <button
-                        onClick={() => handleSort(key)}
-                        style={{
-                          background: "none", border: "none", cursor: "pointer",
-                          padding: 0, fontFamily: "inherit",
-                          display: "flex", alignItems: "center", gap: 3,
-                          fontSize: 11, fontWeight: 700, letterSpacing: "0.05em",
-                          textTransform: "uppercase",
-                          color: sortKey === key ? "var(--accent)" : "var(--fg-subtle)",
-                          transition: "color .15s",
-                        }}
-                      >
-                        {label}
-                        {sortKey === key
-                          ? <span style={{ fontSize: 10, lineHeight: 1 }}>{sortDir === "asc" ? "↑" : "↓"}</span>
-                          : <span style={{ fontSize: 10, lineHeight: 1, opacity: 0.3 }}>↕</span>
-                        }
-                      </button>
+                      {key !== null ? (
+                        <button
+                          onClick={() => handleSort(key)}
+                          style={{
+                            background: "none", border: "none", cursor: "pointer",
+                            padding: 0, fontFamily: "inherit",
+                            display: "flex", alignItems: "center", gap: 3,
+                            fontSize: 11, fontWeight: 700, letterSpacing: "0.05em",
+                            textTransform: "uppercase",
+                            color: sortKey === key ? "var(--accent)" : "var(--fg-subtle)",
+                            transition: "color .15s",
+                          }}
+                        >
+                          {label}
+                          {sortKey === key
+                            ? <span style={{ fontSize: 10, lineHeight: 1 }}>{sortDir === "asc" ? "↑" : "↓"}</span>
+                            : <span style={{ fontSize: 10, lineHeight: 1, opacity: 0.3 }}>↕</span>
+                          }
+                        </button>
+                      ) : (
+                        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--fg-subtle)" }}>
+                          {label}
+                        </span>
+                      )}
                     </th>
                   ))}
                 </tr>
@@ -1121,6 +1128,52 @@ export default function DocumentsPage() {
                           ))}
                           {doc.tags.length > 3 && (
                             <Tag label={`+${doc.tags.length - 3}`} />
+                          )}
+                        </div>
+                      </td>
+                      {/* 索引/状态列 */}
+                      <td style={{ padding: "8px 10px", whiteSpace: "nowrap" }}>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                          <span
+                            title={doc.milvus_covered ? "Milvus 索引已覆盖" : "Milvus 索引未覆盖"}
+                            style={{
+                              display: "inline-flex", alignItems: "center", gap: 4,
+                              fontSize: 10, fontWeight: 600, fontFamily: "var(--font-geist-mono)",
+                              color: doc.milvus_covered ? "#4f9d5b" : "#aaa",
+                            }}
+                          >
+                            <span>{doc.milvus_covered ? "●" : "○"}</span>
+                            <span>Milvus</span>
+                          </span>
+                          <span
+                            title={
+                              doc.lightrag_index_status?.status === "indexed" ? "LRAG 索引已建立"
+                              : doc.lightrag_index_status?.status === "needs_rebuild" ? "LRAG 索引需重构"
+                              : "LRAG 索引未建立"
+                            }
+                            style={{
+                              display: "inline-flex", alignItems: "center", gap: 4,
+                              fontSize: 10, fontWeight: 600, fontFamily: "var(--font-geist-mono)",
+                              color: doc.lightrag_index_status?.status === "indexed" ? "#4f9d5b"
+                                : doc.lightrag_index_status?.status === "needs_rebuild" ? "#cc8a2e"
+                                : "#aaa",
+                            }}
+                          >
+                            <span>{doc.lightrag_index_status?.status === "indexed" ? "●" : doc.lightrag_index_status?.status === "needs_rebuild" ? "⟳" : "○"}</span>
+                            <span>LRAG</span>
+                          </span>
+                          {doc.lifecycle_state === "detached" && (
+                            <span
+                              title="Zotero 来源文档已脱管（原条目可能已在 Zotero 中删除）"
+                              style={{
+                                display: "inline-flex", alignItems: "center", gap: 4,
+                                fontSize: 10, fontWeight: 600, fontFamily: "var(--font-geist-mono)",
+                                color: "#cc8a2e",
+                              }}
+                            >
+                              <span>△</span>
+                              <span>脱管</span>
+                            </span>
                           )}
                         </div>
                       </td>

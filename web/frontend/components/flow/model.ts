@@ -4,6 +4,7 @@ import type { PipelineStage } from "@/lib/api";
 export type FlowStageStatus = PipelineStage["status"];
 
 export type FlowStageId =
+  | "zotero"
   | "ingest"
   | "embedding"
   | "vector_store"
@@ -25,12 +26,21 @@ export type FlowStageMeta = {
   titleKey: I18nKey;
   descKey: I18nKey;
   roleKey: I18nKey;
-  icon: "doc" | "spark" | "db" | "layers" | "graph" | "chat" | "cloud";
-  kind: "pipe" | "dest";
+  icon: "doc" | "spark" | "db" | "layers" | "graph" | "chat" | "cloud" | "book";
+  kind: "pipe" | "dest" | "source";
   link?: { labelKey: I18nKey; href: string; primary?: boolean };
 };
 
 export const STAGE_META: Record<FlowStageId, FlowStageMeta> = {
+  zotero: {
+    idx: 0,
+    titleKey: "flow_stage_zotero",
+    descKey: "flow_stage_zotero_desc",
+    roleKey: "flow_role_optional_source",
+    icon: "book",
+    kind: "source",
+    link: { labelKey: "flow_open_sync", href: "/sync" },
+  },
   ingest: {
     idx: 1,
     titleKey: "flow_stage_ingest",
@@ -103,23 +113,27 @@ export const FIELD_LABEL_KEYS: Partial<Record<FlowStageId, I18nKey>> = {
 };
 
 export const SWITCH_MAP: Partial<Record<FlowStageId, { section: string; key: string; toBool?: boolean }>> = {
+  zotero: { section: "zotero_sync", key: "enabled", toBool: true },
   embedding: { section: "embedding", key: "provider" },
   vector_store: { section: "vector_db", key: "backend" },
   ask: { section: "ask", key: "conversation_enhancement_mode" },
   graph: { section: "graph", key: "enabled", toBool: true },
 };
 
+// 整体右移一列，最左列(col 1)留给 Zotero 可选来源；与 ingest 同行(row 2)。
 export const GRID: Record<FlowStageId, { col: number; row: number }> = {
-  sync: { col: 1, row: 1 },
-  ingest: { col: 1, row: 2 },
-  embedding: { col: 2, row: 2 },
-  vector_store: { col: 3, row: 2 },
-  retrieval: { col: 4, row: 1 },
-  graph: { col: 4, row: 3 },
-  ask: { col: 5, row: 2 },
+  zotero: { col: 1, row: 2 },
+  sync: { col: 2, row: 1 },
+  ingest: { col: 2, row: 2 },
+  embedding: { col: 3, row: 2 },
+  vector_store: { col: 4, row: 2 },
+  retrieval: { col: 5, row: 1 },
+  graph: { col: 5, row: 3 },
+  ask: { col: 6, row: 2 },
 };
 
 export const EDGES: FlowEdge[] = [
+  { from: "zotero", to: "ingest", labelKey: "flow_edge_zotero", dashed: true },
   { from: "ingest", to: "embedding" },
   { from: "embedding", to: "vector_store" },
   { from: "vector_store", to: "retrieval", labelKey: "flow_edge_default" },
@@ -142,6 +156,11 @@ const BACKEND_LABEL_ZH: Record<string, string> = {
   sqlite: "SQLite",
   sqlite_lexical: "SQLite",
   astrbot_kb: "AstrBot KB",
+  strict_mirror: "严格镜像",
+  conservative: "保守同步",
+  archive: "归档堆栈",
+  managed_copy: "副本托管",
+  linked: "链接 Zotero",
 };
 
 const BACKEND_LABEL_EN: Record<string, string> = {
@@ -157,6 +176,11 @@ const BACKEND_LABEL_EN: Record<string, string> = {
   sqlite: "SQLite",
   sqlite_lexical: "SQLite",
   astrbot_kb: "AstrBot KB",
+  strict_mirror: "Strict mirror",
+  conservative: "Conservative",
+  archive: "Archive",
+  managed_copy: "Managed copy",
+  linked: "Linked",
 };
 
 export function isFlowStageId(id: string): id is FlowStageId {

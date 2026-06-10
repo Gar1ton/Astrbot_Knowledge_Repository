@@ -7,6 +7,7 @@ import { useTheme } from "next-themes";
 import { useI18n, I18nKey, Lang } from "@/lib/i18n";
 import { getEffectiveConfig, EffectiveConfig, updateConfigValue, testEmbeddingConnection, EmbeddingTestResult, listLocalModels, deleteLocalModel, LocalModel } from "@/lib/api";
 import { Select } from "@/components/ui/Select";
+import { Toggle } from "@/components/ui/Toggle";
 import { HelpTip } from "@/components/ui/HelpTip";
 
 function errorMessage(error: unknown): string {
@@ -302,6 +303,8 @@ export default function SettingsPage() {
           flexDirection: "column",
           gap: 16,
           borderBottom: "1px solid var(--border)",
+          maxHeight: "50vh",
+          overflowY: "auto",
         }}
       >
         <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: "var(--heading)", letterSpacing: "-0.02em" }}>
@@ -580,12 +583,11 @@ export default function SettingsPage() {
                 />
               </div>
 
-              <label style={{ fontSize: 12, color: "var(--fg-muted)", display: "flex", alignItems: "center", gap: 8 }}>
-                <input
-                  type="checkbox"
+              <div style={{ fontSize: 12, color: "var(--fg-muted)", display: "flex", alignItems: "center", gap: 8 }}>
+                <Toggle
                   checked={autoIndexEnabled}
                   disabled={vectorBackend !== "milvus"}
-                  onChange={(e) => setAutoIndexEnabled(e.target.checked)}
+                  onChange={setAutoIndexEnabled}
                 />
                 <span style={{ opacity: vectorBackend === "milvus" ? 1 : .5 }}>
                   <strong style={{ display: "block", color: "var(--fg)", fontSize: 12 }}>
@@ -597,7 +599,7 @@ export default function SettingsPage() {
                       : "When off, documents are saved to SQLite but skip embedding and are marked for reindex; use the toolbar to trigger batch indexing later — ideal for bulk-upload workflows"}
                   </span>
                 </span>
-              </label>
+              </div>
 
               <div>
                 <div style={{ fontSize: 12, fontWeight: 600, color: "var(--fg-muted)", marginBottom: 6 }}>
@@ -881,11 +883,11 @@ export default function SettingsPage() {
                 ? "仅供 Web Research Agent 的指定 Collection 高精度召回；上传不会自动构建，也不会影响默认 Milvus 召回。"
                 : "Used only for high-precision retrieval on a selected collection in Web Research Agent. Uploads never auto-build it and default Milvus retrieval remains independent."}
             </div>
-            <label style={{ fontSize: 12, color: "var(--fg-muted)", display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-              <input type="checkbox" checked={graphEnabled} onChange={(e) => setGraphEnabled(e.target.checked)} />
+            <div style={{ fontSize: 12, color: "var(--fg-muted)", display: "inline-flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
+              <Toggle checked={graphEnabled} onChange={setGraphEnabled} />
               {t("graph_config_enabled")}
               <HelpTip text={t("graph_config_enabled_help")} />
-            </label>
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, opacity: graphEnabled ? 1 : .45, pointerEvents: graphEnabled ? "auto" : "none" }}>
               <label style={{ fontSize: 12, color: "var(--fg-muted)" }}>
                 {t("graph_config_max_token_size")}

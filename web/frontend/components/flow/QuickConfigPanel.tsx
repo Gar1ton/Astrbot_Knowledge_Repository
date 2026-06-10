@@ -1,14 +1,18 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { EffectiveConfig, PipelineStage } from "@/lib/api";
 import type { I18nKey, Lang } from "@/lib/i18n";
 import { backendLabel, type FlowStageId } from "./model";
+import { DirPickerDialog } from "./DirPickerDialog";
 
 export type FlowConfigSnapshot = EffectiveConfig;
 export type QuickConfigValue = string | number | boolean;
 export type QuickConfigValues = Record<string, string | boolean>;
 export type QuickConfigUpdate = { section: string; key: string; value: QuickConfigValue };
 
-type ConfigSection = "source_store" | "r2_sync" | "notion_sync" | "graph" | "vector_db" | "embedding";
+type ConfigSection = "source_store" | "r2_sync" | "notion_sync" | "graph" | "vector_db" | "embedding" | "zotero_sync";
+
+const ZOTERO_SYNC_MODES = ["strict_mirror", "conservative", "archive"];
+const ZOTERO_STORAGE_MODES = ["managed_copy", "linked"];
 
 type QuickConfigFieldBase = {
   id: string;
@@ -19,7 +23,7 @@ type QuickConfigFieldBase = {
 };
 
 type QuickConfigField =
-  | (QuickConfigFieldBase & { kind: "text"; value: string; placeholder?: string })
+  | (QuickConfigFieldBase & { kind: "text"; value: string; placeholder?: string; browseDir?: boolean })
   | (QuickConfigFieldBase & { kind: "number"; value: string })
   | (QuickConfigFieldBase & { kind: "boolean"; value: boolean })
   | (QuickConfigFieldBase & { kind: "select"; value: string; options: string[] });
@@ -42,8 +46,9 @@ function textField(
   labelKey: I18nKey,
   value: string,
   wide = false,
+  browseDir = false,
 ): QuickConfigField {
-  return { id: fieldId(section, key), kind: "text", section, key, labelKey, value, wide };
+  return { id: fieldId(section, key), kind: "text", section, key, labelKey, value, wide, browseDir };
 }
 
 function numberField(
@@ -108,6 +113,22 @@ function buildQuickConfig(stage: PipelineStage, config: FlowConfigSnapshot): Qui
   const fields: QuickConfigField[] = [];
   const hints: I18nKey[] = [];
 
+  if (id === "zotero") {
+    fields.push(textField("zotero_sync", "zotero_data_dir", "flow_quick_zotero_data_dir", readString(config, "zotero_sync", "zotero_data_dir"), true, true));
+    fields.push(selectField("zotero_sync", "sync_mode", "flow_quick_zotero_sync_mode", readString(config, "zotero_sync", "sync_mode", "conservative"), ZOTERO_SYNC_MODES));
+    const storageMode = readString(config, "zotero_sync", "storage_mode", "managed_copy");
+    fields.push(selectField("zotero_sync", "storage_mode", "flow_quick_zotero_storage_mode", storageMode, ZOTERO_STORAGE_MODES));
+    if (storageMode === "linked") {
+      fields.push(textField("zotero_sync", "linked_root", "flow_quick_zotero_linked_root", readString(config, "zotero_sync", "linked_root"), true));
+    }
+    fields.push(booleanField("zotero_sync", "auto_sync_enabled", "flow_quick_zotero_auto_sync", readBoolean(config, "zotero_sync", "auto_sync_enabled", false)));
+    if (readBoolean(config, "zotero_sync", "auto_sync_enabled", false)) {
+      fields.push(numberField("zotero_sync", "auto_sync_interval_sec", "flow_quick_zotero_interval", readNumberString(config, "zotero_sync", "auto_sync_interval_sec", 3600)));
+    }
+    hints.push("flow_quick_zotero_hint");
+    return { fields, hints };
+  }
+
   if (id === "ingest") {
     fields.push(booleanField("source_store", "ocr_enabled", "flow_quick_ocr_enabled", readBoolean(config, "source_store", "ocr_enabled", false)));
     return { fields, hints };
@@ -140,7 +161,6 @@ function buildQuickConfig(stage: PipelineStage, config: FlowConfigSnapshot): Qui
     fields.push(selectField("graph", "query_mode", "flow_quick_query_mode", readString(config, "graph", "query_mode", "mix"), QUERY_MODES));
     fields.push(numberField("graph", "llm_max_async", "flow_quick_llm_max_async", readNumberString(config, "graph", "llm_max_async", 4)));
     fields.push(numberField("graph", "embedding_max_async", "flow_quick_embedding_max_async", readNumberString(config, "graph", "embedding_max_async", 8)));
-    fields.push(numberField("graph", "max_doc_chars", "flow_quick_max_doc_chars", readNumberString(config, "graph", "max_doc_chars", 30000)));
     fields.push(selectField("graph", "lightrag_llm_provider", "flow_quick_lightrag_llm_provider", readString(config, "graph", "lightrag_llm_provider", "main"), LIGHTRAG_LLM_PROVIDERS));
     fields.push(textField("graph", "lightrag_llm_base_url", "flow_quick_lightrag_llm_base_url", readString(config, "graph", "lightrag_llm_base_url"), true));
     fields.push(textField("graph", "lightrag_llm_model", "flow_quick_lightrag_llm_model", readString(config, "graph", "lightrag_llm_model"), true));
@@ -168,6 +188,84 @@ function graphModeLabel(value: string, t: (k: I18nKey) => string): string {
   return t(key);
 }
 
+// ─── Flow-themed custom select ────────────────────────────────
+
+interface FlowSelectProps {
+  value: string;
+  options: string[];
+  disabled: boolean;
+  getLabel: (v: string) => string;
+  onChange: (v: string) => void;
+}
+
+function FlowSelect({ value, options, disabled, getLabel, onChange }: FlowSelectProps) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent) {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="flow-custom-select" onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        className={`flow-custom-select-trigger${open ? " is-open" : ""}${disabled ? " is-disabled" : ""}`}
+        disabled={disabled}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="flow-custom-select-label">{getLabel(value)}</span>
+        <svg
+          width="11" height="11" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+          className={`flow-custom-select-chevron${open ? " is-open" : ""}`}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="flow-custom-select-menu">
+          {options.map((opt) => {
+            const isActive = opt === value;
+            return (
+              <button
+                key={opt}
+                type="button"
+                className={`flow-custom-select-opt${isActive ? " is-active" : ""}`}
+                onClick={() => { onChange(opt); setOpen(false); }}
+              >
+                {isActive ? (
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="flow-custom-select-check">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                ) : (
+                  <span className="flow-custom-select-check" />
+                )}
+                {getLabel(opt)}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Field control ────────────────────────────────────────────
+
 function FieldControl({
   field,
   value,
@@ -175,6 +273,7 @@ function FieldControl({
   t,
   saving,
   onChange,
+  onBrowseDir,
 }: {
   field: QuickConfigField;
   value: string | boolean;
@@ -182,6 +281,7 @@ function FieldControl({
   t: (k: I18nKey) => string;
   saving: boolean;
   onChange: (value: string | boolean) => void;
+  onBrowseDir?: () => void;
 }) {
   if (field.kind === "boolean") {
     const enabled = Boolean(value);
@@ -201,19 +301,44 @@ function FieldControl({
   }
 
   if (field.kind === "select") {
+    const getLabel =
+      field.section === "graph" && field.key === "query_mode"
+        ? (v: string) => graphModeLabel(v, t)
+        : (v: string) => backendLabel(v, lang);
     return (
-      <select
-        className="flow-quick-select"
+      <FlowSelect
         value={String(value)}
+        options={field.options}
         disabled={saving}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {field.options.map((option) => (
-          <option key={option} value={option}>
-            {field.section === "graph" && field.key === "query_mode" ? graphModeLabel(option, t) : backendLabel(option, lang)}
-          </option>
-        ))}
-      </select>
+        getLabel={getLabel}
+        onChange={onChange}
+      />
+    );
+  }
+
+  if (field.kind === "text" && field.browseDir) {
+    return (
+      <div className="flow-quick-dir-row">
+        <input
+          className="flow-quick-input"
+          type="text"
+          value={String(value)}
+          disabled={saving}
+          placeholder={field.placeholder}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <button
+          type="button"
+          className="flow-quick-dir-btn"
+          disabled={saving}
+          title={t("dir_picker_title")}
+          onClick={onBrowseDir}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+          </svg>
+        </button>
+      </div>
     );
   }
 
@@ -230,6 +355,8 @@ function FieldControl({
     />
   );
 }
+
+// ─── Panel ────────────────────────────────────────────────────
 
 export function QuickConfigPanel({
   stage,
@@ -252,6 +379,7 @@ export function QuickConfigPanel({
     [model.fields],
   );
   const [draft, setDraft] = useState<QuickConfigValues>({});
+  const [dirPickerFieldId, setDirPickerFieldId] = useState<string | null>(null);
 
   useEffect(() => {
     const next: QuickConfigValues = {};
@@ -293,49 +421,75 @@ export function QuickConfigPanel({
     return { updates: nextUpdates, hasInvalidNumber: invalid };
   }, [draft, model.fields]);
 
+  const dirPickerField = dirPickerFieldId
+    ? (model.fields.find((f) => f.id === dirPickerFieldId) ?? null)
+    : null;
+
+  const handleDirSelect = useCallback((path: string) => {
+    if (!dirPickerFieldId) return;
+    setDraft((cur) => ({ ...cur, [dirPickerFieldId]: path }));
+    setDirPickerFieldId(null);
+  }, [dirPickerFieldId]);
+
   if (model.fields.length === 0 && model.hints.length === 0) return null;
 
   const canSave = updates.length > 0 && !hasInvalidNumber && !saving;
   const stageId = stage.id as FlowStageId;
 
   return (
-    <div
-      className="flow-quick-config"
-      onClick={(event) => event.stopPropagation()}
-      onPointerDown={(event) => event.stopPropagation()}
-    >
-      <div className="flow-quick-config-head">
-        <span>{t("flow_quick_title")}</span>
-        <button
-          type="button"
-          className="flow-quick-save"
-          disabled={!canSave}
-          onClick={() => onSave(stageId, updates)}
-        >
-          {saving ? t("flow_quick_saving") : t("flow_quick_save")}
-        </button>
+    <>
+      <div
+        className="flow-quick-config"
+        onClick={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <div className="flow-quick-config-head">
+          <span>{t("flow_quick_title")}</span>
+          <button
+            type="button"
+            className="flow-quick-save"
+            disabled={!canSave}
+            onClick={() => onSave(stageId, updates)}
+          >
+            {saving ? t("flow_quick_saving") : t("flow_quick_save")}
+          </button>
+        </div>
+
+        {model.fields.length > 0 && (
+          <div className="flow-quick-grid">
+            {model.fields.map((field) => (
+              <label key={field.id} className={`flow-quick-field ${field.wide ? "flow-quick-field--wide" : ""}`}>
+                <span>{t(field.labelKey)}</span>
+                <FieldControl
+                  field={field}
+                  value={draft[field.id] ?? fieldInitialValue(field)}
+                  lang={lang}
+                  t={t}
+                  saving={saving}
+                  onChange={(value) => setDraft((current) => ({ ...current, [field.id]: value }))}
+                  onBrowseDir={() => setDirPickerFieldId(field.id)}
+                />
+              </label>
+            ))}
+          </div>
+        )}
+
+        {hasInvalidNumber && <div className="flow-quick-error">{t("flow_quick_number_invalid")}</div>}
+        {model.hints.map((hint) => <div key={hint} className="flow-quick-hint">{t(hint)}</div>)}
       </div>
 
-      {model.fields.length > 0 && (
-        <div className="flow-quick-grid">
-          {model.fields.map((field) => (
-            <label key={field.id} className={`flow-quick-field ${field.wide ? "flow-quick-field--wide" : ""}`}>
-              <span>{t(field.labelKey)}</span>
-              <FieldControl
-                field={field}
-                value={draft[field.id] ?? fieldInitialValue(field)}
-                lang={lang}
-                t={t}
-                saving={saving}
-                onChange={(value) => setDraft((current) => ({ ...current, [field.id]: value }))}
-              />
-            </label>
-          ))}
-        </div>
+      {dirPickerField && (
+        <DirPickerDialog
+          initialPath={
+            dirPickerField.kind === "text"
+              ? (String(draft[dirPickerField.id] ?? dirPickerField.value) || undefined)
+              : undefined
+          }
+          t={t}
+          onSelect={handleDirSelect}
+          onClose={() => setDirPickerFieldId(null)}
+        />
       )}
-
-      {hasInvalidNumber && <div className="flow-quick-error">{t("flow_quick_number_invalid")}</div>}
-      {model.hints.map((hint) => <div key={hint} className="flow-quick-hint">{t(hint)}</div>)}
-    </div>
+    </>
   );
 }

@@ -21,9 +21,24 @@
 
 ---
 
-## [Unreleased]
+## [v0.22.1] - 2026-06-09
 
 ### 新增功能 (Added)
+
+- **Flow 节点目录选择器（DirPickerDialog）**：Zotero 数据目录字段新增文件夹图标按钮，点击弹出风格统一的暗色目录浏览弹窗，支持上下级导航、选中后回填输入框；后端新增 `GET /api/fs/browse` 接口返回指定路径的子目录列表（`web/server.py`, `web/frontend/components/flow/DirPickerDialog.tsx`, `web/frontend/components/flow/QuickConfigPanel.tsx`, `web/frontend/lib/api.ts`, `web/frontend/lib/i18n.ts`, `web/frontend/styles/tokens.css`）。
+- **Flow 节点自定义下拉组件（FlowSelect）**：QuickConfigPanel 内所有 `<select>` 均替换为与 Flow 节点风格一致的自定义浮层下拉（包括同步模式、存储模式、图谱检索模式、LightRAG LLM 来源）；同步页 `⚙ Zotero 配置` 折叠区的下拉也替换为全局 `Select` 组件（`web/frontend/components/flow/QuickConfigPanel.tsx`, `web/frontend/app/(console)/sync/page.tsx`, `web/frontend/styles/tokens.css`）。
+- **全局 Toggle 开关组件**：新增 `components/ui/Toggle.tsx`，替换同步页与设置页的原生 `<input type="checkbox">`，视觉与整体设计语言统一；`Select` 组件补充 `disabled` prop（`web/frontend/components/ui/Toggle.tsx`, `web/frontend/components/ui/Select.tsx`, `web/frontend/app/(console)/sync/page.tsx`, `web/frontend/app/(console)/settings/page.tsx`）。
+
+### 修复 (Fixed)
+
+- **Zotero 节点启用但未探测到数据目录时状态错误**：`CapabilitiesApiMixin` 新增 `_overlay_zotero_availability()`，在 Zotero 为 `ready` 但 `is_available()` 返回 `false` 时将状态降为 `degraded`（黄色），避免误显示绿色就绪（`core/api_capabilities.py`, `core/pipelines/zotero_sync_pipeline.py`）。
+- **去除 QuickConfigPanel 中的「文档字符上限」字段**：该字段为只读内部参数，不应暴露给用户修改（`web/frontend/components/flow/QuickConfigPanel.tsx`）。
+- **文档列表新增「索引/状态」列**：Milvus 索引覆盖、LRAG 索引状态（已建立/需重构/未建立）、生命周期脱管状态（detached）直接在列表中展示，无需打开文档检查器（`web/frontend/app/(console)/documents/page.tsx`）。
+
+### 架构健康 (Refactor)
+
+- **Flow 网格行间距收紧**：`flow-diagram-grid` 的 `row-gap` 由 42px 降至 18px，使 LightRAG 图谱与检索编排节点在视觉上更紧凑（`web/frontend/styles/tokens.css`）。
+- **设置外观栏增加滚动**：外观 sticky 区添加 `maxHeight: 50vh; overflowY: auto`，避免小屏幕下内容溢出（`web/frontend/app/(console)/settings/page.tsx`）。
 
 - **Milvus 运行态覆盖状态与手动重建入口**：`/api/capabilities` 的 vector_store/retrieval/ask 环节现在叠加 Milvus 运行态信息（`compatible`、`rebuild_required`、`pending_reindex_count`、`document_count`、`chunk_count`、`reason`）；Flow 在待重建时显示 degraded 和“重建索引”按钮，Documents 工具栏增加“重建 Milvus 索引”入口，均复用 `/api/documents/rebuild-index` 并展示失败摘要（`core/api_capabilities.py`, `web/server.py`, `web/frontend/components/flow/{FlowDiagram,FlowNode,model}.tsx`, `web/frontend/app/(console)/{flow,documents}/page.tsx`, `web/frontend/lib/{api,i18n}.ts`）。
 - **Ask 页知识库选中高亮边与发送键灰态**：选中集合时输入卡片显示橙色高亮边（`--accent-border`）；加载期间边框退回普通色、仅保留旋转辉光；图谱检索模式下未选有效集合时发送键变灰，点击仍触发已有 toast 提示（`web/frontend/app/globals.css`, `web/frontend/app/(console)/ask/page.tsx`）。
@@ -33,6 +48,12 @@
 
 - **Milvus ready 语义不再只等于依赖可用**：当 compatibility 缺失/不匹配或 SQLite 仍有 `needs_reindex=1` 文档时，capabilities 会把 Milvus 标为需重建，Ask 的 `fallback_reason` 会携带 Milvus 未覆盖/需重建原因，避免 UI 只显示 AstrBot 回退而隐藏真实问题（`core/api.py`, `core/api_capabilities.py`）。
 - **Milvus 索引失败自动重试**：上传自动索引、Zotero 索引回调、collection move、待重建索引和全量重建统一走 retry helper，覆盖 embedding 生成与 Milvus upsert；全部失败后才保留/标记 `needs_reindex=1` 并返回失败统计与错误摘要（`core/api.py`, `tests/backend/test_api.py`）。
+- **单元测试更新**：修复 `tests/backend/test_api.py` 中因 `embedding.max_token_size` 被移出 `CONFIG_KEY_POLICY` 导致的配置项更新校验测试失败（`tests/backend/test_api.py`）。
+
+### 架构健康 (Refactor)
+
+- **简化用户配置项，隐藏 9 个内部/多余配置字段**：从 `_conf_schema.json` 移除 9 个不必要或仅供内部/高级使用的字段（如 Notion 的限速、LightRAG 重试退避等字段），并将它们在 `core/config.py` 中硬编码为常数或保留在 dataclass 中但从 Schema 移除，减少配置界面的认知负担（`_conf_schema.json`, `core/config.py`）。
+- **重写配置项描述和提示**：更新了 `_conf_schema.json` 所有剩余配置字段的 `description` 和 `hint` 文案，重构为更简练易懂的中文说明（`_conf_schema.json`）。
 
 ### 构建与工程 (Build/CI)
 

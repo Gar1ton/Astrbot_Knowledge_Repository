@@ -381,7 +381,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                         )
                         await self._mark_document_needs_reindex(doc_id)
             elif not auto_index or (
-                self._config.get_vector_db_config().backend == "milvus"
+                self._config
+                and self._config.get_vector_db_config().backend == "milvus"
                 and not self._milvus_index_is_compatible()
             ):
                 await self._mark_document_needs_reindex(doc_id)
@@ -502,9 +503,6 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                         await self._vector_store.delete_chunks(chunk_ids)
                     except Exception as exc:
                         logger.error("Milvus document delete failed for %s: %s", doc_id, exc)
-                        self._mark_milvus_incompatible(
-                            f"Milvus document delete failed: {exc}"
-                        )
 
         deleted = await self._source_store.delete_document(doc_id)
         if deleted:
@@ -588,21 +586,27 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 errors.append({"doc_id": doc.doc_id, "error": str(exc)})
 
         if errors:
-            reason = f"Milvus rebuild failed for {len(errors)} document(s)."
-            self._mark_milvus_incompatible(reason)
-            logger.error("Milvus indexing failed after retries: %s", reason)
+            failed_ids = {e["doc_id"] for e in errors}
+            for doc in docs:
+                if doc.doc_id not in failed_ids:
+                    await self._clear_document_needs_reindex(doc.doc_id)
+            if self._index_compatibility and self._embedding_fingerprint:
+                self._index_compatibility.mark_milvus_compatible(self._embedding_fingerprint)
+            logger.error(
+                "Milvus rebuild partial failure: %d doc(s) failed, marking compatible for incremental retry",
+                len(errors),
+            )
             return {
                 "rebuilt_chunks": total_chunks,
                 "failed_docs": len(errors),
                 "errors": errors[:5],
             }
 
-        for doc in docs:
-            await self._clear_document_needs_reindex(doc.doc_id)
-
         logger.info("Successfully rebuilt vector store index: %d chunks", total_chunks)
         if self._index_compatibility and self._embedding_fingerprint:
             self._index_compatibility.mark_milvus_compatible(self._embedding_fingerprint)
+        for doc in docs:
+            await self._clear_document_needs_reindex(doc.doc_id)
         return {"rebuilt_chunks": total_chunks, "failed_docs": 0, "errors": []}
 
     async def rebuild_index_pending(self) -> dict[str, Any]:
@@ -1940,7 +1944,6 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         except Exception as exc:
             logger.error("Milvus collection move sync failed for %s: %s", doc_id, exc)
             await self._mark_document_needs_reindex(doc_id)
-            self._mark_milvus_incompatible(f"Milvus collection move failed: {exc}")
 
     async def _invalidate_embedding_indexes(self, reason: str) -> None:
         if self._index_compatibility:

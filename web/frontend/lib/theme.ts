@@ -2,7 +2,7 @@
 
 export { useTheme } from "next-themes";
 
-export type Palette = "default" | "moirai" | "forest" | "graphite";
+export type Palette = "default" | "moirai" | "venus" | "nox" | "juno" | "augustus" | "selune" | "folio";
 
 const PALETTE_KEY = "kr-palette";
 

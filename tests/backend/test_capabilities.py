@@ -60,13 +60,23 @@ def test_dependency_statuses_cover_all_optional(monkeypatch: pytest.MonkeyPatch)
 # ── 环节状态机 ────────────────────────────────────────────────────
 
 
-def test_pipeline_has_seven_ordered_stages(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pipeline_has_ordered_stages_with_zotero_first(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_modules(
         monkeypatch,
         {"pymupdf4llm", "sentence_transformers", "pymilvus", "lightrag", "boto3"},
     )
     ids = [s["id"] for s in detect_pipeline(_cfg(dim=384))]
-    assert ids == ["ingest", "embedding", "vector_store", "retrieval", "graph", "ask", "sync"]
+    assert ids == [
+        "zotero", "ingest", "embedding", "vector_store", "retrieval", "graph", "ask", "sync"
+    ]
+
+
+def test_zotero_stage_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_modules(monkeypatch, {"pymupdf4llm"})
+    z = _stage(detect_pipeline(_cfg(dim=384)), "zotero")
+    assert z["status"] == STATUS_OFF
+    enabled = _stage(detect_pipeline(_cfg({"zotero_sync": {"enabled": True}}, dim=384)), "zotero")
+    assert enabled["status"] == STATUS_READY
 
 
 def test_ingest_reports_core_pdf_dependency_source(monkeypatch: pytest.MonkeyPatch) -> None:

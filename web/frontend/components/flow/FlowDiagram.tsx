@@ -86,10 +86,32 @@ export function FlowDiagram({
   onInstall: (dep: DependencyStatus) => void;
   onRebuildIndex: () => void;
 }) {
-  const knownStages = useMemo(
-    () => stages.filter((stage) => isFlowStageId(stage.id)).sort((a, b) => STAGE_META[a.id as FlowStageId].idx - STAGE_META[b.id as FlowStageId].idx),
-    [stages],
-  );
+  const knownStages = useMemo(() => {
+    const base = stages
+      .filter((stage) => isFlowStageId(stage.id))
+      .sort((a, b) => STAGE_META[a.id as FlowStageId].idx - STAGE_META[b.id as FlowStageId].idx);
+    // 电路级联：沿实线(非 dashed)边把上游的 degraded 向下游传播——一个错误配置的环节会让其后
+    // 的环节也变黄(degraded/受损)而非保持绿色(ready)。base 已按 idx 左→右拓扑排序，上游先计算。
+    const incoming = new Map<FlowStageId, FlowStageId[]>();
+    for (const edge of EDGES) {
+      if (edge.dashed) continue; // 旁路/可选来源(dashed)不传播。
+      const arr = incoming.get(edge.to) ?? [];
+      arr.push(edge.from);
+      incoming.set(edge.to, arr);
+    }
+    const eff = new Map<FlowStageId, FlowStageStatus>();
+    return base.map((stage) => {
+      const id = stage.id as FlowStageId;
+      let status = stage.status;
+      if (status === "ready") {
+        for (const up of incoming.get(id) ?? []) {
+          if (eff.get(up) === "degraded") { status = "degraded"; break; }
+        }
+      }
+      eff.set(id, status);
+      return status === stage.status ? stage : { ...stage, status };
+    });
+  }, [stages]);
   const depMap = useMemo(() => new Map(dependencies.map((dep) => [dep.key, dep])), [dependencies]);
   const stageById = useMemo(() => new Map(knownStages.map((stage) => [stage.id as FlowStageId, stage])), [knownStages]);
 

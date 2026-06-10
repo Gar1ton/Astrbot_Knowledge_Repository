@@ -622,6 +622,29 @@ async def handle_files_list(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=500)
 
 
+async def handle_fs_browse(request: web.Request) -> web.Response:
+    """GET /api/fs/browse?path=<abs_path> — 列出指定绝对路径下的子目录（供文件夹选择器使用）。"""
+    import os
+    raw_path = request.query.get("path", "").strip()
+    if not raw_path:
+        raw_path = str(os.path.expanduser("~"))
+    try:
+        target = os.path.realpath(os.path.expanduser(raw_path))
+        if not os.path.isdir(target):
+            return web.json_response({"error": "not a directory"}, status=400)
+        entries = []
+        with os.scandir(target) as it:
+            for entry in sorted(it, key=lambda e: e.name.lower()):
+                if entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
+                    entries.append(entry.name)
+        parent = str(os.path.dirname(target)) if target != os.path.dirname(target) else None
+        return web.json_response({"path": target, "parent": parent, "dirs": entries})
+    except PermissionError:
+        return web.json_response({"error": "permission denied"}, status=403)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 async def handle_list_local_models(request: web.Request) -> web.Response:
     """GET /api/models/local — 列出 HuggingFace 缓存中的本地模型。"""
     try:
@@ -977,6 +1000,7 @@ def build_app(
     app.router.add_get("/api/ask/progress/{cid}", handle_ask_progress)
     app.router.add_get("/api/system/info", handle_system_info)
     app.router.add_get("/api/files/list", handle_files_list)
+    app.router.add_get("/api/fs/browse", handle_fs_browse)
     app.router.add_get("/api/models/local", handle_list_local_models)
     app.router.add_delete("/api/models/local/{name}", handle_delete_local_model)
     app.router.add_get("/api/capabilities", handle_capabilities)

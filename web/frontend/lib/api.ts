@@ -1087,6 +1087,18 @@ export async function listDataFiles(subdir?: string): Promise<FileList> {
   return apiFetch<FileList>(`/api/files/list${qs}`);
 }
 
+export interface FsBrowseResult {
+  path: string;
+  parent: string | null;
+  dirs: string[];
+}
+
+export async function browseDir(path?: string): Promise<FsBrowseResult> {
+  const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+  if (isMock()) return { path: path ?? "~", parent: null, dirs: ["Documents", "Desktop", "Downloads"] };
+  return apiFetch<FsBrowseResult>(`/api/fs/browse${qs}`);
+}
+
 export async function listLocalModels(): Promise<LocalModel[]> {
   if (isMock()) return [
     { name: "BAAI/bge-m3", dir_name: "models--BAAI--bge-m3", size_bytes: 2_100_000_000, last_modified: null },

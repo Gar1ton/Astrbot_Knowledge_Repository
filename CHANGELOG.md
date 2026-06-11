@@ -21,6 +21,31 @@
 
 ---
 
+## [v0.24.3] — 2026-06-11
+
+### 新增功能 (Added)
+
+- **终端日志面板**：将 `TerminalPanel` 从运行目录浏览器完整改造为 terminal 风格日志查看器，复用 `getLogs()` / `/api/logs` 环形缓冲接口。支持首次加载 200 条、每 2.5 s 增量轮询、自动滚到底部（用户手动上滚时暂停）、刷新与清屏按钮（清屏仅清前端显示，不影响后端缓冲）；日志行以 `时间 / level / 来源 / 消息` 四列 grid 布局展示，ERROR/CRITICAL 红色、WARNING 橙色、DEBUG 暗色、INFO 绿色（`web/frontend/components/ui/TerminalPanel.tsx`）。
+- **双模挂载保持**：`variant="embedded"` 铺满设置弹窗内容区，`variant="floating"`（默认）从侧边栏触发为浮层；两种模式共用同一日志组件（`web/frontend/components/ui/TerminalPanel.tsx`、`web/frontend/components/rail/Rail.tsx`）。
+- **i18n 补齐**：新增中英文键 `terminal_trigger` / `terminal_trigger_title` / `terminal_panel_title` / `terminal_refresh` / `terminal_clear` / `terminal_auto_scroll` / `terminal_auto_scroll_short` / `terminal_loading` / `terminal_empty` / `terminal_unavailable`（`web/frontend/lib/i18n.ts`）。
+
+### 架构健康 (Refactor)
+
+- 移除 `TerminalPanel` 内部的 `SystemInfo`、`FileEntry`、目录钻取等旧文件浏览逻辑；侧边栏入口文案由"运行目录"统一改为"终端日志"，与实际功能一致（`web/frontend/components/ui/TerminalPanel.tsx`、`web/frontend/components/rail/Rail.tsx`）。
+
+## [v0.24.2] — 2026-06-11
+
+### 新增功能 (Added)
+
+- **LightRAG 构建加固 — 并发守卫**：`build_graph()` 在发起新任务前检查同集合是否已有 queued/running 任务，有则抛 RuntimeError（HTTP 409），防止同一 workspace 被并发写入（`core/api.py`）。
+- **LightRAG 构建加固 — 干净关闭**：新增 `_build_tasks: dict[str, asyncio.Task]` 字段保存任务句柄；`_run_lightrag_build_job()` 显式 `except asyncio.CancelledError` 将 status 设为 `"interrupted"` 后 re-raise；新增 `cancel_build_tasks()` 方法；`teardown()` 调用它，确保重启时构建状态正确落盘（`core/api.py`、`core/plugin_initializer.py`）。
+- **LightRAG 构建加固 — workspace 串行化**：`LightRAGCoreRegistry` 新增 `_collection_locks`，`insert_document`/`delete_doc`/`reset_workspace` 全部通过 per-collection `asyncio.Lock` 串行化，消除构建期间的文件竞争（`core/lightrag_core.py`）。
+- **FilePanel 构建状态区**：LightRAG 集合区 SectionHead 下方新增 `ActiveBuildCard` 内部组件，统一展示所有集合的实时构建进度（进度条 + 百分比 + 集合名）；构建中断后展示「图谱构建中断」标签与「继续构建」按钮（`web/frontend/components/panels/FilePanel.tsx`）；同步 i18n key：`file_build_interrupted` / `file_build_resume` / `file_build_queued`（`web/frontend/lib/i18n.ts`）。
+
+### 测试 (Tests)
+
+- 新增 `tests/backend/test_build_hardening.py`（5 个测试）：并发构建守卫（同集合 → RuntimeError，跨集合 → 成功，已完成任务 → 可重建）、CancelledError → status=interrupted、`cancel_build_tasks()` 清理句柄。
+
 ## [Unreleased]
 
 ### 修复 (Fixed)

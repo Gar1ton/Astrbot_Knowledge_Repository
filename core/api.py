@@ -269,6 +269,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._lightrag_registry = lightrag_registry
         self._graph_build_jobs: dict[str, BuildJob] = {}
         self._build_pause_events: dict[str, asyncio.Event] = {}
+        self._build_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
         self._config = config
         self._config_persist = config_persist
         self._llm_adapter = llm_adapter
@@ -1597,6 +1598,14 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         from core.lightrag_core import BuildJob
 
         col = await self._resolve_collection(collection)
+
+        # 同集合禁止并发构建
+        for job in self._graph_build_jobs.values():
+            if job.collection == col and job.status in ("queued", "running"):
+                raise RuntimeError(
+                    f"集合 {col!r} 已有构建任务正在进行中（job_id={job.job_id}）"
+                )
+
         job_id = uuid.uuid4().hex
         docs = await self._lightrag_docs_for_build(col)
         job = BuildJob(job_id=job_id, collection=col, total_docs=len(docs))
@@ -1604,8 +1613,20 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         ev = asyncio.Event()
         ev.set()
         self._build_pause_events[job_id] = ev
-        asyncio.create_task(self._run_lightrag_build_job(job_id))
+        task = asyncio.create_task(self._run_lightrag_build_job(job_id))
+        self._build_tasks[job_id] = task
         return {"job_id": job_id, "status": job.status, "engine": job.engine, "collection": col}
+
+    async def cancel_build_tasks(self) -> None:
+        """取消所有进行中的构建任务并等待其完成（teardown 时调用）。"""
+        for job_id, task in list(self._build_tasks.items()):
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        self._build_tasks.clear()
 
     async def get_graph_build_job(self, job_id: str) -> dict | None:
         job = self._graph_build_jobs.get(job_id)
@@ -1767,6 +1788,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 self._index_compatibility.mark_lightrag_compatible(
                     job.collection, self._embedding_fingerprint
                 )
+        except asyncio.CancelledError:
+            job.stage = "interrupted"
+            job.status = "interrupted"
+            raise  # 重抛，让 asyncio 正确完成取消流程
         except Exception as exc:
             job.stage = "error"
             job.status = "error"
@@ -1776,6 +1801,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             job.finished_at = time.monotonic()
             job.paused = False
             self._build_pause_events.pop(job_id, None)
+            self._build_tasks.pop(job_id, None)
             finished_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
             await self._source_store.upsert_build_job(
                 self._build_job_db_snapshot(job, started_iso, finished_iso)

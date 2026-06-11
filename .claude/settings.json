@@ -27,7 +27,10 @@
       "Bash(echo \"Restarted PID: $!\")",
       "Bash(curl -sf http://localhost:3000/)",
       "Bash(bash -c 'cd /workspaces/dev-workspace/Astrbot_Knowledge_Repository/web/frontend && npm run dev > /workspaces/dev-workspace/Astrbot_Knowledge_Repository/dev_frontend.log 2>&1')",
-      "Bash(curl -s -o /dev/null http://localhost:3000/)"
+      "Bash(curl -s -o /dev/null http://localhost:3000/)",
+      "Bash(python3 -c ' *)",
+      "Bash(node node_modules/typescript/bin/tsc --noEmit)",
+      "Bash(python tools/sync_frontend.py)"
     ]
   }
 }

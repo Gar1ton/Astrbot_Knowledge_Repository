@@ -338,9 +338,9 @@ export function Rail({ onLogout, collapsed = false, onToggle }: RailProps) {
         <TerminalPanel
           collapsed={collapsed}
           triggerIcon={<TerminalIcon />}
-          triggerLabel="终端日志"
-          triggerTitle="终端日志 · 运行目录"
-          panelTitle=">_ 终端日志 / 运行目录"
+          triggerLabel={t("terminal_trigger")}
+          triggerTitle={t("terminal_trigger_title")}
+          panelTitle={t("terminal_panel_title")}
         />
       </div>
 

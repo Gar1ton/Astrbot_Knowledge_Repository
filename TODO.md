@@ -44,6 +44,59 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.24.3 Terminal logs panel (completed)
+
+### User constraints / 约束
+
+- 将设置页和侧边栏入口的”终端日志”从运行目录浏览器改为 terminal 风格日志查看器。
+- 本轮只显示日志，不保留运行目录浏览功能，不实现命令输入或 shell 执行。
+- 复用现有 `/api/logs`，不新增后端 API；保持 UI 风格与现有 DS token、弹窗、侧边栏一致。
+
+### Technical implementation path
+
+- [x] **P1 - 前端日志面板重构**：`TerminalPanel` 改为读取 `getLogs()` 并渲染日志流，支持刷新、清屏、自动滚动、加载/空/错误状态。技术理由：让”终端日志”文案与实际行为一致，并复用已有日志缓冲接口。
+- [x] **P2 - 入口文案与 i18n 对齐**：补齐中英文日志面板文案，移除侧边栏入口中的”运行目录”语义。技术理由：避免 UI 误导，同时保持中英文界面一致。
+- [x] **P3 - 验证与收尾**：运行前端类型检查、Next build、同步 `pages/` 与同步校验，测试通过后标记完成并追加 `CHANGELOG.md`。技术理由：保证源码与静态产物一致。
+
+### Verification
+
+- `node node_modules/typescript/bin/tsc --noEmit` -> passed, 0 errors
+- `node node_modules/next/dist/bin/next build --webpack` -> passed, 11 static routes
+- `python tools/sync_frontend.py` -> synced 161 files to `pages/`
+- `python tools/sync_frontend.py --check` -> passed
+
+---
+
+## v0.24.2 LightRAG 构建加固 (completed)
+
+### User constraints / 约束
+
+- 重启后端时，正在构建的 LightRAG 任务须被正确打断并将状态持久化为 interrupted，下次启动后前端可一键继续构建。
+- 同一集合不允许并发构建，前端发起第二次构建时须收到错误。
+- 构建期间删除/插入文档不能与正在写入的 LightRAG workspace 产生竞争。
+- 「继续构建」入口放在 FilePanel 文件界面的 LightRAG 集合区——紧跟 SectionHead 之下、第一条集合行之上；同一位置也展示实时进度条。
+- 遵循 Plan-First；执行前已更新 TODO，测试通过后才勾选完成并追加 CHANGELOG。
+
+### Technical implementation path
+
+- [x] **P0 - 治理记录**：新增本计划条目。
+- [x] **P1 - 并发构建守卫**：`core/api.py:build_graph()` 在 `create_task` 前检查同集合是否已有 queued/running 任务，有则抛 RuntimeError（HTTP 409）。
+- [x] **P2 - 任务句柄 + CancelledError 处理**：新增 `_build_tasks: dict[str, asyncio.Task]`；`create_task` 后保存句柄；`_run_lightrag_build_job()` 在 `except Exception` 前插入 `except asyncio.CancelledError` 将 status 设为 interrupted 后 re-raise；新增 `cancel_build_tasks()` 方法；`plugin_initializer.py:teardown()` 调用它。
+- [x] **P3 - workspace 级 asyncio.Lock**：`core/lightrag_core.py:LightRAGCoreRegistry` 新增 `_collection_locks`；`insert_document`/`delete_doc`/`reset_workspace` 均用 per-collection lock 串行化。
+- [x] **P4 - 前端 interrupted UI**：`FilePanel.tsx` 新增 `ActiveBuildCard` 内部组件（活跃进度 + 中断恢复两态）；置于 LightRAG SectionHead 后、集合列表前；移除 per-collection `BuildCard`；`lib/i18n.ts` 新增 `file_build_interrupted`/`file_build_resume`/`file_build_queued`。
+- [x] **P5 - 测试与验证**：新增 `tests/backend/test_build_hardening.py`（并发守卫 + CancelledError）；`pytest -q` 全绿；`tsc --noEmit` 0 错误；`next build` 13 routes；同步 `pages/`。
+- [x] **P6 - 收尾记录**：标完成，追加 CHANGELOG。
+
+### Verification
+
+- `python -m pytest -q` → 275 passed
+- `node node_modules/typescript/bin/tsc --noEmit` → 0 errors
+- `node node_modules/next/dist/bin/next build --webpack` → 13 static routes
+- `python tools/sync_frontend.py` → 161 files synced to `pages/`
+- `python tools/sync_frontend.py --check` → pages/ 已与 web/frontend/out 一致
+
+---
+
 ## v0.24.0 Scoped notes + chat lock persistence (completed)
 
 ### User constraints / 约束

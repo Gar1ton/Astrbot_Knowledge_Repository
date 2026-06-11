@@ -8,6 +8,7 @@ logs readable "KR LightRAG" lines for terminal-based manual verification.
 from __future__ import annotations
 
 import ast
+import asyncio
 import contextvars
 import csv
 import hashlib
@@ -187,6 +188,7 @@ class LightRAGCoreRegistry:
         self._embedding_model = embedding_model
         self._instances: dict[str, Any] = {}
         self._workspace_map: dict[str, str] = {}
+        self._collection_locks: dict[str, asyncio.Lock] = {}
         self._root = self._resolve_root(config.working_dir)
         self._map_path = self._root / "workspace_map.json"
         self._load_workspace_map()
@@ -227,39 +229,47 @@ class LightRAGCoreRegistry:
                 logger.warning("LightRAG finalize failed for %s: %s", collection, exc)
         self._instances.clear()
 
+    def _get_collection_lock(self, collection: str) -> asyncio.Lock:
+        if not hasattr(self, "_collection_locks"):
+            self._collection_locks = {}
+        if collection not in self._collection_locks:
+            self._collection_locks[collection] = asyncio.Lock()
+        return self._collection_locks[collection]
+
     async def reset_workspace(self, collection: str) -> None:
         """Delete one derived workspace after an explicit rebuild/delete action."""
-        rag = self._instances.pop(collection, None)
-        if rag is not None:
-            # Clear shared in-memory data for all JsonKVStorage & JsonDocStatusStorage instances
-            for attr in [
-                "text_chunks",
-                "full_docs",
-                "full_entities",
-                "full_relations",
-                "entity_chunks",
-                "relation_chunks",
-                "doc_status",
-            ]:
-                storage = getattr(rag, attr, None)
-                if storage is not None and hasattr(storage, "drop"):
-                    try:
-                        await storage.drop()
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to drop storage %s during workspace reset: %s", attr, exc
-                        )
-            _terminal(f"finalize_storages collection={collection!r} before reset")
-            await rag.finalize_storages()
-        safe = self._workspace_map.get(collection)
-        if safe is None:
-            return
-        workspace = (self._root / safe).resolve()
-        workspace.relative_to(self._root.resolve())
-        if workspace.is_dir():
-            shutil.rmtree(workspace)
-        self._workspace_map.pop(collection, None)
-        self._save_workspace_map()
+        async with self._get_collection_lock(collection):
+            rag = self._instances.pop(collection, None)
+            if rag is not None:
+                # Clear shared in-memory data for all JsonKVStorage & JsonDocStatusStorage instances
+                for attr in [
+                    "text_chunks",
+                    "full_docs",
+                    "full_entities",
+                    "full_relations",
+                    "entity_chunks",
+                    "relation_chunks",
+                    "doc_status",
+                ]:
+                    storage = getattr(rag, attr, None)
+                    if storage is not None and hasattr(storage, "drop"):
+                        try:
+                            await storage.drop()
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to drop storage %s during workspace reset: %s", attr, exc
+                            )
+                _terminal(f"finalize_storages collection={collection!r} before reset")
+                await rag.finalize_storages()
+            safe = self._workspace_map.get(collection)
+            if safe is None:
+                return
+            workspace = (self._root / safe).resolve()
+            workspace.relative_to(self._root.resolve())
+            if workspace.is_dir():
+                shutil.rmtree(workspace)
+            self._workspace_map.pop(collection, None)
+            self._save_workspace_map()
 
     async def chunk_document(self, collection: str, text: str) -> tuple[list[str], str]:
         """按当前 LightRAG SDK 默认路径生成 LRAG chunk，不复用 Milvus chunk。"""
@@ -289,26 +299,27 @@ class LightRAGCoreRegistry:
         lrag_chunks: list[str] | None = None,
         progress_callback: Any = None,
     ) -> None:
-        rag = await self.get(collection)
-        chunks = lrag_chunks or []
-        token = _LLM_PROGRESS_CALLBACK.set(progress_callback)
-        try:
-            if chunks and hasattr(rag, "ainsert_custom_chunks"):
+        async with self._get_collection_lock(collection):
+            rag = await self.get(collection)
+            chunks = lrag_chunks or []
+            token = _LLM_PROGRESS_CALLBACK.set(progress_callback)
+            try:
+                if chunks and hasattr(rag, "ainsert_custom_chunks"):
+                    _terminal(
+                        f"ainsert_custom_chunks collection={collection!r} doc_id={doc_id!r} "
+                        f"chars={len(text)} chunks={len(chunks)}"
+                    )
+                    await rag.ainsert_custom_chunks(text, chunks, doc_id=doc_id)
+                    return
                 _terminal(
-                    f"ainsert_custom_chunks collection={collection!r} doc_id={doc_id!r} "
+                    f"ainsert collection={collection!r} doc_id={doc_id!r} "
                     f"chars={len(text)} chunks={len(chunks)}"
                 )
-                await rag.ainsert_custom_chunks(text, chunks, doc_id=doc_id)
-                return
-            _terminal(
-                f"ainsert collection={collection!r} doc_id={doc_id!r} "
-                f"chars={len(text)} chunks={len(chunks)}"
-            )
-            result = await rag.ainsert(text, ids=[doc_id])
-            if result is not None:
-                _terminal(f"ainsert done track_id={result!r}")
-        finally:
-            _LLM_PROGRESS_CALLBACK.reset(token)
+                result = await rag.ainsert(text, ids=[doc_id])
+                if result is not None:
+                    _terminal(f"ainsert done track_id={result!r}")
+            finally:
+                _LLM_PROGRESS_CALLBACK.reset(token)
 
     async def query(
         self, collection: str, query: str, *, only_need_context: bool = False
@@ -356,18 +367,19 @@ class LightRAGCoreRegistry:
                 "result": "skipped",
                 "message": "workspace is not built",
             }
-        rag = await self.get(collection)
-        _terminal(f"adelete_by_doc_id collection={collection!r} doc_id={doc_id!r}")
-        result = await rag.adelete_by_doc_id(doc_id)
-        status = getattr(result, "status", None) or str(result)
-        message = getattr(result, "message", None) or ""
-        return {
-            "engine": "lightrag_core",
-            "collection": collection,
-            "doc_id": doc_id,
-            "result": status,
-            "message": message,
-        }
+        async with self._get_collection_lock(collection):
+            rag = await self.get(collection)
+            _terminal(f"adelete_by_doc_id collection={collection!r} doc_id={doc_id!r}")
+            result = await rag.adelete_by_doc_id(doc_id)
+            status = getattr(result, "status", None) or str(result)
+            message = getattr(result, "message", None) or ""
+            return {
+                "engine": "lightrag_core",
+                "collection": collection,
+                "doc_id": doc_id,
+                "result": status,
+                "message": message,
+            }
 
     async def manual_probe(
         self,

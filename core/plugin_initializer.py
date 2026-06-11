@@ -568,6 +568,9 @@ class PluginInitializer:
 
     # ── 关闭：与构造顺序相反释放 ────────────────────────────────
     async def teardown(self) -> None:
+        if self.api is not None:
+            await self.api.cancel_build_tasks()
+
         if self._backup_task is not None:
             self._backup_task.cancel()
             try:

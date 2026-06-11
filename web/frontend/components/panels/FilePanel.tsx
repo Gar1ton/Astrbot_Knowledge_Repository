@@ -4,7 +4,7 @@ import { Panel } from "@/components/ds/Panel";
 import { IconButton } from "@/components/ds/IconButton";
 import { Icon } from "@/components/ds/Icon";
 import { useConsole } from "@/lib/ConsoleContext";
-import { listCollections, getActiveBuildJob, getBuildJobHistory, deleteCollection, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
+import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, deleteCollection, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 
@@ -248,6 +248,136 @@ function BuildCard({ job }: BuildCardProps) {
   );
 }
 
+// ─── Active build status card (section-level, above all collections) ──────────
+
+interface ActiveBuildCardProps {
+  job?: GraphBuildJob | null;
+  interrupted?: BuildJobRecord | null;
+  onResume: (collection: string) => void;
+}
+
+function ActiveBuildCard({ job, interrupted, onResume }: ActiveBuildCardProps) {
+  const { t } = useI18n();
+
+  if (job && (job.status === "running" || job.status === "queued")) {
+    const pct =
+      job.total_chunks && job.total_chunks > 0
+        ? Math.round(((job.processed_chunks ?? 0) / job.total_chunks) * 100)
+        : 0;
+    const stage =
+      job.status === "running"
+        ? pct < 45
+          ? t("file_build_stage_entity")
+          : pct < 80
+          ? t("file_build_stage_relation")
+          : t("file_build_stage_embedding")
+        : t("file_build_queued");
+    return (
+      <div
+        style={{
+          margin: "4px 6px 6px",
+          padding: "8px 10px",
+          background: "var(--accent-soft)",
+          border: "1px solid var(--accent-border)",
+          borderRadius: "var(--radius-md)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
+          <span
+            style={{
+              width: 9,
+              height: 9,
+              borderRadius: "50%",
+              border: "2px solid var(--accent)",
+              borderTopColor: "transparent",
+              animation: "spin .7s linear infinite",
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)", flex: 1 }}>
+            {job.collection} · {stage}
+          </span>
+          <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--accent)" }}>
+            {pct}%
+          </span>
+        </div>
+        <div
+          style={{
+            height: 5,
+            borderRadius: 999,
+            background: "color-mix(in srgb, var(--accent) 18%, transparent)",
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              width: `${pct}%`,
+              height: "100%",
+              borderRadius: 999,
+              background: "linear-gradient(90deg, var(--accent), var(--accent-strong))",
+              transition: "width .4s",
+            }}
+          />
+        </div>
+        <div
+          style={{
+            fontSize: 10,
+            color: "var(--fg-muted)",
+            marginTop: 6,
+            fontFamily: "var(--font-mono)",
+          }}
+        >
+          {job.processed_chunks ?? 0}/{job.total_chunks ?? "?"} {t("unit_chunks")}
+        </div>
+      </div>
+    );
+  }
+
+  if (interrupted) {
+    return (
+      <div
+        style={{
+          margin: "4px 6px 6px",
+          padding: "8px 10px",
+          background: "color-mix(in srgb, var(--warning, #f59e0b) 10%, transparent)",
+          border: "1px solid color-mix(in srgb, var(--warning, #f59e0b) 35%, transparent)",
+          borderRadius: "var(--radius-md)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: "var(--warning, #f59e0b)",
+              flex: 1,
+            }}
+          >
+            {t("file_build_interrupted")} · {interrupted.collection}
+          </span>
+          <button
+            onClick={() => onResume(interrupted.collection)}
+            style={{
+              fontSize: 11,
+              padding: "2px 10px",
+              borderRadius: 999,
+              background: "var(--accent)",
+              color: "var(--accent-fg, #fff)",
+              border: "none",
+              cursor: "pointer",
+              fontWeight: 600,
+            }}
+          >
+            {t("file_build_resume")}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 // ─── Main FilePanel ────────────────────────────────────────────
 
 // ─── Delete Collection Confirmation Dialog ─────────────────────
@@ -474,6 +604,12 @@ export function FilePanel() {
   // LightRAG collections: all non-system collections (user can build graph on any)
   const lightragCollections = collections.filter((c) => !c.is_system);
 
+  const latestHistoryRecord = buildHistory
+    .slice()
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+  const interruptedJob: BuildJobRecord | null =
+    !buildJob && latestHistoryRecord?.status === "interrupted" ? latestHistoryRecord : null;
+
   const isSel = (prefix: string, name: string) =>
     selectedCollection === `${prefix}${name}`;
 
@@ -568,7 +704,7 @@ export function FilePanel() {
                       style={{
                         width: 22,
                         height: 22,
-                        color: "var(--danger)",
+                        color: "var(--select-fg)",
                         background: "transparent",
                         flexShrink: 0,
                       }}
@@ -594,10 +730,13 @@ export function FilePanel() {
             <IconButton name="spark2" label={t("file_action_lightrag_build")} size={14} />
           }
         />
+        <ActiveBuildCard
+          job={buildJob}
+          interrupted={interruptedJob}
+          onResume={(col) => { buildGraph(col).catch(() => {}); }}
+        />
         {lightragCollections.map((c) => {
           const k = `lr:${c.name}`;
-          const isBuilding = buildJob?.collection === c.name &&
-            (buildJob.status === "running" || buildJob.status === "queued");
           return (
             <div key={k}>
               <Row
@@ -608,7 +747,6 @@ export function FilePanel() {
                 graphStatus={getCollectionGraphStatus(c.name)}
                 onClick={() => selectCollection(k)}
               />
-              {isBuilding && buildJob && <BuildCard job={buildJob} />}
             </div>
           );
         })}

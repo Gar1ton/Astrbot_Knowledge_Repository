@@ -3,27 +3,8 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-
-interface SystemInfo {
-  cwd: string;
-  data_dir: string;
-  db_file: string;
-  docs_dir: string;
-  python_version: string;
-  platform: string;
-}
-
-interface FileEntry {
-  name: string;
-  type: "file" | "dir";
-  size_bytes: number | null;
-  modified_at: string | null;
-}
-
-interface FileList {
-  path: string;
-  entries: FileEntry[];
-}
+import { getLogs, type LogLine } from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
 
 interface TerminalPanelProps {
   collapsed?: boolean;
@@ -34,64 +15,100 @@ interface TerminalPanelProps {
   variant?: "floating" | "embedded";
 }
 
-function fmtSize(bytes: number | null): string {
-  if (bytes === null) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+const LOG_LIMIT = 200;
+const POLL_MS = 2500;
+
+function formatTime(ts: number): string {
+  if (!Number.isFinite(ts)) return "--:--:--";
+  return new Date(ts * 1000).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function levelColor(level: string): string {
+  const normalized = level.toUpperCase();
+  if (normalized === "ERROR" || normalized === "CRITICAL") return "var(--danger)";
+  if (normalized === "WARNING" || normalized === "WARN") return "var(--warn)";
+  if (normalized === "DEBUG") return "var(--fg-subtle)";
+  return "var(--accent)";
+}
+
+function rowKey(line: LogLine, index: number): string {
+  return `${line.ts}:${line.level}:${line.name}:${index}`;
+}
+
+function sourceLabel(line: LogLine): string {
+  return line.category || line.source || line.name || "log";
 }
 
 export function TerminalPanel({
   collapsed = false,
-  triggerLabel = "运行目录",
-  triggerTitle = "调试 · 运行目录",
+  triggerLabel,
+  triggerTitle,
   triggerIcon,
-  panelTitle = ">_ 运行目录",
+  panelTitle,
   variant = "floating",
 }: TerminalPanelProps) {
+  const { t } = useI18n();
   const embedded = variant === "embedded";
   const [open, setOpen] = useState(false);
-  const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
-  const [files, setFiles] = useState<FileList | null>(null);
-  const [curDir, setCurDir] = useState("");
+  const [lines, setLines] = useState<LogLine[]>([]);
   const [loading, setLoading] = useState(false);
   const [available, setAvailable] = useState(true);
+  const [autoScroll, setAutoScroll] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const lastTsRef = useRef(0);
   const visible = embedded || open;
 
-  const fetchSysInfo = useCallback(async () => {
+  const resolvedTriggerLabel = triggerLabel ?? t("terminal_trigger");
+  const resolvedTriggerTitle = triggerTitle ?? t("terminal_trigger_title");
+  const resolvedPanelTitle = panelTitle ?? t("terminal_panel_title");
+
+  const loadLogs = useCallback(async (mode: "replace" | "append") => {
+    if (mode === "replace") setLoading(true);
     try {
-      const response = await fetch("/api/system/info");
-      if (!response.ok) {
-        setAvailable(false);
-        return;
-      }
-      setSysInfo(await response.json());
+      const after = mode === "append" ? lastTsRef.current : 0;
+      const result = await getLogs(after, LOG_LIMIT);
       setAvailable(true);
+      if (result.lines.length > 0) {
+        lastTsRef.current = Math.max(lastTsRef.current, ...result.lines.map((line) => line.ts));
+      }
+      setLines((prev) => {
+        if (mode === "replace") return result.lines;
+        if (result.lines.length === 0) return prev;
+        return [...prev, ...result.lines].slice(-LOG_LIMIT);
+      });
     } catch {
       setAvailable(false);
-    }
-  }, []);
-
-  const fetchFiles = useCallback(async (dir: string) => {
-    setLoading(true);
-    try {
-      const qs = dir ? `?dir=${encodeURIComponent(dir)}` : "";
-      const response = await fetch(`/api/files/list${qs}`);
-      if (response.ok) {
-        setFiles(await response.json());
-      }
     } finally {
-      setLoading(false);
+      if (mode === "replace") setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     if (!visible) return;
-    fetchSysInfo();
-    fetchFiles(curDir);
-  }, [visible, fetchSysInfo, fetchFiles, curDir]);
+    loadLogs("replace");
+  }, [visible, loadLogs]);
+
+  useEffect(() => {
+    if (!visible) return;
+    const timer = window.setInterval(() => {
+      loadLogs("append");
+    }, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [visible, loadLogs]);
+
+  useEffect(() => {
+    if (!autoScroll) return;
+    const node = scrollRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+  }, [lines, autoScroll]);
 
   useEffect(() => {
     if (embedded || !open) return;
@@ -109,24 +126,47 @@ export function TerminalPanel({
   }, [embedded, open]);
 
   function refresh() {
-    fetchSysInfo();
-    fetchFiles(curDir);
+    loadLogs("replace");
   }
 
-  function drillInto(entry: FileEntry) {
-    if (entry.type !== "dir") return;
-    setCurDir(curDir ? `${curDir}/${entry.name}` : entry.name);
+  function clearVisibleLogs() {
+    setLines([]);
   }
 
-  function goRoot() {
-    setCurDir("");
+  function onScroll() {
+    const node = scrollRef.current;
+    if (!node) return;
+    const distanceToBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+    setAutoScroll(distanceToBottom < 24);
   }
 
-  function goUp() {
-    const parts = curDir.split("/").filter(Boolean);
-    parts.pop();
-    setCurDir(parts.join("/"));
+  function toggleAutoScroll() {
+    setAutoScroll((next) => {
+      const enabled = !next;
+      if (enabled) {
+        window.requestAnimationFrame(() => {
+          const node = scrollRef.current;
+          if (node) node.scrollTop = node.scrollHeight;
+        });
+      }
+      return enabled;
+    });
   }
+
+  const actionButtonStyle: React.CSSProperties = {
+    height: 26,
+    padding: "0 8px",
+    borderRadius: "var(--radius-md)",
+    border: "1px solid var(--border)",
+    background: "var(--surface)",
+    color: "var(--fg-muted)",
+    cursor: "pointer",
+    fontSize: 11,
+    fontFamily: "var(--font-sans)",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+  };
 
   const panel = (
     <div
@@ -138,8 +178,8 @@ export function TerminalPanel({
         width: embedded
           ? "100%"
           : collapsed
-            ? "min(720px, calc(100vw - 84px))"
-            : "min(720px, calc(100vw - var(--rail-w, 220px) - 36px))",
+            ? "min(760px, calc(100vw - 84px))"
+            : "min(760px, calc(100vw - var(--rail-w, 220px) - 36px))",
         height: embedded ? "100%" : "min(76vh, 680px)",
         minHeight: embedded ? 0 : 420,
         display: "flex",
@@ -161,7 +201,7 @@ export function TerminalPanel({
         style={{
           display: "flex",
           alignItems: "center",
-          padding: "12px 16px 10px",
+          padding: "10px 12px 10px 16px",
           borderBottom: "1px solid var(--border)",
           gap: 8,
           flexShrink: 0,
@@ -169,34 +209,36 @@ export function TerminalPanel({
       >
         <span
           style={{
-            fontFamily: "var(--font-geist-mono, monospace)",
+            fontFamily: "var(--font-mono)",
             fontSize: 12,
             color: "var(--fg-muted)",
             flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
           }}
         >
-          {panelTitle}
+          {resolvedPanelTitle}
         </span>
-        <button
-          onClick={refresh}
-          title="刷新"
-          style={{
-            background: "none",
-            border: "none",
-            color: "var(--fg-subtle)",
-            cursor: "pointer",
-            padding: 4,
-            display: "flex",
-            alignItems: "center",
-            fontSize: 13,
-          }}
-        >
-          ↻
+        <button onClick={toggleAutoScroll} title={t("terminal_auto_scroll")} style={{
+          ...actionButtonStyle,
+          color: autoScroll ? "var(--accent)" : "var(--fg-muted)",
+          borderColor: autoScroll ? "var(--accent-border)" : "var(--border)",
+          background: autoScroll ? "var(--accent-soft)" : "var(--surface)",
+        }}>
+          {t("terminal_auto_scroll_short")}
+        </button>
+        <button onClick={clearVisibleLogs} title={t("terminal_clear")} style={actionButtonStyle}>
+          {t("terminal_clear")}
+        </button>
+        <button onClick={refresh} title={t("terminal_refresh")} style={actionButtonStyle}>
+          {loading ? "..." : t("terminal_refresh")}
         </button>
         {!embedded && (
           <button
             onClick={() => setOpen(false)}
-            title="关闭"
+            title={t("btn_close")}
             style={{
               background: "none",
               border: "none",
@@ -215,185 +257,84 @@ export function TerminalPanel({
         )}
       </div>
 
-      {!available ? (
-        <div style={{ padding: 16, fontSize: 12, color: "var(--fg-subtle)" }}>
-          运行目录接口暂不可用
-        </div>
-      ) : (
-        <>
-          {sysInfo && (
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          padding: "10px 0",
+          background: "color-mix(in srgb, var(--bg-inset) 64%, transparent)",
+          fontFamily: "var(--font-mono)",
+        }}
+      >
+        {!available ? (
+          <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--danger)" }}>
+            {t("terminal_unavailable")}
+          </div>
+        ) : loading && lines.length === 0 ? (
+          <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--fg-subtle)" }}>
+            {t("terminal_loading")}
+          </div>
+        ) : lines.length === 0 ? (
+          <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--fg-subtle)" }}>
+            {t("terminal_empty")}
+          </div>
+        ) : (
+          lines.map((line, index) => (
             <div
+              key={rowKey(line, index)}
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                gap: "8px 14px",
-                padding: "12px 16px",
-                borderBottom: "1px solid var(--border)",
-                flexShrink: 0,
-              }}
-            >
-              {[
-                ["工作目录", sysInfo.cwd],
-                ["数据目录", sysInfo.data_dir],
-                ["数据库", sysInfo.db_file],
-                ["Python", `${sysInfo.python_version} · ${sysInfo.platform}`],
-              ].map(([label, value]) => (
-                <div key={label} style={{ minWidth: 0 }}>
-                  <div style={{ color: "var(--fg-subtle)", fontSize: 10, marginBottom: 2 }}>
-                    {label}
-                  </div>
-                  <div
-                    style={{
-                      color: "var(--fg)",
-                      fontFamily: "var(--font-geist-mono, monospace)",
-                      fontSize: 11,
-                      lineHeight: 1.45,
-                      wordBreak: "break-all",
-                    }}
-                  >
-                    {value}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 0" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "0 16px 8px",
+                gridTemplateColumns: "76px 76px 104px minmax(0, 1fr)",
+                gap: 10,
+                alignItems: "start",
+                padding: "4px 16px",
+                borderBottom: "1px solid color-mix(in srgb, var(--border) 42%, transparent)",
                 fontSize: 11,
-                color: "var(--fg-subtle)",
+                lineHeight: 1.5,
               }}
             >
-              <button
-                onClick={goRoot}
+              <span style={{ color: "var(--fg-subtle)", whiteSpace: "nowrap" }}>
+                {formatTime(line.ts)}
+              </span>
+              <span style={{ color: levelColor(line.level), fontWeight: 700, whiteSpace: "nowrap" }}>
+                {line.level || "INFO"}
+              </span>
+              <span
+                title={line.name}
                 style={{
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  color: "var(--accent)",
-                  fontSize: 11,
-                  padding: 0,
-                  fontFamily: "inherit",
-                  fontWeight: 700,
-                }}
-              >
-                data/
-              </button>
-              {curDir.split("/").filter(Boolean).map((seg, i, arr) => {
-                const path = arr.slice(0, i + 1).join("/");
-                return (
-                  <React.Fragment key={path}>
-                    <span>/</span>
-                    <button
-                      onClick={() => setCurDir(path)}
-                      style={{
-                        background: "none",
-                        border: "none",
-                        cursor: "pointer",
-                        color: i === arr.length - 1 ? "var(--fg)" : "var(--accent)",
-                        fontSize: 11,
-                        padding: 0,
-                        fontFamily: "inherit",
-                        fontWeight: i === arr.length - 1 ? 700 : 500,
-                      }}
-                    >
-                      {seg}
-                    </button>
-                  </React.Fragment>
-                );
-              })}
-            </div>
-
-            {curDir && (
-              <button
-                onClick={goUp}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  width: "100%",
-                  padding: "7px 16px",
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: 12,
                   color: "var(--fg-muted)",
-                  fontFamily: "inherit",
-                  textAlign: "left",
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-inset)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
               >
-                <span style={{ fontSize: 14 }}>↑</span>
-                <span>..</span>
-              </button>
-            )}
-
-            {loading ? (
-              <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--fg-subtle)" }}>
-                加载中...
-              </div>
-            ) : (files?.entries ?? []).map((entry) => (
-              <button
-                key={entry.name}
-                onClick={() => drillInto(entry)}
+                {sourceLabel(line)}
+              </span>
+              <span
                 style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  width: "100%",
-                  padding: "7px 16px",
-                  background: "none",
-                  border: "none",
-                  cursor: entry.type === "dir" ? "pointer" : "default",
-                  fontSize: 12,
-                  fontFamily: "inherit",
-                  textAlign: "left",
-                  minHeight: 34,
+                  color: "var(--fg)",
+                  minWidth: 0,
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
                 }}
-                onMouseEnter={(e) => { if (entry.type === "dir") e.currentTarget.style.background = "var(--bg-inset)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
               >
-                <span style={{ fontSize: 14, flexShrink: 0 }}>{entry.type === "dir" ? "📁" : "📄"}</span>
-                <span
-                  style={{
-                    flex: 1,
-                    color: entry.type === "dir" ? "var(--accent)" : "var(--fg)",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {entry.name}
-                </span>
-                {entry.type === "file" && (
-                  <span style={{ fontSize: 10, color: "var(--fg-subtle)", flexShrink: 0 }}>
-                    {fmtSize(entry.size_bytes)}
-                  </span>
-                )}
-              </button>
-            ))}
-
-            {!loading && files?.entries.length === 0 && (
-              <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--fg-subtle)" }}>
-                目录为空
-              </div>
-            )}
-          </div>
-        </>
-      )}
+                {line.msg}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
 
       <style>{`
         @keyframes terminalIn {
           from { opacity: 0; transform: translateX(-6px) scale(0.97); }
           to   { opacity: 1; transform: translateX(0) scale(1); }
-        }`}
-      </style>
+        }
+      `}</style>
     </div>
   );
 
@@ -409,7 +350,7 @@ export function TerminalPanel({
     <div ref={containerRef} style={{ position: "relative" }}>
       <button
         onClick={() => setOpen((v) => !v)}
-        title={triggerTitle}
+        title={resolvedTriggerTitle}
         style={{
           display: "flex",
           alignItems: "center",
@@ -433,14 +374,14 @@ export function TerminalPanel({
         <span
           style={{
             opacity: open ? 1 : 0.7,
-            fontFamily: "var(--font-geist-mono, monospace)",
+            fontFamily: "var(--font-mono)",
             fontSize: 12,
             display: "inline-flex",
           }}
         >
           {triggerIcon ?? ">_"}
         </span>
-        {!collapsed && <span>{triggerLabel}</span>}
+        {!collapsed && <span>{resolvedTriggerLabel}</span>}
       </button>
 
       {open && typeof document !== "undefined" && createPortal(panel, document.body)}

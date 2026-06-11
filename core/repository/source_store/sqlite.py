@@ -13,10 +13,12 @@ from typing import TYPE_CHECKING
 
 from core.domain.models import (
     Collection,
+    ConsoleScopeState,
     DocumentChunk,
     DocumentLifecycle,
     DocumentOrigin,
     PageChunk,
+    ScopedNote,
     SourceDocument,
     SyncRecord,
     SyncStatus,
@@ -62,12 +64,29 @@ def _loads_list(val: str | None) -> list:
         return []
 
 
+def _loads_dict(val: str | None) -> dict:
+    """安全解析 JSON 对象，失败回退空 dict。"""
+    try:
+        parsed = json.loads(val) if val else {}
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
 # 文档列清单（唯一真相源，杜绝多处 SELECT 列错位）。
 _DOC_COLUMNS = (
     "doc_id, title, file_path, content_type, size_bytes, content_hash, collection, tags, "
     "created_at, updated_at, needs_reindex, library_id, zotero_item_key, attachment_key, "
     "origin, read_only, zotero_version, markdown_rel_path, pages_rel_path, "
     "converter, converter_version, lifecycle_state, last_synced_at"
+)
+
+
+_NOTE_COLUMNS = (
+    "id, scope_type, scope_key, content, note_html, doc_id, collection_name, library_id, "
+    "parent_item_key, parent_attachment_key, zotero_note_key, zotero_version, tags, "
+    "collections, relations, linked, source, chat_conversation_id, chat_message_id, "
+    "created_at, updated_at, raw_zotero_json"
 )
 
 
@@ -98,6 +117,49 @@ def _row_to_document(row: tuple) -> SourceDocument:
         lifecycle_state=DocumentLifecycle(row[21]),
         last_synced_at=_parse_dt(row[22]),
     )
+
+
+def _row_to_scoped_note(row: tuple) -> ScopedNote:
+    """把 scoped_notes 表一行（列顺序同 _NOTE_COLUMNS）映射为领域对象。"""
+    return ScopedNote(
+        id=row[0],
+        scope_type=row[1],
+        scope_key=row[2],
+        content=row[3],
+        note_html=row[4],
+        doc_id=row[5] or "",
+        collection_name=row[6] or "",
+        library_id=row[7],
+        parent_item_key=row[8],
+        parent_attachment_key=row[9],
+        zotero_note_key=row[10],
+        zotero_version=row[11],
+        tags=_loads_list(row[12]),
+        collections=_loads_list(row[13]),
+        relations=_loads_dict(row[14]),
+        linked=bool(row[15]),
+        source=row[16],
+        chat_conversation_id=row[17],
+        chat_message_id=row[18],
+        created_at=_parse_dt(row[19]),
+        updated_at=_parse_dt(row[20]),
+        raw_zotero_json=_loads_dict(row[21]),
+    )
+
+
+def _row_to_chat_message(row: tuple) -> dict:
+    """把 chat_history 一行映射成前端 API 字典。"""
+    return {
+        "id": row[0],
+        "role": row[1],
+        "content": row[2],
+        "sources": _loads_list(row[3]),
+        "retrieval_mode": row[4],
+        "created_at": row[5],
+        "locked": bool(row[6]),
+        "locked_at": row[7],
+        "updated_at": row[8],
+    }
 
 
 class SQLiteSourceDocumentStore(SourceDocumentStore):
@@ -546,6 +608,116 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             ]
 
 
+    # ── 文档/集合笔记 ───────────────────────────────────────────
+
+    async def list_scoped_notes(self, scope_type: str, scope_key: str) -> list[ScopedNote]:
+        async with self._db.execute(
+            f"""
+            SELECT {_NOTE_COLUMNS}
+              FROM scoped_notes
+             WHERE scope_type = ? AND scope_key = ?
+             ORDER BY updated_at DESC, created_at DESC, id ASC
+            """,
+            (scope_type, scope_key),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [_row_to_scoped_note(row) for row in rows]
+
+    async def add_scoped_note(self, note: ScopedNote) -> None:
+        now = datetime.now(timezone.utc)
+        created_at = _format_dt(note.created_at or now)
+        updated_at = _format_dt(note.updated_at or note.created_at or now)
+        try:
+            await self._db.execute(
+                """
+                INSERT INTO scoped_notes (
+                    id, scope_type, scope_key, content, note_html, doc_id, collection_name,
+                    library_id, parent_item_key, parent_attachment_key, zotero_note_key,
+                    zotero_version, tags, collections, relations, linked, source,
+                    chat_conversation_id, chat_message_id, created_at, updated_at,
+                    raw_zotero_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    note.id,
+                    note.scope_type,
+                    note.scope_key,
+                    note.content,
+                    note.note_html,
+                    note.doc_id or None,
+                    note.collection_name or None,
+                    note.library_id,
+                    note.parent_item_key,
+                    note.parent_attachment_key,
+                    note.zotero_note_key,
+                    note.zotero_version,
+                    json.dumps(note.tags),
+                    json.dumps(note.collections),
+                    json.dumps(note.relations),
+                    int(note.linked),
+                    note.source,
+                    note.chat_conversation_id,
+                    note.chat_message_id,
+                    created_at,
+                    updated_at,
+                    json.dumps(note.raw_zotero_json),
+                ),
+            )
+            await self._db.commit()
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed: scoped_notes.id" in str(e):
+                raise ValueError(f"duplicate note id: {note.id}") from e
+            raise
+
+    async def update_scoped_note(self, note: ScopedNote) -> bool:
+        updated_at = _format_dt(note.updated_at or datetime.now(timezone.utc))
+        async with self._db.execute(
+            """
+            UPDATE scoped_notes SET
+                scope_type = ?, scope_key = ?, content = ?, note_html = ?,
+                doc_id = ?, collection_name = ?, library_id = ?, parent_item_key = ?,
+                parent_attachment_key = ?, zotero_note_key = ?, zotero_version = ?,
+                tags = ?, collections = ?, relations = ?, linked = ?, source = ?,
+                chat_conversation_id = ?, chat_message_id = ?, updated_at = ?,
+                raw_zotero_json = ?
+            WHERE id = ?
+            """,
+            (
+                note.scope_type,
+                note.scope_key,
+                note.content,
+                note.note_html,
+                note.doc_id or None,
+                note.collection_name or None,
+                note.library_id,
+                note.parent_item_key,
+                note.parent_attachment_key,
+                note.zotero_note_key,
+                note.zotero_version,
+                json.dumps(note.tags),
+                json.dumps(note.collections),
+                json.dumps(note.relations),
+                int(note.linked),
+                note.source,
+                note.chat_conversation_id,
+                note.chat_message_id,
+                updated_at,
+                json.dumps(note.raw_zotero_json),
+                note.id,
+            ),
+        ) as cursor:
+            await self._db.commit()
+            return cursor.rowcount > 0
+
+    async def get_scoped_note(self, note_id: str) -> ScopedNote | None:
+        async with self._db.execute(
+            f"SELECT {_NOTE_COLUMNS} FROM scoped_notes WHERE id = ?",
+            (note_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return _row_to_scoped_note(row) if row is not None else None
+
     # ── 聊天记录 ─────────────────────────────────────────────────
 
     async def add_chat_message(
@@ -555,43 +727,157 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         content: str,
         sources: list | None = None,
         retrieval_mode: str = "",
+        locked: bool = False,
     ) -> None:
         now = _format_dt(datetime.now(timezone.utc))
         await self._db.execute(
             """
             INSERT INTO chat_history
-                (conversation_id, role, content, sources, retrieval_mode, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (conversation_id, role, content, sources, retrieval_mode, created_at,
+                 locked, locked_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (conversation_id, role, content, json.dumps(sources or []), retrieval_mode, now),
+            (
+                conversation_id,
+                role,
+                content,
+                json.dumps(sources or []),
+                retrieval_mode,
+                now,
+                int(locked),
+                now if locked else None,
+                now,
+            ),
         )
         await self._db.commit()
 
     async def get_chat_messages(self, conversation_id: str) -> list[dict]:
         async with self._db.execute(
             """
-            SELECT role, content, sources, retrieval_mode, created_at
+            SELECT id, role, content, sources, retrieval_mode, created_at,
+                   locked, locked_at, updated_at
               FROM chat_history WHERE conversation_id = ?
              ORDER BY id ASC
             """,
             (conversation_id,),
         ) as cursor:
             rows = await cursor.fetchall()
-        result = []
-        for row in rows:
-            result.append({
-                "role": row[0],
-                "content": row[1],
-                "sources": json.loads(row[2]),
-                "retrieval_mode": row[3],
-                "created_at": row[4],
-            })
-        return result
+        return [_row_to_chat_message(row) for row in rows]
 
-    async def clear_chat_messages(self, conversation_id: str) -> None:
+    async def set_chat_message_locked(
+        self, conversation_id: str, msg_idx: int, locked: bool
+    ) -> dict | None:
+        if msg_idx < 0:
+            return None
+        async with self._db.execute(
+            """
+            SELECT id
+              FROM chat_history
+             WHERE conversation_id = ?
+             ORDER BY id ASC
+             LIMIT 1 OFFSET ?
+            """,
+            (conversation_id, msg_idx),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        message_id = row[0]
+        now = _format_dt(datetime.now(timezone.utc))
         await self._db.execute(
-            "DELETE FROM chat_history WHERE conversation_id = ?",
-            (conversation_id,),
+            """
+            UPDATE chat_history
+               SET locked = ?, locked_at = ?, updated_at = ?
+             WHERE id = ?
+            """,
+            (int(locked), now if locked else None, now, message_id),
+        )
+        await self._db.commit()
+        async with self._db.execute(
+            """
+            SELECT id, role, content, sources, retrieval_mode, created_at,
+                   locked, locked_at, updated_at
+              FROM chat_history
+             WHERE id = ?
+            """,
+            (message_id,),
+        ) as cursor:
+            updated = await cursor.fetchone()
+        return _row_to_chat_message(updated) if updated is not None else None
+
+    async def clear_chat_messages(
+        self, conversation_id: str, preserve_locked: bool = False
+    ) -> None:
+        if preserve_locked:
+            await self._db.execute(
+                "DELETE FROM chat_history WHERE conversation_id = ? AND locked = 0",
+                (conversation_id,),
+            )
+        else:
+            await self._db.execute(
+                "DELETE FROM chat_history WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+        await self._db.commit()
+
+    # ── 控制台上下文状态 ─────────────────────────────────────────
+
+    async def get_console_scope_state(
+        self, scope_type: str, scope_key: str
+    ) -> ConsoleScopeState | None:
+        async with self._db.execute(
+            """
+            SELECT selected_collection, selected_doc_id, note_doc_id, right_panel,
+                   reading_mode, payload, updated_at
+              FROM console_scope_state
+             WHERE scope_type = ? AND scope_key = ?
+            """,
+            (scope_type, scope_key),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return ConsoleScopeState(
+            scope_type=scope_type,
+            scope_key=scope_key,
+            selected_collection=row[0],
+            selected_doc_id=row[1],
+            note_doc_id=row[2],
+            right_panel=row[3],
+            reading_mode=row[4],
+            payload=_loads_dict(row[5]),
+            updated_at=_parse_dt(row[6]),
+        )
+
+    async def upsert_console_scope_state(self, state: ConsoleScopeState) -> None:
+        updated_at = _format_dt(state.updated_at or datetime.now(timezone.utc))
+        await self._db.execute(
+            """
+            INSERT INTO console_scope_state (
+                scope_type, scope_key, selected_collection, selected_doc_id, note_doc_id,
+                right_panel, reading_mode, payload, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope_type, scope_key) DO UPDATE SET
+                selected_collection = excluded.selected_collection,
+                selected_doc_id = excluded.selected_doc_id,
+                note_doc_id = excluded.note_doc_id,
+                right_panel = excluded.right_panel,
+                reading_mode = excluded.reading_mode,
+                payload = excluded.payload,
+                updated_at = excluded.updated_at
+            """,
+            (
+                state.scope_type,
+                state.scope_key,
+                state.selected_collection,
+                state.selected_doc_id,
+                state.note_doc_id,
+                state.right_panel,
+                state.reading_mode,
+                json.dumps(state.payload),
+                updated_at,
+            ),
         )
         await self._db.commit()
 

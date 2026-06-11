@@ -12,8 +12,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from core.domain.models import (
         Collection,
+        ConsoleScopeState,
         DocumentChunk,
         PageChunk,
+        ScopedNote,
         SourceDocument,
         SyncRecord,
         SyncTargetKind,
@@ -115,6 +117,28 @@ class SourceDocumentStore(ABC):
         """读取文档的独立 LightRAG 索引状态。"""
         ...
 
+    # ── 文档/集合笔记 ───────────────────────────────────────────
+
+    @abstractmethod
+    async def list_scoped_notes(self, scope_type: str, scope_key: str) -> list[ScopedNote]:
+        """列出某个 document/collection 作用域下的全部笔记，按更新时间倒序。"""
+        ...
+
+    @abstractmethod
+    async def add_scoped_note(self, note: ScopedNote) -> None:
+        """新增一条 Zotero-shaped scoped note。id 已存在时由实现抛错。"""
+        ...
+
+    @abstractmethod
+    async def update_scoped_note(self, note: ScopedNote) -> bool:
+        """整体更新一条笔记。返回 False 表示 note id 不存在。"""
+        ...
+
+    @abstractmethod
+    async def get_scoped_note(self, note_id: str) -> ScopedNote | None:
+        """按 note id 获取笔记；不存在返回 None。"""
+        ...
+
     # ── 聊天记录 ─────────────────────────────────────────────────
 
     @abstractmethod
@@ -125,6 +149,7 @@ class SourceDocumentStore(ABC):
         content: str,
         sources: list | None = None,
         retrieval_mode: str = "",
+        locked: bool = False,
     ) -> None:
         """追加一条聊天记录（role='user'|'assistant'）。"""
         ...
@@ -135,8 +160,31 @@ class SourceDocumentStore(ABC):
         ...
 
     @abstractmethod
-    async def clear_chat_messages(self, conversation_id: str) -> None:
-        """删除某会话的全部消息。"""
+    async def set_chat_message_locked(
+        self, conversation_id: str, msg_idx: int, locked: bool
+    ) -> dict | None:
+        """按前端消息序号设置锁定状态；不存在返回 None。"""
+        ...
+
+    @abstractmethod
+    async def clear_chat_messages(
+        self, conversation_id: str, preserve_locked: bool = False
+    ) -> None:
+        """删除某会话消息；preserve_locked=True 时保留已锁定消息。"""
+        ...
+
+    # ── 控制台上下文状态 ─────────────────────────────────────────
+
+    @abstractmethod
+    async def get_console_scope_state(
+        self, scope_type: str, scope_key: str
+    ) -> ConsoleScopeState | None:
+        """获取某个 console scope 的右侧上下文状态。"""
+        ...
+
+    @abstractmethod
+    async def upsert_console_scope_state(self, state: ConsoleScopeState) -> None:
+        """创建或更新某个 console scope 的右侧上下文状态。"""
         ...
 
     # ── 同步状态 ──────────────────────────────────────────────────

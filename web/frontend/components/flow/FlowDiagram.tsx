@@ -71,6 +71,7 @@ export function FlowDiagram({
   onQuickConfigSave,
   onInstall,
   onRebuildIndex,
+  onClose,
 }: {
   stages: PipelineStage[];
   dependencies: DependencyStatus[];
@@ -85,6 +86,7 @@ export function FlowDiagram({
   onQuickConfigSave: (stageId: FlowStageId, updates: QuickConfigUpdate[]) => void;
   onInstall: (dep: DependencyStatus) => void;
   onRebuildIndex: () => void;
+  onClose?: () => void;
 }) {
   const knownStages = useMemo(() => {
     const base = stages
@@ -376,6 +378,7 @@ export function FlowDiagram({
                   onQuickConfigSave={onQuickConfigSave}
                   onInstall={onInstall}
                   onRebuildIndex={onRebuildIndex}
+                  onClose={onClose}
                 />
               </div>
             );

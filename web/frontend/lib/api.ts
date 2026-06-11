@@ -772,11 +772,15 @@ export async function getPendingReindexCount(): Promise<{ count: number }> {
 }
 
 export interface ChatMessage {
+  id?: number;
   role: "user" | "assistant";
   content: string;
   sources: AskSource[];
   retrieval_mode: string;
   created_at: string;
+  locked?: boolean;
+  locked_at?: string | null;
+  updated_at?: string | null;
 }
 
 export async function getChatHistory(conversationId: string): Promise<ChatMessage[]> {
@@ -787,10 +791,15 @@ export async function getChatHistory(conversationId: string): Promise<ChatMessag
   return res.messages;
 }
 
-export async function clearChatHistory(conversationId: string): Promise<void> {
+export async function clearChatHistory(
+  conversationId: string,
+  preserveLocked = false,
+): Promise<void> {
   if (isMock()) return;
+  const qs = new URLSearchParams({ conversation_id: conversationId });
+  if (preserveLocked) qs.set("preserve_locked", "true");
   await apiFetch<{ status: string }>(
-    `/api/chat/history?conversation_id=${encodeURIComponent(conversationId)}`,
+    `/api/chat/history?${qs}`,
     { method: "DELETE" }
   );
 }
@@ -1228,4 +1237,202 @@ export async function installDependency(pkg: string): Promise<InstallResult> {
 export async function recheckDependencies(): Promise<CapabilitiesData> {
   if (isMock()) return JSON.parse(JSON.stringify(MOCK_CAPABILITIES));
   return apiFetch<CapabilitiesData>("/api/dependencies/recheck", { method: "POST" });
+}
+
+// ─────────────────────────────────────────────────────────────
+// v0.23.0 新 UI 后端能力桩（部分端口尚未实现，501 降级）
+// ─────────────────────────────────────────────────────────────
+
+export interface DocumentNote {
+  id: string;
+  scope_type?: "document" | "collection";
+  scope_key?: string;
+  doc_id?: string;
+  collection_name?: string;
+  content: string;
+  body?: string;
+  note_html?: string;
+  linked?: boolean;
+  source?: string;
+  library_id?: string;
+  parent_item_key?: string;
+  parent_attachment_key?: string;
+  zotero_note_key?: string;
+  zotero_version?: number;
+  tags?: string[];
+  collections?: string[];
+  raw_zotero_json?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConsoleScopeState {
+  scope_type: string;
+  scope_key: string;
+  selected_collection: string;
+  selected_doc_id: string;
+  note_doc_id: string;
+  right_panel?: string;
+  reading_mode?: string;
+  payload?: Record<string, unknown>;
+  updated_at?: string | null;
+}
+
+export interface ZoteroAnnotation {
+  id: string;
+  doc_id: string;
+  text: string;
+  comment?: string;
+  color?: string;
+  page?: number;
+  page_label?: string;
+  type?: string;
+  position?: { pageIndex?: number; rects?: number[][] };
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface DocumentChunk {
+  chunk_id: string;
+  doc_id?: string;
+  ordinal: number;
+  page?: number;
+  text: string;
+  metadata?: Record<string, unknown>;
+}
+
+export async function getDocumentContent(
+  docId: string,
+  format: "md" | "pdf" = "md",
+): Promise<string> {
+  if (isMock()) return "";
+  const res = await fetch(
+    `/api/documents/${encodeURIComponent(docId)}/content?format=${format}`,
+    { credentials: "include" },
+  );
+  if (!res.ok) {
+    throw new ApiError(res.status, res.statusText);
+  }
+  return res.text();
+}
+
+export async function getDocumentNotes(docId: string): Promise<DocumentNote[]> {
+  return apiFetch<DocumentNote[]>(`/api/documents/${encodeURIComponent(docId)}/notes`);
+}
+
+export async function createDocumentNote(
+  docId: string,
+  content: string,
+  options?: { linked?: boolean; source?: string; chat_conversation_id?: string; chat_message_id?: number },
+): Promise<DocumentNote> {
+  return apiFetch<DocumentNote>(`/api/documents/${encodeURIComponent(docId)}/notes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, ...(options ?? {}) }),
+  });
+}
+
+export async function updateDocumentNote(
+  docId: string,
+  noteId: string,
+  content: string,
+): Promise<DocumentNote> {
+  return apiFetch<DocumentNote>(
+    `/api/documents/${encodeURIComponent(docId)}/notes/${encodeURIComponent(noteId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  );
+}
+
+export async function getCollectionNotes(collectionName: string): Promise<DocumentNote[]> {
+  return apiFetch<DocumentNote[]>(`/api/collections/${encodeURIComponent(collectionName)}/notes`);
+}
+
+export async function createCollectionNote(
+  collectionName: string,
+  content: string,
+  options?: { linked?: boolean; source?: string; chat_conversation_id?: string; chat_message_id?: number },
+): Promise<DocumentNote> {
+  return apiFetch<DocumentNote>(`/api/collections/${encodeURIComponent(collectionName)}/notes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, ...(options ?? {}) }),
+  });
+}
+
+export async function updateCollectionNote(
+  collectionName: string,
+  noteId: string,
+  content: string,
+): Promise<DocumentNote> {
+  return apiFetch<DocumentNote>(
+    `/api/collections/${encodeURIComponent(collectionName)}/notes/${encodeURIComponent(noteId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  );
+}
+
+export async function getDocumentAnnotations(docId: string): Promise<ZoteroAnnotation[]> {
+  if (isMock()) return [];
+  return apiFetch<ZoteroAnnotation[]>(
+    `/api/documents/${encodeURIComponent(docId)}/annotations`,
+  );
+}
+
+export async function lockChatAnswer(
+  convId: string,
+  msgIdx: number,
+  locked = true,
+): Promise<ChatMessage> {
+  return apiFetch<ChatMessage>(`/api/chat/history/${encodeURIComponent(convId)}/messages/${msgIdx}/lock`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ locked }),
+  });
+}
+
+export async function getConsoleScopeState(
+  scopeType: string,
+  scopeKey: string,
+): Promise<ConsoleScopeState | null> {
+  if (isMock()) return null;
+  const qs = new URLSearchParams({ scope_type: scopeType, scope_key: scopeKey });
+  try {
+    return await apiFetch<ConsoleScopeState>(`/api/console/scope-state?${qs}`);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+export async function upsertConsoleScopeState(
+  state: Omit<ConsoleScopeState, "updated_at">,
+): Promise<ConsoleScopeState> {
+  return apiFetch<ConsoleScopeState>("/api/console/scope-state", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(state),
+  });
+}
+
+export async function listDocumentChunks(docId: string): Promise<DocumentChunk[]> {
+  if (isMock()) {
+    return MOCK_KB_CHUNKS
+      .filter((chunk) => chunk.doc_id === docId)
+      .map((chunk) => ({
+        chunk_id: chunk.chunk_id,
+        doc_id: chunk.doc_id,
+        ordinal: chunk.ordinal,
+        text: chunk.text,
+      }));
+  }
+  return apiFetch<DocumentChunk[]>(
+    `/api/documents/${encodeURIComponent(docId)}/chunks`,
+  );
 }

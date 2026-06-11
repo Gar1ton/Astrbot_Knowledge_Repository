@@ -1,0 +1,293 @@
+/*
+ * Knowledge Repository · Design System Tokens (合并版)
+ * 来源：docs/Claude_Design_Reconfiguration/tokens/ 下全部 5 个 token 文件
+ * 消费方只需 import 本文件。
+ * 字体由 next/font 在 app/layout.tsx 预加载；Google Fonts 作降级方案。
+ */
+
+/* ─── 字体（Google Fonts 降级） ─────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ═══════════════════════════════════════════════════════════════
+   颜色 tokens
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ─── Light theme (default) ─────────────────────────────────── */
+:root {
+  --bg: #f6f6f4;
+  --bg-subtle: #f1f1ee;
+  --bg-inset: #ebebe7;
+  --surface: #ffffff;
+  --surface-hover: #f7f7f5;
+  --surface-raised: #ffffff;
+
+  --border: #e7e7e3;
+  --border-strong: #d9d9d4;
+
+  --fg: #26272b;
+  --fg-muted: #6e7076;
+  --fg-subtle: #9fa1a7;
+  --heading: #1b1c1f;
+
+  /* Primary accent — HSL driven (recolorable from Settings) */
+  --accent-h: 225;
+  --accent-s: 72%;
+  --accent-l: 56%;
+  --accent: hsl(var(--accent-h) var(--accent-s) var(--accent-l));
+  --accent-strong: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l) - 12%));
+  --accent-fg: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  --accent-softer: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  --accent-border: color-mix(in srgb, var(--accent) 34%, var(--border));
+  --ring: color-mix(in srgb, var(--accent) 28%, transparent);
+  --glow: color-mix(in srgb, var(--accent) 22%, transparent);
+
+  /* Inverse selection (tree active row: dark in light theme) */
+  --select-bg: #26272b;
+  --select-fg: #ffffff;
+  --select-muted: rgba(255, 255, 255, 0.62);
+
+  /* Semantic */
+  --ok: #2f9e63;
+  --ok-soft: #e3f4ea;
+  --warn: #d98414;
+  --warn-soft: #fbf0db;
+  --danger: #d5453c;
+  --danger-soft: #fbe7e5;
+  --info: #4e79c7;
+  --info-soft: #e8eef9;
+
+  /* Annotation highlight colors (Zotero 5-color) */
+  --ann-purple: #7a5af5;
+  --ann-purple-bg: #f0ebfe;
+  --ann-purple-border: #c4aef9;
+  --ann-yellow: #b98a1d;
+  --ann-yellow-bg: #fdf6e0;
+  --ann-yellow-border: #e0c46b;
+  --ann-green: #2f9e63;
+  --ann-green-bg: #e6f6ed;
+  --ann-green-border: #8fd4b0;
+  --ann-red: #d5453c;
+  --ann-red-bg: #fdebe9;
+  --ann-red-border: #f0a49f;
+  --ann-blue: #3b76d6;
+  --ann-blue-bg: #e9f0fc;
+  --ann-blue-border: #96bcf0;
+}
+
+/* ─── Dark theme (ink) ──────────────────────────────────────── */
+.dark {
+  --bg: #17181b;
+  --bg-subtle: #1c1d20;
+  --bg-inset: #232427;
+  --surface: #1e1f22;
+  --surface-hover: #26272b;
+  --surface-raised: #26272b;
+
+  --border: #303135;
+  --border-strong: #3d3e43;
+
+  --fg: #e8e9ec;
+  --fg-muted: #9b9da4;
+  --fg-subtle: #6b6d74;
+  --heading: #f3f4f6;
+
+  --accent-l: 62%;
+  --accent-soft: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  --accent-border: color-mix(in srgb, var(--accent) 40%, var(--border));
+
+  /* Inverse selection (light in dark theme) */
+  --select-bg: #f3f4f6;
+  --select-fg: #1b1c1f;
+  --select-muted: rgba(27, 28, 31, 0.6);
+
+  --ok-soft: rgba(47, 158, 99, 0.16);
+  --warn-soft: rgba(217, 132, 20, 0.16);
+  --danger-soft: rgba(213, 69, 60, 0.16);
+  --info-soft: rgba(78, 121, 199, 0.16);
+}
+
+/* ─── LightRAG 高级模式：全屏特殊色彩映射（violet） ──────────── */
+[data-mode="lightrag"] {
+  --accent-h: 265;
+  --accent-s: 70%;
+  --accent-l: 58%;
+  --bg: #f5f4f9;
+  --bg-subtle: #f0eef6;
+  --bg-inset: #e9e6f2;
+  --border: #e5e2ee;
+  --border-strong: #d5d0e4;
+  --select-bg: #322a52;
+}
+.dark[data-mode="lightrag"], .dark [data-mode="lightrag"] {
+  --bg: #16151c;
+  --surface: #1e1c26;
+}
+
+/* ─── Palette swatches (switched via [data-palette]) ────────── */
+[data-palette="blue"]     { --accent-h: 225; --accent-s: 72%; --accent-l: 56%; }
+[data-palette="violet"]   { --accent-h: 265; --accent-s: 70%; --accent-l: 58%; }
+[data-palette="teal"]     { --accent-h: 175; --accent-s: 60%; --accent-l: 42%; }
+[data-palette="amber"]    { --accent-h: 32;  --accent-s: 80%; --accent-l: 50%; }
+[data-palette="rose"]     { --accent-h: 350; --accent-s: 68%; --accent-l: 58%; }
+[data-palette="graphite"] { --accent-h: 230; --accent-s: 8%;  --accent-l: 32%; }
+
+/* ═══════════════════════════════════════════════════════════════
+   Typography tokens
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  /* Font families */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  /* Alias so ported code using --font-geist-mono keeps working */
+  --font-geist-mono: var(--font-mono);
+
+  /* Type scale (px) — dense console; body = 13px */
+  --text-2xs: 10px;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 26px;
+
+  /* Weights */
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Line heights */
+  --leading-tight: 1.2;
+  --leading-snug: 1.45;
+  --leading-normal: 1.6;
+  --leading-relaxed: 1.65;
+
+  /* Tracking */
+  --tracking-tight: -0.02em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.06em;
+  --tracking-wider: 0.09em;
+
+  /* Semantic aliases */
+  --text-body: var(--text-base);
+  --text-heading: var(--text-xl);
+  --text-eyebrow: var(--text-xs);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Spacing, Radii, Shadows, Layout tokens
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  /* Spacing scale (4px grid) */
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 10px;
+  --space-5: 12px;
+  --space-6: 14px;
+  --space-7: 16px;
+  --space-8: 20px;
+  --space-9: 24px;
+  --space-10: 32px;
+  --space-12: 40px;
+
+  /* Radii — conservative */
+  --radius-xs: 4px;
+  --radius-sm: 5px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-2xl: 12px;
+  --radius-pill: 999px;
+
+  /* Card-feel shadows: hairline ring + soft drop */
+  --shadow-card: 0 0 0 1px rgba(22, 23, 26, 0.045), 0 1px 2px rgba(22, 23, 26, 0.05), 0 3px 10px rgba(22, 23, 26, 0.045);
+  --shadow-raised: 0 0 0 1px rgba(22, 23, 26, 0.05), 0 2px 6px rgba(22, 23, 26, 0.06), 0 10px 28px rgba(22, 23, 26, 0.08);
+  --shadow-pop: 0 0 0 1px rgba(22, 23, 26, 0.05), 0 6px 16px rgba(22, 23, 26, 0.08), 0 24px 60px rgba(22, 23, 26, 0.16);
+  --shadow: var(--shadow-card);
+
+  /* Layout */
+  --topbar-h: 50px;
+  --panel-gap: 10px;
+  --file-w: 264px;
+  --chat-w: 360px;
+  --ring-width: 3px;
+}
+
+.dark {
+  --shadow-card: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4), 0 3px 10px rgba(0, 0, 0, 0.35);
+  --shadow-raised: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.45), 0 10px 28px rgba(0, 0, 0, 0.5);
+  --shadow-pop: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 6px 16px rgba(0, 0, 0, 0.5), 0 24px 60px rgba(0, 0, 0, 0.6);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Effects & Keyframes
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ─── Frosted glass (sticky bars, topbar) ───────────────────── */
+.fx-glass {
+  background: color-mix(in srgb, var(--bg-subtle) 72%, transparent);
+  backdrop-filter: saturate(1.4) blur(12px);
+  -webkit-backdrop-filter: saturate(1.4) blur(12px);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+/* ─── Gradient hairline border (featured cards) ─────────────── */
+.fx-gborder {
+  position: relative;
+}
+.fx-gborder::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(140deg,
+    color-mix(in srgb, var(--accent) 55%, transparent),
+    transparent 40%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* ─── Motion keyframes ──────────────────────────────────────── */
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadeUp { from { transform: translateY(8px); } to { transform: translateY(0); } }
+
+/* Branch pulse: active tree row connector line */
+@keyframes branchPulse {
+  0%, 100% { opacity: 0.4; transform: translateX(-4px); }
+  50%       { opacity: 1;   transform: translateX(4px); }
+}
+
+/* Citation highlight flash */
+@keyframes citeFlash {
+  0%   { background-color: color-mix(in srgb, var(--accent) 22%, transparent); }
+  60%  { background-color: color-mix(in srgb, var(--accent) 14%, transparent); }
+  100% { background-color: transparent; }
+}
+
+/* Modal overlay entrance */
+@keyframes overlayIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.985); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Spinner for build progress dots */
+@keyframes dotDrift {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(2px, -3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+}

@@ -60,6 +60,47 @@ async def test_get_document() -> None:
     assert await api.get_document("missing") is None
 
 
+async def test_document_and_collection_notes_are_zotero_shaped() -> None:
+    api = await _make_api()
+    doc_note = await api.create_document_note("d1", "hello\nworld")
+    assert doc_note is not None
+    assert doc_note["scope_type"] == "document"
+    assert doc_note["doc_id"] == "d1"
+    assert doc_note["content"] == "hello\nworld"
+    assert doc_note["raw_zotero_json"]["itemType"] == "note"
+    assert doc_note["raw_zotero_json"]["note"] == "<p>hello<br/>world</p>"
+    assert [n["id"] for n in await api.list_document_notes("d1") or []] == [doc_note["id"]]
+
+    await api.create_collection("papers")
+    collection_note = await api.create_collection_note("papers", "collection note")
+    assert collection_note is not None
+    assert collection_note["scope_type"] == "collection"
+    assert collection_note["collection_name"] == "papers"
+    assert collection_note["raw_zotero_json"]["itemType"] == "note"
+
+
+async def test_chat_lock_and_console_scope_state() -> None:
+    api = await _make_api()
+    await api._source_store.add_chat_message("conv", "user", "q")  # type: ignore[attr-defined]
+    await api._source_store.add_chat_message("conv", "assistant", "a")  # type: ignore[attr-defined]
+    locked = await api.set_chat_message_locked("conv", 1, True)
+    assert locked is not None and locked["locked"] is True
+    await api.clear_chat_history("conv", preserve_locked=True)
+    messages = await api.get_chat_history("conv")
+    assert [(m["role"], m["locked"]) for m in messages] == [("assistant", True)]
+
+    state = await api.upsert_console_scope_state(
+        "collection",
+        "papers",
+        selected_collection="papers",
+        selected_doc_id="d1",
+        note_doc_id="d1",
+        payload={"right": "notes"},
+    )
+    assert state["selected_doc_id"] == "d1"
+    assert await api.get_console_scope_state("collection", "papers") == state
+
+
 async def test_classify_document_partial_update() -> None:
     api = await _make_api()
     assert await api.classify_document("d2", collection="moved") is True

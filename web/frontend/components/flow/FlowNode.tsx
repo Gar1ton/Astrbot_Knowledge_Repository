@@ -146,6 +146,7 @@ export function FlowNode({
   onQuickConfigSave,
   onInstall,
   onRebuildIndex,
+  onClose,
 }: {
   stage: PipelineStage;
   depMap: Map<string, DependencyStatus>;
@@ -162,6 +163,7 @@ export function FlowNode({
   onQuickConfigSave: (stageId: FlowStageId, updates: QuickConfigUpdate[]) => void;
   onInstall: (dep: DependencyStatus) => void;
   onRebuildIndex: () => void;
+  onClose?: () => void;
 }) {
   if (!isFlowStageId(stage.id)) return null;
 
@@ -274,14 +276,25 @@ export function FlowNode({
         )}
 
         {meta.link && (
-          <Link
-            href={meta.link.href}
-            className={`flow-open-link ${meta.link.primary ? "flow-open-link--primary" : ""}`}
-            onClick={(event) => event.stopPropagation()}
-          >
-            {t(meta.link.labelKey)}
-            <span className="flow-open-arrow"><ArrowIcon /></span>
-          </Link>
+          id === "ask" && onClose ? (
+            <button
+              type="button"
+              className={`flow-open-link ${meta.link.primary ? "flow-open-link--primary" : ""}`}
+              onClick={(event) => { event.stopPropagation(); onClose(); }}
+            >
+              {t(meta.link.labelKey)}
+              <span className="flow-open-arrow"><ArrowIcon /></span>
+            </button>
+          ) : (
+            <Link
+              href={meta.link.href}
+              className={`flow-open-link ${meta.link.primary ? "flow-open-link--primary" : ""}`}
+              onClick={(event) => event.stopPropagation()}
+            >
+              {t(meta.link.labelKey)}
+              <span className="flow-open-arrow"><ArrowIcon /></span>
+            </Link>
+          )
         )}
       </div>
     </div>

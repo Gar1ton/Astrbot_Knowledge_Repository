@@ -21,6 +21,210 @@
 
 ---
 
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **`rebuild.sh` 一键重建失败、3000 端口无前端内容**：根因是 stale TS 增量缓存 `web/frontend/tsconfig.tsbuildinfo` 仍记录已删除的 `app/api/[...proxy]/route.ts`，生产构建读取该缓存时 `ENOENT` 失败；脚本 `set -e` 在第 3 步即中断，dev server 永远不启动。修复：
+  - `web/frontend/package.json` 的 `dev` / `build` 脚本在编译前追加清理 `tsconfig.tsbuildinfo`（`rm -rf .next tsconfig.tsbuildinfo`），令二者自愈。
+  - `rebuild.sh` 第 3 步构建前再显式 `rm -f tsconfig.tsbuildinfo`（防 `package.json` 被回退）。
+- **`rebuild.sh` 进程清理抓不到旧 dev server**：`next dev` 启动后进程名变为 `next-server`，原 `pkill -f "next dev"` 无法命中，旧进程残留占用 3000 端口与文件 watcher 致启动假死。改为一并清理 `next-server` / `next/dist/bin/next` / `npm run dev`（`rebuild.sh`）。
+
+### 构建与工程 (Build/CI)
+
+- `rebuild.sh` 修正 dev 启动注释（WASM 模式下 Next.js 直接跳过 `.next/lock` 的 flock，规避 WSL2 drvfs 不支持文件锁导致的 `Permission denied (os error 13)`），移除指向错误路径的 `rm -f .next/dev/lock`；前端就绪等待超时由 60s 放宽到 120s 以容忍首次冷编译（`rebuild.sh`）。
+- 端到端验证：`bash rebuild.sh` → exit 0，后端 6520 与前端 dev 3000 均 `200`，`/api/*` 经 `next.config.ts` rewrites 正常代理到后端（aiohttp 401 鉴权门）。
+
+## [v0.24.1] - 2026-06-11
+
+### 修复 (Fixed)
+
+- **SettingModal 终端面板嵌入**：补齐 `TerminalPanel variant="embedded"` 调用与内容区 `minHeight: 0` / 条件 padding，设置弹窗"终端日志"Tab 现直接渲染运行目录面板（`web/frontend/components/modals/SettingModal.tsx`）。
+- **BuildJob 响应缺失 `type` 字段**：`BuildJob.to_dict()` 补加 `"type": "lightrag_build"`，前端 FilePanel BuildCard 可正确区分进度条来源（`core/lightrag_core.py`）。
+- **`metadata.yaml` 版本号落后**：修正 `version` 字段从 `v0.23.6` 到 `v0.23.9`（`metadata.yaml`）。
+- **前端构建失败**：删除遗留的 `app/api/[...proxy]/route.ts` 开发代理路由（该文件与 `output: "export"` 不兼容），改为在 `next.config.ts` 使用 `rewrites()` 仅在开发模式下代理 `/api/*` 请求（`web/frontend/next.config.ts`）。
+
+### 架构健康 (Refactor)
+
+- **删除 9 个零引用前端组件**：`components/ds/{Card,Input,QuotaBar,StatusChip}.tsx` 及 `components/fx/{Atmosphere,GrainOverlay,RetrievalProgress,DotField,SunBloom}.tsx`；同步更新 `components/ds/index.ts` 移除对应 re-export 行，减少构建产物体积。
+- **TODO.md 状态修正**：补标 v0.23.0 P1/P3/P4 为 `[x]`（后端路由已实现）；v0.23.4 P1/P2/P3 全部标为 `[x]`（终端双模式已完整落地）；v0.23.0 P6 标为 `[x]`。
+
+### 构建与工程 (Build/CI)
+
+- `node node_modules/typescript/bin/tsc --noEmit` → passed, 0 errors
+- `node node_modules/next/dist/bin/next build --webpack` → passed, 13 static routes generated
+- `python tools/sync_frontend.py` → synced 167 files to `pages/`
+- `python tools/sync_frontend.py --check` → passed
+- `python -m pytest -q` → 270 passed, 316 warnings
+
+---
+
+## [v0.24.0] - 2026-06-11
+
+### 新增功能 (Added)
+
+- **Zotero-shaped 文档/集合笔记持久化**：新增 `ScopedNote` domain 模型、SQLite 迁移和仓储契约，补齐 `GET|POST|PATCH /api/documents/{doc_id}/notes`，并新增 `GET|POST|PATCH /api/collections/{name}/notes`；笔记保留 `note_html`、`parentItem`、tags、collections 与 `raw_zotero_json`，当前只写本地 SQLite，后续可接 Zotero 写回（`core/domain/models.py`, `core/repository/source_store/{base,memory,sqlite}.py`, `migrations/013_scoped_notes.sql`, `core/api.py`, `web/server.py`）。
+- **聊天回答锁定持久化**：为 `chat_history` 增加 `locked/locked_at/updated_at`，实现 `PATCH /api/chat/history/{convId}/messages/{msgIdx}/lock`；清空聊天记录支持 `preserve_locked=true` 保留已固定回答（`migrations/014_chat_history_lock.sql`, `core/repository/source_store/{base,memory,sqlite}.py`, `core/api.py`, `web/server.py`）。
+- **控制台右侧 scope state 持久化**：新增 `ConsoleScopeState` 与 `/api/console/scope-state`，前端 `ConsoleContext` 会恢复 global/collection/document 层级的右侧文档与笔记面板选择（`migrations/015_console_scope_state.sql`, `web/frontend/lib/ConsoleContext.tsx`, `web/frontend/lib/api.ts`）。
+- **前端接线落地**：`NotePanel` 改用类型化 notes/annotations API；`ChatPanel` 将 lock、save note、clear preserved history 接到后端；保存聊天笔记优先写当前文档，其次写当前 collection（`web/frontend/components/panels/{NotePanel,ChatPanel}.tsx`, `web/frontend/lib/api.ts`）。
+
+### 修复 (Fixed)
+
+- **Windows SQLite 快照临时文件占用**：修复 SQLite backup helper 中连接未显式关闭的问题，避免 R2 数据库快照备份在 Windows 上因临时文件仍被占用失败（`core/pipelines/sync_pipeline.py`）。
+
+### 测试 (Tests)
+
+- `python -m pytest tests/backend/test_source_store.py tests/backend/test_sqlite_source_store.py tests/backend/test_api.py tests/backend/test_web_server.py tests/backend/test_sync_pipeline.py -q` -> passed, 110 passed / 1 skipped（本机缺少可选 `boto3`/`botocore`）。
+- `node node_modules/typescript/bin/tsc --noEmit` -> passed。
+- `node node_modules/next/dist/bin/next build --webpack` -> passed，13 static routes generated。
+- `python tools/sync_frontend.py` -> synced 163 files to `pages/`；`python tools/sync_frontend.py --check` -> passed。
+
+---
+
+## [v0.23.9] - 2026-06-11
+
+### 修复 (Fixed)
+
+- **三段控制台中英文映射收敛**：新增 File/Documents/Chat/Note/TopBar/Modal 相关 i18n 键，中文界面统一使用“文件/集合/分块/文档/问答”等普通术语，保留 LightRAG、Milvus、Zotero、R2 等技术专名；修复左侧文件栏中文模式仍显示 Collection 的问题（`web/frontend/lib/i18n.ts`, `web/frontend/components/panels/{FilePanel,DocumentsPanel,ChatPanel,NotePanel}.tsx`, `web/frontend/components/layout/TopBar.tsx`, `web/frontend/components/modals/{SettingModal,WorkflowModal,AstrBotModal}.tsx`, `web/frontend/components/ds/Modal.tsx`）。
+- **控制台面板布局对齐**：调整通用 `Panel` header 的面包屑分隔符与溢出宽度策略，避免无标题阅读态出现前导 `/`，并修正 Documents 面板标题重复；左侧分区标题按当前语言调整字距和大小，中文界面不再强制 uppercase 间距（`web/frontend/components/ds/Panel.tsx`, `web/frontend/components/panels/{DocumentsPanel,FilePanel}.tsx`）。
+
+### 构建与工程 (Build/CI)
+
+- `node node_modules/typescript/bin/tsc --noEmit` -> passed。
+- `node node_modules/next/dist/bin/next build --webpack` -> passed，13 static routes generated。
+- `python tools/sync_frontend.py` -> synced 163 files to `pages/`；`python tools/sync_frontend.py --check` -> passed。
+- Browser smoke on `http://localhost:3000/?mock=true` -> passed，中文/英文切换与三栏 header 对齐检查通过，无浏览器 console error。
+
+---
+
+## [v0.23.8] - 2026-06-11
+
+### 新增功能 (Added)
+
+- **PDF.js 受控阅读面板**：用 `pdfjs-dist` 替换 DocumentsPanel 中的 iframe PDF 预览，支持页码跳转、缩放、适合宽度、loading/error 状态与 annotation 侧栏点击跳页（`web/frontend/components/panels/PdfViewer.tsx`, `web/frontend/components/panels/DocumentsPanel.tsx`, `web/frontend/package.json`）。
+- **文档阅读后端接口补齐**：新增 `GET /api/documents/{doc_id}/content?format=md`、`GET /api/documents/{doc_id}/chunks`、`GET /api/documents/{doc_id}/annotations`，并为 `/raw` 增加 `?disposition=inline`，默认下载行为仍保持 `attachment`（`web/server.py`, `core/api.py`）。
+- **Zotero Local API 只读桥接**：新增只读 `ZoteroLocalApiClient` 与 annotation 归一化 helper，仅使用 `GET` 读取 Local API，不向 Zotero 写回数据（`core/adapters/zotero/local_api.py`）。
+
+### 测试 (Tests)
+
+- `python -m pytest tests/backend/test_web_server.py tests/backend/test_zotero_local_api.py -q` -> passed, 46 passed。
+- `node node_modules/typescript/bin/tsc --noEmit` -> passed。
+- `node node_modules/next/dist/bin/next build --webpack` -> passed, 13 static routes generated。
+- `python tools/sync_frontend.py` -> synced 163 files to `pages/`；`python tools/sync_frontend.py --check` -> passed。
+- Browser smoke 未执行：当前工具发现未暴露可用的 in-app Browser 控制工具。
+
+---
+
+## [v0.23.7] - 2026-06-11
+
+### 架构健康 (Refactor)
+
+- **前端冗余 `ui/` 组件清理**：删除 5 个已被 `ds/` 设计系统取代、零引用的旧组件：`Btn.tsx`（→`ds/Button`）、`HelpTip.tsx`（→`ds/Tooltip`）、`Select.tsx`（→`ds/Select`）、`Tag.tsx`（→`ds/Tag`）、`Toggle.tsx`（→`ds/Toggle`）（`web/frontend/components/ui/`）。
+- **删除空占位目录 `core/repository/graph_store/`**：三个实现文件（`base.py`、`memory.py`、`sqlite.py`）在 commit `ac05dfe` 中已移除，仅余空 `__init__.py`，本次一并清除（`core/repository/graph_store/`）。
+
+---
+
+## [v0.23.6] - 2026-06-11
+
+### 修复 (Fixed)
+
+- **Flow 面板按钮行为调整**：`sync` 节点与 `zotero` 节点的"进入同步设置"链接由 `/sync` 改为 `/settings`，与设置页实际位置对齐（`web/frontend/components/flow/model.ts`）。
+- **Flow 面板"进入问答界面"改为关闭弹窗**：`ask` 节点的链接按钮在 WorkflowModal 上下文中改为调用 `onClose()` 关闭弹窗而非导航至 `/ask`；通过 `WorkflowModal → FlowPageContent → FlowDiagram → FlowNode` 链路传递可选 `onClose` prop；standalone `/flow` 页未传入时仍保留原 `<Link>` 行为（`web/frontend/components/modals/WorkflowModal.tsx`, `components/panels/FlowPageContent.tsx`, `components/flow/FlowDiagram.tsx`, `components/flow/FlowNode.tsx`）。
+
+### 构建与工程 (Build/CI)
+
+- `node node_modules/typescript/bin/tsc --noEmit` -> passed, 0 errors
+- `node node_modules/next/dist/bin/next build --webpack` -> passed, 13 static routes generated
+- `python tools/sync_frontend.py` -> synced 158 files to `pages/`
+
+---
+
+## [v0.23.5] - 2026-06-11
+
+### 新增功能 (Added)
+
+- **一键构建重启开发工具**：在项目根目录新增 `rebuild.sh` 脚本，支持一键停止旧服务、自动清理 `.next` 缓存、构建/编译前端页面、同步静态资源产物并于后台重启前后端开发服务。
+
+### 修复 (Fixed)
+
+- **前端开发模式白屏刷新崩溃**：修改 `web/frontend/package.json` 中的 `dev` 和 `build` 脚本，在运行前运行 `rm -rf .next` 清除缓存，避免由于生产静态导出后的 `.next` 缓存与开发模式冲突导致的 `missing required error components` 白屏循环刷新崩溃问题。
+- **前端打包时的 rewrites 警告**：修改 `web/frontend/next.config.ts`，将 `rewrites` 配置改为仅在开发模式（`isDev`）下注入，避免 Next.js 在打包为静态导出（`output: 'export'`）时抛出 rewrites 不兼容的编译警告。
+
+## [v0.23.3] - 2026-06-11
+
+### 修复 (Fixed)
+
+- **WorkflowModal 数据流图退化为原生白底文本**：在 `web/frontend/app/globals.css` 中恢复引入 `web/frontend/styles/tokens.css`，并置于 `ds-tokens.css` 之前，确保 `.flow-*` 样式与 `--flow-*` 变量进入全局样式，同时保留新 DS token 的后加载覆盖顺序。
+
+### 构建与工程 (Build/CI)
+
+- `node .\node_modules\typescript\bin\tsc --noEmit` -> passed。
+- `node .\node_modules\next\dist\bin\next build --webpack` -> passed，13 static routes generated。
+- `python tools/sync_frontend.py` -> synced 160 files to `pages/`。
+- `python tools/sync_frontend.py --check` -> passed。
+- `http://localhost:3000` -> HTTP 200，当前由 Next dev preview 提供预览。
+
+---
+
+## [v0.23.2] - 2026-06-10
+
+### 修复 (Fixed)
+
+- **WorkflowModal 数据流图只显示头部/图例**：补齐 `WorkflowModal` content、`FlowPageContent` 根节点与 `.flow-viewport` 的 flex 高度链路，确保 FlowDiagram 在弹窗内占满剩余空间并保留拖拽/缩放交互（`web/frontend/components/modals/WorkflowModal.tsx`, `web/frontend/components/panels/FlowPageContent.tsx`, `web/frontend/styles/tokens.css`）。
+- **Terminal 浮层过小且侧边栏误走 `/terminal` redirect**：`TerminalPanel` 新增触发文案/图标 props，修正 portal 内点击被外部点击处理器关闭的问题，浮层放大为面板尺寸并使用两列系统信息布局；`Rail` 直接挂载该浮层入口，设置页入口继续复用默认运行目录按钮（`web/frontend/components/ui/TerminalPanel.tsx`, `web/frontend/components/rail/Rail.tsx`）。
+
+### 构建与工程 (Build/CI)
+
+- `node .\node_modules\typescript\bin\tsc --noEmit` -> passed。
+- `node .\node_modules\next\dist\bin\next build --webpack` -> passed，13 static routes generated。
+- `python tools/sync_frontend.py` -> synced 160 files to `pages/`。
+
+---
+
+## [v0.23.1] - 2026-06-10
+
+### 修复 (Fixed)
+
+- **WorkflowModal 数据流界面不可用**：`FlowPageContent` 根元素 CSS class `.flow-topo-page` 定义了 `height: 100vh`，嵌入 Modal flex 容器后强制撑开至视口高度导致图谱无法交互。通过行内 style 覆盖为 `height: 100%` 修复（`web/frontend/components/panels/FlowPageContent.tsx`）。
+
+### 新增功能 (Added)
+
+- **Local Collection 删除按钮与确认弹窗**：FilePanel Local Collection 选中行右侧新增红色垃圾桶 `IconButton`（仅选中时显示）。点击弹出全屏遮罩确认对话框：含危险操作警告、需用户完整输入 collection 名称方可激活"确认删除"按钮（输入错误时边框高亮 `--danger`）、支持 Escape 取消及 Enter 快捷确认。删除成功后调用 `deleteCollection()` API、刷新列表并清空 `selectedCollection`（`web/frontend/components/panels/FilePanel.tsx`, `web/frontend/lib/api.ts`）。
+
+### 构建与工程 (Build/CI)
+
+- `npx next build` → Compiled successfully, 13 static pages generated。
+- `python tools/sync_frontend.py` → 同步 144 个文件到 `pages/`。
+
+---
+
+## [v0.23.0] - 2026-06-10
+
+### 新增功能 (Added)
+
+- **三段式控制台 UI（Heptabase 风格）**：将原 Rail 侧栏 + 多页路由结构全面替换为 File | Documents | Chat 三段式集成控制台。左侧 FilePanel（264px）展示 Zotero Sync / Local Collection / LightRAG Collection 三分区集合树；中间 DocumentsPanel（flex）支持文献列表视图与阅读视图双模式切换；右侧 ChatPanel（360px）整合 Research Agent 对话、引用跳转、锁定回答功能（`web/frontend/app/(console)/layout.tsx`, `web/frontend/components/panels/FilePanel.tsx`, `web/frontend/components/panels/DocumentsPanel.tsx`, `web/frontend/components/panels/ChatPanel.tsx`）。
+- **NotePanel**：点击文献 Note 图标时替换 FilePanel，展示文献元数据、Zotero 注释占位（501 降级）、本地笔记 CRUD（localStorage 降级）、摘要（`web/frontend/components/panels/NotePanel.tsx`）。
+- **三个全屏弹窗**：TopBar 三个按钮各打开一个全屏弹窗——SettingModal（外观/同步备份/后端配置/终端日志）、AstrBotModal（Embedding/向量库/LightRAG/Research Agent 四卡片单页滚动）、WorkflowModal（包裹现有 Flow 点阵图 FlowDiagram，面积扩大至 `calc(100vw - 32px) × calc(100vh - 32px)`）（`web/frontend/components/modals/SettingModal.tsx`, `web/frontend/components/modals/AstrBotModal.tsx`, `web/frontend/components/modals/WorkflowModal.tsx`, `web/frontend/components/panels/FlowPageContent.tsx`）。
+- **设计系统 Token（ds-tokens.css）**：合并白灰 Heptabase 风格 Token，替换暖橙色调；字体切换为 Inter + JetBrains Mono；新增 `branchPulse`、`citeFlash`、`overlayIn`、`modalIn`、`dotDrift` 关键帧动画；新增 LightRAG 模式紫色调（`[data-mode="lightrag"]`）（`web/frontend/styles/ds-tokens.css`, `web/frontend/app/globals.css`, `web/frontend/app/layout.tsx`）。
+- **设计系统组件库（`components/ds/`）**：新增 15 个组件——`Button`、`IconButton`、`Badge`、`Card`、`StatusChip`、`QuotaBar`、`Input`、`Select`、`Tag`、`Toggle`、`Panel`、`Modal`、`Eyebrow`、`Tooltip`、`Icon`（30+ 命名 SVG 路径）（`web/frontend/components/ds/*.tsx`）。
+- **ConsoleContext**：新增 React Context 共享 `selectedCollection`、`selectedDocId`、`highlightedChunk`、`noteDocId`、三个弹窗开关状态；引用跳转（Chat → Documents）通过 `setHighlightedChunk` + `setSelectedDocId` 实现（`web/frontend/lib/ConsoleContext.tsx`）。
+- **lib/api.ts 后端能力 stub**：新增 7 个类型化 stub 函数（`getDocumentContent`、`getDocumentNotes`、`createDocumentNote`、`updateDocumentNote`、`getDocumentAnnotations`、`lockChatAnswer`、`listDocumentChunks`），对应待实现的后端端口（`web/frontend/lib/api.ts`）。
+
+### 架构健康 (Refactor)
+
+- **旧路由清理**：将 `/ask`、`/documents`、`/flow`、`/graph`、`/quota`、`/search`、`/settings`、`/sync`、`/terminal` 全部替换为 `redirect("/")` 全重定向（`web/frontend/app/(console)/*/page.tsx`）。
+- **FlowPageContent 提取**：将 `flow/page.tsx` 的组件逻辑提取为 `FlowPageContent.tsx`，供 WorkflowModal 引用，同时保留 `components/flow/` 文件不变（`web/frontend/components/panels/FlowPageContent.tsx`）。
+- **BuildWidget 更新**：将原 `/graph` 路由跳转改为 `setWorkflowOpen(true)` 调用（`web/frontend/components/build/BuildWidget.tsx`）。
+
+### 构建与工程 (Build/CI)
+
+- `npx tsc --noEmit` → 0 errors（全量类型检查通过）。
+- `npx next build` → 编译成功，13 个静态路由生成。
+- `python tools/sync_frontend.py` → 同步 143 个文件到 `pages/`。
+- `python -m pytest -q` → 256 passed, 281 warnings（后端测试全部通过，无新增失败）。
+
+---
+
 ## [v0.22.1] - 2026-06-09
 
 ### 新增功能 (Added)

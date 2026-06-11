@@ -221,6 +221,125 @@ async def handle_delete_document(request: web.Request) -> web.Response:
     return web.json_response({"ok": ok}, status=200 if ok else 404)
 
 
+async def handle_document_content(request: web.Request) -> web.Response:
+    doc_id = request.match_info["doc_id"]
+    fmt = (request.query.get("format") or "md").lower()
+    if fmt != "md":
+        return web.json_response({"error": "only format=md is supported; use /raw for pdf"}, status=400)
+    try:
+        content = await _api(request).get_document_markdown_content(doc_id)
+    except FileNotFoundError as exc:
+        return web.json_response({"error": str(exc)}, status=404)
+    if content is None:
+        return web.json_response({"error": "document not found"}, status=404)
+    return web.Response(text=content, content_type="text/markdown", charset="utf-8")
+
+
+async def handle_document_chunks(request: web.Request) -> web.Response:
+    doc_id = request.match_info["doc_id"]
+    doc = await _api(request).get_document(doc_id)
+    if doc is None:
+        return web.json_response({"error": "document not found"}, status=404)
+    chunks = await _api(request).list_document_chunks(doc_id)
+    return web.json_response([_chunk_dict(c) for c in chunks])
+
+
+async def handle_document_annotations(request: web.Request) -> web.Response:
+    doc_id = request.match_info["doc_id"]
+    annotations = await _api(request).list_document_annotations(doc_id)
+    if annotations is None:
+        return web.json_response({"error": "document not found"}, status=404)
+    return web.json_response(annotations)
+
+
+async def handle_document_notes_get(request: web.Request) -> web.Response:
+    doc_id = request.match_info["doc_id"]
+    notes = await _api(request).list_document_notes(doc_id)
+    if notes is None:
+        return web.json_response({"error": "document not found"}, status=404)
+    return web.json_response(notes)
+
+
+async def handle_document_notes_post(request: web.Request) -> web.Response:
+    doc_id = request.match_info["doc_id"]
+    body = await request.json() if request.can_read_body else {}
+    content = str(body.get("content") or body.get("body") or "").strip()
+    if not content:
+        return web.json_response({"error": "content required"}, status=400)
+    note = await _api(request).create_document_note(
+        doc_id,
+        content,
+        linked=bool(body.get("linked") or False),
+        source=str(body.get("source") or "manual"),
+        chat_conversation_id=str(body.get("chat_conversation_id") or ""),
+        chat_message_id=body.get("chat_message_id") if isinstance(body.get("chat_message_id"), int) else None,
+    )
+    if note is None:
+        return web.json_response({"error": "document not found"}, status=404)
+    return web.json_response(note, status=201)
+
+
+async def handle_document_notes_patch(request: web.Request) -> web.Response:
+    doc_id = request.match_info["doc_id"]
+    note_id = request.match_info["note_id"]
+    body = await request.json() if request.can_read_body else {}
+    content = body.get("content", body.get("body")) if isinstance(body, dict) else None
+    linked = body.get("linked") if isinstance(body, dict) and "linked" in body else None
+    note = await _api(request).update_document_note(
+        doc_id,
+        note_id,
+        content=str(content).strip() if content is not None else None,
+        linked=bool(linked) if linked is not None else None,
+    )
+    if note is None:
+        return web.json_response({"error": "note not found"}, status=404)
+    return web.json_response(note)
+
+
+async def handle_collection_notes_get(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    notes = await _api(request).list_collection_notes(name)
+    if notes is None:
+        return web.json_response({"error": "collection not found"}, status=404)
+    return web.json_response(notes)
+
+
+async def handle_collection_notes_post(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    body = await request.json() if request.can_read_body else {}
+    content = str(body.get("content") or body.get("body") or "").strip()
+    if not content:
+        return web.json_response({"error": "content required"}, status=400)
+    note = await _api(request).create_collection_note(
+        name,
+        content,
+        linked=bool(body.get("linked") or False),
+        source=str(body.get("source") or "manual"),
+        chat_conversation_id=str(body.get("chat_conversation_id") or ""),
+        chat_message_id=body.get("chat_message_id") if isinstance(body.get("chat_message_id"), int) else None,
+    )
+    if note is None:
+        return web.json_response({"error": "collection not found"}, status=404)
+    return web.json_response(note, status=201)
+
+
+async def handle_collection_notes_patch(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    note_id = request.match_info["note_id"]
+    body = await request.json() if request.can_read_body else {}
+    content = body.get("content", body.get("body")) if isinstance(body, dict) else None
+    linked = body.get("linked") if isinstance(body, dict) and "linked" in body else None
+    note = await _api(request).update_collection_note(
+        name,
+        note_id,
+        content=str(content).strip() if content is not None else None,
+        linked=bool(linked) if linked is not None else None,
+    )
+    if note is None:
+        return web.json_response({"error": "note not found"}, status=404)
+    return web.json_response(note)
+
+
 async def handle_download_document(request: web.Request) -> web.StreamResponse:
     doc_id = request.match_info["doc_id"]
     doc = await _api(request).get_document(doc_id)
@@ -229,10 +348,13 @@ async def handle_download_document(request: web.Request) -> web.StreamResponse:
     file_path = Path(doc.file_path)
     if not file_path.is_file():
         return web.json_response({"error": "file not found on disk"}, status=404)
+    disposition = request.query.get("disposition")
+    disposition_type = "inline" if disposition == "inline" else "attachment"
+    filename = (doc.title or file_path.name).replace('"', "")
     return web.FileResponse(
         file_path,
         headers={
-            "Content-Disposition": f'attachment; filename="{doc.title}"',
+            "Content-Disposition": f'{disposition_type}; filename="{filename}"',
         },
     )
 
@@ -597,8 +719,62 @@ async def handle_chat_history_clear(request: web.Request) -> web.Response:
     cid = request.query.get("conversation_id", "").strip()
     if not cid:
         return web.json_response({"error": "conversation_id required"}, status=400)
-    await _api(request).clear_chat_history(cid)
+    preserve_locked = request.query.get("preserve_locked", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    await _api(request).clear_chat_history(cid, preserve_locked=preserve_locked)
     return web.json_response({"status": "ok"})
+
+
+async def handle_chat_message_lock(request: web.Request) -> web.Response:
+    """PATCH /api/chat/history/{convId}/messages/{msgIdx}/lock — 锁定/取消锁定消息。"""
+    conv_id = request.match_info["conv_id"]
+    try:
+        msg_idx = int(request.match_info["msg_idx"])
+    except ValueError:
+        return web.json_response({"error": "msgIdx must be an integer"}, status=400)
+    body = await request.json() if request.can_read_body else {}
+    locked = bool(body.get("locked", True)) if isinstance(body, dict) else True
+    message = await _api(request).set_chat_message_locked(conv_id, msg_idx, locked)
+    if message is None:
+        return web.json_response({"error": "message not found"}, status=404)
+    return web.json_response(message)
+
+
+async def handle_console_scope_state_get(request: web.Request) -> web.Response:
+    scope_type = request.query.get("scope_type", "").strip()
+    scope_key = request.query.get("scope_key", "").strip()
+    if not scope_type or not scope_key:
+        return web.json_response({"error": "scope_type and scope_key required"}, status=400)
+    state = await _api(request).get_console_scope_state(scope_type, scope_key)
+    if state is None:
+        return web.json_response({"error": "scope state not found"}, status=404)
+    return web.json_response(state)
+
+
+async def handle_console_scope_state_upsert(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    scope_type = str(body.get("scope_type") or "").strip()
+    scope_key = str(body.get("scope_key") or "").strip()
+    if not scope_type or not scope_key:
+        return web.json_response({"error": "scope_type and scope_key required"}, status=400)
+    payload = body.get("payload")
+    state = await _api(request).upsert_console_scope_state(
+        scope_type,
+        scope_key,
+        selected_collection=str(body.get("selected_collection") or ""),
+        selected_doc_id=str(body.get("selected_doc_id") or ""),
+        note_doc_id=str(body.get("note_doc_id") or ""),
+        right_panel=str(body.get("right_panel") or ""),
+        reading_mode=str(body.get("reading_mode") or ""),
+        payload=payload if isinstance(payload, dict) else {},
+    )
+    return web.json_response(state)
 
 
 async def handle_system_info(request: web.Request) -> web.Response:
@@ -876,12 +1052,14 @@ async def _document_dict(api: KnowledgeRepositoryApi, d: object) -> dict:
 
 
 def _chunk_dict(c: object) -> dict:
+    metadata = getattr(c, "metadata", {}) or {}
     return {
         "chunk_id": c.chunk_id,  # type: ignore[attr-defined]
         "doc_id": c.doc_id,  # type: ignore[attr-defined]
         "ordinal": c.ordinal,  # type: ignore[attr-defined]
         "text": c.text,  # type: ignore[attr-defined]
-        "metadata": getattr(c, "metadata", {}),
+        "page": metadata.get("page_number") or metadata.get("page"),
+        "metadata": metadata,
     }
 
 
@@ -961,10 +1139,23 @@ def build_app(
     app.router.add_get("/api/collections", handle_list_collections)
     app.router.add_post("/api/collections", handle_create_collection)
     app.router.add_delete("/api/collections/{name}", handle_delete_collection)
+    app.router.add_get("/api/collections/{name}/notes", handle_collection_notes_get)
+    app.router.add_post("/api/collections/{name}/notes", handle_collection_notes_post)
+    app.router.add_patch(
+        "/api/collections/{name}/notes/{note_id}", handle_collection_notes_patch
+    )
     app.router.add_get("/api/documents", handle_list_documents)
     app.router.add_post("/api/documents", handle_upload_document)
     app.router.add_patch("/api/documents/{doc_id}", handle_classify_document)
     app.router.add_delete("/api/documents/{doc_id}", handle_delete_document)
+    app.router.add_get("/api/documents/{doc_id}/content", handle_document_content)
+    app.router.add_get("/api/documents/{doc_id}/chunks", handle_document_chunks)
+    app.router.add_get("/api/documents/{doc_id}/annotations", handle_document_annotations)
+    app.router.add_get("/api/documents/{doc_id}/notes", handle_document_notes_get)
+    app.router.add_post("/api/documents/{doc_id}/notes", handle_document_notes_post)
+    app.router.add_patch(
+        "/api/documents/{doc_id}/notes/{note_id}", handle_document_notes_patch
+    )
     app.router.add_get("/api/documents/{doc_id}/raw", handle_download_document)
     app.router.add_get("/api/kb/collections", handle_kb_collections)
     app.router.add_get("/api/kb/search", handle_kb_search)
@@ -1010,8 +1201,14 @@ def build_app(
     app.router.add_get("/api/logs", handle_logs)
     app.router.add_post("/api/logs/events", handle_log_event)
     app.router.add_post("/api/ask", handle_ask)
+    app.router.add_get("/api/console/scope-state", handle_console_scope_state_get)
+    app.router.add_put("/api/console/scope-state", handle_console_scope_state_upsert)
+    app.router.add_patch("/api/console/scope-state", handle_console_scope_state_upsert)
     app.router.add_get("/api/chat/history", handle_chat_history_get)
     app.router.add_delete("/api/chat/history", handle_chat_history_clear)
+    app.router.add_patch(
+        "/api/chat/history/{conv_id}/messages/{msg_idx}/lock", handle_chat_message_lock
+    )
 
     # 安装内存日志 handler（幂等，重复调用安全）
     from core.log_capture import install as _install_log_handler

@@ -39,7 +39,7 @@ export const STAGE_META: Record<FlowStageId, FlowStageMeta> = {
     roleKey: "flow_role_optional_source",
     icon: "book",
     kind: "source",
-    link: { labelKey: "flow_open_sync", href: "/sync" },
+    link: { labelKey: "flow_open_sync", href: "/settings" },
   },
   ingest: {
     idx: 1,
@@ -98,7 +98,7 @@ export const STAGE_META: Record<FlowStageId, FlowStageMeta> = {
     roleKey: "flow_role_interface_bypass",
     icon: "cloud",
     kind: "dest",
-    link: { labelKey: "flow_open_sync", href: "/sync", primary: true },
+    link: { labelKey: "flow_open_sync", href: "/settings", primary: true },
   },
 };
 

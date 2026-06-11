@@ -1,0 +1,20 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Surfaces" subtitle="Page → panel background layers (light)" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin:0; background:var(--bg); font-family:var(--font-sans); }
+  .row { display:flex; gap:14px; padding:22px 24px; }
+  .sw { flex:1; }
+  .chip { height:54px; border-radius:8px; border:1px solid var(--border); }
+  .nm { font-size:11px; font-weight:600; color:var(--fg); margin-top:8px; }
+  .hex { font-size:10px; color:var(--fg-subtle); font-family:var(--font-mono); margin-top:2px; }
+</style></head>
+<body>
+  <div class="row">
+    <div class="sw"><div class="chip" style="background:var(--bg)"></div><div class="nm">--bg</div><div class="hex">#f6f6f4</div></div>
+    <div class="sw"><div class="chip" style="background:var(--bg-subtle)"></div><div class="nm">--bg-subtle</div><div class="hex">#f1f1ee</div></div>
+    <div class="sw"><div class="chip" style="background:var(--bg-inset)"></div><div class="nm">--bg-inset</div><div class="hex">#ebebe7</div></div>
+    <div class="sw"><div class="chip" style="background:var(--surface)"></div><div class="nm">--surface</div><div class="hex">#ffffff</div></div>
+    <div class="sw"><div class="chip" style="background:var(--surface-hover)"></div><div class="nm">--surface-hover</div><div class="hex">#f7f7f5</div></div>
+  </div>
+</body></html>

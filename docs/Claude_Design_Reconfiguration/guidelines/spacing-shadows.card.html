@@ -1,0 +1,17 @@
+<!-- @dsCard group="Spacing" viewport="700x170" name="Shadows" subtitle="--shadow (resting) · --shadow-pop (overlay)" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin:0; background:var(--bg); font-family:var(--font-sans); padding:30px 24px; }
+  .row { display:flex; gap:34px; }
+  .c { text-align:center; }
+  .box { width:150px; height:74px; background:var(--surface); border:1px solid var(--border); border-radius:14px; }
+  .nm { font-size:11px; font-family:var(--font-mono); color:var(--fg-muted); margin-top:14px; }
+</style></head>
+<body>
+  <div class="row">
+    <div class="c"><div class="box" style="box-shadow:var(--shadow)"></div><div class="nm">--shadow</div></div>
+    <div class="c"><div class="box" style="box-shadow:var(--shadow-pop)"></div><div class="nm">--shadow-pop</div></div>
+    <div class="c"><div class="box" style="box-shadow:var(--shadow),0 0 24px var(--accent-soft);border-color:var(--accent-border)"></div><div class="nm">featured glow</div></div>
+  </div>
+</body></html>

@@ -11,6 +11,7 @@ managers/pipelines（ingest/category/sync/quota）后，对应写操作改为委
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import time
 import uuid
@@ -26,7 +27,14 @@ from core.config import (
     change_consequence,
     structural_keys,
 )
-from core.domain.models import Collection, DocumentOrigin, SourceDocument, SyncTargetKind
+from core.domain.models import (
+    Collection,
+    ConsoleScopeState,
+    DocumentOrigin,
+    ScopedNote,
+    SourceDocument,
+    SyncTargetKind,
+)
 from core.pipelines.retrieval_orchestrator import RetrievalScope
 
 logger = logging.getLogger("KnowledgeRepositoryApi")
@@ -43,6 +51,60 @@ def _build_scope(scope_type: str, scope_key: str, scope_library_id: str) -> Retr
     return RetrievalScope(
         scope_type=scope_type, scope_key=scope_key, library_id=scope_library_id
     )
+
+
+def _note_html(content: str) -> str:
+    """把纯文本笔记转为 Zotero note 可接受的基础 HTML。"""
+    escaped = html.escape(content.strip())
+    paragraphs = [p for p in escaped.split("\n\n") if p.strip()]
+    if not paragraphs:
+        return ""
+    return "".join(f"<p>{p.replace(chr(10), '<br/>')}</p>" for p in paragraphs)
+
+
+def _scoped_note_dict(note: ScopedNote) -> dict[str, Any]:
+    """领域笔记转前端稳定 JSON shape。"""
+    created_at = note.created_at.isoformat() if note.created_at else None
+    updated_at = note.updated_at.isoformat() if note.updated_at else None
+    return {
+        "id": note.id,
+        "scope_type": note.scope_type,
+        "scope_key": note.scope_key,
+        "doc_id": note.doc_id,
+        "collection_name": note.collection_name,
+        "content": note.content,
+        "body": note.content,
+        "note_html": note.note_html,
+        "library_id": note.library_id,
+        "parent_item_key": note.parent_item_key,
+        "parent_attachment_key": note.parent_attachment_key,
+        "zotero_note_key": note.zotero_note_key,
+        "zotero_version": note.zotero_version,
+        "tags": note.tags,
+        "collections": note.collections,
+        "relations": note.relations,
+        "linked": note.linked,
+        "source": note.source,
+        "chat_conversation_id": note.chat_conversation_id,
+        "chat_message_id": note.chat_message_id,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "raw_zotero_json": note.raw_zotero_json,
+    }
+
+
+def _console_scope_state_dict(state: ConsoleScopeState) -> dict[str, Any]:
+    return {
+        "scope_type": state.scope_type,
+        "scope_key": state.scope_key,
+        "selected_collection": state.selected_collection,
+        "selected_doc_id": state.selected_doc_id,
+        "note_doc_id": state.note_doc_id,
+        "right_panel": state.right_panel,
+        "reading_mode": state.reading_mode,
+        "payload": state.payload,
+        "updated_at": state.updated_at.isoformat() if state.updated_at else None,
+    }
 
 
 def _assert_doc_writable(doc: SourceDocument) -> None:
@@ -315,6 +377,216 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     async def list_document_chunks(self, doc_id: str) -> list[DocumentChunk]:
         """列出单个文档的本地文本分块，供管理端展示摘要统计。"""
         return await self._source_store.list_chunks(doc_id)
+
+    async def get_document_markdown_content(self, doc_id: str) -> str | None:
+        """读取文档制品包中的 clean.md；文档不存在返回 None。"""
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return None
+        rel_path = doc.markdown_rel_path or "clean.md"
+        artifact_path = self._resolve_document_artifact_path(doc, rel_path)
+        if artifact_path is None:
+            raise FileNotFoundError(f"Markdown artifact not found for {doc_id}: {rel_path}")
+        return await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
+
+    async def list_document_annotations(self, doc_id: str) -> list[dict[str, Any]] | None:
+        """经 Zotero Local API 只读列出某文档 PDF attachment 的 annotations。"""
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return None
+        if doc.origin is not DocumentOrigin.ZOTERO or not doc.attachment_key:
+            return []
+
+        from core.adapters.zotero import local_api
+
+        port = local_api.DEFAULT_PORT
+        if self._config is not None:
+            port = self._config.get_zotero_sync_config().api_port
+        client = local_api.ZoteroLocalApiClient(port=port)
+        try:
+            items = await asyncio.to_thread(
+                client.list_items, item_type="annotation", include="data"
+            )
+        except local_api.ZoteroLocalApiError as exc:
+            logger.info("Zotero Local API annotations unavailable for %s: %s", doc_id, exc)
+            return []
+
+        annotations: list[dict[str, Any]] = []
+        for item in items:
+            data = item.get("data") if isinstance(item.get("data"), dict) else {}
+            if str(data.get("parentItem") or "") != doc.attachment_key:
+                continue
+            annotations.append(local_api.normalize_zotero_annotation(doc.doc_id, item))
+        return annotations
+
+    async def list_document_notes(self, doc_id: str) -> list[dict[str, Any]] | None:
+        """列出某文档的本地笔记；字段兼容 Zotero note 形态。"""
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return None
+        notes = await self._source_store.list_scoped_notes("document", doc.doc_id)
+        return [_scoped_note_dict(note) for note in notes]
+
+    async def create_document_note(
+        self,
+        doc_id: str,
+        content: str,
+        *,
+        linked: bool = False,
+        source: str = "manual",
+        chat_conversation_id: str = "",
+        chat_message_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """为文档创建一条 Zotero-shaped note；只写本地，不回写 Zotero。"""
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return None
+        body = content.strip()
+        note_html = _note_html(body)
+        parent_item = doc.zotero_item_key or doc.attachment_key
+        raw_zotero_json = {
+            "itemType": "note",
+            "note": note_html,
+            "tags": [{"tag": tag} for tag in doc.tags],
+            "collections": [doc.collection] if doc.collection else [],
+        }
+        if parent_item:
+            raw_zotero_json["parentItem"] = parent_item
+        if doc.attachment_key:
+            raw_zotero_json["parentAttachment"] = doc.attachment_key
+        note = ScopedNote(
+            id=uuid.uuid4().hex,
+            scope_type="document",
+            scope_key=doc.doc_id,
+            content=body,
+            note_html=note_html,
+            doc_id=doc.doc_id,
+            library_id=doc.library_id,
+            parent_item_key=doc.zotero_item_key,
+            parent_attachment_key=doc.attachment_key,
+            tags=list(doc.tags),
+            collections=[doc.collection] if doc.collection else [],
+            linked=linked,
+            source=source,
+            chat_conversation_id=chat_conversation_id,
+            chat_message_id=chat_message_id,
+            created_at=_now(),
+            updated_at=_now(),
+            raw_zotero_json=raw_zotero_json,
+        )
+        await self._source_store.add_scoped_note(note)
+        return _scoped_note_dict(note)
+
+    async def update_document_note(
+        self,
+        doc_id: str,
+        note_id: str,
+        *,
+        content: str | None = None,
+        linked: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """更新文档笔记；note 不属于该文档时返回 None。"""
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return None
+        note = await self._source_store.get_scoped_note(note_id)
+        if note is None or note.scope_type != "document" or note.scope_key != doc.doc_id:
+            return None
+        if content is not None:
+            note.content = content.strip()
+            note.note_html = _note_html(note.content)
+            note.raw_zotero_json = {**note.raw_zotero_json, "note": note.note_html}
+        if linked is not None:
+            note.linked = bool(linked)
+        note.updated_at = _now()
+        ok = await self._source_store.update_scoped_note(note)
+        return _scoped_note_dict(note) if ok else None
+
+    async def list_collection_notes(self, collection_name: str) -> list[dict[str, Any]] | None:
+        """列出某集合的本地笔记。"""
+        collections = {c.name: c for c in await self._source_store.list_collections()}
+        if collection_name not in collections:
+            return None
+        notes = await self._source_store.list_scoped_notes("collection", collection_name)
+        return [_scoped_note_dict(note) for note in notes]
+
+    async def create_collection_note(
+        self,
+        collection_name: str,
+        content: str,
+        *,
+        linked: bool = False,
+        source: str = "manual",
+        chat_conversation_id: str = "",
+        chat_message_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """为集合创建一条本地 note，collections 字段优先使用 Zotero collection key。"""
+        collections = {c.name: c for c in await self._source_store.list_collections()}
+        collection = collections.get(collection_name)
+        if collection is None:
+            return None
+        body = content.strip()
+        note_html = _note_html(body)
+        collection_key = collection.zotero_collection_key or collection.name
+        raw_zotero_json = {
+            "itemType": "note",
+            "note": note_html,
+            "collections": [collection_key] if collection_key else [],
+            "tags": [],
+        }
+        note = ScopedNote(
+            id=uuid.uuid4().hex,
+            scope_type="collection",
+            scope_key=collection.name,
+            content=body,
+            note_html=note_html,
+            collection_name=collection.name,
+            collections=[collection_key] if collection_key else [],
+            linked=linked,
+            source=source,
+            chat_conversation_id=chat_conversation_id,
+            chat_message_id=chat_message_id,
+            created_at=_now(),
+            updated_at=_now(),
+            raw_zotero_json=raw_zotero_json,
+        )
+        await self._source_store.add_scoped_note(note)
+        return _scoped_note_dict(note)
+
+    async def update_collection_note(
+        self,
+        collection_name: str,
+        note_id: str,
+        *,
+        content: str | None = None,
+        linked: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """更新集合笔记；note 不属于该集合时返回 None。"""
+        collections = {c.name for c in await self._source_store.list_collections()}
+        if collection_name not in collections:
+            return None
+        note = await self._source_store.get_scoped_note(note_id)
+        if note is None or note.scope_type != "collection" or note.scope_key != collection_name:
+            return None
+        if content is not None:
+            note.content = content.strip()
+            note.note_html = _note_html(note.content)
+            note.raw_zotero_json = {**note.raw_zotero_json, "note": note.note_html}
+        if linked is not None:
+            note.linked = bool(linked)
+        note.updated_at = _now()
+        ok = await self._source_store.update_scoped_note(note)
+        return _scoped_note_dict(note) if ok else None
+
+    def _resolve_document_artifact_path(self, doc: SourceDocument, rel_path: str) -> Path | None:
+        candidates: list[Path] = []
+        if self._managed_documents_dir is not None:
+            candidates.append(self._managed_documents_dir / doc.doc_id / rel_path)
+        candidates.append(Path(doc.file_path).parent / rel_path)
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return None
 
     async def get_zotero_item_meta(self, library_id: str, item_key: str) -> dict[str, Any] | None:
         """返回某 Zotero 条目的归一化引用字段（供文档界面一等展示）。"""
@@ -673,9 +945,53 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         """返回某会话的全部消息记录，按时间升序。"""
         return await self._source_store.get_chat_messages(conversation_id)
 
-    async def clear_chat_history(self, conversation_id: str) -> None:
-        """删除某会话的全部消息记录。"""
-        await self._source_store.clear_chat_messages(conversation_id)
+    async def set_chat_message_locked(
+        self, conversation_id: str, msg_idx: int, locked: bool = True
+    ) -> dict | None:
+        """设置某条聊天消息的锁定/固定状态。msg_idx 为前端展示序号（0-based）。"""
+        return await self._source_store.set_chat_message_locked(conversation_id, msg_idx, locked)
+
+    async def clear_chat_history(
+        self, conversation_id: str, preserve_locked: bool = False
+    ) -> None:
+        """删除某会话消息；preserve_locked=True 时保留已锁定回答。"""
+        await self._source_store.clear_chat_messages(
+            conversation_id, preserve_locked=preserve_locked
+        )
+
+    async def get_console_scope_state(
+        self, scope_type: str, scope_key: str
+    ) -> dict[str, Any] | None:
+        """读取控制台右侧上下文状态。"""
+        state = await self._source_store.get_console_scope_state(scope_type, scope_key)
+        return _console_scope_state_dict(state) if state is not None else None
+
+    async def upsert_console_scope_state(
+        self,
+        scope_type: str,
+        scope_key: str,
+        *,
+        selected_collection: str = "",
+        selected_doc_id: str = "",
+        note_doc_id: str = "",
+        right_panel: str = "",
+        reading_mode: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """持久化控制台右侧上下文状态。"""
+        state = ConsoleScopeState(
+            scope_type=scope_type,
+            scope_key=scope_key,
+            selected_collection=selected_collection,
+            selected_doc_id=selected_doc_id,
+            note_doc_id=note_doc_id,
+            right_panel=right_panel,
+            reading_mode=reading_mode,
+            payload=dict(payload or {}),
+            updated_at=_now(),
+        )
+        await self._source_store.upsert_console_scope_state(state)
+        return _console_scope_state_dict(state)
 
     async def ask(
         self,

@@ -1,0 +1,71 @@
+/*
+ * Knowledge Repository · Visual Effects & Utilities
+ * Frosted-glass seams, halftone atmosphere, motion keyframes.
+ * Discipline: all animation rides transform/opacity (GPU); backdrop-filter
+ * is reserved for small sticky bars (height <= 56px), never full-page.
+ */
+
+/* ─── Frosted glass (sticky bars, panel seams) ──────────────── */
+.fx-glass {
+  background: color-mix(in srgb, var(--bg-subtle) 72%, transparent);
+  backdrop-filter: saturate(1.4) blur(12px);
+  -webkit-backdrop-filter: saturate(1.4) blur(12px);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.fx-glass-edge {
+  box-shadow: inset 1px 0 0 color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/* ─── Gradient hairline border (featured cards / inputs) ───── */
+.fx-gborder {
+  position: relative;
+}
+.fx-gborder::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(140deg,
+    color-mix(in srgb, var(--accent) 55%, transparent),
+    transparent 40%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* ─── Film grain (single inline turbulence, very low opacity) ─ */
+.fx-grain::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.dark .fx-grain::before { mix-blend-mode: screen; opacity: 0.05; }
+
+/* ─── Motion keyframes ──────────────────────────────────────── */
+@keyframes dotDrift {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(4px, -6px); }
+  50% { transform: translate(6px, -8px); }
+  75% { transform: translate(-3px, -4px); }
+}
+@keyframes dotTwinkle {
+  0%, 100% { opacity: 0.10; }
+  50% { opacity: 0.32; }
+}
+@keyframes sunSpin { to { transform: rotate(360deg); } }
+@keyframes sunBreathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+@keyframes sparkleFloat { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+/* Entrance: animate transform ONLY — never start at opacity:0 (content must stay visible). */
+@keyframes fadeUp { from { transform: translateY(8px); } to { transform: translateY(0); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .fx-grain::before,
+  [class*="dot"],
+  [style*="sparkleFloat"] { animation: none !important; }
+}

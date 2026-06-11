@@ -14,7 +14,20 @@
       "Bash(python -m pytest tests/backend/test_sync_pipeline.py tests/backend/test_r2_target.py -q)",
       "Bash(pkill -f \"next dev\")",
       "Bash(pkill -f \"next-server\")",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(npx tsc *)",
+      "Bash(npx next *)",
+      "Bash(node -e ' *)",
+      "Bash(nohup npm run dev)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(pkill -9 -f \"next\")",
+      "Bash(echo \"Started PID: $!\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" -H \"RSC: 1\" -H 'next-router-state-tree: %5B%22%22%2C%5B%22%28console%29%22%2C%5B%22__PAGE__%22%2C%7B%7D%5D%5D%2C%22%24undefined%22%2C%22%24undefined%22%2C16%5D' http://localhost:3000/)",
+      "Bash(echo \"Restarted PID: $!\")",
+      "Bash(curl -sf http://localhost:3000/)",
+      "Bash(bash -c 'cd /workspaces/dev-workspace/Astrbot_Knowledge_Repository/web/frontend && npm run dev > /workspaces/dev-workspace/Astrbot_Knowledge_Repository/dev_frontend.log 2>&1')",
+      "Bash(curl -s -o /dev/null http://localhost:3000/)"
     ]
   }
 }

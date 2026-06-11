@@ -16,6 +16,7 @@ from core.config import Config
 from core.domain.models import (
     Collection,
     DocumentChunk,
+    DocumentOrigin,
     SourceDocument,
     SyncTargetKind,
 )
@@ -666,6 +667,247 @@ async def test_download_document_route(tmp_path: Path) -> None:
         await api._source_store.update_document(doc)
         resp_file_missing = await client.get("/api/documents/d1/raw")
         assert resp_file_missing.status == 404
+    finally:
+        await client.close()
+
+
+async def test_document_reader_routes(tmp_path: Path) -> None:
+    api = await _make_api()
+    bundle = tmp_path / "library" / "d1"
+    bundle.mkdir(parents=True)
+    raw_pdf = bundle / "original.pdf"
+    raw_pdf.write_bytes(b"%PDF-1.4 reader")
+    (bundle / "clean.md").write_text("# Clean\n\nMarkdown body", encoding="utf-8")
+
+    doc = await api._source_store.get_document("d1")
+    assert doc is not None
+    doc.file_path = str(raw_pdf)
+    doc.markdown_rel_path = "clean.md"
+    await api._source_store.update_document(doc)
+    await api._source_store.replace_chunks(
+        "d1",
+        [
+            DocumentChunk(
+                "c1",
+                "d1",
+                0,
+                "source text",
+                "h1",
+                metadata={"page_number": 3, "locator": "page_3_p1"},
+            )
+        ],
+    )
+
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        content = await client.get("/api/documents/d1/content?format=md")
+        assert content.status == 200
+        assert await content.text() == "# Clean\n\nMarkdown body"
+        assert content.headers["Content-Type"].startswith("text/markdown")
+
+        chunks = await client.get("/api/documents/d1/chunks")
+        assert chunks.status == 200
+        assert await chunks.json() == [
+            {
+                "chunk_id": "c1",
+                "doc_id": "d1",
+                "ordinal": 0,
+                "text": "source text",
+                "page": 3,
+                "metadata": {"page_number": 3, "locator": "page_3_p1"},
+            }
+        ]
+
+        inline = await client.get("/api/documents/d1/raw?disposition=inline")
+        assert inline.status == 200
+        assert inline.headers["Content-Disposition"] == 'inline; filename="Doc 1"'
+
+        default = await client.get("/api/documents/d1/raw")
+        assert default.status == 200
+        assert default.headers["Content-Disposition"] == 'attachment; filename="Doc 1"'
+    finally:
+        await client.close()
+
+
+async def test_document_annotations_route_uses_zotero_readonly_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = await _make_api()
+    doc = await api._source_store.get_document("d1")
+    assert doc is not None
+    doc.origin = DocumentOrigin.ZOTERO
+    doc.library_id = "1"
+    doc.zotero_item_key = "ITEM"
+    doc.attachment_key = "ATTACH"
+    await api._source_store.update_document(doc)
+
+    class FakeZoteroClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def list_items(self, **kwargs: object) -> list[dict]:
+            assert kwargs == {"item_type": "annotation", "include": "data"}
+            return [
+                {
+                    "key": "ANN1",
+                    "data": {
+                        "key": "ANN1",
+                        "itemType": "annotation",
+                        "parentItem": "ATTACH",
+                        "annotationType": "highlight",
+                        "annotationText": "matched text",
+                        "annotationComment": "comment",
+                        "annotationColor": "#ffd400",
+                        "annotationPageLabel": "7",
+                        "annotationPosition": '{"pageIndex":6,"rects":[[1,2,3,4]]}',
+                        "dateAdded": "2026-06-10T11:49:59Z",
+                        "dateModified": "2026-06-10T11:50:00Z",
+                    },
+                },
+                {
+                    "key": "ANN2",
+                    "data": {
+                        "key": "ANN2",
+                        "itemType": "annotation",
+                        "parentItem": "OTHER",
+                        "annotationText": "ignored",
+                    },
+                },
+            ]
+
+    from core.adapters.zotero import local_api
+
+    monkeypatch.setattr(local_api, "ZoteroLocalApiClient", FakeZoteroClient)
+
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/documents/d1/annotations")
+        assert resp.status == 200
+        assert await resp.json() == [
+            {
+                "id": "ANN1",
+                "doc_id": "d1",
+                "text": "matched text",
+                "type": "highlight",
+                "comment": "comment",
+                "color": "#ffd400",
+                "page": 7,
+                "page_label": "7",
+                "position": {"pageIndex": 6, "rects": [[1, 2, 3, 4]]},
+                "created_at": "2026-06-10T11:49:59Z",
+                "updated_at": "2026-06-10T11:50:00Z",
+            }
+        ]
+    finally:
+        await client.close()
+
+
+async def test_document_and_collection_notes_routes(tmp_path: Path) -> None:
+    client = await _client(tmp_path)
+    try:
+        resp = await client.get("/api/documents/d1/notes")
+        assert resp.status == 200
+        assert await resp.json() == []
+
+        created = await client.post("/api/documents/d1/notes", json={"content": "note body"})
+        assert created.status == 201
+        note = await created.json()
+        assert note["scope_type"] == "document"
+        assert note["doc_id"] == "d1"
+        assert note["raw_zotero_json"]["itemType"] == "note"
+
+        patched = await client.patch(
+            f"/api/documents/d1/notes/{note['id']}",
+            json={"content": "updated"},
+        )
+        assert patched.status == 200
+        assert (await patched.json())["content"] == "updated"
+
+        collection_note = await client.post(
+            "/api/collections/papers/notes",
+            json={"content": "collection note"},
+        )
+        assert collection_note.status == 201
+        body = await collection_note.json()
+        assert body["scope_type"] == "collection"
+        assert body["collection_name"] == "papers"
+
+        listed = await client.get("/api/collections/papers/notes")
+        assert listed.status == 200
+        assert [n["id"] for n in await listed.json()] == [body["id"]]
+    finally:
+        await client.close()
+
+
+async def test_chat_lock_route_and_preserve_locked_clear(tmp_path: Path) -> None:
+    api = await _make_api()
+    await api._source_store.add_chat_message("conv", "user", "q")
+    await api._source_store.add_chat_message("conv", "assistant", "a")
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        locked = await client.patch(
+            "/api/chat/history/conv/messages/1/lock",
+            json={"locked": True},
+        )
+        assert locked.status == 200
+        assert (await locked.json())["locked"] is True
+
+        clear = await client.delete("/api/chat/history?conversation_id=conv&preserve_locked=true")
+        assert clear.status == 200
+        history = await client.get("/api/chat/history?conversation_id=conv")
+        assert history.status == 200
+        messages = (await history.json())["messages"]
+        assert [(m["role"], m["locked"]) for m in messages] == [("assistant", True)]
+    finally:
+        await client.close()
+
+
+async def test_console_scope_state_routes(tmp_path: Path) -> None:
+    client = await _client(tmp_path)
+    try:
+        missing = await client.get("/api/console/scope-state?scope_type=global&scope_key=console")
+        assert missing.status == 404
+
+        saved = await client.put(
+            "/api/console/scope-state",
+            json={
+                "scope_type": "collection",
+                "scope_key": "papers",
+                "selected_collection": "papers",
+                "selected_doc_id": "d1",
+                "note_doc_id": "d1",
+                "payload": {"right": "notes"},
+            },
+        )
+        assert saved.status == 200
+        assert (await saved.json())["selected_doc_id"] == "d1"
+
+        loaded = await client.get("/api/console/scope-state?scope_type=collection&scope_key=papers")
+        assert loaded.status == 200
+        body = await loaded.json()
+        assert body["note_doc_id"] == "d1"
+        assert body["payload"] == {"right": "notes"}
     finally:
         await client.close()
 

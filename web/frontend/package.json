@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "rm -rf .next tsconfig.tsbuildinfo && next dev --webpack",
+    "build": "rm -rf .next tsconfig.tsbuildinfo && next build --webpack",
     "start": "next start",
     "lint": "eslint"
   },
@@ -14,6 +14,7 @@
     "geist": "^1.7.1",
     "next": "16.2.6",
     "next-themes": "^0.4.6",
+    "pdfjs-dist": "^6.0.227",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },

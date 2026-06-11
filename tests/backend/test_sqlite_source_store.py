@@ -13,7 +13,9 @@ import pytest
 
 from core.domain.models import (
     Collection,
+    ConsoleScopeState,
     DocumentChunk,
+    ScopedNote,
     SourceDocument,
     SyncRecord,
     SyncStatus,
@@ -228,3 +230,69 @@ async def test_chunk_metadata_persistence(sqlite_store: SQLiteSourceDocumentStor
     assert got[0].metadata == {"page_number": 1, "locator": "page_1_p1", "paragraph": 1}
     assert got[1].chunk_id == "mc2"
     assert got[1].metadata == {"page_number": 2, "locator": "page_2_p1", "paragraph": 1}
+
+
+async def test_scoped_notes_persist_zotero_shape(
+    sqlite_store: SQLiteSourceDocumentStore,
+) -> None:
+    await sqlite_store.add_document(_doc("note-doc", collection="default", tags=["tag1"]))
+    note = ScopedNote(
+        id="n1",
+        scope_type="document",
+        scope_key="note-doc",
+        content="plain note",
+        note_html="<p>plain note</p>",
+        doc_id="note-doc",
+        library_id="1",
+        parent_item_key="ITEM1",
+        parent_attachment_key="ATT1",
+        tags=["tag1"],
+        collections=["default"],
+        raw_zotero_json={"itemType": "note", "parentItem": "ITEM1", "note": "<p>plain note</p>"},
+    )
+    await sqlite_store.add_scoped_note(note)
+
+    notes = await sqlite_store.list_scoped_notes("document", "note-doc")
+    assert len(notes) == 1
+    assert notes[0].parent_item_key == "ITEM1"
+    assert notes[0].raw_zotero_json["itemType"] == "note"
+
+    notes[0].content = "updated"
+    notes[0].raw_zotero_json["note"] = "<p>updated</p>"
+    assert await sqlite_store.update_scoped_note(notes[0]) is True
+    got = await sqlite_store.get_scoped_note("n1")
+    assert got is not None
+    assert got.content == "updated"
+    assert got.raw_zotero_json["note"] == "<p>updated</p>"
+
+
+async def test_chat_lock_and_preserve_locked_clear(
+    sqlite_store: SQLiteSourceDocumentStore,
+) -> None:
+    await sqlite_store.add_chat_message("conv", "user", "q")
+    await sqlite_store.add_chat_message("conv", "assistant", "a")
+    locked = await sqlite_store.set_chat_message_locked("conv", 1, True)
+    assert locked is not None and locked["locked"] is True
+
+    await sqlite_store.clear_chat_messages("conv", preserve_locked=True)
+    messages = await sqlite_store.get_chat_messages("conv")
+    assert len(messages) == 1
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["locked"] is True
+
+
+async def test_console_scope_state_upsert(sqlite_store: SQLiteSourceDocumentStore) -> None:
+    await sqlite_store.upsert_console_scope_state(
+        ConsoleScopeState(
+            scope_type="collection",
+            scope_key="papers",
+            selected_collection="papers",
+            selected_doc_id="d1",
+            note_doc_id="d1",
+            payload={"right": "notes"},
+        )
+    )
+    state = await sqlite_store.get_console_scope_state("collection", "papers")
+    assert state is not None
+    assert state.selected_doc_id == "d1"
+    assert state.payload == {"right": "notes"}

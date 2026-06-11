@@ -271,6 +271,56 @@ class PageChunk:
     markdown_end_char: int
 
 
+# ── 用户侧持久化状态 ────────────────────────────────────────────
+
+
+@dataclass
+class ScopedNote:
+    """文档/集合笔记，字段形态贴近 Zotero note，便于后续 push 对接。
+
+    scope_type 为 document 或 collection；scope_key 分别对应 doc_id 或 collection name。
+    Zotero 相关字段只做本地对齐和备份，不代表当前会写回 Zotero。
+    """
+
+    id: str
+    scope_type: str
+    scope_key: str
+    content: str
+    note_html: str = ""
+    doc_id: str = ""
+    collection_name: str = ""
+    library_id: str = "LOCAL"
+    parent_item_key: str = ""
+    parent_attachment_key: str = ""
+    zotero_note_key: str = ""
+    zotero_version: int = 0
+    tags: list[str] = field(default_factory=list)
+    collections: list[str] = field(default_factory=list)
+    relations: dict[str, Any] = field(default_factory=dict)
+    linked: bool = False
+    source: str = "manual"
+    chat_conversation_id: str = ""
+    chat_message_id: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    raw_zotero_json: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ConsoleScopeState:
+    """控制台右侧上下文状态，用于恢复文档/集合层级的选择结果。"""
+
+    scope_type: str
+    scope_key: str
+    selected_collection: str = ""
+    selected_doc_id: str = ""
+    note_doc_id: str = ""
+    right_panel: str = ""
+    reading_mode: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    updated_at: datetime | None = None
+
+
 # ── 在线同步 ────────────────────────────────────────────────────
 
 
@@ -354,6 +404,8 @@ __all__ = [
     "ZoteroTag",
     "ZoteroRelation",
     "PageChunk",
+    "ScopedNote",
+    "ConsoleScopeState",
     "SyncRecord",
     "QuotaUsage",
     "QuotaWarning",

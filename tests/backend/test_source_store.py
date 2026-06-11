@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.domain.models import Collection, DocumentChunk, SourceDocument
+from core.domain.models import Collection, ConsoleScopeState, DocumentChunk, ScopedNote, SourceDocument
 from core.repository.source_store.memory import InMemorySourceDocumentStore
 
 
@@ -108,3 +108,51 @@ async def test_collection_crud(store: InMemorySourceDocumentStore) -> None:
     assert cols[0].description == "updated"
     assert await store.delete_collection("a") is True
     assert await store.delete_collection("a") is False
+
+
+async def test_scoped_notes_chat_lock_and_console_state(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    await store.add_scoped_note(
+        ScopedNote(
+            id="n1",
+            scope_type="document",
+            scope_key="d1",
+            content="plain note",
+            note_html="<p>plain note</p>",
+            doc_id="d1",
+            parent_item_key="ITEM1",
+            raw_zotero_json={"itemType": "note", "note": "<p>plain note</p>"},
+        )
+    )
+    notes = await store.list_scoped_notes("document", "d1")
+    assert len(notes) == 1
+    assert notes[0].raw_zotero_json["itemType"] == "note"
+
+    notes[0].content = "updated"
+    assert await store.update_scoped_note(notes[0]) is True
+    got = await store.get_scoped_note("n1")
+    assert got is not None and got.content == "updated"
+
+    await store.add_chat_message("conv", "user", "q")
+    await store.add_chat_message("conv", "assistant", "a")
+    locked = await store.set_chat_message_locked("conv", 1, True)
+    assert locked is not None and locked["locked"] is True
+    await store.clear_chat_messages("conv", preserve_locked=True)
+    messages = await store.get_chat_messages("conv")
+    assert [(m["role"], m["locked"]) for m in messages] == [("assistant", True)]
+
+    await store.upsert_console_scope_state(
+        ConsoleScopeState(
+            scope_type="collection",
+            scope_key="papers",
+            selected_collection="papers",
+            selected_doc_id="d1",
+            note_doc_id="d1",
+            payload={"right": "notes"},
+        )
+    )
+    state = await store.get_console_scope_state("collection", "papers")
+    assert state is not None
+    assert state.selected_doc_id == "d1"
+    assert state.payload == {"right": "notes"}

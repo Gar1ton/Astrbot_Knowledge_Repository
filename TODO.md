@@ -44,6 +44,288 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.24.0 Scoped notes + chat lock persistence (completed)
+
+### User constraints / 约束
+
+- 每一篇文章 / 每一个 collection 只要在右侧上下文中被选中，都需要持久化，重新打开该层级时应恢复对应面板状态。
+- 文档笔记要和 Zotero note 形态对齐，便于后续接入 Zotero；当前仍不向 Zotero 写回。
+- 笔记必须成为 R2 备份的一部分，优先复用现有 SQLite 快照备份路径。
+- 遵循 Plan-First；执行前先更新 TODO，测试通过后才能标完成并追加 CHANGELOG。
+
+### Technical implementation path
+
+- [x] **P0 - 治理记录与范围确认**：新增本计划条目，限定改动为 notes/chat lock/UI scope state 的持久化链路、前端接线、测试与闭环文档。
+- [x] **P1 - 持久化契约与迁移**：新增 Zotero-shaped `ScopedNote` 与 `ConsoleScopeState` domain/仓储契约，追加 SQLite 迁移；给 `chat_history` 增加 `locked` 字段。技术理由：把用户笔记、锁定回答和右侧选择状态放入同一 SQLite，天然纳入 R2 DB 快照。
+- [x] **P2 - Repository 实现与 API 门面**：补齐 SQLite / memory 实现，并在 `KnowledgeRepositoryApi` 暴露 list/create/update notes、collection notes、chat lock、scope state 方法。技术理由：保持 web 层只做 HTTP 翻译，业务语义沉到门面和仓储契约。
+- [x] **P3 - Web 路由接线**：实现 `GET|POST|PATCH /api/documents/{doc_id}/notes`、collection notes、`PATCH /api/chat/history/{convId}/messages/{msgIdx}/lock` 与 scope state 路由。技术理由：补齐新版前端已预留的缺口，并为 collection 层级和 UI state 提供稳定接口。
+- [x] **P4 - 前端持久化接线**：NotePanel 使用类型化 API 读取/创建/更新笔记；ChatPanel 调用 lock API 并加载 `locked`；ConsoleContext 按 scope 恢复/保存右侧状态。技术理由：移除 localStorage 作为主存储，仅保留 mock/offline fallback。
+- [x] **P5 - R2 备份与回归验证**：补充后端契约、web 路由和 SQLite 快照恢复测试；运行前端类型检查/构建。技术理由：验证 notes/locks/state 确实随 `knowledge_repository.db` 快照进入 R2 备份。
+- [x] **P6 - 收尾记录**：测试通过后将本计划标完成，并在 `CHANGELOG.md` 顶部追加变更记录。
+
+### Verification
+
+- `python -m pytest tests/backend/test_source_store.py tests/backend/test_sqlite_source_store.py tests/backend/test_api.py tests/backend/test_web_server.py tests/backend/test_sync_pipeline.py -q` -> passed, 110 passed / 1 skipped（本机缺少可选 `boto3`/`botocore`，R2 restore mock 测试跳过）。
+- `node node_modules/typescript/bin/tsc --noEmit` -> passed。
+- `node node_modules/next/dist/bin/next build --webpack` -> passed，13 static routes generated。
+- `python tools/sync_frontend.py` -> synced 163 files to `pages/`。
+- `python tools/sync_frontend.py --check` -> passed。
+
+---
+
+## v0.23.9 Frontend i18n panel alignment (completed)
+
+### User constraints / 约束
+
+- 修复前端语言切换后面板内中英文混用问题，尤其是中文界面下左侧 File 栏仍出现 Collection 等英文标签。
+- 重新梳理中英文映射，保证面板上的语言一致；技术/产品专名如 LightRAG、Milvus、Zotero、R2 可保留英文。
+- 对齐三栏控制台布局，保持面板标题、面包屑、操作按钮和内容区基线一致。
+- 遵循先 TODO 后修；测试通过后才勾选完成，收尾追加 `CHANGELOG.md`。
+
+### Technical implementation path
+
+- [x] **P0 - 治理记录与范围确认**：新增本计划条目，限定改动范围为 `web/frontend/` 源码、构建同步产物和闭环文档。
+- [x] **P1 - i18n 字典重分组**：扩展 `web/frontend/lib/i18n.ts`，新增三段控制台、面板标题、操作提示、空状态和构建状态相关键值，中文界面使用中文术语，英文界面使用英文术语。
+- [x] **P2 - 面板硬编码文案替换**：改造 `FilePanel`、`DocumentsPanel`、`ChatPanel`、`NotePanel`、`TopBar`、`SettingModal`、`WorkflowModal`，将可见 UI 文案统一走 `useI18n()`。
+- [x] **P3 - 布局对齐微调**：收敛 `Panel` 标题/面包屑/action 区域、三栏容器和侧栏分区标题的对齐与文本溢出策略，避免切换语言后错位。
+- [x] **P4 - 验证与发布记录**：运行前端类型检查、Next build、同步 `pages/`，验证通过后更新本计划与 `CHANGELOG.md`。
+
+### Verification
+
+- `node node_modules/typescript/bin/tsc --noEmit` -> passed
+- `node node_modules/next/dist/bin/next build --webpack` -> passed, 13 static routes generated
+- `python tools/sync_frontend.py` -> synced 163 files to `pages/`
+- `python tools/sync_frontend.py --check` -> passed
+- Browser smoke on `http://localhost:3000/?mock=true` -> passed; zh/en toggle verified, Chinese panel labels show 文件/本地集合/LightRAG 集合/文档/问答, three panel headers align at 38px height, no browser console errors.
+
+---
+
+## v0.23.8 PDF reader + Zotero read-only API bridge (completed)
+
+### User constraints / 约束
+
+- Zotero 交互只读，只调用 Local API `GET`；不向 Zotero 写回 notes、annotations 或 metadata。
+- 先打通 PDF reader 相关前后端接口，再替换当前 iframe 预览。
+- 遵循先 TODO 后修；测试通过后才勾选完成，收尾追加 `CHANGELOG.md`。
+
+### Technical implementation path
+
+- [x] **P1 - 文档阅读接口补齐**：实现 `GET /api/documents/{doc_id}/content?format=md`、`GET /api/documents/{doc_id}/chunks`，并为 `/raw` 增加 `?disposition=inline`，默认下载行为保持兼容。
+- [x] **P2 - Zotero Local API 只读桥接**：扩展 `core/adapters/zotero/local_api.py`，提供 status/schema、`list_items(itemType)`、`get_item(key)`、`get_file_view_url(key)` 只读 helper；`/annotations` 以文档 `attachment_key` 匹配 Zotero annotation `parentItem`。
+- [x] **P3 - PDF.js 阅读面板**：修正前端 API wire shape，使用 `pdfjs-dist` 渲染 `/raw?disposition=inline`，提供页码、缩放、fit width、loading/error、annotation 点击跳页。
+- [x] **P4 - NotePanel 边界保持**：Zotero notes 仅只读展示预留；本轮不新增 notes 持久化迁移，保留 localStorage fallback。
+- [x] **P5 - 验证与发布记录**：补后端路由/解析测试、前端类型检查和构建，构建通过后同步 `pages/` 并追加 `CHANGELOG.md`。
+
+### Verification
+
+- `python -m pytest tests/backend/test_web_server.py tests/backend/test_zotero_local_api.py -q` -> passed, 46 passed
+- `node node_modules/typescript/bin/tsc --noEmit` -> passed
+- `node node_modules/next/dist/bin/next build --webpack` -> passed, 13 static routes generated
+- `python tools/sync_frontend.py` -> synced 163 files to `pages/`
+- `python tools/sync_frontend.py --check` -> passed
+- Browser smoke -> skipped; Browser plugin control tool unavailable in current tool discovery.
+
+---
+
+## v0.23.7 前端冗余组件清理 (completed)
+
+### User constraints / 约束
+
+- 仅删除零引用的旧 `ui/` 组件；保留仍在使用的 `Toast`、`TerminalPanel`、`PerfPanel`。
+- 不删除 `tests/mocks/` 下的两个脚本（待后续重构一并处理）。
+- 不修改 `pages/` 构建产物。
+
+### Technical implementation path
+
+- [x] **P1 — 删除 5 个冗余 `ui/` 组件**：`Btn.tsx`、`HelpTip.tsx`、`Select.tsx`、`Tag.tsx`、`Toggle.tsx`（均被 `ds/` 版取代，零 import 验证）。
+- [x] **P2 — 删除空占位目录 `core/repository/graph_store/`**：三个实现文件在 commit `ac05dfe` 中已删，仅剩空壳，一并清除。
+- [x] **P3 — 更新 TODO.md + CHANGELOG.md**。
+
+### Verification
+
+- `grep -rn "ui/Btn\|ui/HelpTip\|ui/Select\|ui/Tag\|ui/Toggle" web/frontend/` → 0 matches
+- `ls core/repository/graph_store/` → directory not found
+
+---
+
+## v0.23.6 Flow 面板按钮行为调整 (completed)
+
+### User constraints / 约束
+
+- "进入同步设置"按钮（sync 节点、zotero 节点）跳转到设置页 `/settings`，而非同步页 `/sync`。
+- "进入问答界面"按钮（ask 节点）改为关闭 WorkflowModal（回主页），而非导航到 `/ask`。
+- 不改变图节点/连线逻辑；不修改 `pages/` 构建产物。
+
+### Technical implementation path
+
+- [x] **P0 — 更新 TODO.md**：修正三个计划标题 `(in progress)` → `(completed)`；新增本条目。
+- [x] **P1 — model.ts href 更新**：`zotero.link.href` 与 `sync.link.href` 由 `"/sync"` 改为 `"/settings"`。
+- [x] **P2 — onClose 链路传递**：`WorkflowModal` → `FlowPageContent` → `FlowDiagram` → `FlowNode`；ask 节点在有 `onClose` 时渲染 `<button>` 而非 `<Link>`，确保 standalone `/flow` 页也不报错。
+- [x] **P3 — 验证与构建**：`tsc --noEmit` + `next build --webpack` + `sync_frontend.py`。
+
+### Verification
+
+- `node node_modules/typescript/bin/tsc --noEmit` -> passed, 0 errors
+- `node node_modules/next/dist/bin/next build --webpack` -> passed, 13 static routes generated
+- `python tools/sync_frontend.py` -> synced 158 files to pages/
+
+## v0.23.5 Fix frontend build warnings and dev server startup crash (completed)
+
+### User constraints / 约束
+- 修复 `npm run build` 的 `rewrites` 警告。
+- 修复 `npm run dev` 启动后可能出现的 `missing required error components` 白屏循环刷新问题。
+- 不影响主程序代码。
+
+### Technical implementation path
+- [x] **P1 - 调整配置与脚本**：修改 `web/frontend/next.config.ts` 避免导出时注入 rewrites；修改 `web/frontend/package.json` 在开发与构建命令执行前自动删除 `.next` 缓存文件夹。
+- [x] **P2 - 验证**：运行 `npm run build` 和 `npm run dev`，并使用 `python tools/sync_frontend.py` 验证同步。
+
+### Verification
+- `npm run build` -> passed without warnings
+- `npm run dev` -> passed, server ready and cache cleared
+- `python tools/sync_frontend.py` -> synced 145 files successfully
+
+## v0.23.4 Terminal 设置页嵌入面板修复 (completed)
+
+### User constraints / 约束
+
+- 设置弹窗的”终端日志”页不能只显示一个”运行目录”按钮并再弹出全局浮层；应直接在设置弹窗内容区展示运行目录面板。
+- 侧边栏 Terminal 入口继续保留放大的浮层形态。
+- 不新增后端 API，不删除文件。
+
+### Technical implementation path
+
+- [x] **P1 - TerminalPanel 双模式**：为 `TerminalPanel` 增加 `variant`，默认 `floating` 兼容 Rail；新增 `embedded` 模式直接渲染面板内容并自动加载系统信息与文件列表。
+- [x] **P2 - SettingModal 嵌入终端面板**：设置页 terminal tab 使用 `variant=”embedded”`，内容区补齐 `minHeight: 0` 与条件 padding，避免空白区域和二次浮层。
+- [x] **P3 - 验证与同步**：运行前端类型检查、Next build、同步 `pages/`，并确认 `localhost:3000` 可查看最新前端。
+
+### Verification
+
+- `node node_modules/typescript/bin/tsc --noEmit` -> passed, 0 errors
+- `node node_modules/next/dist/bin/next build --webpack` -> passed, 13 static routes generated
+- `python tools/sync_frontend.py` -> synced 167 files to pages/
+- `python tools/sync_frontend.py --check` -> passed
+
+## v0.23.3 Workflow 样式加载修复 (completed)
+
+### User constraints / 约束
+
+- Workflow 面板打开后仍然显示为原生白底文本，需恢复 FlowDiagram 节点、画布、图例、缩放控件等完整样式。
+- 修复后重新构建，并确保 `localhost:3000` 可查看最新前端。
+- 不修改 `components/flow/` 内部图节点/连线逻辑。
+
+### Technical implementation path
+
+- [x] **P1 - 恢复 Flow 专用 CSS 加载**：在 `app/globals.css` 中引入 `styles/tokens.css`，并置于 `ds-tokens.css` 之前，避免旧主题变量覆盖新 DS 主题，同时恢复 `.flow-*` class 与 `--flow-*` 变量。
+- [x] **P2 - 构建与本地预览**：运行 TypeScript 检查、Next build、同步 `pages/`，并重启/确认 3000 端口预览服务。
+
+### Verification
+
+- `node .\node_modules\typescript\bin\tsc --noEmit` -> passed
+- `node .\node_modules\next\dist\bin\next build --webpack` -> passed, 13 static routes generated
+- `python tools/sync_frontend.py` -> synced 160 files to `pages/`
+- `python tools/sync_frontend.py --check` -> passed
+- `rg "flow-topo-page|flow-viewport|flow-node" .\web\frontend\out\_next\static\css` -> passed, Flow CSS present in built bundle
+- `http://localhost:3000` -> HTTP 200, serving Next dev preview on port 3000
+
+## v0.23.2 UI 修复：WorkflowModal 数据流 + Terminal 浮层 (completed)
+
+### User constraints / 约束
+
+- 修复数据流弹窗只显示标题、说明和图例的问题，FlowDiagram 必须在 WorkflowModal 内完整显示并可拖拽/缩放。
+- Terminal 保留浮层形态，但从 300px 小弹窗放大为接近面板的运行目录视图；侧边栏 Terminal 直接打开浮层，设置页入口继续可用。
+- 本轮只输出前端冗余候选清单，不删除文件；不手改 `pages/` 构建产物，不修改 `components/flow/` 内部图节点/连线逻辑。
+
+### Technical implementation path
+
+- [x] **P1 - WorkflowModal flex 高度链路修复**：补齐 modal content、`FlowPageContent` 根节点与 `.flow-viewport` 的 `flex: 1`、`minHeight: 0`、`overflow: hidden`，避免图表 viewport 被压成 0 高。
+- [x] **P2 - Terminal 浮层放大与侧边栏触发**：扩展 `TerminalPanel` 的触发文案/图标 props，修正 portal 内点击关闭判断，放大浮层尺寸并优化系统信息两列布局；`Rail` 直接使用该组件替代 `/terminal` redirect 链接。
+- [x] **P3 - 冗余清单与验证**：运行前端类型检查、构建和同步命令；输出 legacy/template/未引用资源与旧 UI 组件候选清单，不执行删除。
+
+### Verification
+
+- `node .\node_modules\typescript\bin\tsc --noEmit` -> passed
+- `node .\node_modules\next\dist\bin\next build --webpack` -> passed, 13 static routes generated
+- `python tools/sync_frontend.py` -> synced 160 files to `pages/`
+
+## v0.23.1 UI 修复：WorkflowModal 布局 + Local Collection 删除按钮 (completed)
+
+### User constraints / 约束
+
+- WorkflowModal（数据流界面）目前打开后不可用（布局问题）。
+- Local Collection 选中后右侧应有删除按钮，点击弹出确认对话框（需用户再次输入 collection 名称才能删除）。
+- 保持整体设计风格一致；不修改 `pages/`；不修改 `components/flow/` 文件。
+
+### Technical implementation path
+
+- [x] **P1 — 修复 WorkflowModal 布局问题**
+  `.flow-topo-page` 使用 `height: 100vh`，在 Modal 内嵌时溢出整个 modal 容器导致无法交互。
+  修复：在 `FlowPageContent` 改用 `height: 100%` 替代 `height: 100vh`，使其作为 modal flex 子元素正确撑满。
+  涉及文件：`web/frontend/components/panels/FlowPageContent.tsx`（行内 style 覆盖）或修改 CSS class。
+
+- [x] **P2 — Local Collection 删除按钮 + 确认弹窗**
+  在 `FilePanel` Local Collection section 中，选中的 collection 行右侧显示删除 `IconButton`（`trash` 图标，`var(--danger)` 色，hover 才可见）。
+  点击后弹出内联确认对话框：显示警告文案 + 输入框（用户需完整输入 collection name）+ 取消/确认删除按钮。
+  确认后调用 `deleteCollection(name)`，成功后刷新列表并清空 `selectedCollection`。
+  涉及文件：`web/frontend/components/panels/FilePanel.tsx`。
+
+### Verification
+
+- `npx tsc --noEmit` → 0 source errors
+- `npx next build` → Compiled successfully, 13 static pages generated
+- `python tools/sync_frontend.py` → 同步 144 个文件到 `pages/`
+- WorkflowModal 打开后 FlowDiagram 正常渲染、可拖拽/交互 ✓
+- Local Collection 选中后出现删除按钮，输入错误名称无法删除，输入正确后成功删除并刷新列表 ✓
+
+## v0.23.0 三段式控制台 UI 重构——后端能力缺口 (completed)
+
+### User constraints / 约束
+
+- 新三段式控制台（File | Documents | Chat）已在前端落地，部分功能依赖后端端口尚未实现。
+- 前端已用 localStorage 或 fetch 优雅降级（501 → 忽略），本节记录完整实现所需的 6 项后端能力。
+- 不修改 `pages/`（构建产物），不修改 `components/flow/` 文件。
+
+### Technical implementation path
+
+- [x] **P1 — `GET /api/documents/{doc_id}/content?format=md|pdf`**
+  阅读视图内容流（DocumentsPanel ReadingView 占位"加载中"）。
+  降级状态：前端显示"详细内容加载中"占位。
+  规格：`format=md` 返回 Markdown 文本；`format=pdf` 以 `application/pdf` 流返回文件。
+  已实现：`web/server.py` 中已注册路由，`core/api.py` 中已实现相应方法。
+
+- [x] **P2 — `GET|POST|PATCH /api/documents/{doc_id}/notes`**
+  文档本地笔记 CRUD（NotePanel 与 ChatPanel "Add to Linked Notes" 按钮）。
+  降级状态：前端已降级到 `localStorage`（key = `kr_notes_doc_{doc_id}`）。
+  规格：`GET` 返回 `DocumentNote[]`；`POST { content }` 新建；`PATCH /{note_id} { content }` 更新。
+  已实现：v0.24.0 引入 `ScopedNote` + migration 013，同时支持 `/api/collections/{name}/notes`（`web/server.py`, `core/api.py`）。
+
+- [x] **P3 — `GET /api/documents/{doc_id}/annotations`**
+  Zotero 注释高亮同步（NotePanel Annotations 分区）。
+  降级状态：显示"连接 Zotero 后同步注释"占位 + 五色图例。
+  规格：返回 `ZoteroAnnotation[]`（id, text, comment?, color, page?）。
+  已实现：`web/server.py` 中已注册路由，桥接 `core/adapters/zotero/local_api.py`。
+
+- [x] **P4 — `GET /api/documents/{doc_id}/chunks`**
+  阅读视图有序分块列表（DocumentsPanel ReadingView 分块原文区）。
+  降级状态：显示"详细内容加载中"占位（当前 `chunks=[]`）。
+  规格：返回 `{ chunk_id, ordinal, page?, text }[]`，按 `ordinal` 升序排列。
+  已实现：`web/server.py` 中已注册路由，`core/api.py` 中已实现相应方法。
+
+- [x] **P5 — `PATCH /api/chat/history/{conv_id}/messages/{idx}/lock`**
+  锁定回答持久化（ChatPanel "锁定回答" 按钮服务端持久化）。
+  降级状态：前端已降级到 `message.pinned` React 状态（刷新后丢失）。
+  规格：body `{ "locked": true|false }`；服务端标记 `locked=true`，`clear_chat_history` 支持 `preserve_locked=true` 跳过。
+  已实现：v0.24.0 引入 migration 014（`locked/locked_at/updated_at`），`set_chat_message_locked()` 方法（`web/server.py`, `core/api.py`）。
+
+- [x] **P6 — GraphBuildJob 响应新增 `type` 字段**
+  区分 LightRAG 图谱构建 job 与 Zotero 同步进度（FilePanel 进度条来源判断）。
+  降级状态：FilePanel BuildCard 当前对所有 job 类型显示相同进度条。
+  规格：`type: "lightrag_build" | "zotero_sync" | "milvus_rebuild"` 字段加入 `GraphBuildJob` 响应。
+
+### Verification
+
+- 每项完成后：前端相关占位替换为真实 API 调用；`npx tsc --noEmit` 通过；`python -m pytest` 通过。
+
 ## v0.22.2 Milvus index coverage status and rebuild retry (completed)
 
 ### User constraints / 约束
@@ -119,7 +401,7 @@
 - `npx -y node@20 node_modules/next/dist/bin/next build` → passed，13 static pages generated
 - `python tools/sync_frontend.py` → 150 文件同步至 `pages/`
 
-## v0.21.0 LRAG recall bug fix, build persistence & floating widget (in progress)
+## v0.21.0 LRAG recall bug fix, build persistence & floating widget (completed)
 
 ### User constraints / 约束
 
@@ -315,7 +597,7 @@
 - `npx -y node@20 node_modules/next/dist/bin/next build` → passed，13 static pages generated
 - `python tools/sync_frontend.py` → 149 文件同步至 `pages/`
 
-## v0.20.1 LightRAG raw-text indexing path (in progress)
+## v0.20.1 LightRAG raw-text indexing path (completed)
 
 ### User constraints / 约束
 
@@ -333,7 +615,7 @@
 - `ruff check . --quiet` → OK
 - 重建图谱时终端观察：传入 LightRAG 的文本为原始 PDF 文本（无 chunk overlap 重复）
 
-## v0.20.0 UX & retrieval overhaul (in progress)
+## v0.20.0 UX & retrieval overhaul (completed)
 
 ### User constraints / 约束
 

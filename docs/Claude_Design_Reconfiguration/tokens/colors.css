@@ -1,0 +1,121 @@
+/*
+ * Knowledge Repository · Color Tokens (重构 · Heptabase 演绎 · 浅色优先)
+ * 白卡片 + 极淡灰画布 + 蓝色强调；保守圆角、卡片质感。
+ * 强调色 HSL 驱动 → Settings 一处调节，全站换肤。
+ * Dark mode via `.dark`. LightRAG 高级模式 via [data-mode="lightrag"].
+ */
+
+/* ─── Light theme (default) ─────────────────────────────────── */
+:root {
+  --bg: #f6f6f4;
+  --bg-subtle: #f1f1ee;
+  --bg-inset: #ebebe7;
+  --surface: #ffffff;
+  --surface-hover: #f7f7f5;
+  --surface-raised: #ffffff;
+
+  --border: #e7e7e3;
+  --border-strong: #d9d9d4;
+
+  --fg: #26272b;
+  --fg-muted: #6e7076;
+  --fg-subtle: #9fa1a7;
+  --heading: #1b1c1f;
+
+  /* Primary accent — HSL driven (recolorable from Settings) */
+  --accent-h: 225;  /* @kind other */
+  --accent-s: 72%;  /* @kind other */
+  --accent-l: 56%;  /* @kind other */
+  --accent: hsl(var(--accent-h) var(--accent-s) var(--accent-l));
+  --accent-strong: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l) - 12%));
+  --accent-fg: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  --accent-softer: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  --accent-border: color-mix(in srgb, var(--accent) 34%, var(--border));
+  --ring: color-mix(in srgb, var(--accent) 28%, transparent);
+  --glow: color-mix(in srgb, var(--accent) 22%, transparent);
+
+  /* Inverse selection (tree active row: dark in light theme) */
+  --select-bg: #26272b;
+  --select-fg: #ffffff;
+  --select-muted: rgba(255, 255, 255, 0.62);
+
+  /* Semantic */
+  --ok: #2f9e63;
+  --ok-soft: #e3f4ea;
+  --warn: #d98414;
+  --warn-soft: #fbf0db;
+  --danger: #d5453c;
+  --danger-soft: #fbe7e5;
+  --info: #4e79c7;
+  --info-soft: #e8eef9;
+
+  /* Annotation highlight colors (Zotero) */
+  --ann-purple: #7a5af5;
+  --ann-purple-bg: #f0ebfe;
+  --ann-yellow: #b98a1d;
+  --ann-yellow-bg: #fdf6e0;
+  --ann-green: #2f9e63;
+  --ann-green-bg: #e6f6ed;
+  --ann-red: #d5453c;
+  --ann-red-bg: #fdebe9;
+  --ann-blue: #3b76d6;
+  --ann-blue-bg: #e9f0fc;
+}
+
+/* ─── Dark theme (ink) ──────────────────────────────────────── */
+.dark {
+  --bg: #17181b;
+  --bg-subtle: #1c1d20;
+  --bg-inset: #232427;
+  --surface: #1e1f22;
+  --surface-hover: #26272b;
+  --surface-raised: #26272b;
+
+  --border: #303135;
+  --border-strong: #3d3e43;
+
+  --fg: #e8e9ec;
+  --fg-muted: #9b9da4;
+  --fg-subtle: #6b6d74;
+  --heading: #f3f4f6;
+
+  --accent-l: 62%;
+  --accent-soft: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  --accent-border: color-mix(in srgb, var(--accent) 40%, var(--border));
+
+  /* Inverse selection (light in dark theme) */
+  --select-bg: #f3f4f6;
+  --select-fg: #1b1c1f;
+  --select-muted: rgba(27, 28, 31, 0.6);
+
+  --ok-soft: rgba(47, 158, 99, 0.16);
+  --warn-soft: rgba(217, 132, 20, 0.16);
+  --danger-soft: rgba(213, 69, 60, 0.16);
+  --info-soft: rgba(78, 121, 199, 0.16);
+}
+
+/* ─── LightRAG 高级模式：全屏特殊色彩映射（violet） ──────────── */
+[data-mode="lightrag"] {
+  --accent-h: 265;  /* @kind other */
+  --accent-s: 70%;  /* @kind other */
+  --accent-l: 58%;  /* @kind other */
+  --bg: #f5f4f9;
+  --bg-subtle: #f0eef6;
+  --bg-inset: #e9e6f2;
+  --border: #e5e2ee;
+  --border-strong: #d5d0e4;
+  --select-bg: #322a52;
+}
+.dark[data-mode="lightrag"], .dark [data-mode="lightrag"] {
+  --bg: #16151c;
+  --surface: #1e1c26;
+}
+
+/* ─── Palette swatches (switched via [data-palette]) ────────── */
+[data-palette="blue"]    { --accent-h: 225; /* @kind other */ --accent-s: 72%; --accent-l: 56%; }
+[data-palette="violet"]  { --accent-h: 265; /* @kind other */ --accent-s: 70%; --accent-l: 58%; }
+[data-palette="teal"]    { --accent-h: 175; /* @kind other */ --accent-s: 60%; --accent-l: 42%; }
+[data-palette="amber"]   { --accent-h: 32;  /* @kind other */ --accent-s: 80%; --accent-l: 50%; }
+[data-palette="rose"]    { --accent-h: 350; /* @kind other */ --accent-s: 68%; --accent-l: 58%; }
+[data-palette="graphite"]{ --accent-h: 230; /* @kind other */ --accent-s: 8%;  --accent-l: 32%; }

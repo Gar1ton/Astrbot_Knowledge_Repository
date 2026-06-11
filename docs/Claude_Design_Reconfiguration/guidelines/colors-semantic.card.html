@@ -1,0 +1,19 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Semantic & Secondary" subtitle="ok · warn · danger · olive accent-2" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin:0; background:var(--bg); font-family:var(--font-sans); }
+  .row { display:flex; gap:14px; padding:22px 24px; }
+  .sw { flex:1; }
+  .chip { height:40px; border-radius:9px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; }
+  .soft { height:18px; border-radius:0 0 9px 9px; margin-top:-2px; }
+  .nm { font-size:11px; font-weight:600; color:var(--fg); margin-top:8px; }
+</style></head>
+<body>
+  <div class="row">
+    <div class="sw"><div class="chip" style="background:var(--ok); color:#fff">OK</div><div class="soft" style="background:var(--ok-soft)"></div><div class="nm">--ok / --ok-soft</div></div>
+    <div class="sw"><div class="chip" style="background:var(--warn); color:#fff">WARN</div><div class="soft" style="background:var(--warn-soft)"></div><div class="nm">--warn / --warn-soft</div></div>
+    <div class="sw"><div class="chip" style="background:var(--danger); color:#fff">DANGER</div><div class="soft" style="background:var(--danger-soft)"></div><div class="nm">--danger / -soft</div></div>
+    <div class="sw"><div class="chip" style="background:var(--accent-2); color:#fff">OLIVE</div><div class="soft" style="background:var(--accent-2-soft)"></div><div class="nm">--accent-2 / -soft</div></div>
+  </div>
+</body></html>

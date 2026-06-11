@@ -1,0 +1,29 @@
+<!-- @dsCard group="Colors" viewport="700x150" name="Text & Borders" subtitle="Ink hierarchy + hairlines" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin:0; background:var(--surface); font-family:var(--font-sans); }
+  .wrap { padding:20px 24px; display:flex; gap:30px; align-items:center; }
+  .texts > div { margin-bottom:7px; }
+  .h { font-size:18px; font-weight:700; color:var(--heading); letter-spacing:-0.02em; }
+  .b { font-size:13px; color:var(--fg); }
+  .m { font-size:13px; color:var(--fg-muted); }
+  .s { font-size:13px; color:var(--fg-subtle); }
+  .borders { display:flex; gap:12px; }
+  .bx { width:80px; height:80px; border-radius:10px; background:var(--bg); display:flex; align-items:flex-end; padding:8px; box-sizing:border-box; }
+  .lbl { font-size:10px; font-family:var(--font-mono); color:var(--fg-subtle); }
+</style></head>
+<body>
+  <div class="wrap">
+    <div class="texts">
+      <div class="h">Heading · --heading</div>
+      <div class="b">Body text · --fg</div>
+      <div class="m">Muted · --fg-muted</div>
+      <div class="s">Subtle · --fg-subtle</div>
+    </div>
+    <div class="borders">
+      <div class="bx" style="border:1px solid var(--border)"><span class="lbl">--border</span></div>
+      <div class="bx" style="border:1.5px solid var(--border-strong)"><span class="lbl">--border-strong</span></div>
+    </div>
+  </div>
+</body></html>

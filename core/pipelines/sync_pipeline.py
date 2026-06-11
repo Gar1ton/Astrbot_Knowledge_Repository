@@ -10,6 +10,7 @@ import logging
 import os
 import sqlite3
 import tempfile
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -282,8 +283,8 @@ def _create_sqlite_snapshot(db_path: Path) -> bytes:
     os.close(fd)
     snapshot_path = Path(temp_name)
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as source:
-            with sqlite3.connect(snapshot_path) as target:
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as source:
+            with closing(sqlite3.connect(snapshot_path)) as target:
                 source.backup(target)
         _check_sqlite_integrity(snapshot_path)
         return snapshot_path.read_bytes()
@@ -309,7 +310,7 @@ def _replace_with_validated_snapshot(db_path: Path, payload: bytes) -> None:
 
 
 def _check_sqlite_integrity(db_path: Path) -> None:
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         result = db.execute("PRAGMA integrity_check").fetchone()
     if result != ("ok",):
         raise ValueError(f"invalid SQLite snapshot: {result}")

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from core.repository.source_store.base import SourceDocumentStore
@@ -13,8 +14,10 @@ from core.repository.source_store.base import SourceDocumentStore
 if TYPE_CHECKING:
     from core.domain.models import (
         Collection,
+        ConsoleScopeState,
         DocumentChunk,
         PageChunk,
+        ScopedNote,
         SourceDocument,
         SyncRecord,
         SyncTargetKind,
@@ -45,6 +48,10 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._zitem_tags: dict[tuple[str, str], list[ZoteroTag]] = {}
         self._zrelations: set[tuple[str, str, str, str]] = set()
         self._page_chunks: dict[str, list[PageChunk]] = {}
+        self._notes: dict[str, ScopedNote] = {}
+        self._chat_history: dict[str, list[dict]] = {}
+        self._chat_id_seq = 1
+        self._console_scope_states: dict[tuple[str, str], ConsoleScopeState] = {}
 
     # ── 集合 ────────────────────────────────────────────────────
 
@@ -107,6 +114,11 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
             return False
         self._chunks.pop(doc_id, None)  # 先删分块
         self._page_chunks.pop(doc_id, None)
+        self._notes = {
+            note_id: note
+            for note_id, note in self._notes.items()
+            if note.scope_type != "document" or note.scope_key != doc_id
+        }
         self._sync_records = {
             key: record for key, record in self._sync_records.items() if key[0] != doc_id
         }
@@ -157,6 +169,40 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         return [copy.deepcopy(r) for r in ordered]
 
 
+    # ── 文档/集合笔记 ───────────────────────────────────────────
+
+    async def list_scoped_notes(self, scope_type: str, scope_key: str) -> list[ScopedNote]:
+        notes = [
+            n for n in self._notes.values() if n.scope_type == scope_type and n.scope_key == scope_key
+        ]
+        ordered = sorted(
+            notes,
+            key=lambda n: (n.updated_at is None, n.updated_at, n.created_at, n.id),
+            reverse=True,
+        )
+        return [copy.deepcopy(n) for n in ordered]
+
+    async def add_scoped_note(self, note: ScopedNote) -> None:
+        if note.id in self._notes:
+            raise ValueError(f"duplicate note id: {note.id}")
+        now = datetime.now(timezone.utc)
+        stored = copy.deepcopy(note)
+        stored.created_at = stored.created_at or now
+        stored.updated_at = stored.updated_at or stored.created_at
+        self._notes[stored.id] = stored
+
+    async def update_scoped_note(self, note: ScopedNote) -> bool:
+        if note.id not in self._notes:
+            return False
+        stored = copy.deepcopy(note)
+        stored.updated_at = stored.updated_at or datetime.now(timezone.utc)
+        self._notes[stored.id] = stored
+        return True
+
+    async def get_scoped_note(self, note_id: str) -> ScopedNote | None:
+        note = self._notes.get(note_id)
+        return copy.deepcopy(note) if note is not None else None
+
     # ── 聊天记录（内存实现：进程重启后丢失，仅用于测试）───────────
 
     async def add_chat_message(
@@ -166,14 +212,60 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         content: str,
         sources: list | None = None,
         retrieval_mode: str = "",
+        locked: bool = False,
     ) -> None:
-        pass  # 内存实现不持久化聊天记录
+        now = datetime.now(timezone.utc).isoformat()
+        message = {
+            "id": self._chat_id_seq,
+            "role": role,
+            "content": content,
+            "sources": copy.deepcopy(sources or []),
+            "retrieval_mode": retrieval_mode,
+            "created_at": now,
+            "locked": bool(locked),
+            "locked_at": now if locked else None,
+            "updated_at": now,
+        }
+        self._chat_id_seq += 1
+        self._chat_history.setdefault(conversation_id, []).append(message)
 
     async def get_chat_messages(self, conversation_id: str) -> list[dict]:
-        return []
+        return copy.deepcopy(self._chat_history.get(conversation_id, []))
 
-    async def clear_chat_messages(self, conversation_id: str) -> None:
-        pass
+    async def set_chat_message_locked(
+        self, conversation_id: str, msg_idx: int, locked: bool
+    ) -> dict | None:
+        messages = self._chat_history.get(conversation_id, [])
+        if msg_idx < 0 or msg_idx >= len(messages):
+            return None
+        now = datetime.now(timezone.utc).isoformat()
+        messages[msg_idx]["locked"] = bool(locked)
+        messages[msg_idx]["locked_at"] = now if locked else None
+        messages[msg_idx]["updated_at"] = now
+        return copy.deepcopy(messages[msg_idx])
+
+    async def clear_chat_messages(
+        self, conversation_id: str, preserve_locked: bool = False
+    ) -> None:
+        if not preserve_locked:
+            self._chat_history.pop(conversation_id, None)
+            return
+        self._chat_history[conversation_id] = [
+            m for m in self._chat_history.get(conversation_id, []) if m.get("locked")
+        ]
+
+    # ── 控制台上下文状态 ─────────────────────────────────────────
+
+    async def get_console_scope_state(
+        self, scope_type: str, scope_key: str
+    ) -> ConsoleScopeState | None:
+        state = self._console_scope_states.get((scope_type, scope_key))
+        return copy.deepcopy(state) if state is not None else None
+
+    async def upsert_console_scope_state(self, state: ConsoleScopeState) -> None:
+        stored = copy.deepcopy(state)
+        stored.updated_at = stored.updated_at or datetime.now(timezone.utc)
+        self._console_scope_states[(stored.scope_type, stored.scope_key)] = stored
 
     # ── 图谱构建任务持久化（内存实现：进程重启后丢失，仅用于测试）───
 

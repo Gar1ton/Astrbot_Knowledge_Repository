@@ -7,6 +7,7 @@ import { useTheme } from "next-themes";
 import { useI18n } from "@/lib/i18n";
 import { getQuota } from "@/lib/api";
 import { PerfPanel } from "@/components/ui/PerfPanel";
+import { TerminalPanel } from "@/components/ui/TerminalPanel";
 
 // ─── 图标（内联 SVG，避免额外依赖） ──────────────────────────
 
@@ -334,7 +335,13 @@ export function Rail({ onLogout, collapsed = false, onToggle }: RailProps) {
         <NavItem href="/flow" icon={<FlowIcon />} label={t("nav_flow")} collapsed={collapsed} />
         <NavItem href="/sync" icon={<SyncIcon />} label={t("nav_sync")} collapsed={collapsed} />
         <NavItem href="/quota" icon={<QuotaIcon />} label={t("nav_quota")} badge={quotaWarning} collapsed={collapsed} />
-        <NavItem href="/terminal" icon={<TerminalIcon />} label="终端日志" collapsed={collapsed} />
+        <TerminalPanel
+          collapsed={collapsed}
+          triggerIcon={<TerminalIcon />}
+          triggerLabel="终端日志"
+          triggerTitle="终端日志 · 运行目录"
+          panelTitle=">_ 终端日志 / 运行目录"
+        />
       </div>
 
       {/* 弹性间隔 */}

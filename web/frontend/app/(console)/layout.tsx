@@ -1,14 +1,20 @@
 "use client";
 
 import React, { useEffect, useState, useCallback } from "react";
-import { Rail } from "@/components/rail/Rail";
-import { GrainOverlay } from "@/components/fx/GrainOverlay";
-import { Atmosphere } from "@/components/fx/Atmosphere";
 import { ToastProvider } from "@/components/ui/Toast";
 import { BuildWidget } from "@/components/build/BuildWidget";
 import { I18nContext, Lang, makeT } from "@/lib/i18n";
 import { initPalette } from "@/lib/theme";
-import { getAuth, login, logout } from "@/lib/api";
+import { getAuth, login } from "@/lib/api";
+import { ConsoleProvider, useConsole } from "@/lib/ConsoleContext";
+import { TopBar } from "@/components/layout/TopBar";
+import { FilePanel } from "@/components/panels/FilePanel";
+import { DocumentsPanel } from "@/components/panels/DocumentsPanel";
+import { ChatPanel } from "@/components/panels/ChatPanel";
+import { NotePanel } from "@/components/panels/NotePanel";
+import { WorkflowModal } from "@/components/modals/WorkflowModal";
+import { SettingModal } from "@/components/modals/SettingModal";
+import { AstrBotModal } from "@/components/modals/AstrBotModal";
 
 // ─── 登录页面 ─────────────────────────────────────────────────
 
@@ -44,9 +50,6 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
         zIndex: 100,
       }}
     >
-      {/* Atmosphere Hero 背景 */}
-      <Atmosphere variant="login" sun={true} follow={true} />
-
       <div
         style={{
           background: "var(--surface)",
@@ -55,8 +58,6 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
           padding: 32,
           width: 320,
           boxShadow: "var(--shadow-pop)",
-          position: "relative",
-          zIndex: 1,
         }}
       >
         <h1
@@ -130,33 +131,86 @@ function I18nProvider({ children }: { children: React.ReactNode }) {
 
   const setLang = useCallback((l: Lang) => {
     setLangState(l);
-    if (typeof localStorage !== "undefined") {
-      localStorage.setItem("kr-lang", l);
-    }
-    if (typeof document !== "undefined") {
-      document.documentElement.lang = l;
-    }
+    if (typeof localStorage !== "undefined") localStorage.setItem("kr-lang", l);
+    if (typeof document !== "undefined") document.documentElement.lang = l;
   }, []);
 
   useEffect(() => {
     initPalette();
   }, []);
 
-  const t = makeT(lang);
-
   return (
-    <I18nContext.Provider value={{ lang, setLang, t }}>
+    <I18nContext.Provider value={{ lang, setLang, t: makeT(lang) }}>
       {children}
     </I18nContext.Provider>
   );
 }
 
-// ─── Console Shell ────────────────────────────────────────────
+// ─── Three-panel canvas ───────────────────────────────────────
 
-function ConsoleShell({ children }: { children: React.ReactNode }) {
+function ConsoleCanvas({ onLogout }: { onLogout: () => void }) {
+  const { noteDocId, selectedCollection, settingOpen, setSettingOpen, astrBotOpen, setAstrBotOpen, workflowOpen, setWorkflowOpen } = useConsole();
+
+  useEffect(() => {
+    const isLightRAG = selectedCollection?.startsWith("lr:") ?? false;
+    document.documentElement.dataset.mode = isLightRAG ? "lightrag" : "";
+  }, [selectedCollection]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
+      <TopBar onLogout={onLogout} />
+
+      {/* Three-panel stage */}
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          gap: "var(--panel-gap)",
+          padding: "0 var(--panel-gap) var(--panel-gap)",
+          overflow: "hidden",
+        }}
+      >
+        {/* Left: File OR Note */}
+        <div
+          style={{
+            width: "var(--file-w)",
+            flexShrink: 0,
+            display: "flex",
+            flexDirection: "column",
+            minHeight: 0,
+          }}
+        >
+          {noteDocId ? (
+            <NotePanel docId={noteDocId} />
+          ) : (
+            <FilePanel />
+          )}
+        </div>
+
+        {/* Middle: Documents */}
+        <DocumentsPanel />
+
+        {/* Right: Chat */}
+        <ChatPanel />
+      </div>
+
+      {/* Floating build progress widget */}
+      <BuildWidget />
+
+      {/* Full-screen modals */}
+      {settingOpen && <SettingModal onClose={() => setSettingOpen(false)} />}
+      {astrBotOpen && <AstrBotModal onClose={() => setAstrBotOpen(false)} />}
+      {workflowOpen && <WorkflowModal onClose={() => setWorkflowOpen(false)} />}
+    </div>
+  );
+}
+
+// ─── Console Shell (auth gate) ────────────────────────────────
+
+function ConsoleShell({ children: _children }: { children: React.ReactNode }) {
   const [authChecked, setAuthChecked] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
-  const [railCollapsed, setRailCollapsed] = useState(false);
 
   useEffect(() => {
     getAuth()
@@ -170,8 +224,7 @@ function ConsoleShell({ children }: { children: React.ReactNode }) {
       });
   }, []);
 
-  const handleLogout = useCallback(async () => {
-    await logout();
+  const handleLogout = useCallback(() => {
     setLoggedIn(false);
   }, []);
 
@@ -199,21 +252,9 @@ function ConsoleShell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh" }}>
-      <Rail onLogout={handleLogout} collapsed={railCollapsed} onToggle={() => setRailCollapsed(v => !v)} />
-      <main
-        style={{
-          flex: 1,
-          minWidth: 0,
-          overflowX: "hidden",
-          position: "relative",
-        }}
-      >
-        <Atmosphere follow={true} />
-        {children}
-      </main>
-      <BuildWidget />
-    </div>
+    <ConsoleProvider>
+      <ConsoleCanvas onLogout={handleLogout} />
+    </ConsoleProvider>
   );
 }
 
@@ -223,7 +264,6 @@ export default function ConsoleLayout({ children }: { children: React.ReactNode 
   return (
     <ToastProvider>
       <I18nProvider>
-        <GrainOverlay />
         <ConsoleShell>{children}</ConsoleShell>
       </I18nProvider>
     </ToastProvider>

@@ -1,0 +1,52 @@
+/*
+ * Knowledge Repository · Typography Tokens
+ * UI = Inter; Mono = JetBrains Mono (see fonts.css).
+ * Headings use the --heading ink color and tight tracking (-0.02em).
+ */
+:root {
+  /* Font families */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  /* Original frontend referenced --font-geist-mono; alias so ported code keeps working */
+  --font-geist-mono: var(--font-mono);
+
+  /* Type scale (px) — the console is dense; body sits at 13px */
+  --text-2xs: 10px;   /* eyebrow labels, RRF scores */
+  --text-xs: 11px;    /* meta, tags, captions */
+  --text-sm: 12px;    /* secondary UI text, table meta */
+  --text-base: 13px;  /* body / default UI text */
+  --text-md: 14px;    /* emphasized body, control labels */
+  --text-lg: 16px;    /* panel titles */
+  --text-xl: 20px;    /* page headings */
+  --text-2xl: 26px;   /* hero / empty-state marks */
+
+  /* Weights */
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Line heights */
+  --leading-tight: 1.2;
+  --leading-snug: 1.45;
+  --leading-normal: 1.6;
+  --leading-relaxed: 1.65;
+
+  /* Tracking */
+  --tracking-tight: -0.02em;   /* headings */
+  --tracking-normal: 0;
+  --tracking-wide: 0.06em;     /* uppercase eyebrow labels */
+  --tracking-wider: 0.09em;    /* mono field labels */
+
+  /* Semantic aliases */
+  --text-body: var(--text-base);
+  --text-heading: var(--text-xl);
+  --text-eyebrow: var(--text-xs);
+}
+
+/* Base document defaults — opt-in by setting font-family on body */
+:root {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}

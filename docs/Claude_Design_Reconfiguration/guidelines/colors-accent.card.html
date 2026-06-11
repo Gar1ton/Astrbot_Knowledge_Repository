@@ -1,0 +1,23 @@
+<!-- @dsCard group="Colors" viewport="700x160" name="Accent — Blue (default)" subtitle="HSL-driven primary, recolorable from Settings" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin:0; background:var(--bg); font-family:var(--font-sans); }
+  .row { display:flex; gap:14px; padding:22px 24px 10px; }
+  .sw { flex:1; }
+  .chip { height:56px; border-radius:8px; border:1px solid var(--border); }
+  .nm { font-size:11px; font-weight:600; color:var(--fg); margin-top:8px; }
+  .hex { font-size:10px; color:var(--fg-subtle); font-family:var(--font-mono); margin-top:2px; }
+  .note { padding:0 24px 18px; font-size:11px; color:var(--fg-muted); }
+  code { font-family:var(--font-mono); color:var(--accent); }
+</style></head>
+<body>
+  <div class="row">
+    <div class="sw"><div class="chip" style="background:var(--accent)"></div><div class="nm">--accent</div><div class="hex">hsl(225 72% 56%)</div></div>
+    <div class="sw"><div class="chip" style="background:var(--accent-strong)"></div><div class="nm">--accent-strong</div><div class="hex">−12% L</div></div>
+    <div class="sw"><div class="chip" style="background:var(--accent-soft)"></div><div class="nm">--accent-soft</div><div class="hex">10% tint</div></div>
+    <div class="sw"><div class="chip" style="background:var(--accent-softer)"></div><div class="nm">--accent-softer</div><div class="hex">5% tint</div></div>
+    <div class="sw"><div class="chip" style="background:var(--surface); border:1px solid var(--accent-border)"></div><div class="nm">--accent-border</div><div class="hex">34% mix</div></div>
+  </div>
+  <div class="note">Driven by <code>--accent-h / -s / -l</code> — Settings mutates these live and the whole console recolors. Default hue 225°. LightRAG advanced mode shifts to violet (265°).</div>
+</body></html>

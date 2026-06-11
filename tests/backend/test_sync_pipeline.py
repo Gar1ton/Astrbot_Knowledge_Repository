@@ -78,6 +78,19 @@ async def pipeline(
     with sqlite3.connect(db_file) as db:
         db.execute("CREATE TABLE snapshot_test (id INTEGER PRIMARY KEY)")
         db.execute("INSERT INTO snapshot_test (id) VALUES (1)")
+        db.execute("CREATE TABLE collections (name TEXT PRIMARY KEY)")
+        db.execute("CREATE TABLE documents (doc_id TEXT PRIMARY KEY)")
+        db.execute("INSERT INTO collections (name) VALUES ('papers')")
+        db.execute("INSERT INTO documents (doc_id) VALUES ('d1')")
+        db.executescript(Path("migrations/013_scoped_notes.sql").read_text(encoding="utf-8"))
+        db.execute(
+            "INSERT INTO scoped_notes "
+            "(id, scope_type, scope_key, content, note_html, doc_id, created_at, updated_at, "
+            "raw_zotero_json) VALUES "
+            "('n1', 'document', 'd1', 'note backup', '<p>note backup</p>', 'd1', "
+            "'2026-06-11T00:00:00+00:00', '2026-06-11T00:00:00+00:00', "
+            "'{\"itemType\":\"note\",\"note\":\"<p>note backup</p>\"}')"
+        )
 
     return SyncPipeline(
         source_store=store,
@@ -134,6 +147,9 @@ async def test_full_pipeline_sync_success(
     restored.write_bytes(db_bytes)
     with sqlite3.connect(restored) as db:
         assert db.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert db.execute(
+            "SELECT content FROM scoped_notes WHERE id = 'n1'"
+        ).fetchone() == ("note backup",)
 
 
 async def test_incremental_indexing_efficiency(
@@ -185,6 +201,9 @@ async def test_quota_hard_block_stops_sync(
 
 
 async def test_restore_from_backup(pipeline: SyncPipeline) -> None:
+    pytest.importorskip("boto3")
+    pytest.importorskip("botocore")
+
     # 构造真实的 R2SyncTarget (用 mock config)
     r2_config = R2SyncConfig(
         enabled=True,

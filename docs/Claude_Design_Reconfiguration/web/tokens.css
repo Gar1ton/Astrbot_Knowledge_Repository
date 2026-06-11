@@ -1,0 +1,157 @@
+/*
+ * Knowledge Repository · 重构主题 tokens（Heptabase 演绎 · 浅色优先）
+ * ─────────────────────────────────────────────────────────────
+ * 统一主题入口：所有控件只允许引用这里的变量。
+ * 全局换肤 = 改 :root 的 --accent-h/-s/-l 与表面变量，一处生效。
+ * LightRAG 高级模式 = <html data-mode="lightrag">，整体色彩映射切换。
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ─── 浅色（默认） ───────────────────────────────────────────── */
+:root {
+  /* 画布与表面：白卡片 + 极淡灰画布（Heptabase 板面） */
+  --bg: #f6f6f4;            /* 应用画布 */
+  --bg-subtle: #f1f1ee;     /* 次级底 */
+  --bg-inset: #ebebe7;      /* 凹陷井 / hover 井 */
+  --surface: #ffffff;       /* 面板、卡片 */
+  --surface-hover: #f7f7f5;
+  --surface-raised: #ffffff;
+
+  /* 边框 */
+  --border: #e7e7e3;
+  --border-strong: #d9d9d4;
+
+  /* 文字 */
+  --fg: #26272b;
+  --fg-muted: #6e7076;
+  --fg-subtle: #9fa1a7;
+  --heading: #1b1c1f;
+
+  /* 主强调色：HSL 驱动（全局换肤入口） */
+  --accent-h: 225;
+  --accent-s: 72%;
+  --accent-l: 56%;
+  --accent: hsl(var(--accent-h) var(--accent-s) var(--accent-l));
+  --accent-strong: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l) - 12%));
+  --accent-fg: #ffffff;
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  --accent-softer: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  --accent-border: color-mix(in srgb, var(--accent) 34%, var(--border));
+  --ring: color-mix(in srgb, var(--accent) 28%, transparent);
+  --glow: color-mix(in srgb, var(--accent) 22%, transparent);
+
+  /* 选中态（树激活：浅色界面用暗色高亮） */
+  --select-bg: #26272b;
+  --select-fg: #ffffff;
+  --select-muted: rgba(255, 255, 255, 0.62);
+
+  /* 语义色 */
+  --ok: #2f9e63;
+  --ok-soft: #e3f4ea;
+  --warn: #d98414;
+  --warn-soft: #fbf0db;
+  --danger: #d5453c;
+  --danger-soft: #fbe7e5;
+  --info: #4e79c7;
+  --info-soft: #e8eef9;
+
+  /* 注释高亮色（Zotero annotations） */
+  --ann-purple: #7a5af5;
+  --ann-purple-bg: #f0ebfe;
+  --ann-purple-border: #d9cdfb;
+  --ann-yellow: #b98a1d;
+  --ann-yellow-bg: #fdf6e0;
+  --ann-yellow-border: #f0e2b2;
+  --ann-green: #2f9e63;
+  --ann-green-bg: #e6f6ed;
+  --ann-green-border: #bfe6cf;
+  --ann-red: #d5453c;
+  --ann-red-bg: #fdebe9;
+  --ann-red-border: #f5c8c4;
+  --ann-blue: #3b76d6;
+  --ann-blue-bg: #e9f0fc;
+  --ann-blue-border: #c4d7f5;
+
+  /* 字体 */
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  /* 圆角：整体保守（曲度降低） */
+  --radius-xs: 4px;
+  --radius-sm: 5px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-2xl: 12px;
+  --radius-pill: 999px;
+
+  /* 卡片质感：极轻分层阴影 + 1px 发丝描边 */
+  --shadow-card: 0 0 0 1px rgba(22, 23, 26, 0.045), 0 1px 2px rgba(22, 23, 26, 0.05), 0 3px 10px rgba(22, 23, 26, 0.045);
+  --shadow-raised: 0 0 0 1px rgba(22, 23, 26, 0.05), 0 2px 6px rgba(22, 23, 26, 0.06), 0 10px 28px rgba(22, 23, 26, 0.08);
+  --shadow-pop: 0 0 0 1px rgba(22, 23, 26, 0.05), 0 6px 16px rgba(22, 23, 26, 0.08), 0 24px 60px rgba(22, 23, 26, 0.16);
+  --shadow: var(--shadow-card);
+
+  /* 布局 */
+  --topbar-h: 50px;
+  --panel-gap: 10px;
+  --file-w: 264px;
+  --chat-w: 360px;
+}
+
+/* ─── LightRAG 高级模式：全屏特殊色彩映射 ───────────────────── */
+[data-mode="lightrag"] {
+  --accent-h: 265;
+  --accent-s: 70%;
+  --accent-l: 58%;
+  --bg: #f5f4f9;
+  --bg-subtle: #f0eef6;
+  --bg-inset: #e9e6f2;
+  --border: #e5e2ee;
+  --border-strong: #d5d0e4;
+  --select-bg: #322a52;
+  --glow: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* ─── 基础 reset 与全局质感 ─────────────────────────────────── */
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+
+/* 滚动条（细、低调） */
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: rgba(22, 23, 26, 0.14); border-radius: 99px; border: 2.5px solid transparent; background-clip: content-box; }
+*::-webkit-scrollbar-thumb:hover { background-color: rgba(22, 23, 26, 0.26); }
+*::-webkit-scrollbar-track { background: transparent; }
+
+/* ─── 关键帧 ────────────────────────────────────────────────── */
+/* 树枝脉冲：主题色光点沿连接线从左到右掠过 */
+@keyframes branchPulse {
+  0%   { transform: translateX(-12px); opacity: 0; }
+  18%  { opacity: 1; }
+  82%  { opacity: 1; }
+  100% { transform: translateX(26px); opacity: 0; }
+}
+/* 引用 chunk 高亮呼吸 */
+@keyframes citeFlash {
+  0% { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+  100% { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadeUp { from { transform: translateY(6px); } to { transform: translateY(0); } }
+@keyframes modalIn { from { transform: translateY(14px) scale(0.985); opacity: 0; } to { transform: translateY(0) scale(1); opacity: 1; } }
+@keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes connFlow { to { stroke-dashoffset: -34; } }
+@keyframes barStripe { to { background-position: 24px 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

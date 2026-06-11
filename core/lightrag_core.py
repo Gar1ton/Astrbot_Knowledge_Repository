@@ -67,6 +67,7 @@ class BuildJob:
         eta = remaining_chunks * avg if avg is not None else None
         return {
             "job_id": self.job_id,
+            "type": "lightrag_build",
             "collection": self.collection,
             "engine": self.engine,
             "status": self.status,

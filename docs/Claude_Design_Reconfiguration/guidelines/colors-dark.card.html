@@ -1,0 +1,20 @@
+<!-- @dsCard group="Colors" viewport="700x170" name="Dark Theme (ink)" subtitle=".dark — deep neutral surfaces, brighter accent" -->
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="../styles.css">
+<style>
+  body { margin:0; font-family:var(--font-sans); background:var(--bg); }
+  .row { display:flex; gap:14px; padding:22px 24px; }
+  .sw { flex:1; }
+  .chip { height:52px; border-radius:8px; border:1px solid var(--border); }
+  .nm { font-size:11px; font-weight:600; color:var(--fg); margin-top:8px; }
+  .hex { font-size:10px; color:var(--fg-subtle); font-family:var(--font-mono); margin-top:2px; }
+</style></head>
+<body class="dark">
+  <div class="row">
+    <div class="sw"><div class="chip" style="background:var(--bg)"></div><div class="nm">--bg</div><div class="hex">#17181b</div></div>
+    <div class="sw"><div class="chip" style="background:var(--surface)"></div><div class="nm">--surface</div><div class="hex">#1e1f22</div></div>
+    <div class="sw"><div class="chip" style="background:var(--bg-inset)"></div><div class="nm">--bg-inset</div><div class="hex">#232427</div></div>
+    <div class="sw"><div class="chip" style="background:var(--accent)"></div><div class="nm">--accent</div><div class="hex">62% L</div></div>
+    <div class="sw"><div class="chip" style="background:var(--surface); border:1px solid var(--border-strong)"></div><div class="nm">--border-strong</div><div class="hex">#3d3e43</div></div>
+  </div>
+</body></html>

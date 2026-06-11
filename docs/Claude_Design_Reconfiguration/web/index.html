@@ -1,0 +1,184 @@
+<!-- @dsCard group="Console" viewport="1280x720" name="Knowledge Repository · Console" subtitle="三段式集成面板 · Heptabase 演绎 · 高保真原型" -->
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge Repository · Console</title>
+<link rel="stylesheet" href="tokens.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+  #app { height: 100vh; display: flex; flex-direction: column; }
+  .kr-topbar { height: var(--topbar-h); flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 0 14px; }
+  .kr-stage { flex: 1; min-height: 0; display: flex; gap: var(--panel-gap); padding: 0 14px 14px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script type="text/babel" src="icons.jsx"></script>
+<script type="text/babel" src="mock.jsx"></script>
+<script type="text/babel" src="ui.jsx"></script>
+<script type="text/babel" src="FilePanel.jsx"></script>
+<script type="text/babel" src="DocumentsPanel.jsx"></script>
+<script type="text/babel" src="NotePanel.jsx"></script>
+<script type="text/babel" src="ChatPanel.jsx"></script>
+<script type="text/babel" src="SettingModal.jsx"></script>
+<script type="text/babel" src="AstrBotModal.jsx"></script>
+<script type="text/babel" src="WorkflowModal.jsx"></script>
+
+<script type="text/babel" data-presets="react">
+const { Button, IconBtn, Panel } = window.KRUI;
+const Icon = window.KRIcon;
+const { DOCS } = window.KRMock;
+
+function App() {
+  const [selection, setSelection] = React.useState({ type: "collection", id: "z:Agents", name: "Agents", section: "zotero" });
+  const [view, setView] = React.useState("list");          // list | reading
+  const [openDoc, setOpenDoc] = React.useState(null);       // doc object → left becomes Note
+  const [docMode, setDocMode] = React.useState("md");       // md | pdf
+  const [highlight, setHighlight] = React.useState(null);   // chunk_id to flash
+  const [notes, setNotes] = React.useState({});
+  const [modal, setModal] = React.useState(null);           // setting | astrbot | workflow
+  const [accent, setAccent] = React.useState({ h: 225, s: 72, l: 56 });
+  const [theme, setTheme] = React.useState("light");
+  const [build, setBuild] = React.useState(null);
+
+  // apply global accent live (LightRAG mode overrides to its violet accent)
+  React.useEffect(() => {
+    const r = document.documentElement.style;
+    const lr = selection.type === "lightrag";
+    const a = lr ? { h: 265, s: 70, l: 58 } : accent;
+    r.setProperty("--accent-h", a.h);
+    r.setProperty("--accent-s", a.s + "%");
+    r.setProperty("--accent-l", a.l + "%");
+  }, [accent, selection]);
+
+  React.useEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
+
+  // LightRAG full-screen color mode when a LightRAG collection is active
+  React.useEffect(() => {
+    if (selection.type === "lightrag") document.documentElement.setAttribute("data-mode", "lightrag");
+    else document.documentElement.removeAttribute("data-mode");
+  }, [selection]);
+
+  // open a doc (from Documents list OR citation) → reading view + Note panel on left
+  function openDocument(doc, chunkId) {
+    setOpenDoc(doc);
+    setSelection({ type: "doc", id: doc.doc_id, name: doc.title, section: doc.origin, collection: doc.collection });
+    setView("reading");
+    if (chunkId) { setDocMode("md"); setTimeout(() => setHighlight(chunkId), 60); }
+  }
+  window.__krOpenDoc = (doc) => openDocument(doc);
+
+  function handleSelect(sel) {
+    setSelection(sel);
+    if (sel.type === "doc") {
+      const d = DOCS.find((x) => x.doc_id === sel.id);
+      if (d) openDocument(d);
+    } else {
+      setView("list"); setOpenDoc(null); setHighlight(null);
+    }
+  }
+
+  function handleCite(source) {
+    const d = DOCS.find((x) => x.doc_id === source.doc_id);
+    if (d) openDocument(d, source.chunk_id);
+  }
+
+  function backToList() {
+    setOpenDoc(null); setView("list"); setHighlight(null);
+    // fall back selection to the doc's collection
+    if (selection.type === "doc" && selection.collection) {
+      const sec = selection.section === "zotero" ? "z:" : "l:";
+      setSelection({ type: "collection", id: sec + selection.collection, name: selection.collection, section: selection.section });
+    }
+  }
+
+  function addNoteFromChat(msg) {
+    const docId = openDoc ? openDoc.doc_id : "d-react";
+    const body = msg.content.replace(/\*\*/g, "").replace(/\[\d+\]/g, "").slice(0, 160) + "…";
+    setNotes((n) => ({ ...n, [docId]: [...(n[docId] || (window.KRMock.NOTES[docId] || {}).notes || []), { id: "ln" + Date.now(), body, linked: true }] }));
+    if (!openDoc) { const d = DOCS.find((x) => x.doc_id === docId); if (d) openDocument(d); }
+  }
+
+  function toggleBuild() {
+    if (build) { setBuild(null); return; }
+    setSelection({ type: "lightrag", id: "lr:RAG & Retrieval", name: "RAG & Retrieval", section: "lightrag" });
+    let pct = 0; const total = 144;
+    setBuild({ collection: "RAG & Retrieval", stage: "实体抽取", pct: 0, processed: 0, total });
+    const iv = setInterval(() => {
+      pct += 7 + Math.random() * 6;
+      if (pct >= 100) { pct = 100; clearInterval(iv); setTimeout(() => setBuild(null), 1400); }
+      setBuild((b) => b && ({ ...b, pct, processed: Math.round(total * pct / 100), stage: pct < 45 ? "实体抽取" : pct < 80 ? "关系合并" : "向量化" }));
+    }, 700);
+  }
+
+  // chat context label
+  const ctx = selection.type === "doc" ? { kind: "doc", label: selection.name.length > 22 ? selection.name.slice(0, 22) + "…" : selection.name }
+    : selection.type === "lightrag" ? { kind: "lightrag", label: selection.name + " · 图谱" }
+    : selection.type === "collection" ? { kind: "collection", label: selection.name } : { kind: "all", label: "全部集合" };
+
+  const TopTab = ({ id, icon, label }) => (
+    <Button variant="tab" active={modal === id} onClick={() => setModal(id)} style={{ height: 30 }}>
+      <Icon name={icon} size={14} /> {label}
+    </Button>
+  );
+
+  return (
+    <div id="app-inner" style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      {/* top bar */}
+      <div className="kr-topbar">
+        <span style={{ width: 24, height: 24, borderRadius: 6, background: "var(--accent)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="sparkle" size={14} /></span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: "var(--heading)", letterSpacing: "-.01em" }}>Knowledge Repository</span>
+        {selection.type === "lightrag" && <span style={{ fontSize: 10.5, fontWeight: 600, color: "var(--accent)", background: "var(--accent-soft)", border: "1px solid var(--accent-border)", padding: "2px 8px", borderRadius: 999 }}>LightRAG 高级模式</span>}
+        <span style={{ flex: 1 }} />
+        <TopTab id="setting" icon="settings" label="Setting" />
+        <TopTab id="astrbot" icon="spark2" label="AstrBot" />
+        <TopTab id="workflow" icon="flow" label="WorkFlow" />
+      </div>
+
+      {/* three-segment stage */}
+      <div className="kr-stage">
+        {/* LEFT: File OR Note */}
+        <div style={{ width: "var(--file-w)", flexShrink: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          {openDoc ? (
+            <div style={{ flex: 1, minHeight: 0, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-2xl)", boxShadow: "var(--shadow-card)", overflow: "hidden" }}>
+              <window.KRNotePanel doc={openDoc} notes={notes} onClose={backToList} onAddNote={() => addNoteFromChat({ content: "（手动新建笔记）" })} />
+            </div>
+          ) : (
+            <Panel title="File" flush style={{ flex: 1, minHeight: 0 }}
+              right={<React.Fragment>
+                <IconBtn name="arrowUp" label="Initiate LightRAG 构建" />
+                <IconBtn name="cloud" label="R2 备份" />
+                <IconBtn name="sync" label="Zotero 同步（弹窗选择 Push / Pull）" onClick={() => setModal("setting")} />
+              </React.Fragment>}>
+              <window.KRFilePanel selection={selection} onSelect={handleSelect} onZoteroSync={() => setModal("setting")} build={build} onToggleBuild={toggleBuild} />
+            </Panel>
+          )}
+        </div>
+
+        {/* MIDDLE: Documents */}
+        <window.KRDocumentsPanel selection={selection} view={view} doc={openDoc} mode={docMode} setMode={setDocMode}
+          highlight={highlight} onClearHighlight={() => setHighlight(null)} onBack={backToList} />
+
+        {/* RIGHT: Chat */}
+        <window.KRChatPanel contextLabel={ctx.label} contextKind={ctx.kind} onCite={handleCite} onSaveNote={addNoteFromChat} />
+      </div>
+
+      {/* modals */}
+      {modal === "setting" && <window.KRSettingModal onClose={() => setModal(null)} accent={accent} setAccent={setAccent} theme={theme} onTheme={setTheme} />}
+      {modal === "astrbot" && <window.KRAstrBotModal onClose={() => setModal(null)} />}
+      {modal === "workflow" && <window.KRWorkflowModal onClose={() => setModal(null)} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("app")).render(<App />);
+</script>
+</body>
+</html>

@@ -42,6 +42,7 @@ logger = logging.getLogger("KnowledgeRepositoryApi")
 SYSTEM_COLLECTION_UNCATEGORIZED = "_uncategorized"
 MILVUS_INDEX_MAX_ATTEMPTS = 3
 MILVUS_INDEX_RETRY_DELAYS = (0.5, 1.5)
+ZOTERO_SERVER_KEY_SECRET = "zotero.server_api_key"
 
 
 def _build_scope(scope_type: str, scope_key: str, scope_library_id: str) -> RetrievalScope | None:
@@ -60,6 +61,14 @@ def _note_html(content: str) -> str:
     if not paragraphs:
         return ""
     return "".join(f"<p>{p.replace(chr(10), '<br/>')}</p>" for p in paragraphs)
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "****"
+    return f"{value[:2]}****{value[-2:]}"
 
 
 def _scoped_note_dict(note: ScopedNote) -> dict[str, Any]:
@@ -133,6 +142,7 @@ if TYPE_CHECKING:
     from core.repository.source_store.base import SourceDocumentStore
     from core.repository.sync_targets.base import SyncTarget
     from core.repository.vector_store.base import VectorStore
+    from core.secret_store import EncryptedSecretStore
 
 
 def _get_astrbot_persona_prompt(context: Any) -> str:
@@ -255,6 +265,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         progress_store: ProgressStore | None = None,
         index_compatibility: IndexCompatibilityStore | None = None,
         embedding_fingerprint: str | None = None,
+        secret_store: EncryptedSecretStore | None = None,
     ) -> None:
         self._source_store = source_store
         self._kb_reader = kb_reader
@@ -278,6 +289,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._progress_store = progress_store
         self._index_compatibility = index_compatibility
         self._embedding_fingerprint = embedding_fingerprint
+        self._secret_store = secret_store
         # Zotero 同步管线（组合根在 api 构造后注入，避免回调循环依赖）。
         self._zotero_pipeline: Any | None = None
         self._last_zotero_sync: dict[str, Any] = {}
@@ -732,6 +744,26 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             await self._mark_lightrag_pending(doc_id, collection)
             await self._sync_milvus_collection_move(doc_id, collection)
         return updated
+
+    async def update_document_meta(
+        self, doc_id: str, meta: dict[str, Any]
+    ) -> SourceDocument | None:
+        """更新本地文档的富元数据（作者、年份、期刊、DOI 等）。
+
+        仅限 origin=LOCAL 文档；Zotero 文档元数据由同步管道维护，不允许手动覆盖。
+        返回 None 表示文档不存在或不可编辑。
+        """
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None or doc.origin != DocumentOrigin.LOCAL:
+            return None
+        allowed = {"title", "creators", "year", "venue", "doi", "url", "abstract"}
+        cleaned: dict[str, Any] = {k: v for k, v in meta.items() if k in allowed}
+        doc.local_meta = cleaned
+        if "title" in cleaned and cleaned["title"]:
+            doc.title = str(cleaned["title"])
+        doc.updated_at = _now()
+        await self._source_store.update_document(doc)
+        return doc
 
     async def delete_document(self, doc_id: str) -> bool:
         """删除文档、图谱贡献、远端镜像和插件托管原件。
@@ -2220,30 +2252,91 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
     async def get_zotero_config(self) -> dict[str, Any]:
         """返回 Zotero 同步配置 + 连接/数据目录/linked 探针状态（供设置与 sync 页）。"""
-        from core.adapters.zotero import local_api
-        from core.config import ZOTERO_STORAGE_LINKED
+        from core.adapters.zotero import local_api, paths as zpaths
+        from core.config import ZOTERO_ACCESS_SERVER, ZOTERO_STORAGE_LINKED
 
         if self._config is None:
             return {"enabled": False, "available": False}
         cfg = self._config.get_zotero_sync_config()
+        resolved_dir = zpaths.resolve_data_dir(cfg.zotero_data_dir)
         out: dict[str, Any] = {
             "enabled": cfg.enabled,
+            "access_mode": cfg.access_mode,
             "zotero_data_dir": cfg.zotero_data_dir,
+            "resolved_data_dir": str(resolved_dir) if resolved_dir else "",
             "api_port": cfg.api_port,
             "storage_mode": cfg.storage_mode,
             "linked_root": cfg.linked_root,
             "sync_mode": cfg.sync_mode,
             "auto_sync_enabled": cfg.auto_sync_enabled,
             "auto_sync_interval_sec": cfg.auto_sync_interval_sec,
-            "connection": local_api.probe_connection(cfg.api_port),
+            "server_key_present": bool(self._zotero_server_key()),
+            "server_key_masked": _mask_secret(self._zotero_server_key()),
+            "server_user_id": "",
+            "server_username": "",
+            "server_access": {},
         }
+        if cfg.access_mode != ZOTERO_ACCESS_SERVER:
+            out["connection"] = local_api.probe_connection(cfg.api_port)
         if self._zotero_pipeline is not None:
-            out["availability"] = self._zotero_pipeline.is_available()
+            availability = self._zotero_pipeline.is_available()
+            out["availability"] = availability
+            if cfg.access_mode == ZOTERO_ACCESS_SERVER:
+                out["server_user_id"] = str(availability.get("server_user_id") or "")
+                out["server_username"] = str(availability.get("server_username") or "")
+                access = availability.get("server_access")
+                out["server_access"] = access if isinstance(access, dict) else {}
         if cfg.storage_mode == ZOTERO_STORAGE_LINKED:
-            from core.adapters.zotero import paths as zpaths
-
             out["linked_probe"] = zpaths.probe_linked_root(cfg.linked_root)
         return out
+
+    async def probe_zotero_local(self) -> dict[str, Any]:
+        """本地离线探针：合并端口连通性 + zotero.sqlite 干读计数（供数据流面板调试）。"""
+        from core.adapters.zotero import local_api
+
+        if self._config is None:
+            return {
+                "connection": {"connected": False},
+                "read": {"available": False, "reason": "未初始化"},
+            }
+        cfg = self._config.get_zotero_sync_config()
+        connection = local_api.probe_connection(cfg.api_port)
+        if self._zotero_pipeline is None:
+            read: dict[str, Any] = {"available": False, "reason": "Zotero 同步未启用或未装配"}
+        else:
+            read = self._zotero_pipeline.probe_local_read()
+        return {"connection": connection, "read": read}
+
+    async def save_zotero_server_key(self, api_key: str) -> dict[str, Any]:
+        """Validate and store Zotero Web API key without exposing plaintext again."""
+        from core.adapters.zotero.web_api import (
+            ZoteroWebApiClient,
+            current_key_identity,
+        )
+
+        cleaned = api_key.strip()
+        if not cleaned:
+            raise ValueError("Zotero API key is required")
+        if self._secret_store is None:
+            raise RuntimeError("Secret store is unavailable")
+        current_key_identity(ZoteroWebApiClient(cleaned).get_current_key())
+        self._secret_store.set_secret(ZOTERO_SERVER_KEY_SECRET, cleaned)
+        return await self.get_zotero_config()
+
+    async def delete_zotero_server_key(self) -> dict[str, Any]:
+        """Remove stored Zotero Web API key."""
+        if self._secret_store is not None:
+            self._secret_store.delete_secret(ZOTERO_SERVER_KEY_SECRET)
+        return await self.get_zotero_config()
+
+    def _zotero_server_key(self) -> str:
+        if self._secret_store is not None:
+            key = self._secret_store.get_secret(ZOTERO_SERVER_KEY_SECRET)
+            if key:
+                return key
+        if self._config is None:
+            return ""
+        return self._config.get_zotero_sync_config().cloud_api_key
 
     async def sync_zotero_pull(self, incremental: bool = True) -> dict[str, Any]:
         """执行一次 Zotero Pull；strict 模式变化后触发 Milvus 全量重建。"""

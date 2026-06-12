@@ -354,6 +354,16 @@
   justify-content: flex-end;
 }
 
+.flow-topo-status-panel {
+  min-width: min(620px, 100%);
+  max-width: 760px;
+  justify-content: flex-end;
+  padding: 8px 10px;
+  border: 1px solid var(--flow-node-bd);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--flow-node) 58%, transparent);
+}
+
 .flow-terminal-link,
 .flow-recheck-button {
   display: inline-flex;
@@ -392,7 +402,7 @@
 .flow-topo-legend {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
@@ -533,12 +543,12 @@
 .flow-diagram-grid {
   position: relative;
   display: grid;
-  grid-template-columns: 248px 300px 324px 324px 340px 360px;
-  grid-auto-rows: minmax(340px, auto);
-  column-gap: 60px;
-  row-gap: 18px;
+  grid-template-columns: 480px 330px 360px 360px 380px 420px;
+  grid-auto-rows: minmax(300px, auto);
+  column-gap: 52px;
+  row-gap: 16px;
   align-items: stretch;
-  padding: 16px;
+  padding: 18px 24px;
 }
 
 .flow-node-cell {
@@ -944,6 +954,19 @@
   cursor: default;
 }
 
+.flow-segmented-option.is-locked {
+  cursor: not-allowed;
+  opacity: 0.54;
+}
+
+.flow-seg-lock {
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+  margin-right: 4px;
+  vertical-align: -2px;
+}
+
 .flow-segmented-option.is-active {
   background: color-mix(in srgb, var(--flow-seg-accent) 12%, var(--flow-node));
   color: color-mix(in srgb, var(--flow-seg-accent) 75%, var(--flow-ink));
@@ -1039,10 +1062,143 @@
   opacity: 0.45;
 }
 
+.flow-quick-save--ghost {
+  background: transparent;
+  color: var(--flow-muted);
+}
+
+/* ── Zotero: 标签式连接模式切换（仿 md/pdf toggle） ── */
+.flow-quick-modetab {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--flow-inset);
+  border: 1px solid var(--flow-node-bd);
+}
+
+.flow-quick-modetab-btn {
+  flex: 1 1 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--flow-muted);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 5px 8px;
+}
+
+.flow-quick-modetab-btn.is-active {
+  background: var(--flow-node);
+  color: color-mix(in srgb, var(--flow-st) 78%, var(--flow-ink));
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--flow-ink) 14%, transparent);
+}
+
+.flow-quick-modetab-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* ── Zotero: 诊断行（连接徽标 + 探针 + 计数） ── */
+.flow-quick-diag {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  color: var(--flow-muted);
+}
+
+.flow-quick-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--flow-faint);
+}
+
+.flow-quick-dot.is-ok {
+  background: #3fb950;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #3fb950 22%, transparent);
+}
+
+.flow-quick-dot.is-off {
+  background: color-mix(in srgb, var(--flow-faint) 80%, transparent);
+}
+
+.flow-quick-diag-label {
+  font-weight: 700;
+  color: var(--flow-faint);
+}
+
+.flow-quick-diag-counts {
+  font-family: var(--font-geist-mono);
+  color: var(--flow-ink);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Zotero: 高级折叠区 ── */
+.flow-quick-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.flow-quick-advanced-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  border: none;
+  background: transparent;
+  color: var(--flow-faint);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0;
+}
+
+.flow-quick-advanced-caret {
+  display: inline-block;
+  transition: transform 0.12s ease;
+}
+
+.flow-quick-advanced-caret.is-open {
+  transform: rotate(90deg);
+}
+
+/* ── Zotero: 同步动作条 ── */
+.flow-quick-syncbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--flow-node-bd);
+}
+
+.flow-quick-syncbar-status {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  color: var(--flow-faint);
+  font-family: var(--font-geist-mono);
+}
+
 .flow-quick-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px 8px;
 }
 
 .flow-quick-field {
@@ -1057,6 +1213,9 @@
 }
 
 .flow-quick-field > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   overflow: hidden;
   color: var(--flow-faint);
   font-size: 10px;
@@ -1079,7 +1238,7 @@
   font-family: var(--font-geist-mono);
   font-size: 11px;
   outline: none;
-  padding: 6px 8px;
+  padding: 4px 7px;
 }
 
 .flow-quick-input:focus,
@@ -1094,13 +1253,49 @@
   opacity: 0.72;
 }
 
+.flow-quick-readonly {
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px dashed var(--flow-node-bd-strong);
+  border-radius: 7px;
+  background: var(--flow-inset);
+  color: var(--flow-muted);
+  font-family: var(--font-geist-mono);
+  font-size: 11px;
+  padding: 4px 7px;
+}
+
+.flow-quick-readonly.is-empty {
+  color: var(--flow-faint);
+}
+
+.flow-help-dot {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 1px solid var(--flow-node-bd-strong);
+  color: var(--flow-faint);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+}
+
 .flow-quick-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
   gap: 7px;
   width: 100%;
-  min-height: 30px;
+  min-height: 26px;
   border: 1px solid var(--flow-node-bd);
   border-radius: 7px;
   background: var(--flow-node);
@@ -1163,6 +1358,47 @@
   background: color-mix(in srgb, var(--flow-node) 54%, transparent);
 }
 
+.flow-zotero-key-box {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border: 1px solid var(--flow-node-bd);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--flow-node) 54%, transparent);
+  padding: 8px;
+}
+
+.flow-zotero-key-head,
+.flow-zotero-key-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.flow-zotero-key-head {
+  justify-content: space-between;
+  color: var(--flow-faint);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.flow-zotero-key-head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.flow-zotero-key-head code {
+  color: var(--flow-muted);
+  font-family: var(--font-geist-mono);
+  font-size: 10px;
+}
+
+.flow-zotero-key-row .flow-quick-input {
+  flex: 1 1 180px;
+}
+
 .flow-quick-error {
   color: color-mix(in srgb, var(--flow-st-warn) 78%, var(--flow-ink));
   background: color-mix(in srgb, var(--flow-st-warn) 10%, var(--flow-node));
@@ -1180,8 +1416,8 @@
   display: flex;
   align-items: center;
   width: 100%;
-  min-height: 30px;
-  padding: 5px 28px 5px 8px;
+  min-height: 26px;
+  padding: 4px 28px 4px 7px;
   box-sizing: border-box;
   border: 1px solid var(--flow-node-bd);
   border-radius: 7px;

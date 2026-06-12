@@ -69,6 +69,7 @@ class OptionalDependency:
     pip_spec: str
     feature: str
     stages: tuple[str, ...]
+    required: bool = False
 
 
 # 仅收录「用户可见可选功能」的依赖；核心安装依赖（如 pymupdf4llm）不在手动安装面板内。
@@ -89,6 +90,7 @@ OPTIONAL_DEPENDENCIES: tuple[OptionalDependency, ...] = (
         pip_spec="pymilvus[milvus_lite]>=2.5,<3.0",
         feature="milvus",
         stages=("vector_store", "retrieval"),
+        required=True,
     ),
     OptionalDependency(
         key="lightrag",
@@ -135,6 +137,7 @@ def dependency_statuses() -> list[dict[str, Any]]:
             "pip_spec": dep.pip_spec,
             "feature": dep.feature,
             "stages": list(dep.stages),
+            "required": dep.required,
             "installed": module_available(dep.import_name),
             "version": _installed_version(dep.dist_name),
         }
@@ -156,6 +159,18 @@ CONSEQUENCE_RESTART = "restart"
 CONSEQUENCE_REBUILD = "rebuild"
 
 ENV_EMBEDDING_API_KEY = "KR_EMBEDDING_API_KEY"
+
+
+def _lightrag_llm_label(provider: str, model: str) -> str:
+    """返回数据流 UI 的只读 LLM 摘要，不暴露 endpoint。"""
+    display_model = (model or "").strip()
+    if provider == "main":
+        display_model = display_model or "AstrBot main LLM"
+    elif provider == "local":
+        display_model = display_model or "local model"
+    else:
+        display_model = display_model or "configured model"
+    return f"<{provider} - {display_model}>"
 
 
 def detect_pipeline(config: Config) -> list[dict[str, Any]]:
@@ -199,6 +214,8 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         "required_deps": [],
         "configured": zotero_cfg.enabled,
         "detail": {
+            "access_mode": zotero_cfg.access_mode,
+            "api_port": zotero_cfg.api_port,
             "sync_mode": zotero_cfg.sync_mode,
             "storage_mode": zotero_cfg.storage_mode,
         },
@@ -268,7 +285,10 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         "consequence": CONSEQUENCE_RESTART,
         "required_deps": vector_deps,
         "configured": True,
-        "detail": {"auto_index_enabled": vdb_cfg.auto_index_enabled},
+        "detail": {
+            "auto_index_enabled": vdb_cfg.auto_index_enabled,
+            "astrbot_locked": True,
+        },
     }
 
     # ④ 检索编排：自动 RRF 融合，展示当前生效引擎集合。
@@ -308,6 +328,11 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         "detail": {
             "query_mode": graph_cfg.query_mode,
             "llm_provider": graph_cfg.lightrag_llm_provider,
+            "llm_model": graph_cfg.lightrag_llm_model,
+            "llm_label": _lightrag_llm_label(
+                graph_cfg.lightrag_llm_provider,
+                graph_cfg.lightrag_llm_model,
+            ),
         },
     }
 

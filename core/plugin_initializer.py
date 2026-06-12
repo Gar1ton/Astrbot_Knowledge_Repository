@@ -33,6 +33,7 @@ from core.pipelines.sync_pipeline import SyncPipeline
 from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
 from core.repository.sync_targets.r2 import R2SyncTarget
 from core.runtime_config import RuntimeConfigStore
+from core.secret_store import EncryptedSecretStore
 
 if TYPE_CHECKING:
     from core.index_compatibility import IndexCompatibilityStore
@@ -90,6 +91,7 @@ class PluginInitializer:
         self.agent_enabled: bool = False
         self.metrics: PerformanceTracker = PerformanceTracker()
         self.progress_store: ProgressStore = ProgressStore()
+        self.secret_store: EncryptedSecretStore = EncryptedSecretStore(data_dir / "secrets")
 
         # 依赖句柄
         self.ingest_manager: IngestManager | None = None
@@ -420,6 +422,7 @@ class PluginInitializer:
             progress_store=self.progress_store,
             index_compatibility=self.index_compatibility,
             embedding_fingerprint=self.embedding_fingerprint,
+            secret_store=self.secret_store,
         )
 
         # 5.5) Zotero 单向 Pull 管线（api 构造后注入，回调引用 api 的索引/LRAG 助手）。
@@ -429,6 +432,8 @@ class PluginInitializer:
             source_store=self.source_store,
             ingest_manager=self.ingest_manager,
             config=self._config,
+            zotero_api_key_provider=self.api._zotero_server_key,
+            web_cache_dir=self._data_dir / "zotero_web_cache",
             index_document=self.api._index_document,
             remove_index=self.api._remove_document_index,
             lightrag_cleanup=self.api._lightrag_cleanup,

@@ -292,6 +292,16 @@
         "type": "bool",
         "default": false
       },
+      "access_mode": {
+        "description": "Zotero 连接模式",
+        "type": "string",
+        "default": "local",
+        "options": [
+          "local",
+          "server"
+        ],
+        "hint": "local：读取本机 Zotero，本地 API 端口默认 23119；server：使用 Zotero Web API key，只同步个人库。API key 通过 Web 控制台加密保存，不写入公开配置。"
+      },
       "zotero_data_dir": {
         "description": "Zotero 数据目录",
         "type": "string",

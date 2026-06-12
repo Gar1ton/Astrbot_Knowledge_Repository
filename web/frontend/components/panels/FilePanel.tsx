@@ -4,7 +4,7 @@ import { Panel } from "@/components/ds/Panel";
 import { IconButton } from "@/components/ds/IconButton";
 import { Icon } from "@/components/ds/Icon";
 import { useConsole } from "@/lib/ConsoleContext";
-import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, deleteCollection, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
+import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, deleteCollection, createCollection, uploadDocument, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 
@@ -375,7 +375,18 @@ function ActiveBuildCard({ job, interrupted, onResume }: ActiveBuildCardProps) {
     );
   }
 
-  return null;
+  // idle fallback — always renders something so the toggle is meaningful
+  return (
+    <div
+      style={{
+        margin: "4px 6px 6px",
+        padding: "6px 10px",
+        borderRadius: "var(--radius-md)",
+      }}
+    >
+      <span style={{ fontSize: 11, color: "var(--fg-subtle)" }}>{t("file_build_idle")}</span>
+    </div>
+  );
 }
 
 // ─── Main FilePanel ────────────────────────────────────────────
@@ -546,6 +557,281 @@ function DeleteCollectionDialog({ collectionName, onConfirm, onCancel, deleting 
   );
 }
 
+// ─── New Collection Dialog ─────────────────────────────────────
+
+interface NewCollectionDialogProps {
+  onClose: () => void;
+  onCreated: () => void;
+}
+
+function NewCollectionDialog({ onClose, onCreated }: NewCollectionDialogProps) {
+  const { t } = useI18n();
+  const { toast } = useToast();
+  const [name, setName] = useState("");
+  const [desc, setDesc] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  async function handleCreate() {
+    if (!name.trim()) return;
+    setCreating(true);
+    try {
+      await createCollection(name.trim(), desc.trim() || undefined);
+      toast(t("file_new_collection_success").replace("{name}", name.trim()), "ok");
+      onCreated();
+      onClose();
+    } catch (err: unknown) {
+      toast(t("file_new_collection_error").replace("{message}", err instanceof Error ? err.message : String(err)), "error");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Escape") onClose();
+    if (e.key === "Enter" && name.trim() && !creating) handleCreate();
+  }
+
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, zIndex: 2000,
+        background: "rgba(22,23,26,.46)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        animation: "overlayIn .15s ease",
+      }}
+    >
+      <div
+        style={{
+          background: "var(--surface)", border: "1px solid var(--border)",
+          borderRadius: "var(--radius-2xl)", boxShadow: "var(--shadow-pop)",
+          width: 360, maxWidth: "calc(100vw - 32px)",
+          padding: "22px 22px 18px",
+          animation: "modalIn .18s cubic-bezier(.2,.7,.2,1)",
+          display: "flex", flexDirection: "column", gap: 14,
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--heading)" }}>
+          {t("file_new_collection_title")}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={t("file_new_collection_name_placeholder")}
+            autoFocus
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <input
+            value={desc}
+            onChange={(e) => setDesc(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={t("file_new_collection_desc_placeholder")}
+            autoComplete="off"
+          />
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            type="button" onClick={onClose} disabled={creating}
+            style={{
+              background: "var(--bg-inset)", border: "1px solid var(--border-strong)",
+              color: "var(--fg-muted)", borderRadius: "var(--radius-xl)",
+              padding: "7px 16px", fontSize: 12.5, fontWeight: 500,
+              cursor: "pointer", fontFamily: "inherit",
+            }}
+          >
+            {t("btn_cancel")}
+          </button>
+          <button
+            type="button" onClick={handleCreate} disabled={!name.trim() || creating}
+            style={{
+              background: name.trim() && !creating ? "var(--accent)" : "var(--bg-inset)",
+              border: "1px solid transparent",
+              color: name.trim() && !creating ? "var(--accent-fg, #fff)" : "var(--fg-subtle)",
+              borderRadius: "var(--radius-xl)", padding: "7px 16px",
+              fontSize: 12.5, fontWeight: 600,
+              cursor: name.trim() && !creating ? "pointer" : "not-allowed",
+              fontFamily: "inherit",
+              display: "flex", alignItems: "center", gap: 6,
+            }}
+          >
+            {creating ? (
+              <>
+                <span style={{
+                  width: 10, height: 10, borderRadius: "50%",
+                  border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff",
+                  animation: "spin .6s linear infinite", display: "inline-block",
+                }} />
+                {t("file_new_collection_creating")}
+              </>
+            ) : t("file_new_collection_create")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Upload Document Dialog ────────────────────────────────────
+
+interface UploadDocumentDialogProps {
+  defaultCollection: string | null;
+  localCollections: string[];
+  onClose: () => void;
+}
+
+function UploadDocumentDialog({ defaultCollection, localCollections, onClose }: UploadDocumentDialogProps) {
+  const { t } = useI18n();
+  const { toast } = useToast();
+  const [file, setFile] = useState<File | null>(null);
+  const [collection, setCollection] = useState(defaultCollection ?? localCollections[0] ?? "");
+  const [uploading, setUploading] = useState(false);
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  async function handleUpload() {
+    if (!file) { toast(t("file_upload_no_file"), "error"); return; }
+    if (!collection) { toast(t("file_build_no_collection"), "error"); return; }
+    setUploading(true);
+    try {
+      await uploadDocument(file, collection);
+      toast(t("file_upload_success").replace("{name}", file.name), "ok");
+      onClose();
+    } catch (err: unknown) {
+      toast(t("file_upload_error").replace("{message}", err instanceof Error ? err.message : String(err)), "error");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    const dropped = e.dataTransfer.files[0];
+    if (dropped) setFile(dropped);
+  }
+
+  return (
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, zIndex: 2000,
+        background: "rgba(22,23,26,.46)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        animation: "overlayIn .15s ease",
+      }}
+    >
+      <div
+        style={{
+          background: "var(--surface)", border: "1px solid var(--border)",
+          borderRadius: "var(--radius-2xl)", boxShadow: "var(--shadow-pop)",
+          width: 400, maxWidth: "calc(100vw - 32px)",
+          padding: "22px 22px 18px",
+          animation: "modalIn .18s cubic-bezier(.2,.7,.2,1)",
+          display: "flex", flexDirection: "column", gap: 14,
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--heading)" }}>
+          {t("file_upload_title")}
+        </div>
+
+        {/* Drop zone */}
+        <div
+          onClick={() => inputRef.current?.click()}
+          onDrop={handleDrop}
+          onDragOver={(e) => e.preventDefault()}
+          style={{
+            border: `2px dashed ${file ? "var(--accent)" : "var(--border-strong)"}`,
+            borderRadius: "var(--radius-lg)",
+            padding: "20px 16px",
+            textAlign: "center",
+            cursor: "pointer",
+            background: file ? "var(--accent-soft)" : "var(--bg-inset)",
+            transition: "all .15s",
+          }}
+        >
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".pdf,.md,.txt,.docx"
+            style={{ display: "none" }}
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) setFile(f); }}
+          />
+          <Icon name="upload" size={20} style={{ color: file ? "var(--accent)" : "var(--fg-subtle)", marginBottom: 6 }} />
+          <div style={{ fontSize: 12, color: file ? "var(--accent)" : "var(--fg-subtle)", lineHeight: 1.5 }}>
+            {file ? file.name : t("file_upload_drop_hint")}
+          </div>
+          {file && (
+            <div style={{ fontSize: 11, color: "var(--fg-subtle)", marginTop: 4 }}>
+              {(file.size / 1024).toFixed(1)} KB
+            </div>
+          )}
+        </div>
+
+        {/* Collection selector */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label style={{ fontSize: 12, fontWeight: 500, color: "var(--fg-muted)" }}>
+            {t("file_upload_collection_label")}
+          </label>
+          <select
+            value={collection}
+            onChange={(e) => setCollection(e.target.value)}
+            style={{
+              height: 32, padding: "0 10px",
+              border: "1px solid var(--border-strong)", borderRadius: "var(--radius-md)",
+              background: "var(--surface)", color: "var(--fg)",
+              fontSize: 12.5, fontFamily: "inherit", outline: "none",
+            }}
+          >
+            {localCollections.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button
+            type="button" onClick={onClose} disabled={uploading}
+            style={{
+              background: "var(--bg-inset)", border: "1px solid var(--border-strong)",
+              color: "var(--fg-muted)", borderRadius: "var(--radius-xl)",
+              padding: "7px 16px", fontSize: 12.5, fontWeight: 500,
+              cursor: "pointer", fontFamily: "inherit",
+            }}
+          >
+            {t("btn_cancel")}
+          </button>
+          <button
+            type="button" onClick={handleUpload} disabled={!file || uploading}
+            style={{
+              background: file && !uploading ? "var(--accent)" : "var(--bg-inset)",
+              border: "1px solid transparent",
+              color: file && !uploading ? "var(--accent-fg, #fff)" : "var(--fg-subtle)",
+              borderRadius: "var(--radius-xl)", padding: "7px 16px",
+              fontSize: 12.5, fontWeight: 600,
+              cursor: file && !uploading ? "pointer" : "not-allowed",
+              fontFamily: "inherit",
+              display: "flex", alignItems: "center", gap: 6,
+            }}
+          >
+            {uploading ? (
+              <>
+                <span style={{
+                  width: 10, height: 10, borderRadius: "50%",
+                  border: "2px solid rgba(255,255,255,0.4)", borderTopColor: "#fff",
+                  animation: "spin .6s linear infinite", display: "inline-block",
+                }} />
+                {t("file_upload_uploading")}
+              </>
+            ) : t("file_upload_btn")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 // ─── Main FilePanel ────────────────────────────────────────────
 
 export function FilePanel() {
@@ -558,6 +844,9 @@ export function FilePanel() {
   const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
   const [deletingCollection, setDeletingCollection] = useState<string | null>(null);
   const [deleteInProgress, setDeleteInProgress] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(true);
+  const [showNewCollection, setShowNewCollection] = useState(false);
+  const [showUpload, setShowUpload] = useState(false);
 
   useEffect(() => {
     listCollections().then(setCollections).catch(() => {});
@@ -630,7 +919,15 @@ export function FilePanel() {
       style={{ flex: 1 }}
       right={
         <>
-          <IconButton name="arrowUp" label={t("file_action_lightrag_build")} />
+          <IconButton
+            name="graph"
+            label={t("file_action_lightrag_build")}
+            onClick={() => {
+              const name = selectedCollection?.replace(/^(z:|l:|lr:)/, "");
+              if (!name) { toast(t("file_build_no_collection"), "error"); return; }
+              buildGraph(name).catch(() => toast(t("file_build_error"), "error"));
+            }}
+          />
           <IconButton name="cloud" label={t("file_action_r2_backup")} />
           <IconButton name="sync" label={t("file_action_zotero_sync")} />
         </>
@@ -677,8 +974,8 @@ export function FilePanel() {
           label={t("file_local_collections")}
           actions={
             <>
-              <IconButton name="upload" label={t("file_action_upload_document")} size={14} />
-              <IconButton name="plus" label={t("file_action_new_collection")} size={14} />
+              <IconButton name="upload" label={t("file_action_upload_document")} size={14} onClick={() => setShowUpload(true)} />
+              <IconButton name="plus" label={t("file_action_new_collection")} size={14} onClick={() => setShowNewCollection(true)} />
             </>
           }
         />
@@ -727,14 +1024,21 @@ export function FilePanel() {
           icon="graph"
           label={t("file_lightrag_collections")}
           actions={
-            <IconButton name="spark2" label={t("file_action_lightrag_build")} size={14} />
+            <IconButton
+              name={progressOpen ? "chevU" : "chevD"}
+              label={progressOpen ? t("file_lightrag_hide_progress") : t("file_lightrag_show_progress")}
+              onClick={() => setProgressOpen((v) => !v)}
+              size={14}
+            />
           }
         />
-        <ActiveBuildCard
-          job={buildJob}
-          interrupted={interruptedJob}
-          onResume={(col) => { buildGraph(col).catch(() => {}); }}
-        />
+        {progressOpen && (
+          <ActiveBuildCard
+            job={buildJob}
+            interrupted={interruptedJob}
+            onResume={(col) => { buildGraph(col).catch(() => {}); }}
+          />
+        )}
         {lightragCollections.map((c) => {
           const k = `lr:${c.name}`;
           return (
@@ -776,6 +1080,21 @@ export function FilePanel() {
             setDeleteInProgress(false);
           }
         }}
+      />
+    )}
+
+    {showNewCollection && (
+      <NewCollectionDialog
+        onClose={() => setShowNewCollection(false)}
+        onCreated={() => listCollections().then(setCollections).catch(() => {})}
+      />
+    )}
+
+    {showUpload && (
+      <UploadDocumentDialog
+        defaultCollection={selectedCollection ? selectedCollection.replace(/^(z:|l:|lr:)/, "") : null}
+        localCollections={localCollections.map((c) => c.name)}
+        onClose={() => setShowUpload(false)}
       />
     )}
     </>

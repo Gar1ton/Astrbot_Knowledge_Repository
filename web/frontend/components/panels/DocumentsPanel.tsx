@@ -241,8 +241,8 @@ function ReadingView({
     return () => clearTimeout(timer);
   }, [highlightedChunk, doc.doc_id, setHighlightedChunk]);
 
-  return (
-    <div style={{ maxWidth: mode === "pdf" ? 1180 : 720, margin: "0 auto", padding: "6px 20px 60px" }}>
+  const docHeader = (
+    <>
       <h1
         style={{
           fontSize: 21,
@@ -280,103 +280,79 @@ function ReadingView({
           </Badge>
         )}
       </div>
+    </>
+  );
 
-      {/* MD/PDF mode toggle */}
-      <div
-        style={{
-          display: "flex",
-          gap: 2,
-          background: "var(--bg-inset)",
-          borderRadius: "var(--radius-md)",
-          padding: 2,
-          width: "fit-content",
-          marginBottom: 20,
-        }}
-      >
-        {(["md", "pdf"] as const).map((m) => (
-          <button
-            key={m}
-            onClick={() => setMode(m)}
+  if (mode === "pdf") {
+    return (
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <div style={{ padding: "6px 12px 12px", flexShrink: 0 }}>
+          {docHeader}
+        </div>
+        <div style={{ flex: 1, minHeight: 0, padding: "0 12px 12px", overflow: "hidden" }}>
+          <PdfViewer
+            docId={doc.doc_id}
+            title={doc.title ?? doc.filename}
+            annotations={annotations}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ maxWidth: 720, margin: "0 auto", padding: "6px 12px 60px" }}>
+      {docHeader}
+      {meta?.abstract && (
+        <>
+          <Eyebrow style={{ marginBottom: 8 }}>{t("documents_abstract")}</Eyebrow>
+          <p style={{ fontSize: 13.5, lineHeight: 1.75, color: "var(--fg)", margin: "0 0 24px" }}>
+            {meta.abstract}
+          </p>
+        </>
+      )}
+      <Eyebrow style={{ marginBottom: 8 }}>
+        {t("documents_source_chunks", { n: chunks.length })}
+      </Eyebrow>
+      {chunkLoading ? (
+        <div style={{ fontSize: 12.5, color: "var(--fg-subtle)", padding: "16px 0" }}>
+          {t("documents_detail_loading")}
+        </div>
+      ) : chunks.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--fg-subtle)", padding: "16px 0" }}>
+          {t("documents_no_chunks")}
+        </div>
+      ) : (
+        chunks.map((c) => (
+          <div
+            key={c.chunk_id}
+            ref={(el) => { chunkRefs.current[c.chunk_id] = el; }}
             style={{
-              fontSize: 11,
-              fontWeight: 600,
-              padding: "4px 10px",
-              borderRadius: "var(--radius-sm)",
-              border: "none",
-              cursor: "pointer",
-              fontFamily: "var(--font-sans)",
-              textTransform: "uppercase",
-              letterSpacing: ".04em",
-              background: mode === m ? "var(--surface)" : "transparent",
-              color: mode === m ? "var(--accent)" : "var(--fg-muted)",
-              boxShadow: mode === m ? "var(--shadow-card)" : "none",
+              padding: "11px 13px",
+              borderRadius: "var(--radius-md)",
+              marginBottom: 8,
+              border: "1px solid var(--border)",
+              background: "var(--surface)",
+              transition: "background-color .2s",
             }}
           >
-            {m}
-          </button>
-        ))}
-      </div>
-
-      {mode === "pdf" ? (
-        <PdfViewer
-          docId={doc.doc_id}
-          title={doc.title ?? doc.filename}
-          annotations={annotations}
-        />
-      ) : (
-        <>
-          {meta?.abstract && (
-            <>
-              <Eyebrow style={{ marginBottom: 8 }}>{t("documents_abstract")}</Eyebrow>
-              <p style={{ fontSize: 13.5, lineHeight: 1.75, color: "var(--fg)", margin: "0 0 24px" }}>
-                {meta.abstract}
-              </p>
-            </>
-          )}
-          <Eyebrow style={{ marginBottom: 8 }}>
-            {t("documents_source_chunks", { n: chunks.length })}
-          </Eyebrow>
-          {chunkLoading ? (
-            <div style={{ fontSize: 12.5, color: "var(--fg-subtle)", padding: "16px 0" }}>
-              {t("documents_detail_loading")}
-            </div>
-          ) : chunks.length === 0 ? (
-            <div style={{ fontSize: 12.5, color: "var(--fg-subtle)", padding: "16px 0" }}>
-              {t("documents_no_chunks")}
-            </div>
-          ) : (
-            chunks.map((c) => (
-              <div
-                key={c.chunk_id}
-                ref={(el) => { chunkRefs.current[c.chunk_id] = el; }}
-                style={{
-                  padding: "11px 13px",
-                  borderRadius: "var(--radius-md)",
-                  marginBottom: 8,
-                  border: "1px solid var(--border)",
-                  background: "var(--surface)",
-                  transition: "background-color .2s",
-                }}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+              <span
+                style={{ fontSize: 10, fontFamily: "var(--font-mono)", fontWeight: 600, color: "var(--accent)" }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-                  <span
-                    style={{ fontSize: 10, fontFamily: "var(--font-mono)", fontWeight: 600, color: "var(--accent)" }}
-                  >
-                    #{c.ordinal}
-                  </span>
-                  {c.page != null && (
-                    <span style={{ fontSize: 10, color: "var(--fg-subtle)" }}>
-                      {t("documents_page_label", { page: c.page })} · {c.chunk_id}
-                    </span>
-                  )}
-                </div>
-                <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: "var(--fg)" }}>
-                  {c.text}
-                </p>
-              </div>
-            ))
-          )}
-        </>
+                #{c.ordinal}
+              </span>
+              {c.page != null && (
+                <span style={{ fontSize: 10, color: "var(--fg-subtle)" }}>
+                  {t("documents_page_label", { page: c.page })} · {c.chunk_id}
+                </span>
+              )}
+            </div>
+            <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: "var(--fg)" }}>
+              {c.text}
+            </p>
+          </div>
+        ))
       )}
     </div>
   );
@@ -450,7 +426,11 @@ export function DocumentsPanel() {
   const title = colName ?? t("docs_all");
 
   const crumbs = isReading
-    ? [{ label: t("panel_documents"), onClick: backToList }, { label: activeDoc!.collection, onClick: backToList }, { label: activeDoc!.title ?? activeDoc!.filename ?? "" }]
+    ? [
+        { label: t("panel_documents"), onClick: backToList },
+        { label: activeDoc!.collection, onClick: backToList, separator: "  " },
+        { label: activeDoc!.title ?? activeDoc!.filename ?? "" },
+      ]
     : [{ label: title }];
 
   const right = isReading ? (
@@ -497,7 +477,11 @@ export function DocumentsPanel() {
       right={right}
       flush
       style={{ flex: 1, minWidth: 0 }}
-      bodyStyle={{ padding: "14px 0" }}
+      bodyStyle={
+        isReading && mode === "pdf"
+          ? { padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }
+          : { padding: "14px 0" }
+      }
     >
       {isReading ? (
         <ReadingView doc={activeDoc!} mode={mode} setMode={setMode} />

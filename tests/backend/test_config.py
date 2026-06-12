@@ -21,6 +21,7 @@ def test_defaults_when_empty() -> None:
     assert cfg.get_vector_db_config().backend == "milvus"
     assert cfg.get_embedding_config().model == "intfloat/multilingual-e5-small"
     assert cfg.get_embedding_config().max_token_size == 512
+    assert cfg.get_zotero_sync_config().access_mode == "local"
 
 
 def test_section_overrides() -> None:
@@ -182,7 +183,8 @@ def test_diagnostics_report_missing_optional_feature_dependencies(
         }
     ).get_diagnostics()
 
-    assert sum("requirements-additional.txt" in item for item in diagnostics) == 4
+    assert sum("requirements-additional.txt" in item for item in diagnostics) == 3
+    assert any("Milvus Lite is a required dependency" in item for item in diagnostics)
 
 
 def test_runtime_config_store_only_persists_generated_notion_values(tmp_path: Path) -> None:

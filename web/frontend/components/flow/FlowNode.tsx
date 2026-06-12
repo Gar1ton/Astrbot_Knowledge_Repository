@@ -58,6 +58,8 @@ function Segmented({
   disabled,
   status,
   justActivatedValue,
+  lockedOptions,
+  lockedTitle,
   onChange,
 }: {
   options: string[];
@@ -66,23 +68,28 @@ function Segmented({
   disabled: boolean;
   status: FlowStageStatus;
   justActivatedValue: string | null;
+  lockedOptions?: Set<string>;
+  lockedTitle?: string;
   onChange: (value: string) => void;
 }) {
   return (
     <div className="flow-segmented" role="group">
       {options.map((option) => {
         const active = option === value;
+        const locked = lockedOptions?.has(option) ?? false;
         return (
           <button
             key={option}
             type="button"
-            className={`flow-segmented-option ${active ? "is-active" : ""} ${active && justActivatedValue === option ? "seg-flash" : ""} ${STATUS_CLASS[status]}`}
-            disabled={disabled || active}
+            className={`flow-segmented-option ${active ? "is-active" : ""} ${locked ? "is-locked" : ""} ${active && justActivatedValue === option ? "seg-flash" : ""} ${STATUS_CLASS[status]}`}
+            disabled={disabled || active || locked}
+            title={locked ? lockedTitle : undefined}
             onClick={(event) => {
               event.stopPropagation();
-              if (!active) onChange(option);
+              if (!active && !locked) onChange(option);
             }}
           >
+            {locked && <span className="flow-seg-lock"><LockIcon /></span>}
             {backendLabel(option, lang)}
           </button>
         );
@@ -112,7 +119,7 @@ function DepRow({
     <div className="flow-dep-row" onClick={(event) => event.stopPropagation()}>
       <span className="flow-dep-icon"><AlertIcon /></span>
       <div className="flow-dep-text">
-        <span className="flow-dep-name">{t("flow_missing_dep")}: {depName}</span>
+        <span className="flow-dep-name">{t(dep.required ? "flow_missing_required_dep" : "flow_missing_dep")}: {depName}</span>
         <code className="flow-dep-pip">{dep.pip_spec}</code>
       </div>
       <button
@@ -144,6 +151,7 @@ export function FlowNode({
   config,
   onSwitch,
   onQuickConfigSave,
+  onRefresh,
   onInstall,
   onRebuildIndex,
   onClose,
@@ -161,6 +169,7 @@ export function FlowNode({
   onSelect: () => void;
   onSwitch: (stage: PipelineStage, value: string) => void;
   onQuickConfigSave: (stageId: FlowStageId, updates: QuickConfigUpdate[]) => void;
+  onRefresh?: () => Promise<void>;
   onInstall: (dep: DependencyStatus) => void;
   onRebuildIndex: () => void;
   onClose?: () => void;
@@ -170,6 +179,7 @@ export function FlowNode({
   const id = stage.id as FlowStageId;
   const meta = STAGE_META[id];
   const canSwitch = Boolean(SWITCH_MAP[id]) && stage.candidates.length > 1;
+  const lockedOptions = id === "vector_store" ? new Set(["astr"]) : undefined;
   const isDest = meta.kind === "dest";
   const isOff = stage.status === "off";
   const detailParts = buildDetailParts(stage, lang, t("flow_engines"));
@@ -220,6 +230,8 @@ export function FlowNode({
               disabled={saving}
               status={stage.status}
               justActivatedValue={justActivatedValue}
+              lockedOptions={lockedOptions}
+              lockedTitle={t("flow_vector_astr_locked")}
               onChange={(value) => onSwitch(stage, value)}
             />
           </Field>
@@ -248,6 +260,7 @@ export function FlowNode({
           t={t}
           saving={saving}
           onSave={onQuickConfigSave}
+          onRefresh={onRefresh}
         />
 
         {missingDeps.map((dep) => (

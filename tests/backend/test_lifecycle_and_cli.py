@@ -209,7 +209,13 @@ async def test_default_initializer_starts_without_optional_feature_packages(
         assert initializer.vector_store is None
         assert initializer.lightrag_registry is None
         diagnostics = initializer.config.get_diagnostics()
-        assert sum("requirements-additional.txt" in item for item in diagnostics) >= 2
+        # 可选特性缺包仍给出可执行指引：local embedding 指向 requirements-additional.txt；
+        # Milvus Lite 自 v0.24.6 起为必装依赖，缺失时改提示 requirements.txt + AstrBot 兜底。
+        assert any("requirements-additional.txt" in item for item in diagnostics)
+        assert any(
+            "Milvus Lite is a required dependency from requirements.txt" in item
+            for item in diagnostics
+        )
         await initializer.teardown()
 
 

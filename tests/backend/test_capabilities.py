@@ -54,6 +54,8 @@ def test_dependency_statuses_cover_all_optional(monkeypatch: pytest.MonkeyPatch)
     assert {d["key"] for d in deps} == {
         "local_embedding", "milvus", "lightrag", "r2"
     }
+    assert next(d for d in deps if d["key"] == "milvus")["required"] is True
+    assert next(d for d in deps if d["key"] == "lightrag")["required"] is False
     assert all(d["installed"] is False for d in deps)
 
 

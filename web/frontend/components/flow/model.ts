@@ -145,6 +145,7 @@ export const EDGES: FlowEdge[] = [
 
 const BACKEND_LABEL_ZH: Record<string, string> = {
   local: "本地离线",
+  server: "服务器 API",
   external: "云端 API",
   milvus: "Milvus Lite",
   astr: "AstrBot KB",
@@ -165,6 +166,7 @@ const BACKEND_LABEL_ZH: Record<string, string> = {
 
 const BACKEND_LABEL_EN: Record<string, string> = {
   local: "Local",
+  server: "Server API",
   external: "Cloud API",
   milvus: "Milvus Lite",
   astr: "AstrBot KB",

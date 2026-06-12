@@ -21,6 +21,52 @@
 
 ---
 
+## [Unreleased]
+
+### 新增功能 (Added)
+
+- **Zotero 快速配置改为标签式可切换面板**：数据流 Zotero 节点不再用下拉框切换 access_mode，改为仿文档面板 md/pdf 的分段标签（`本地离线` / `在线 API`）。本地页签含端口、自动解析目录（截断 + hover）、覆盖目录选择 + 诊断行；在线页签含 API key 保存/清除 + 用户徽标。`sync_mode / storage_mode / linked_root / 自动同步` 收进折叠「高级」区；底部新增「立即同步 + 上次同步状态」动作条（`web/frontend/components/flow/ZoteroQuickConfig.tsx`、`web/frontend/components/flow/QuickConfigPanel.tsx`）。
+- **Zotero 本地干跑探针**：新增 `ZoteroSyncPipeline.probe_local_read()`（只读 zotero.sqlite 快照、返回条目/集合/附件/PDF 计数，不 mirror/不写库；server 模式跳过），`api.probe_zotero_local()` 合并端口连通性与计数，新增 `GET /api/zotero/probe` 路由（`core/pipelines/zotero_sync_pipeline.py`、`core/api.py`、`web/server.py`）。
+- **前端探针客户端**：`lib/api.ts` 新增 `ZoteroProbeResult` 接口与 `probeZoteroLocal()`（含 mock 分支）；`lib/i18n.ts` 中英补齐标签 / 探针 / 同步相关键（`web/frontend/lib/api.ts`、`web/frontend/lib/i18n.ts`）。
+
+### 架构健康 (Refactor)
+
+- **QuickConfigPanel 拆分**：`QuickConfigPanel` 退化为按阶段分发的 dispatcher，Zotero 阶段交给独立的 `ZoteroQuickConfig`；共享字段原语（`FieldControl`、字段构造器、读取辅助）从 `QuickConfigPanel` 导出复用，主文件由 600 行降至约 525 行，回到文件大小红线内（`web/frontend/components/flow/QuickConfigPanel.tsx`、`web/frontend/components/flow/ZoteroQuickConfig.tsx`）。
+
+### 样式 (Style)
+
+- 新增 `.flow-quick-modetab`、`.flow-quick-diag`、`.flow-quick-advanced`、`.flow-quick-syncbar` 等 token，统一标签切换 / 诊断行 / 折叠区 / 同步条视觉（`web/frontend/styles/tokens.css`）。
+
+### 测试 (Tests)
+
+- `test_zotero_sync.py` 新增 `probe_local_read` 三例（计数、缺目录、server 跳过）；`test_web_server.py` 新增 `/api/zotero/probe` 路由 smoke（`tests/backend/test_zotero_sync.py`、`tests/backend/test_web_server.py`）。
+
+## [v0.24.6] — 2026-06-11
+
+### 新增功能 (Added)
+
+- **Milvus Lite 升级为必装依赖**：`requirements.txt` 将 `pymilvus[milvus_lite]>=2.5,<3.0` 从可选升为必装；`core/capabilities.py` 的 `OptionalDependency` 标记 `required=True`，前端依赖状态区区分必需 / 可选语义（`requirements.txt`、`core/capabilities.py`）。
+- **AstrBot KB 前端锁定**：`FlowNode.tsx` 在 `vector_store` 阶段 segmented control 中将 `"astr"` 选项设为 locked/disabled，附带锁图标和 i18n tooltip，AstrBot KB 仅保留为后端兜底代码，不可在前端选择（`web/frontend/components/flow/FlowNode.tsx`、`web/frontend/lib/i18n.ts`）。
+- **WorkflowModal 全屏**：modal 改为 `fullscreen` 模式，`width: 100vw`、`height: 100vh`，内容区 flex 铺满视口（`web/frontend/components/modals/WorkflowModal.tsx`）。
+- **FlowPageContent 5 秒自动刷新，删除 recheck 按钮**：移除手动"重新检测"按钮；面板打开期间每 5 秒自动调用 `recheckDependencies()` + `getEffectiveConfig()` + `getZoteroConfig()`，带 `refreshInFlight` 并发保护与卸载清理（`web/frontend/components/panels/FlowPageContent.tsx`）。
+- **状态图例移到 header 右侧**：原 recheck 按钮位置改为 `.flow-topo-status-panel`，展示就绪 / 待处理 / 未启用图例、并联提示和"每 5 秒自动刷新状态"提示（`web/frontend/components/panels/FlowPageContent.tsx`、`web/frontend/styles/tokens.css`）。
+- **TopBar 5 秒健康轮询**：TopBar 挂载后每 5 秒调用 `getCapabilities()` + `deriveWorkflowStatus()`，关键环节 degraded 时按钮变红；不再只在挂载时检测一次（`web/frontend/components/layout/TopBar.tsx`）。
+- **Zotero 加密密钥存储**：新增 `core/secret_store.py`（`EncryptedSecretStore`）；Zotero API key 以加密形式落盘，API 响应只返回掩码，不返回明文；新增 `POST /api/zotero/server-key`（验证 + 保存）和 `DELETE /api/zotero/server-key`（`web/server.py`、`core/api.py`、`core/secret_store.py`）。
+- **Zotero Web API reader**：新增 `core/adapters/zotero/web_api.py`（`ZoteroWebApiClient`、`ZoteroWebApiReader`），按官方 Web API v3 读取个人库文献、附件元数据；同步管线按 `access_mode=local|server` 分支路由（`core/adapters/zotero/web_api.py`、`core/pipelines/zotero_sync_pipeline.py`）。
+- **Zotero 快速配置重做**：`QuickConfigPanel.tsx` 中 Zotero 阶段支持 local / server 双模式；local 显示端口（默认 23119）与自动解析目录（截断 + hover 全路径）；server 显示 password 输入、掩码状态、保存 / 清除按钮，带 `?` 角标问号提示（`web/frontend/components/flow/QuickConfigPanel.tsx`）。
+- **LightRAG LLM 只读摘要**：LightRAG 快速配置中 LLM 模型改为 `readonlyField`，显示 `<provider - model>` 格式；LLM 地址（base_url）字段已移除（`web/frontend/components/flow/QuickConfigPanel.tsx`）。
+- **Zotero 节点横向拉宽**：数据流图 col 1（Zotero 列）从 380px 扩大至 480px；输入框、只读字段、toggle、custom-select 控件 padding / min-height 各降 2–4px；resolved_data_dir 改为 1/3 列宽并添加 hover 全路径 title（`web/frontend/styles/tokens.css`、`web/frontend/components/flow/QuickConfigPanel.tsx`）。
+
+## [v0.24.5] — 2026-06-11
+
+### 新增功能 (Added)
+
+- **设置模态框「通用」Tab**：将原「外观」Tab 改名为「通用」，新增「账户」Card，内含退出登录按钮（`web/frontend/components/modals/SettingModal.tsx`、`web/frontend/lib/i18n.ts`）。
+- **TopBar 精简**：语言切换和退出登录 IconButton 移入设置弹窗，TopBar 右侧仅保留「设置」「AstrBot」「数据流」三个触发按键（`web/frontend/components/layout/TopBar.tsx`、`web/frontend/app/(console)/layout.tsx`）。
+- **数据流按键状态脉冲**：挂载时拉取 `/api/capabilities` + `/api/zotero/config`，判断管道就绪状态与 R2/Zotero 配置，按钮外层包裹 `wf-pulse-red`（1.2 s 强脉冲）/ `wf-pulse-green`（2.4 s 弱脉冲）/ `wf-pulse-purple`（2.4 s 弱脉冲）CSS class（`web/frontend/app/globals.css`、`web/frontend/components/layout/TopBar.tsx`）。
+- **Ask 输入框辉光轨道**：Composer `<div>` 接入已有的 `.ask-card` / `.ask-card--collection` / `.ask-card--loading` CSS class，focus 时出现旋转辉光轨道，加载时切换为强辉光（`web/frontend/components/panels/ChatPanel.tsx`）。
+- **查询设置锁定**：`graph_only` 和 `high_precision` 在非 `lr:` 集合时以 38% 透明度不可点击；新增「全文检索」模式（`fulltext`），仅在选中单篇文章时启用，文档上限 60 000 字符（`web/frontend/components/panels/ChatPanel.tsx`、`web/frontend/lib/api.ts`、`web/frontend/lib/i18n.ts`）。
+
 ## [v0.24.3] — 2026-06-11
 
 ### 新增功能 (Added)
@@ -50,6 +96,10 @@
 
 ### 修复 (Fixed)
 
+- **Docker 内 3000 前端预览启动链路加固**：devcontainer 镜像定义从 NodeSource `setup_18.x` 升级到 `setup_20.x`，并在 Docker 层发布 `3000:3000` 与 `6520:6520`，避免 `next@16.2.6` 在 Node 18 中直接失败，以及 3000/6520 依赖编辑器端口转发导致的不稳定（`D:\dev-workspace\.devcontainer\Dockerfile`, `D:\dev-workspace\.devcontainer\devcontainer.json`）。
+- **devcontainer Dockerfile 编码修复**：将 `D:\dev-workspace\.devcontainer\Dockerfile` 与 `devcontainer.json` 重写为 UTF-8 无 BOM，修复 Dev Containers 生成 `Dockerfile-with-features` 后在 `FROM` 前出现隐藏字符，导致 Docker 报 `unknown instruction: FROM` 的问题。
+- **`rebuild.sh` Docker 运行自检与固定监听地址**：脚本启动第 0 步校验 Node `>=20.9.0`，Node 或 lockfile 变化时自动刷新 `node_modules`，并在缺少 `aiohttp` 或 `requirements.txt` 更新时自动安装轻量后端依赖；后端以 `0.0.0.0:6520` 启动，前端 dev server 以 `0.0.0.0:3000` 启动，健康检查和输出统一使用 `http://127.0.0.1:*`，避免 `localhost` 命中宿主机 IPv6 旧进程（`rebuild.sh`）。
+- **Next dev manifest 500 修复**：生产 build 继续保留 `NEXT_TEST_WASM=1` 规避 Windows bind mount lock 问题，但 dev server 不再设置该变量；Node 20/Linux 容器下强制 WASM 会导致 `.next/dev/routes-manifest.json` 与 `middleware-manifest.json` 缺失并使 3000 返回 500（`rebuild.sh`）。
 - **`rebuild.sh` 一键重建失败、3000 端口无前端内容**：根因是 stale TS 增量缓存 `web/frontend/tsconfig.tsbuildinfo` 仍记录已删除的 `app/api/[...proxy]/route.ts`，生产构建读取该缓存时 `ENOENT` 失败；脚本 `set -e` 在第 3 步即中断，dev server 永远不启动。修复：
   - `web/frontend/package.json` 的 `dev` / `build` 脚本在编译前追加清理 `tsconfig.tsbuildinfo`（`rm -rf .next tsconfig.tsbuildinfo`），令二者自愈。
   - `rebuild.sh` 第 3 步构建前再显式 `rm -f tsconfig.tsbuildinfo`（防 `package.json` 被回退）。
@@ -57,7 +107,12 @@
 
 ### 构建与工程 (Build/CI)
 
-- `rebuild.sh` 修正 dev 启动注释（WASM 模式下 Next.js 直接跳过 `.next/lock` 的 flock，规避 WSL2 drvfs 不支持文件锁导致的 `Permission denied (os error 13)`），移除指向错误路径的 `rm -f .next/dev/lock`；前端就绪等待超时由 60s 放宽到 120s 以容忍首次冷编译（`rebuild.sh`）。
+- devcontainer 必须重建后才会应用 Node 20 与 `3000/6520` Docker 端口发布；当前旧容器验证结果为 `bash -n rebuild.sh` 通过，`bash rebuild.sh` 在 Node `18.20.8` 下按预期输出版本不兼容并退出 `1`（`rebuild.sh`）。
+- `docker buildx build --check -f D:\dev-workspace\.devcontainer\Dockerfile D:\dev-workspace\.devcontainer` → passed，确认 Dockerfile 解析层已恢复。
+- 处理 devcontainer 启动时 `ports are not available: 0.0.0.0:3000`：确认宿主机旧 `node` PID `30940` 占用 3000，停止后删除失败遗留的 Created 容器 `316ddf1cea6c`；`docker run --rm -p 6186:6185 -p 3000:3000 -p 6520:6520 --entrypoint /bin/true ...` → passed。
+- devcontainer slim 镜像补装 `procps`，确保后续镜像中 `pkill` 可用；`rebuild.sh` 同时提供 `/proc` Python fallback 以兼容当前未重建的容器（`D:\dev-workspace\.devcontainer\Dockerfile`, `rebuild.sh`）。
+- `bash rebuild.sh` → passed，Node `20.20.2`，Next build 11 static routes，`python3 tools/sync_frontend.py --check` → passed；宿主机 `curl.exe -I http://127.0.0.1:3000/` 与 `curl.exe -I http://127.0.0.1:6520/` 均 `200 OK`。
+- `rebuild.sh` 保留生产 build 阶段的 `NEXT_TEST_WASM=1` 以规避 Windows bind mount lock 问题；dev 阶段改回原生 Next.js 启动以保证 `.next/dev` manifest 完整生成；前端就绪等待超时由 60s 放宽到 120s 以容忍首次冷编译（`rebuild.sh`）。
 - 端到端验证：`bash rebuild.sh` → exit 0，后端 6520 与前端 dev 3000 均 `200`，`/api/*` 经 `next.config.ts` rewrites 正常代理到后端（aiohttp 401 鉴权门）。
 
 ## [v0.24.1] - 2026-06-11

@@ -119,6 +119,9 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
   return (
     <div
       style={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
         border: "1px solid var(--border)",
         borderRadius: "var(--radius-lg)",
         overflow: "hidden",
@@ -182,7 +185,7 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
         <IconButton name="maximize" label="适合宽度" onClick={fitWidth} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: annotations.length ? "minmax(0, 1fr) 260px" : "1fr" }}>
+      <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
         <div
           ref={viewportRef}
           onScroll={() => {
@@ -201,10 +204,11 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
             if (closest !== currentPage) setCurrentPage(closest);
           }}
           style={{
-            height: "72vh",
+            flex: 1,
+            minHeight: 0,
             overflow: "auto",
             background: "var(--bg)",
-            padding: "20px 22px",
+            padding: "10px 14px",
           }}
         >
           {loading && <PdfState label="Loading PDF" />}
@@ -236,9 +240,10 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
         {annotations.length > 0 && (
           <aside
             style={{
+              width: 260,
+              flexShrink: 0,
               borderLeft: "1px solid var(--border)",
               background: "var(--surface)",
-              height: "72vh",
               overflow: "auto",
               padding: 12,
             }}

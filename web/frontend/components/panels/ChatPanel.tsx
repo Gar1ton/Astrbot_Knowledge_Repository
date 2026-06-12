@@ -17,7 +17,7 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────
 
-type RetrievalMode = "default" | "high_precision" | "graph_only";
+type RetrievalMode = "default" | "high_precision" | "graph_only" | "fulltext";
 
 interface Message {
   id?: number;
@@ -440,7 +440,7 @@ function getOrCreateConvId(): string {
   return id;
 }
 
-export function ChatPanel() {
+export function ChatPanel({ width }: { width?: number }) {
   const { selectedCollection, selectedDocId, setSelectedDocId, setHighlightedChunk } = useConsole();
   const { t } = useI18n();
   const { toast } = useToast();
@@ -515,6 +515,10 @@ export function ChatPanel() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
+  useEffect(() => {
+    if (!selectedDocId && retrievalMode === "fulltext") setRetrievalMode("default");
+  }, [selectedDocId, retrievalMode]);
+
   function handleCite(msg: Message, n: number) {
     const src = msg.sources?.find((s) => s.n === n);
     if (!src) return;
@@ -572,7 +576,7 @@ export function ChatPanel() {
 
   async function submitQuestion(question: string, mode: RetrievalMode, appendUser: boolean) {
     if (loading) return;
-    if ((mode === "high_precision" || mode === "graph_only") && !graphModeReady) {
+    if (mode === "fulltext" && !selectedDocId) {
       toast(t("chat_graph_requires_collection"), "info");
       return;
     }
@@ -585,6 +589,7 @@ export function ChatPanel() {
       const result: AskResult = await ask({
         question,
         collection: collectionName ?? null,
+        doc_id: mode === "fulltext" ? selectedDocId : null,
         top_k: 5,
         conversation_id: conversationId,
         persona_enabled: personaEnabled,
@@ -671,7 +676,7 @@ export function ChatPanel() {
   return (
     <section
       style={{
-        width: "var(--chat-w)",
+        width: width ?? "var(--chat-w)",
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
@@ -787,13 +792,12 @@ export function ChatPanel() {
 
         <form onSubmit={handleSend}>
           <div
-            style={{
-              border: "1px solid var(--border-strong)",
-              borderRadius: "var(--radius-lg)",
-              background: "var(--surface)",
-              padding: 8,
-              boxShadow: "var(--shadow-card)",
-            }}
+            className={[
+              "ask-card",
+              collectionName ? "ask-card--collection" : "",
+              loading ? "ask-card--loading" : "",
+            ].filter(Boolean).join(" ")}
+            style={{ padding: 8 }}
           >
             <textarea
               value={input}
@@ -860,17 +864,18 @@ export function ChatPanel() {
                     <div style={{ padding: "4px 8px 6px" }}>
                       {(
                         [
-                          { value: "default" as const, label: t("chat_retrieval_semantic"), desc: t("chat_retrieval_semantic_desc") },
-                          { value: "graph_only" as const, label: t("chat_retrieval_graph"), desc: t("chat_retrieval_graph_desc") },
-                          { value: "high_precision" as const, label: t("chat_retrieval_hybrid"), desc: t("chat_retrieval_hybrid_desc") },
-                        ] as const
-                      ).map(({ value, label, desc }) => {
+                          { value: "default" as RetrievalMode,        label: t("chat_retrieval_semantic"), desc: t("chat_retrieval_semantic_desc"), disabled: false },
+                          { value: "graph_only" as RetrievalMode,     label: t("chat_retrieval_graph"),    desc: t("chat_retrieval_graph_desc"),    disabled: !isLightRAG },
+                          { value: "high_precision" as RetrievalMode, label: t("chat_retrieval_hybrid"),   desc: t("chat_retrieval_hybrid_desc"),   disabled: !isLightRAG },
+                          { value: "fulltext" as RetrievalMode,       label: t("chat_retrieval_fulltext"), desc: t("chat_retrieval_fulltext_desc"), disabled: !selectedDocId },
+                        ]
+                      ).map(({ value, label, desc, disabled }) => {
                         const selected = retrievalMode === value;
                         return (
                           <button
                             key={value}
                             type="button"
-                            onClick={() => setRetrievalMode(value)}
+                            onClick={() => { if (!disabled) setRetrievalMode(value); }}
                             style={{
                               display: "flex",
                               alignItems: "center",
@@ -880,8 +885,9 @@ export function ChatPanel() {
                               borderRadius: 7,
                               background: selected ? "var(--accent-soft)" : "transparent",
                               border: "none",
-                              cursor: "pointer",
+                              cursor: disabled ? "not-allowed" : "pointer",
                               textAlign: "left",
+                              opacity: disabled ? 0.38 : 1,
                             }}
                           >
                             <span

@@ -1,11 +1,13 @@
 # AstrBot 会自动安装本文件中的每一项，因此这里只保留首次安装所需的轻量依赖。
-# Milvus、本地 Embedding、LightRAG、R2 与开发依赖位于 requirements-additional.txt，
-# 避免自动拉取 PyTorch/CUDA 等大型 wheel。
+# 本地 Embedding、LightRAG、R2 与开发依赖位于 requirements-additional.txt，
+# 避免自动拉取 PyTorch/CUDA 等大型 wheel；Milvus Lite 是默认向量库，作为必装依赖保留在本文件。
 
 aiosqlite                  # SQLite 事实源与分块仓储
 PyMuPDF>=1.24,<2.0         # PDF 原件处理；pymupdf4llm 的运行时依赖
 pymupdf4llm>=0.0.17,<0.1.0 # PDF → 干净 Markdown 清洗内核（pinned）
 aiohttp                    # 独立 Web 控制台、外部 Embedding HTTP 客户端
+pymilvus[milvus_lite]>=2.5,<3.0  # Milvus Lite 向量库，默认且必装
+cryptography>=42,<47       # 本地 secret 加密存储（Zotero Web API key）
 
-# 默认配置优先使用 Milvus；未安装可选运行时时会明确回退到 AstrBot/SQLite 词汇召回。
+# 默认配置优先使用 Milvus；后端仍保留 AstrBot/SQLite 检索兜底。
 # Notion 同步经 AstrBot 已配置的 notion MCP server，无需 notion-sdk。

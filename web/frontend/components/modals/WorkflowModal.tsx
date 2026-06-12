@@ -16,7 +16,8 @@ export function WorkflowModal({ onClose }: WorkflowModalProps) {
       title={t("workflow_modal_title")}
       icon="flow"
       onClose={onClose}
-      style={{ width: "calc(100vw - 32px)", height: "calc(100vh - 32px)" }}
+      fullscreen
+      style={{ width: "100vw", height: "100vh" }}
       contentStyle={{
         flex: "1 1 auto",
         minHeight: 0,

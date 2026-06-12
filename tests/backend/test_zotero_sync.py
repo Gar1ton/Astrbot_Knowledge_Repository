@@ -275,3 +275,47 @@ async def test_pull_linked_keeps_original_external(tmp_path: Path) -> None:
     assert not (tmp_path / "plugin" / "library" / DOC_ID / "original.pdf").exists()
     # 但派生制品 clean.md 仍在插件内
     assert (tmp_path / "plugin" / "library" / DOC_ID / "clean.md").exists()
+
+
+# ── pipeline: 本地干跑探针 ───────────────────────────────────────
+
+
+def test_probe_local_read_counts_without_mirroring(tmp_path: Path) -> None:
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    _build_zotero_db(data_dir)
+    store, pipeline, _, _ = _pipeline(tmp_path, data_dir, "conservative")
+
+    probe = pipeline.probe_local_read()
+
+    assert probe["available"] is True
+    assert probe["item_count"] == 1
+    assert probe["collection_count"] == 1
+    assert probe["attachment_count"] == 1
+    assert probe["pdf_attachment_count"] == 1
+    # 干读：不写入 source_store
+    assert store._documents == {}  # type: ignore[attr-defined]
+
+
+def test_probe_local_read_missing_data_dir(tmp_path: Path) -> None:
+    _, pipeline, _, _ = _pipeline(tmp_path, tmp_path / "nonexistent", "conservative")
+    probe = pipeline.probe_local_read()
+    assert probe["available"] is False
+    assert "zotero.sqlite" in str(probe["reason"])
+
+
+def test_probe_local_read_server_mode_is_skipped(tmp_path: Path) -> None:
+    from core.config import Config, SourceStoreConfig
+    from core.managers.ingest_manager import IngestManager
+    from core.repository.source_store.memory import InMemorySourceDocumentStore
+
+    store = InMemorySourceDocumentStore()
+    ingest = IngestManager(
+        source_store=store, config=SourceStoreConfig(), data_dir=tmp_path / "plugin"
+    )
+    cfg = Config({"zotero_sync": {"enabled": True, "access_mode": "server"}})
+    pipeline = ZoteroSyncPipeline(source_store=store, ingest_manager=ingest, config=cfg)
+
+    probe = pipeline.probe_local_read()
+    assert probe["available"] is False
+    assert "本地" in str(probe["reason"])

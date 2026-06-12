@@ -10,9 +10,12 @@ import {
   getDocumentAnnotations,
   getDocumentNotes,
   listDocuments,
+  syncZoteroPull,
+  updateDocumentMeta,
   type DocumentNote,
   type KrDocument,
   type ZoteroAnnotation,
+  type ZoteroMeta,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
@@ -108,16 +111,181 @@ function MetaRow({ k, v, mono, link }: { k: string; v?: string | null; mono?: bo
   );
 }
 
+// ─── MetaEditForm ─────────────────────────────────────────────
+
+type MetaDraft = Partial<ZoteroMeta> & { title?: string };
+
+function MetaEditForm({
+  draft,
+  saving,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  draft: MetaDraft;
+  saving: boolean;
+  onChange: (d: MetaDraft) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const { t } = useI18n();
+  const fieldStyle: React.CSSProperties = {
+    width: "100%",
+    fontSize: 12,
+    fontFamily: "var(--font-sans)",
+    color: "var(--fg)",
+    background: "var(--bg-inset)",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-sm)",
+    padding: "4px 7px",
+    outline: "none",
+    boxSizing: "border-box",
+  };
+  const labelStyle: React.CSSProperties = {
+    fontSize: 10.5,
+    color: "var(--fg-subtle)",
+    marginBottom: 3,
+    display: "block",
+  };
+  const rowStyle: React.CSSProperties = { marginBottom: 8 };
+  const creatorsValue = Array.isArray(draft.creators)
+    ? draft.creators.join("\n")
+    : (draft.creators as string | undefined) ?? "";
+
+  return (
+    <div
+      style={{
+        background: "var(--bg-inset)",
+        border: "1px solid var(--border-strong)",
+        borderRadius: "var(--radius-md)",
+        padding: "10px 12px",
+        marginBottom: 12,
+      }}
+    >
+      <div style={rowStyle}>
+        <label style={labelStyle}>{t("note_meta_title")}</label>
+        <input
+          style={fieldStyle}
+          value={draft.title ?? ""}
+          onChange={(e) => onChange({ ...draft, title: e.target.value })}
+        />
+      </div>
+      <div style={rowStyle}>
+        <label style={labelStyle}>{t("note_meta_authors")} ({t("note_meta_authors_hint")})</label>
+        <textarea
+          style={{ ...fieldStyle, resize: "none", lineHeight: 1.5 }}
+          rows={3}
+          value={creatorsValue}
+          onChange={(e) => onChange({ ...draft, creators: e.target.value as unknown as string[] })}
+        />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+        <div>
+          <label style={labelStyle}>{t("note_meta_year")}</label>
+          <input style={fieldStyle} value={draft.year ?? ""} onChange={(e) => onChange({ ...draft, year: e.target.value })} />
+        </div>
+        <div>
+          <label style={labelStyle}>{t("note_meta_journal")}</label>
+          <input style={fieldStyle} value={draft.venue ?? ""} onChange={(e) => onChange({ ...draft, venue: e.target.value })} />
+        </div>
+      </div>
+      <div style={rowStyle}>
+        <label style={labelStyle}>DOI</label>
+        <input style={{ ...fieldStyle, fontFamily: "var(--font-mono)" }} value={draft.doi ?? ""} onChange={(e) => onChange({ ...draft, doi: e.target.value })} />
+      </div>
+      <div style={rowStyle}>
+        <label style={labelStyle}>{t("documents_abstract")}</label>
+        <textarea
+          style={{ ...fieldStyle, resize: "none", lineHeight: 1.55 }}
+          rows={4}
+          value={draft.abstract ?? ""}
+          onChange={(e) => onChange({ ...draft, abstract: e.target.value })}
+        />
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+        <button
+          onClick={onCancel}
+          style={{
+            fontSize: 11, padding: "4px 10px", borderRadius: "var(--radius-pill)",
+            border: "1px solid var(--border)", background: "transparent",
+            color: "var(--fg-muted)", cursor: "pointer", fontFamily: "var(--font-sans)",
+          }}
+        >
+          {t("btn_cancel")}
+        </button>
+        <button
+          onClick={onSave}
+          disabled={saving}
+          style={{
+            fontSize: 11, padding: "4px 10px", borderRadius: "var(--radius-pill)",
+            border: "none", background: "var(--accent)", color: "var(--accent-fg)",
+            cursor: saving ? "wait" : "pointer", fontWeight: 600, fontFamily: "var(--font-sans)",
+            opacity: saving ? 0.7 : 1,
+          }}
+        >
+          {t("btn_save")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── NotePanel ────────────────────────────────────────────────
 
 export function NotePanel({ docId }: { docId: string }) {
-  const { setNoteDocId, selectedCollection } = useConsole();
+  const { setNoteDocId, setSelectedDocId, selectedCollection } = useConsole();
   const { t, lang } = useI18n();
   const [doc, setDoc] = useState<KrDocument | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [notes, setNotes] = useState<DocumentNote[]>([]);
   const [newNote, setNewNote] = useState("");
   const [addingNote, setAddingNote] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [editingMeta, setEditingMeta] = useState(false);
+  const [metaDraft, setMetaDraft] = useState<Partial<ZoteroMeta> & { title?: string }>({});
+  const [savingMeta, setSavingMeta] = useState(false);
+
+  async function handleZoteroSync() {
+    if (syncing) return;
+    setSyncing(true);
+    try { await syncZoteroPull(true); } catch { /* ignore */ } finally { setSyncing(false); }
+  }
+
+  function handleBack() {
+    setSelectedDocId(null);
+    setNoteDocId(null);
+  }
+
+  function openMetaEdit() {
+    const m = doc?.zotero_meta;
+    setMetaDraft({
+      title: doc?.title ?? "",
+      creators: m?.creators ?? [],
+      year: m?.year ?? "",
+      venue: m?.venue ?? "",
+      doi: m?.doi ?? "",
+      abstract: m?.abstract ?? "",
+    });
+    setEditingMeta(true);
+  }
+
+  async function handleSaveMeta() {
+    if (!doc) return;
+    setSavingMeta(true);
+    try {
+      const payload: Partial<ZoteroMeta> & { title?: string } = {
+        ...metaDraft,
+        creators: typeof metaDraft.creators === "string"
+          ? (metaDraft.creators as string).split("\n").map((s) => s.trim()).filter(Boolean)
+          : (metaDraft.creators ?? []),
+      };
+      const updated = await updateDocumentMeta(docId, payload);
+      setDoc(updated);
+      setEditingMeta(false);
+    } catch { /* ignore */ } finally {
+      setSavingMeta(false);
+    }
+  }
 
   const colName = selectedCollection?.replace(/^(z:|l:|lr:)/, "");
 
@@ -219,7 +387,32 @@ export function NotePanel({ docId }: { docId: string }) {
         >
           {doc ? (doc.origin === "zotero" ? t("file_zotero_sync") : t("note_source_local")) : t("panel_loading")}
         </span>
-        <IconButton name="x" label={t("note_close_to_file")} onClick={() => setNoteDocId(null)} />
+        {doc?.origin === "local" && !editingMeta && (
+          <IconButton name="edit" label={t("note_edit_meta")} onClick={openMetaEdit} />
+        )}
+        <IconButton name="sync" label={t("file_action_zotero_sync")} onClick={handleZoteroSync} active={syncing} />
+        <button
+          onClick={handleBack}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 3,
+            height: 24,
+            padding: "0 8px",
+            borderRadius: "var(--radius-sm)",
+            border: "1px solid var(--border-strong)",
+            background: "var(--surface)",
+            boxShadow: "var(--shadow-card)",
+            cursor: "pointer",
+            fontSize: 11,
+            fontWeight: 600,
+            color: "var(--fg)",
+            fontFamily: "var(--font-sans)",
+          }}
+        >
+          <Icon name="chevL" size={11} />
+          {t("note_back_to_list")}
+        </button>
       </header>
 
       {/* Body */}
@@ -242,14 +435,26 @@ export function NotePanel({ docId }: { docId: string }) {
               {doc.title ?? doc.filename ?? t("panel_untitled")}
             </div>
 
-            {meta?.creators && meta.creators.length > 0 && (
-              <MetaRow k={t("note_meta_authors")} v={meta.creators.join(", ")} />
+            {editingMeta ? (
+              <MetaEditForm
+                draft={metaDraft}
+                saving={savingMeta}
+                onChange={setMetaDraft}
+                onSave={handleSaveMeta}
+                onCancel={() => setEditingMeta(false)}
+              />
+            ) : (
+              <>
+                {meta?.creators && meta.creators.length > 0 && (
+                  <MetaRow k={t("note_meta_authors")} v={meta.creators.join(", ")} />
+                )}
+                <MetaRow k={t("note_meta_year")} v={meta?.year ? String(meta.year) : undefined} />
+                <MetaRow k={t("note_meta_journal")} v={meta?.venue} />
+                <MetaRow k="DOI" v={meta?.doi} link mono />
+                <MetaRow k={t("note_meta_type")} v={meta?.item_type} />
+                <MetaRow k="Doc ID" v={doc.doc_id} mono />
+              </>
             )}
-            <MetaRow k={t("note_meta_year")} v={meta?.year ? String(meta.year) : undefined} />
-            <MetaRow k={t("note_meta_journal")} v={meta?.venue} />
-            <MetaRow k="DOI" v={meta?.doi} link mono />
-            <MetaRow k={t("note_meta_type")} v={meta?.item_type} />
-            <MetaRow k="Doc ID" v={doc.doc_id} mono />
 
             {doc.tags.length > 0 && (
               <>

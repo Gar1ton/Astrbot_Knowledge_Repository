@@ -9,8 +9,8 @@ import { useConsole } from "@/lib/ConsoleContext";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n, type I18nKey } from "@/lib/i18n";
 import {
-  AskResult, AskSource, ApiError, GraphBuildEstimate, GraphBuildJob,
-  ChatMessage, ask, buildGraph, estimateGraphBuild, getGraphBuildJob,
+  AskResult, AskSource, ApiError, GraphBuildEstimate,
+  ChatMessage, ask, buildGraph, estimateGraphBuild,
   listCollections, getChatHistory, clearChatHistory, lockChatAnswer,
   createDocumentNote, createCollectionNote,
 } from "@/lib/api";
@@ -35,7 +35,6 @@ interface PrecisionDialogState {
   estimate?: GraphBuildEstimate;
   canBuild: boolean;
   building?: boolean;
-  job?: GraphBuildJob;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -399,16 +398,6 @@ function PrecisionDialog({
             {state.estimate.estimate_notice}
           </div>
         )}
-        {state.job && (
-          <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.6 }}>
-            {t("chat_building_status", {
-              status: state.job.status,
-              done: state.job.processed_chunks ?? 0,
-              total: state.job.total_chunks ?? "?",
-            })}
-            {state.job.elapsed_seconds != null && ` · ${t("chat_elapsed")} ${formatDuration(state.job.elapsed_seconds)}`}
-          </div>
-        )}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
           <Button variant="ghost" size="sm" disabled={state.building} onClick={onCancel}>
             {t("btn_cancel")}
@@ -418,7 +407,7 @@ function PrecisionDialog({
           </Button>
           {state.canBuild && state.estimate && (
             <Button size="sm" loading={state.building} onClick={onBuild}>
-              {t("chat_build_and_continue")}
+              {t("chat_start_build")}
             </Button>
           )}
         </div>
@@ -647,16 +636,9 @@ export function ChatPanel({ width }: { width?: number }) {
     const pending = precisionDialog;
     setPrecisionDialog({ ...pending, building: true });
     try {
-      let job = await buildGraph(pending.collection);
-      setPrecisionDialog((cur) => cur ? { ...cur, job } : cur);
-      while (!["success", "partial_failure", "error"].includes(job.status)) {
-        await new Promise((res) => setTimeout(res, 1200));
-        job = await getGraphBuildJob(job.job_id);
-        setPrecisionDialog((cur) => cur ? { ...cur, job } : cur);
-      }
-      if (job.status !== "success") throw new Error(job.recent_error ?? `build ended with ${job.status}`);
+      await buildGraph(pending.collection);
       setPrecisionDialog(null);
-      await submitQuestion(pending.question, "high_precision", false);
+      toast(t("chat_build_started_file_panel"), "ok");
     } catch (err) {
       setPrecisionDialog((cur) =>
         cur ? { ...cur, building: false, reason: err instanceof Error ? err.message : t("error_generic") } : cur,

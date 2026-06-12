@@ -38,6 +38,9 @@ _QUERY_MODES = {"local", "global", "hybrid", "naive", "mix", "bypass"}
 _LLM_PROGRESS_CALLBACK: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "kr_lightrag_llm_progress_callback", default=None
 )
+_LLM_PAUSE_GATE: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "kr_lightrag_pause_gate", default=None
+)
 
 
 @dataclass
@@ -57,15 +60,31 @@ class BuildJob:
     current_chunk_index: int = 0
     progress_basis: str = "lrag_chunks"
     started_at: float = field(default_factory=time.monotonic)
+    started_at_iso: str = ""
     finished_at: float | None = None
+    finished_at_iso: str | None = None
     recent_error: str = ""
     paused: bool = False
+    pause_requested: bool = False
+    paused_at: float | None = None
+    paused_at_iso: str | None = None
+    paused_seconds: float = 0
+    in_llm_call: bool = False
+    progress_current: int = 0
+    progress_total: int = 0
+    progress_label: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        elapsed = (self.finished_at or time.monotonic()) - self.started_at
+        elapsed_end = self.finished_at or self.paused_at or time.monotonic()
+        elapsed = max(0.0, elapsed_end - self.started_at - self.paused_seconds)
         avg = elapsed / self.processed_chunks if self.processed_chunks > 0 else None
         remaining_chunks = max(0, self.total_chunks - self.processed_chunks)
         eta = remaining_chunks * avg if avg is not None else None
+        progress_percent = (
+            round((self.progress_current / self.progress_total) * 100)
+            if self.progress_total > 0
+            else 0
+        )
         return {
             "job_id": self.job_id,
             "type": "lightrag_build",
@@ -74,6 +93,10 @@ class BuildJob:
             "status": self.status,
             "stage": self.stage,
             "paused": self.paused,
+            "pause_requested": self.pause_requested,
+            "pause_message": (
+                "等待当前 LLM 调用完成后暂停" if self.pause_requested else ""
+            ),
             "processed_docs": self.processed_docs,
             "failed_docs": self.failed_docs,
             "total_docs": self.total_docs,
@@ -83,9 +106,17 @@ class BuildJob:
             "current_doc_id": self.current_doc_id,
             "current_chunk_index": self.current_chunk_index,
             "progress_basis": self.progress_basis,
+            "progress_current": self.progress_current,
+            "progress_total": self.progress_total,
+            "progress_percent": progress_percent,
+            "progress_label": self.progress_label or self.stage,
             "elapsed_seconds": round(elapsed, 2),
             "average_seconds_per_chunk": round(avg, 2) if avg is not None else None,
             "estimated_remaining_seconds": round(eta, 2) if eta is not None else None,
+            "paused_seconds": round(self.paused_seconds, 2),
+            "paused_at": self.paused_at_iso,
+            "started_at": self.started_at_iso,
+            "finished_at": self.finished_at_iso,
             "recent_error": self.recent_error,
         }
 
@@ -107,7 +138,17 @@ class LightRAGLLMAdapter:
         del kwargs
         flattened = _flatten_history(history_messages or [])
         user_prompt = f"{flattened}\n\n{prompt}" if flattened else prompt
+        pause_gate = _LLM_PAUSE_GATE.get()
+        if callable(pause_gate):
+            await pause_gate("before_llm")
         started = time.monotonic()
+        _emit_llm_progress(
+            {
+                "status": "start",
+                "keyword_extraction": keyword_extraction,
+                "prompt_chars": len(user_prompt),
+            }
+        )
         try:
             result = await self._llm_adapter.generate(
                 user_prompt, system_prompt=system_prompt or "", allow_mock=False
@@ -298,11 +339,13 @@ class LightRAGCoreRegistry:
         *,
         lrag_chunks: list[str] | None = None,
         progress_callback: Any = None,
+        pause_gate: Any = None,
     ) -> None:
         async with self._get_collection_lock(collection):
             rag = await self.get(collection)
             chunks = lrag_chunks or []
             token = _LLM_PROGRESS_CALLBACK.set(progress_callback)
+            pause_token = _LLM_PAUSE_GATE.set(pause_gate)
             try:
                 if chunks and hasattr(rag, "ainsert_custom_chunks"):
                     _terminal(
@@ -320,6 +363,7 @@ class LightRAGCoreRegistry:
                     _terminal(f"ainsert done track_id={result!r}")
             finally:
                 _LLM_PROGRESS_CALLBACK.reset(token)
+                _LLM_PAUSE_GATE.reset(pause_token)
 
     async def query(
         self, collection: str, query: str, *, only_need_context: bool = False

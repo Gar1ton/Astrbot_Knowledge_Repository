@@ -39,6 +39,7 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._chunks: dict[str, list[DocumentChunk]] = {}
         self._sync_records: dict[tuple[str, SyncTargetKind], SyncRecord] = {}
         self._lightrag_status: dict[str, dict[str, str]] = {}
+        self._build_jobs: dict[str, dict] = {}
         # Zotero 镜像 + 页面 provenance（key 均含 library_id 命名空间）
         self._zlibraries: dict[str, ZoteroLibrary] = {}
         self._zcollections: dict[tuple[str, str], ZoteroCollection] = {}
@@ -270,15 +271,36 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
     # ── 图谱构建任务持久化（内存实现：进程重启后丢失，仅用于测试）───
 
     async def upsert_build_job(self, job: dict) -> None:
-        pass
+        stored = copy.deepcopy(job)
+        stored.setdefault("created_at", stored.get("started_at", ""))
+        self._build_jobs[str(stored["job_id"])] = stored
 
     async def list_build_jobs(
         self, collection: str | None = None, limit: int = 20
     ) -> list[dict]:
-        return []
+        jobs = list(self._build_jobs.values())
+        if collection is not None:
+            jobs = [job for job in jobs if job.get("collection") == collection]
+        jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
+        return [copy.deepcopy(job) for job in jobs[:limit]]
+
+    async def get_latest_resumable_build_job(self) -> dict | None:
+        jobs = [
+            job for job in self._build_jobs.values() if job.get("status") == "paused"
+        ]
+        if not jobs:
+            return None
+        jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
+        return copy.deepcopy(jobs[0])
 
     async def mark_interrupted_build_jobs(self) -> int:
-        return 0
+        count = 0
+        for job in self._build_jobs.values():
+            if job.get("status") in {"queued", "running", "pause_requested"}:
+                job["status"] = "interrupted"
+                job["stage"] = "interrupted"
+                count += 1
+        return count
 
     # ── Zotero 逻辑镜像 ──────────────────────────────────────────
 

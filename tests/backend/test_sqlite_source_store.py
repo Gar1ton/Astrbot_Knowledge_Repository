@@ -70,6 +70,38 @@ async def test_add_and_get_document(sqlite_store: SQLiteSourceDocumentStore) -> 
     assert await sqlite_store.get_document("missing") is None
 
 
+async def test_graph_build_job_pause_migration_defaults_and_cleanup() -> None:
+    conn = await aiosqlite.connect(":memory:")
+    await run_migrations(conn)
+    store = SQLiteSourceDocumentStore(conn)
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+    for status in ["queued", "running", "pause_requested", "paused"]:
+        await conn.execute(
+            "INSERT INTO graph_build_jobs (job_id, collection, status, stage, started_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (f"job-{status}", "papers", status, status, started),
+        )
+    await conn.commit()
+
+    jobs = {job["job_id"]: job for job in await store.list_build_jobs(limit=10)}
+    assert jobs["job-queued"]["pause_requested"] is False
+    assert jobs["job-queued"]["paused_at"] is None
+    assert jobs["job-queued"]["paused_seconds"] == 0
+    assert jobs["job-queued"]["progress_current"] == 0
+    assert jobs["job-queued"]["progress_total"] == 0
+
+    changed = await store.mark_interrupted_build_jobs()
+    jobs = {job["job_id"]: job for job in await store.list_build_jobs(limit=10)}
+    assert changed == 3
+    assert jobs["job-queued"]["status"] == "interrupted"
+    assert jobs["job-running"]["status"] == "interrupted"
+    assert jobs["job-pause_requested"]["status"] == "interrupted"
+    assert jobs["job-paused"]["status"] == "paused"
+    resumable = await store.get_latest_resumable_build_job()
+    assert resumable and resumable["job_id"] == "job-paused"
+    await conn.close()
+
+
 async def test_add_duplicate_raises(sqlite_store: SQLiteSourceDocumentStore) -> None:
     await sqlite_store.add_document(_doc("d1"))
     with pytest.raises(ValueError):

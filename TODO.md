@@ -44,6 +44,58 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.24.9 LightRAG 暂停持久化与进度修复 (completed)
+
+### User constraints / 约束
+
+- LightRAG 构建保持线性单队列，同一时间只允许一个活动构建。
+- 暂停状态必须持久化可恢复；重启后仍能看到 paused / pause_requested，并可从文件面板继续。
+- 暂停不打断当前 LLM 请求，等待当前回答完成后停在下一次 LLM / 下一步构建前，并明确提示用户“等待当前 LLM 完成后暂停”。
+- 构建进度统一放在文件面板；聊天面板不再显示构建中的阻塞弹窗。
+- 进度条必须覆盖 LRAG chunks 之后的文档收尾与 finalize，不允许 6/6 chunks 后提前显示完成。
+
+### Technical implementation path
+
+- [x] **P1 - 构建任务持久化模型**：扩展 `graph_build_jobs` 与 SourceDocumentStore build job 契约，保存 pause_requested / paused_at / paused_seconds / progress_current / progress_total，并保留 paused job 不被启动清理改成 interrupted。技术理由：暂停状态必须可跨刷新/重启恢复。
+- [x] **P2 - 后端 pause gate 与恢复**：将 pause 拆成 request 与 actual pause；当前 LLM 不取消，下一次 LLM / 文档边界 / finalize 前进入真正 paused；resume 可取消 pause_requested 或恢复 paused，并复用原 job_id。技术理由：兼顾不浪费当前 LLM 与可控暂停。
+- [x] **P3 - 整体进度口径**：后端输出 progress_percent/current/total/label，进度覆盖 chunk、文档收尾、finalize。技术理由：避免 chunk 计数完成但构建仍在继续时 UI 误判 100%。
+- [x] **P4 - 前端文件面板控制与聊天弹窗收敛**：FilePanel 行内提供开始 / 暂停 / 等待暂停 / 继续；ChatPanel 启动构建后关闭确认框，仅 toast 引导去文件面板。技术理由：不阻塞知识库提问面板。
+- [x] **P5 - 测试、构建与收口**：补后端状态机测试，运行目标 pytest、tsc、next build、sync_frontend；通过后标记完成并追加 CHANGELOG。技术理由：覆盖持久化、暂停恢复与 UI 类型安全。
+
+### Verification
+
+- `python -m pytest tests\backend\test_build_hardening.py tests\backend\test_sqlite_source_store.py tests\backend\test_api.py tests\backend\test_web_server.py -q` → passed，109 passed / 330 warnings。
+- `node node_modules/typescript/bin/tsc --noEmit` → passed。
+- `node node_modules/next/dist/bin/next build --webpack` → passed，13 static routes。
+- `python tools\sync_frontend.py` → synced 164 files to `pages/`。
+- `python tools\sync_frontend.py --check` → passed。
+- `python -m pytest -q` → blocked by missing optional `botocore` in this environment；`python -m pytest -q --ignore=tests/backend/test_r2_target.py` → 278 passed / 2 skipped / 2 failed，剩余失败为既有环境/平台问题：`boto3` 缺失与 Zotero Windows path separator 断言。
+
+---
+
+## v0.24.8 笔记面板本地标签编辑 (completed)
+
+### User constraints / 约束
+
+- 在前端「笔记」面板规划并落地本地文档标签编辑窗口。
+- 保持整体美术水平平衡：不做重型弹窗，使用轻量行内编辑，视觉密度与现有笔记元信息区一致。
+- Zotero 同步来源的标签保持只读，不允许从本系统改写。
+
+### Technical implementation path
+
+- [x] **P1 - NotePanel 标签编辑组件**：在文档元信息区新增轻量 `TagEditor`，普通态展示 tag chips，本地文档进入行内编辑态后可添加/删除标签；同步拆出 `DocumentMeta` 保持 `NotePanel` 回到文件大小红线内。技术理由：标签是文档上下文元数据，放在笔记面板可就地维护，不打断阅读/笔记流。
+- [x] **P2 - API 接线与只读保护**：调用 `patchDocument(doc_id, { tags })` 整体替换标签；`origin=zotero` 或 `read_only=True` 时隐藏编辑入口并显示只读提示。技术理由：复用既有后端契约，并让前端约束与 service 层只读保护一致。
+- [x] **P3 - i18n 与验证收口**：补齐中英文文案，运行前端类型检查与构建；通过后标记完成并追加 CHANGELOG。技术理由：保证 UI 双语完整、静态构建可交付。
+
+### Verification
+
+- `node node_modules/typescript/bin/tsc --noEmit` → passed，0 errors。
+- `node node_modules/next/dist/bin/next build --webpack` → passed，13 static routes。
+- `python tools/sync_frontend.py` → synced 164 files to `pages/`。
+- `python tools/sync_frontend.py --check` → pages/ 已与 `web/frontend/out` 一致。
+
+---
+
 ## v0.24.7 Zotero 快速配置标签式面板与本地探针 (completed)
 
 ### User constraints / 约束

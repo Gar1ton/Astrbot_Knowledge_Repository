@@ -25,6 +25,8 @@
 
 ### 新增功能 (Added)
 
+- **LightRAG 构建暂停/恢复持久化与整体进度修复**：新增 `017_graph_build_pause_state` 迁移并扩展 build job 持久化契约，保存 `pause_requested`、`paused_at`、`paused_seconds`、`progress_current` 与 `progress_total`；后端改为线性单队列，支持 LLM 调用中请求暂停、下一安全点进入 `paused`、同一 `job_id` 恢复、重启后从持久化 paused job 继续未 `indexed` 文档，并让 elapsed 排除真正暂停时间；整体进度覆盖 LRAG chunk、文档收尾与 collection finalize，避免 chunk 完成后提前显示 100%；前端将开始/暂停/等待暂停/继续控制收敛到 FilePanel，ChatPanel 启动构建后关闭确认框并引导到文件面板，移除阻塞聊天区的浮动构建弹窗（`migrations/017_graph_build_pause_state.sql`、`core/api.py`、`core/lightrag_core.py`、`core/plugin_initializer.py`、`core/repository/source_store/base.py`、`core/repository/source_store/memory.py`、`core/repository/source_store/sqlite.py`、`web/frontend/components/panels/FilePanel.tsx`、`web/frontend/components/panels/ChatPanel.tsx`、`web/frontend/app/(console)/layout.tsx`、`web/frontend/lib/api.ts`、`web/frontend/lib/i18n.ts`、`pages/`）。
+- **笔记面板支持本地标签行内编辑**：在文档笔记元信息区新增轻量 `TagEditor`，本地文档可添加/删除标签并通过 `patchDocument(doc_id, { tags })` 保存；Zotero/read_only 文档仅展示只读标签提示，继续由 Zotero 同步维护；同步拆出 `DocumentMeta` 让 `NotePanel` 回到文件大小红线内（`web/frontend/components/panels/NotePanel.tsx`、`web/frontend/components/panels/TagEditor.tsx`、`web/frontend/components/panels/DocumentMeta.tsx`、`web/frontend/lib/i18n.ts`、`pages/`）。
 - **Zotero 快速配置改为标签式可切换面板**：数据流 Zotero 节点不再用下拉框切换 access_mode，改为仿文档面板 md/pdf 的分段标签（`本地离线` / `在线 API`）。本地页签含端口、自动解析目录（截断 + hover）、覆盖目录选择 + 诊断行；在线页签含 API key 保存/清除 + 用户徽标。`sync_mode / storage_mode / linked_root / 自动同步` 收进折叠「高级」区；底部新增「立即同步 + 上次同步状态」动作条（`web/frontend/components/flow/ZoteroQuickConfig.tsx`、`web/frontend/components/flow/QuickConfigPanel.tsx`）。
 - **Zotero 本地干跑探针**：新增 `ZoteroSyncPipeline.probe_local_read()`（只读 zotero.sqlite 快照、返回条目/集合/附件/PDF 计数，不 mirror/不写库；server 模式跳过），`api.probe_zotero_local()` 合并端口连通性与计数，新增 `GET /api/zotero/probe` 路由（`core/pipelines/zotero_sync_pipeline.py`、`core/api.py`、`web/server.py`）。
 - **前端探针客户端**：`lib/api.ts` 新增 `ZoteroProbeResult` 接口与 `probeZoteroLocal()`（含 mock 分支）；`lib/i18n.ts` 中英补齐标签 / 探针 / 同步相关键（`web/frontend/lib/api.ts`、`web/frontend/lib/i18n.ts`）。
@@ -39,6 +41,7 @@
 
 ### 测试 (Tests)
 
+- **LightRAG 暂停恢复回归覆盖**：补充 SQLite migration 默认值、启动清理保留 paused job、LLM 中 pause_requested 持久化、pause gate 入库 paused、同进程恢复累计 `paused_seconds`、重启后复用原 `job_id` 处理未 `indexed` 文档、finalize 前进度小于 100% 等用例；验证命令包括 `python -m pytest tests\backend\test_build_hardening.py tests\backend\test_sqlite_source_store.py tests\backend\test_api.py tests\backend\test_web_server.py -q`、`node node_modules/typescript/bin/tsc --noEmit`、`node node_modules/next/dist/bin/next build --webpack`、`python tools\sync_frontend.py` 与 `python tools\sync_frontend.py --check`（`tests/backend/test_build_hardening.py`、`tests/backend/test_sqlite_source_store.py`）。
 - `test_zotero_sync.py` 新增 `probe_local_read` 三例（计数、缺目录、server 跳过）；`test_web_server.py` 新增 `/api/zotero/probe` 路由 smoke（`tests/backend/test_zotero_sync.py`、`tests/backend/test_web_server.py`）。
 
 ## [v0.24.6] — 2026-06-11

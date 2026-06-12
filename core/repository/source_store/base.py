@@ -219,8 +219,13 @@ class SourceDocumentStore(ABC):
         ...
 
     @abstractmethod
+    async def get_latest_resumable_build_job(self) -> dict | None:
+        """读取最新的 paused 构建任务；没有可恢复任务返回 None。"""
+        ...
+
+    @abstractmethod
     async def mark_interrupted_build_jobs(self) -> int:
-        """将所有 status=queued/running 的任务标记为 interrupted；返回受影响行数。"""
+        """将启动时遗留的 queued/running/pause_requested 标为 interrupted；paused 保留可恢复。"""
         ...
 
     # ── Zotero 逻辑镜像（单向 Pull）───────────────────────────────

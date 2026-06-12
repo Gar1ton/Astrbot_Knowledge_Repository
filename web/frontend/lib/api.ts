@@ -226,6 +226,8 @@ export interface GraphBuildJob {
   status: string;
   stage?: string;
   paused?: boolean;
+  pause_requested?: boolean;
+  pause_message?: string;
   processed_docs?: number;
   failed_docs?: number;
   total_docs?: number;
@@ -235,9 +237,17 @@ export interface GraphBuildJob {
   current_doc_id?: string;
   current_chunk_index?: number;
   progress_basis?: "lrag_chunks" | "estimated_lrag_chunks" | string;
+  progress_current?: number;
+  progress_total?: number;
+  progress_percent?: number;
+  progress_label?: string;
   elapsed_seconds?: number;
   average_seconds_per_chunk?: number | null;
   estimated_remaining_seconds?: number | null;
+  paused_seconds?: number;
+  paused_at?: string | null;
+  started_at?: string;
+  finished_at?: string | null;
   recent_error?: string;
 }
 
@@ -966,11 +976,17 @@ export interface BuildJobRecord {
   failed_docs: number;
   total_docs: number;
   processed_chunks: number;
+  failed_chunks?: number;
   total_chunks: number;
   recent_error: string;
   started_at: string;
   finished_at: string | null;
   created_at: string;
+  pause_requested?: boolean;
+  paused_at?: string | null;
+  paused_seconds?: number;
+  progress_current?: number;
+  progress_total?: number;
 }
 
 export async function getBuildJobHistory(collection?: string): Promise<BuildJobRecord[]> {

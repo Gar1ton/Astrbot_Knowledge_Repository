@@ -3,19 +3,21 @@ import React, { useEffect, useState } from "react";
 import { Eyebrow } from "@/components/ds/Eyebrow";
 import { Icon } from "@/components/ds/Icon";
 import { IconButton } from "@/components/ds/IconButton";
-import { Tag } from "@/components/ds/Tag";
+import { MetaEditForm, MetaRow, type MetaDraft } from "@/components/panels/DocumentMeta";
+import { TagEditor } from "@/components/panels/TagEditor";
+import { useToast } from "@/components/ui/Toast";
 import { useConsole } from "@/lib/ConsoleContext";
 import {
   createDocumentNote,
   getDocumentAnnotations,
   getDocumentNotes,
   listDocuments,
+  patchDocument,
   syncZoteroPull,
   updateDocumentMeta,
   type DocumentNote,
   type KrDocument,
   type ZoteroAnnotation,
-  type ZoteroMeta,
 } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
@@ -88,152 +90,11 @@ function toDocumentNote(n: LocalStoredNote, docId: string): DocumentNote {
   };
 }
 
-// ─── MetaRow ──────────────────────────────────────────────────
-
-function MetaRow({ k, v, mono, link }: { k: string; v?: string | null; mono?: boolean; link?: boolean }) {
-  if (!v) return null;
-  return (
-    <div style={{ display: "flex", gap: 10, padding: "3px 0" }}>
-      <span style={{ width: 58, flexShrink: 0, fontSize: 11, color: "var(--fg-subtle)" }}>{k}</span>
-      <span
-        style={{
-          flex: 1,
-          fontSize: 11.5,
-          color: link ? "var(--accent)" : "var(--fg)",
-          fontFamily: mono ? "var(--font-mono)" : "var(--font-sans)",
-          wordBreak: "break-word",
-          lineHeight: 1.45,
-        }}
-      >
-        {v}
-      </span>
-    </div>
-  );
-}
-
-// ─── MetaEditForm ─────────────────────────────────────────────
-
-type MetaDraft = Partial<ZoteroMeta> & { title?: string };
-
-function MetaEditForm({
-  draft,
-  saving,
-  onChange,
-  onSave,
-  onCancel,
-}: {
-  draft: MetaDraft;
-  saving: boolean;
-  onChange: (d: MetaDraft) => void;
-  onSave: () => void;
-  onCancel: () => void;
-}) {
-  const { t } = useI18n();
-  const fieldStyle: React.CSSProperties = {
-    width: "100%",
-    fontSize: 12,
-    fontFamily: "var(--font-sans)",
-    color: "var(--fg)",
-    background: "var(--bg-inset)",
-    border: "1px solid var(--border-strong)",
-    borderRadius: "var(--radius-sm)",
-    padding: "4px 7px",
-    outline: "none",
-    boxSizing: "border-box",
-  };
-  const labelStyle: React.CSSProperties = {
-    fontSize: 10.5,
-    color: "var(--fg-subtle)",
-    marginBottom: 3,
-    display: "block",
-  };
-  const rowStyle: React.CSSProperties = { marginBottom: 8 };
-  const creatorsValue = Array.isArray(draft.creators)
-    ? draft.creators.join("\n")
-    : (draft.creators as string | undefined) ?? "";
-
-  return (
-    <div
-      style={{
-        background: "var(--bg-inset)",
-        border: "1px solid var(--border-strong)",
-        borderRadius: "var(--radius-md)",
-        padding: "10px 12px",
-        marginBottom: 12,
-      }}
-    >
-      <div style={rowStyle}>
-        <label style={labelStyle}>{t("note_meta_title")}</label>
-        <input
-          style={fieldStyle}
-          value={draft.title ?? ""}
-          onChange={(e) => onChange({ ...draft, title: e.target.value })}
-        />
-      </div>
-      <div style={rowStyle}>
-        <label style={labelStyle}>{t("note_meta_authors")} ({t("note_meta_authors_hint")})</label>
-        <textarea
-          style={{ ...fieldStyle, resize: "none", lineHeight: 1.5 }}
-          rows={3}
-          value={creatorsValue}
-          onChange={(e) => onChange({ ...draft, creators: e.target.value as unknown as string[] })}
-        />
-      </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-        <div>
-          <label style={labelStyle}>{t("note_meta_year")}</label>
-          <input style={fieldStyle} value={draft.year ?? ""} onChange={(e) => onChange({ ...draft, year: e.target.value })} />
-        </div>
-        <div>
-          <label style={labelStyle}>{t("note_meta_journal")}</label>
-          <input style={fieldStyle} value={draft.venue ?? ""} onChange={(e) => onChange({ ...draft, venue: e.target.value })} />
-        </div>
-      </div>
-      <div style={rowStyle}>
-        <label style={labelStyle}>DOI</label>
-        <input style={{ ...fieldStyle, fontFamily: "var(--font-mono)" }} value={draft.doi ?? ""} onChange={(e) => onChange({ ...draft, doi: e.target.value })} />
-      </div>
-      <div style={rowStyle}>
-        <label style={labelStyle}>{t("documents_abstract")}</label>
-        <textarea
-          style={{ ...fieldStyle, resize: "none", lineHeight: 1.55 }}
-          rows={4}
-          value={draft.abstract ?? ""}
-          onChange={(e) => onChange({ ...draft, abstract: e.target.value })}
-        />
-      </div>
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
-        <button
-          onClick={onCancel}
-          style={{
-            fontSize: 11, padding: "4px 10px", borderRadius: "var(--radius-pill)",
-            border: "1px solid var(--border)", background: "transparent",
-            color: "var(--fg-muted)", cursor: "pointer", fontFamily: "var(--font-sans)",
-          }}
-        >
-          {t("btn_cancel")}
-        </button>
-        <button
-          onClick={onSave}
-          disabled={saving}
-          style={{
-            fontSize: 11, padding: "4px 10px", borderRadius: "var(--radius-pill)",
-            border: "none", background: "var(--accent)", color: "var(--accent-fg)",
-            cursor: saving ? "wait" : "pointer", fontWeight: 600, fontFamily: "var(--font-sans)",
-            opacity: saving ? 0.7 : 1,
-          }}
-        >
-          {t("btn_save")}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // ─── NotePanel ────────────────────────────────────────────────
 
 export function NotePanel({ docId }: { docId: string }) {
   const { setNoteDocId, setSelectedDocId, selectedCollection } = useConsole();
+  const { toast } = useToast();
   const { t, lang } = useI18n();
   const [doc, setDoc] = useState<KrDocument | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
@@ -242,8 +103,10 @@ export function NotePanel({ docId }: { docId: string }) {
   const [addingNote, setAddingNote] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [editingMeta, setEditingMeta] = useState(false);
-  const [metaDraft, setMetaDraft] = useState<Partial<ZoteroMeta> & { title?: string }>({});
+  const [metaDraft, setMetaDraft] = useState<MetaDraft>({});
   const [savingMeta, setSavingMeta] = useState(false);
+  const [editingTags, setEditingTags] = useState(false);
+  const [savingTags, setSavingTags] = useState(false);
 
   async function handleZoteroSync() {
     if (syncing) return;
@@ -273,7 +136,7 @@ export function NotePanel({ docId }: { docId: string }) {
     if (!doc) return;
     setSavingMeta(true);
     try {
-      const payload: Partial<ZoteroMeta> & { title?: string } = {
+      const payload: MetaDraft = {
         ...metaDraft,
         creators: typeof metaDraft.creators === "string"
           ? (metaDraft.creators as string).split("\n").map((s) => s.trim()).filter(Boolean)
@@ -284,6 +147,21 @@ export function NotePanel({ docId }: { docId: string }) {
       setEditingMeta(false);
     } catch { /* ignore */ } finally {
       setSavingMeta(false);
+    }
+  }
+
+  async function handleSaveTags(tags: string[]) {
+    if (!doc) return;
+    setSavingTags(true);
+    try {
+      const updated = await patchDocument(doc.doc_id, { tags });
+      setDoc(updated);
+      setEditingTags(false);
+      toast(t("note_tags_saved"), "ok");
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : t("error_generic"), "error");
+    } finally {
+      setSavingTags(false);
     }
   }
 
@@ -456,14 +334,15 @@ export function NotePanel({ docId }: { docId: string }) {
               </>
             )}
 
-            {doc.tags.length > 0 && (
-              <>
-                <Eyebrow style={{ margin: "18px 0 8px" }}>{t("note_tags")}</Eyebrow>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                  {doc.tags.map((tag) => <Tag key={tag} label={tag} />)}
-                </div>
-              </>
-            )}
+            <TagEditor
+              tags={doc.tags}
+              readOnly={doc.origin === "zotero" || Boolean(doc.read_only)}
+              editing={editingTags}
+              saving={savingTags}
+              onEdit={() => setEditingTags(true)}
+              onCancel={() => setEditingTags(false)}
+              onSave={handleSaveTags}
+            />
 
             {/* Annotations */}
             <Eyebrow style={{ margin: "20px 0 8px" }}>

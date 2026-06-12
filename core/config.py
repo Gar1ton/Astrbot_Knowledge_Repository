@@ -191,6 +191,8 @@ ZOTERO_STORAGE_LINKED = "linked"
 ZOTERO_SYNC_STRICT = "strict_mirror"
 ZOTERO_SYNC_CONSERVATIVE = "conservative"
 ZOTERO_SYNC_ARCHIVE = "archive"
+ZOTERO_ACCESS_LOCAL = "local"
+ZOTERO_ACCESS_SERVER = "server"
 
 
 @dataclass
@@ -207,6 +209,7 @@ class ZoteroSyncConfig:
     """
 
     enabled: bool = False
+    access_mode: str = ZOTERO_ACCESS_LOCAL
     zotero_data_dir: str = ""  # 覆盖默认 Zotero 数据目录；空=自动探测
     api_port: int = 23119
     storage_mode: str = ZOTERO_STORAGE_MANAGED
@@ -257,6 +260,7 @@ class Config:
         vector_db = self.get_vector_db_config()
         embedding = self.get_embedding_config()
         ask = self.get_ask_agent_config()
+        zotero = self.get_zotero_sync_config()
         return {
             "source_store": {
                 "db_filename": source.db_filename,
@@ -314,6 +318,17 @@ class Config:
             },
             "ask": {
                 "conversation_enhancement_mode": ask.conversation_enhancement_mode,
+            },
+            "zotero_sync": {
+                "enabled": zotero.enabled,
+                "access_mode": zotero.access_mode,
+                "zotero_data_dir": zotero.zotero_data_dir,
+                "api_port": zotero.api_port,
+                "storage_mode": zotero.storage_mode,
+                "linked_root": zotero.linked_root,
+                "sync_mode": zotero.sync_mode,
+                "auto_sync_enabled": zotero.auto_sync_enabled,
+                "auto_sync_interval_sec": zotero.auto_sync_interval_sec,
             },
             "diagnostics": self.get_diagnostics(),
         }
@@ -379,8 +394,8 @@ class Config:
             )
         if self.get_vector_db_config().backend == "milvus" and not _module_available("pymilvus"):
             diagnostics.append(
-                "Milvus Lite requires optional dependencies from requirements-additional.txt; "
-                "SQLite/AstrBot fallback remains available."
+                "Milvus Lite is a required dependency from requirements.txt; "
+                "AstrBot fallback remains available until it is installed."
             )
         graph = self.get_graph_config()
         if graph.enabled and not _module_available("lightrag"):
@@ -478,6 +493,9 @@ class Config:
 
     def get_zotero_sync_config(self) -> ZoteroSyncConfig:
         s = _section(self.raw, "zotero_sync")
+        access_mode = str(s.get("access_mode", ZoteroSyncConfig.access_mode))
+        if access_mode not in {ZOTERO_ACCESS_LOCAL, ZOTERO_ACCESS_SERVER}:
+            access_mode = ZoteroSyncConfig.access_mode
         storage_mode = str(s.get("storage_mode", ZoteroSyncConfig.storage_mode))
         if storage_mode not in {ZOTERO_STORAGE_MANAGED, ZOTERO_STORAGE_LINKED}:
             storage_mode = ZoteroSyncConfig.storage_mode
@@ -486,6 +504,7 @@ class Config:
             sync_mode = ZoteroSyncConfig.sync_mode
         return ZoteroSyncConfig(
             enabled=bool(s.get("enabled", ZoteroSyncConfig.enabled)),
+            access_mode=access_mode,
             zotero_data_dir=str(s.get("zotero_data_dir", ZoteroSyncConfig.zotero_data_dir)),
             api_port=int(s.get("api_port", ZoteroSyncConfig.api_port)),
             storage_mode=storage_mode,
@@ -502,8 +521,13 @@ class Config:
         s = _section(self.raw, "vector_db")
         raw_auto = s.get("auto_index_enabled", VectorDbConfig.auto_index_enabled)
         auto_index = bool(raw_auto) if not isinstance(raw_auto, bool) else raw_auto
+        backend = str(s.get("backend", VectorDbConfig.backend))
+        if backend == "astrbot":
+            backend = "astr"
+        if backend not in {"milvus", "astr"}:
+            backend = VectorDbConfig.backend
         return VectorDbConfig(
-            backend=s.get("backend", VectorDbConfig.backend),
+            backend=backend,
             db_filename=s.get("db_filename", VectorDbConfig.db_filename),
             auto_index_enabled=auto_index,
         )
@@ -622,6 +646,7 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
     },
     "zotero_sync": {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "access_mode": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "zotero_data_dir": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "api_port": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "storage_mode": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
@@ -697,6 +722,8 @@ __all__ = [
     "ZOTERO_SYNC_STRICT",
     "ZOTERO_SYNC_CONSERVATIVE",
     "ZOTERO_SYNC_ARCHIVE",
+    "ZOTERO_ACCESS_LOCAL",
+    "ZOTERO_ACCESS_SERVER",
     "CONSEQUENCE_NONE",
     "CONSEQUENCE_RESTART",
     "CONSEQUENCE_REBUILD",

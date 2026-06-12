@@ -3,16 +3,17 @@ import type { EffectiveConfig, PipelineStage } from "@/lib/api";
 import type { I18nKey, Lang } from "@/lib/i18n";
 import { backendLabel, type FlowStageId } from "./model";
 import { DirPickerDialog } from "./DirPickerDialog";
+import { ZoteroQuickConfig } from "./ZoteroQuickConfig";
 
 export type FlowConfigSnapshot = EffectiveConfig;
 export type QuickConfigValue = string | number | boolean;
 export type QuickConfigValues = Record<string, string | boolean>;
 export type QuickConfigUpdate = { section: string; key: string; value: QuickConfigValue };
 
-type ConfigSection = "source_store" | "r2_sync" | "notion_sync" | "graph" | "vector_db" | "embedding" | "zotero_sync";
+export type ConfigSection = "source_store" | "r2_sync" | "notion_sync" | "graph" | "vector_db" | "embedding" | "zotero_sync";
 
-const ZOTERO_SYNC_MODES = ["strict_mirror", "conservative", "archive"];
-const ZOTERO_STORAGE_MODES = ["managed_copy", "linked"];
+export const ZOTERO_SYNC_MODES = ["strict_mirror", "conservative", "archive"];
+export const ZOTERO_STORAGE_MODES = ["managed_copy", "linked"];
 
 type QuickConfigFieldBase = {
   id: string;
@@ -20,13 +21,15 @@ type QuickConfigFieldBase = {
   key: string;
   labelKey: I18nKey;
   wide?: boolean;
+  helpKey?: I18nKey;
 };
 
-type QuickConfigField =
+export type QuickConfigField =
   | (QuickConfigFieldBase & { kind: "text"; value: string; placeholder?: string; browseDir?: boolean })
   | (QuickConfigFieldBase & { kind: "number"; value: string })
   | (QuickConfigFieldBase & { kind: "boolean"; value: boolean })
-  | (QuickConfigFieldBase & { kind: "select"; value: string; options: string[] });
+  | (QuickConfigFieldBase & { kind: "select"; value: string; options: string[] })
+  | (QuickConfigFieldBase & { kind: "readonly"; value: string });
 
 type QuickConfigModel = {
   fields: QuickConfigField[];
@@ -34,33 +37,34 @@ type QuickConfigModel = {
 };
 
 const QUERY_MODES = ["mix", "local", "global", "hybrid", "naive", "bypass"];
-const LIGHTRAG_LLM_PROVIDERS = ["main", "local", "api"];
 
 function fieldId(section: ConfigSection, key: string): string {
   return `${section}.${key}`;
 }
 
-function textField(
+export function textField(
   section: ConfigSection,
   key: string,
   labelKey: I18nKey,
   value: string,
   wide = false,
   browseDir = false,
+  helpKey?: I18nKey,
 ): QuickConfigField {
-  return { id: fieldId(section, key), kind: "text", section, key, labelKey, value, wide, browseDir };
+  return { id: fieldId(section, key), kind: "text", section, key, labelKey, value, wide, browseDir, helpKey };
 }
 
-function numberField(
+export function numberField(
   section: ConfigSection,
   key: string,
   labelKey: I18nKey,
   value: string,
+  helpKey?: I18nKey,
 ): QuickConfigField {
-  return { id: fieldId(section, key), kind: "number", section, key, labelKey, value };
+  return { id: fieldId(section, key), kind: "number", section, key, labelKey, value, helpKey };
 }
 
-function booleanField(
+export function booleanField(
   section: ConfigSection,
   key: string,
   labelKey: I18nKey,
@@ -69,33 +73,46 @@ function booleanField(
   return { id: fieldId(section, key), kind: "boolean", section, key, labelKey, value };
 }
 
-function selectField(
+export function selectField(
   section: ConfigSection,
   key: string,
   labelKey: I18nKey,
   value: string,
   options: string[],
+  wide = false,
+  helpKey?: I18nKey,
 ): QuickConfigField {
-  return { id: fieldId(section, key), kind: "select", section, key, labelKey, value, options };
+  return { id: fieldId(section, key), kind: "select", section, key, labelKey, value, options, wide, helpKey };
+}
+
+export function readonlyField(
+  section: ConfigSection,
+  key: string,
+  labelKey: I18nKey,
+  value: string,
+  wide = false,
+  helpKey?: I18nKey,
+): QuickConfigField {
+  return { id: fieldId(section, key), kind: "readonly", section, key, labelKey, value, wide, helpKey };
 }
 
 function sectionData(config: FlowConfigSnapshot, section: ConfigSection): Record<string, unknown> {
   return (config[section] ?? {}) as Record<string, unknown>;
 }
 
-function readString(config: FlowConfigSnapshot, section: ConfigSection, key: string, fallback = ""): string {
+export function readString(config: FlowConfigSnapshot, section: ConfigSection, key: string, fallback = ""): string {
   const value = sectionData(config, section)[key];
   if (value === null || value === undefined) return fallback;
   return String(value);
 }
 
-function readNumberString(config: FlowConfigSnapshot, section: ConfigSection, key: string, fallback: number): string {
+export function readNumberString(config: FlowConfigSnapshot, section: ConfigSection, key: string, fallback: number): string {
   const value = sectionData(config, section)[key];
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   return Number.isFinite(parsed) ? String(parsed) : String(fallback);
 }
 
-function readBoolean(config: FlowConfigSnapshot, section: ConfigSection, key: string, fallback: boolean): boolean {
+export function readBoolean(config: FlowConfigSnapshot, section: ConfigSection, key: string, fallback: boolean): boolean {
   const value = sectionData(config, section)[key];
   if (typeof value === "boolean") return value;
   if (typeof value === "string") return value.toLowerCase() === "true";
@@ -113,21 +130,7 @@ function buildQuickConfig(stage: PipelineStage, config: FlowConfigSnapshot): Qui
   const fields: QuickConfigField[] = [];
   const hints: I18nKey[] = [];
 
-  if (id === "zotero") {
-    fields.push(textField("zotero_sync", "zotero_data_dir", "flow_quick_zotero_data_dir", readString(config, "zotero_sync", "zotero_data_dir"), true, true));
-    fields.push(selectField("zotero_sync", "sync_mode", "flow_quick_zotero_sync_mode", readString(config, "zotero_sync", "sync_mode", "conservative"), ZOTERO_SYNC_MODES));
-    const storageMode = readString(config, "zotero_sync", "storage_mode", "managed_copy");
-    fields.push(selectField("zotero_sync", "storage_mode", "flow_quick_zotero_storage_mode", storageMode, ZOTERO_STORAGE_MODES));
-    if (storageMode === "linked") {
-      fields.push(textField("zotero_sync", "linked_root", "flow_quick_zotero_linked_root", readString(config, "zotero_sync", "linked_root"), true));
-    }
-    fields.push(booleanField("zotero_sync", "auto_sync_enabled", "flow_quick_zotero_auto_sync", readBoolean(config, "zotero_sync", "auto_sync_enabled", false)));
-    if (readBoolean(config, "zotero_sync", "auto_sync_enabled", false)) {
-      fields.push(numberField("zotero_sync", "auto_sync_interval_sec", "flow_quick_zotero_interval", readNumberString(config, "zotero_sync", "auto_sync_interval_sec", 3600)));
-    }
-    hints.push("flow_quick_zotero_hint");
-    return { fields, hints };
-  }
+  // Zotero 阶段由独立的 <ZoteroQuickConfig> 渲染（标签式面板），不走通用字段模型。
 
   if (id === "ingest") {
     fields.push(booleanField("source_store", "ocr_enabled", "flow_quick_ocr_enabled", readBoolean(config, "source_store", "ocr_enabled", false)));
@@ -161,11 +164,10 @@ function buildQuickConfig(stage: PipelineStage, config: FlowConfigSnapshot): Qui
     fields.push(selectField("graph", "query_mode", "flow_quick_query_mode", readString(config, "graph", "query_mode", "mix"), QUERY_MODES));
     fields.push(numberField("graph", "llm_max_async", "flow_quick_llm_max_async", readNumberString(config, "graph", "llm_max_async", 4)));
     fields.push(numberField("graph", "embedding_max_async", "flow_quick_embedding_max_async", readNumberString(config, "graph", "embedding_max_async", 8)));
-    fields.push(selectField("graph", "lightrag_llm_provider", "flow_quick_lightrag_llm_provider", readString(config, "graph", "lightrag_llm_provider", "main"), LIGHTRAG_LLM_PROVIDERS));
-    fields.push(textField("graph", "lightrag_llm_base_url", "flow_quick_lightrag_llm_base_url", readString(config, "graph", "lightrag_llm_base_url"), true));
-    fields.push(textField("graph", "lightrag_llm_model", "flow_quick_lightrag_llm_model", readString(config, "graph", "lightrag_llm_model"), true));
+    fields.push(numberField("graph", "max_doc_chars", "flow_quick_max_doc_chars", readNumberString(config, "graph", "max_doc_chars", 30000)));
+    fields.push(readonlyField("graph", "lightrag_llm_summary", "flow_quick_lightrag_llm_summary", stageStringDetail(stage, "llm_label", "<main - AstrBot main LLM>"), true));
     fields.push(numberField("graph", "lightrag_llm_timeout_seconds", "flow_quick_lightrag_llm_timeout_seconds", readNumberString(config, "graph", "lightrag_llm_timeout_seconds", 900)));
-    hints.push("flow_quick_lightrag_llm_hint");
+    hints.push("flow_quick_lightrag_llm_readonly_hint");
     return { fields, hints };
   }
 
@@ -179,7 +181,7 @@ function buildQuickConfig(stage: PipelineStage, config: FlowConfigSnapshot): Qui
   return { fields, hints };
 }
 
-function fieldInitialValue(field: QuickConfigField): string | boolean {
+export function fieldInitialValue(field: QuickConfigField): string | boolean {
   return field.kind === "boolean" ? field.value : field.value;
 }
 
@@ -266,7 +268,7 @@ function FlowSelect({ value, options, disabled, getLabel, onChange }: FlowSelect
 
 // ─── Field control ────────────────────────────────────────────
 
-function FieldControl({
+export function FieldControl({
   field,
   value,
   lang,
@@ -283,6 +285,18 @@ function FieldControl({
   onChange: (value: string | boolean) => void;
   onBrowseDir?: () => void;
 }) {
+  if (field.kind === "readonly") {
+    const display = String(value) || t("flow_value_empty");
+    return (
+      <div
+        className={`flow-quick-readonly ${String(value) ? "" : "is-empty"}`}
+        title={String(value) || undefined}
+      >
+        {display}
+      </div>
+    );
+  }
+
   if (field.kind === "boolean") {
     const enabled = Boolean(value);
     return (
@@ -358,21 +372,24 @@ function FieldControl({
 
 // ─── Panel ────────────────────────────────────────────────────
 
-export function QuickConfigPanel({
-  stage,
-  config,
-  lang,
-  t,
-  saving,
-  onSave,
-}: {
+export type QuickConfigPanelProps = {
   stage: PipelineStage;
   config: FlowConfigSnapshot;
   lang: Lang;
   t: (k: I18nKey) => string;
   saving: boolean;
   onSave: (stageId: FlowStageId, updates: QuickConfigUpdate[]) => void;
-}) {
+  onRefresh?: () => Promise<void>;
+};
+
+function GenericQuickConfig({
+  stage,
+  config,
+  lang,
+  t,
+  saving,
+  onSave,
+}: QuickConfigPanelProps) {
   const model = useMemo(() => buildQuickConfig(stage, config), [config, stage]);
   const fieldSignature = useMemo(
     () => model.fields.map((field) => `${field.id}:${String(fieldInitialValue(field))}`).join("|"),
@@ -394,6 +411,8 @@ export function QuickConfigPanel({
     for (const field of model.fields) {
       const current = draft[field.id] ?? fieldInitialValue(field);
       const initial = fieldInitialValue(field);
+
+      if (field.kind === "readonly") continue;
 
       if (field.kind === "boolean") {
         const value = Boolean(current);
@@ -431,10 +450,10 @@ export function QuickConfigPanel({
     setDirPickerFieldId(null);
   }, [dirPickerFieldId]);
 
-  if (model.fields.length === 0 && model.hints.length === 0) return null;
-
   const canSave = updates.length > 0 && !hasInvalidNumber && !saving;
   const stageId = stage.id as FlowStageId;
+
+  if (model.fields.length === 0 && model.hints.length === 0) return null;
 
   return (
     <>
@@ -459,7 +478,12 @@ export function QuickConfigPanel({
           <div className="flow-quick-grid">
             {model.fields.map((field) => (
               <label key={field.id} className={`flow-quick-field ${field.wide ? "flow-quick-field--wide" : ""}`}>
-                <span>{t(field.labelKey)}</span>
+                <span>
+                  {t(field.labelKey)}
+                  {field.helpKey && (
+                    <span className="flow-help-dot" title={t(field.helpKey)}>?</span>
+                  )}
+                </span>
                 <FieldControl
                   field={field}
                   value={draft[field.id] ?? fieldInitialValue(field)}
@@ -492,4 +516,10 @@ export function QuickConfigPanel({
       )}
     </>
   );
+}
+
+// Zotero 阶段走标签式专用面板，其余阶段走通用字段面板。
+export function QuickConfigPanel(props: QuickConfigPanelProps) {
+  if (props.stage.id === "zotero") return <ZoteroQuickConfig {...props} />;
+  return <GenericQuickConfig {...props} />;
 }

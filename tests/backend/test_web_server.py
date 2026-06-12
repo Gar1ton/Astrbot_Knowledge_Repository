@@ -25,6 +25,7 @@ from core.plugin_initializer import PluginInitializer
 from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
 from core.repository.source_store.memory import InMemorySourceDocumentStore
 from core.repository.sync_targets.memory import InMemorySyncTarget
+from core.secret_store import EncryptedSecretStore
 from web.server import SESSION_COOKIE, build_app
 
 _GB = 1024 * 1024 * 1024
@@ -331,6 +332,20 @@ async def test_sync_status_endpoint_returns_200(tmp_path: Path) -> None:
         assert resp.status == 200
         body = await resp.json()
         assert isinstance(body, list)
+    finally:
+        await client.close()
+
+
+async def test_zotero_probe_endpoint_returns_connection_and_read(tmp_path: Path) -> None:
+    client = await _client(tmp_path)
+    try:
+        resp = await client.get("/api/zotero/probe")
+        assert resp.status == 200
+        body = await resp.json()
+        assert "connection" in body
+        assert "read" in body
+        # 未装配 zotero pipeline → read 不可用但接口仍稳定返回
+        assert body["read"]["available"] is False
     finally:
         await client.close()
 
@@ -1006,6 +1021,51 @@ async def test_zotero_routes_respond(tmp_path: Path) -> None:
 
         status = await (await client.get("/api/sync/zotero/status")).json()
         assert status == {}
+    finally:
+        await client.close()
+
+
+async def test_zotero_server_key_routes_encrypt_and_mask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST/DELETE /api/zotero/server-key 保存密钥但不回显明文。"""
+
+    class Client:
+        def __init__(self, api_key: str) -> None:
+            assert api_key == "zotero-secret"
+
+        def get_current_key(self) -> dict[str, object]:
+            return {
+                "userID": 123,
+                "username": "alice",
+                "access": {"user": {"library": True, "files": True}},
+            }
+
+    monkeypatch.setattr("core.adapters.zotero.web_api.ZoteroWebApiClient", Client)
+    api = await _make_api()
+    api._secret_store = EncryptedSecretStore(tmp_path / "secrets")
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        saved = await client.post("/api/zotero/server-key", json={"api_key": "zotero-secret"})
+        assert saved.status == 200
+        body = await saved.json()
+        assert body["server_key_present"] is True
+        assert body["server_key_masked"] == "zo****et"
+        assert "zotero-secret" not in str(body)
+
+        removed = await client.delete("/api/zotero/server-key")
+        assert removed.status == 200
+        body2 = await removed.json()
+        assert body2["server_key_present"] is False
+        assert body2["server_key_masked"] == ""
     finally:
         await client.close()
 

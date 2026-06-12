@@ -44,6 +44,117 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.24.7 Zotero 快速配置标签式面板与本地探针 (completed)
+
+### User constraints / 约束
+
+- 数据流 Zotero 节点的快速配置改为像文档面板 md/pdf 那样的**标签式可切换面板**（local / server），而非下拉框。
+- 本地页签提供「连接测试 + 干跑计数」探针：测本地 API 连通性并干读 zotero.sqlite 返回条目/附件数（不写库、不同步）。
+- 把「立即同步 + 上次同步状态」从设置弹窗整合进快速面板。
+- `sync_mode / storage_mode / linked_root / 自动同步` 收进折叠「高级」区，优化面板视觉密度。
+- 自动解析目录截断 + hover 全路径。
+
+### Technical implementation path
+
+- [x] **P1 - 后端干跑探针**：`ZoteroSyncPipeline.probe_local_read()`（只读快照计数，server 模式跳过）；`api.probe_zotero_local()` 合并端口连通性 + 计数；`GET /api/zotero/probe`。
+- [x] **P2 - 前端 API 客户端**：`lib/api.ts` 新增 `ZoteroProbeResult` 与 `probeZoteroLocal()`（含 mock）。
+- [x] **P3 - 拆分独立组件**：`QuickConfigPanel` 退化为 dispatcher，Zotero 阶段交给新 `ZoteroQuickConfig.tsx`（标签切换 + 高级折叠 + 诊断行 + 同步条），共享字段原语从 `QuickConfigPanel` 导出复用，主文件降至 ~525 行（红线内）。
+- [x] **P4 - 样式与 i18n**：`tokens.css` 新增 `.flow-quick-modetab/-diag/-advanced/-syncbar`；`i18n.ts` 中英补齐标签 / 探针 / 同步键。
+- [x] **P5 - 验证与收口**：后端 pytest 绿（probe 单测 + web 路由 smoke）；ruff/mypy 我方新增行无新增告警；next build 通过；sync_frontend 同步到 pages/。
+
+### Verification
+
+- `python -m pytest tests/backend/test_zotero_sync.py tests/backend/test_web_server.py` → probe 用例 + 路由 smoke 通过。
+- `npm run build` → 编译成功，TypeScript 通过，13 静态路由。
+- `python tools/sync_frontend.py` → 已同步；`grep flow_quick_zotero_tab_local pages/_next` 命中。
+- 已知遗留（非本次引入）：`test_lifecycle_and_cli.py::test_default_initializer_starts_without_optional_feature_packages` 因分支内 `plugin_initializer`/`requirements-additional.txt` 既有改动失败，与本计划无关。
+
+---
+
+## v0.24.6 数据流与 Zotero 服务器模式 (completed)
+
+### User constraints / 约束
+
+- Milvus Lite 升级为必装依赖并保持默认；AstrBot KB 代码保留为后端兜底，但前端选项锁定不可选。
+- 数据流面板全屏展示；打开期间每 5 秒自动刷新状态，删除”重新检测”按钮并重排状态说明。
+- Zotero 快速配置重做为本地 / 服务器模式：本地端口默认 23119 并显示自动解析目录；服务器使用 API key，后端加密存储且不回显明文。
+- LightRAG LLM 在数据流中只读展示当前配置摘要，不再暴露 endpoint/model 自定义输入。
+- 数据流按钮状态必须跟随关键环节 degraded 变化，不能继续显示绿色。
+- Zotero 节点横向拉宽、控件降低高度。
+
+### Technical implementation path
+
+- [x] **P1 - 配置与依赖能力**：新增 Zotero access_mode 与 public config 字段；Milvus 依赖标记 required；能力探针补充 LightRAG LLM 摘要与必需依赖语义。
+- [x] **P2 - Zotero server reader 与 secret 存储**：新增加密密钥存储、API key 验证接口、个人库 Web API reader，并让同步管线按 local/server 分支读取。
+- [x] **P3 - 前端数据流 UI**：WorkflowModal 全屏；FlowPageContent 自动刷新并移除 recheck；TopBar 与面板共用健康状态推导；锁定 AstrBot KB。
+- [x] **P4 - Zotero 与 LightRAG 快速配置**：Zotero 本地/服务器紧凑布局、提示角标、密钥保存/清除；LightRAG LLM 改为只读摘要。
+- [x] **P5 - 验证与收口**：前端类型检查通过、next build 通过、sync_frontend --check 一致。
+
+### Verification
+
+- `npx tsc --noEmit` → 无类型错误。
+- `npm run build` → 11 静态路由，exit 0。
+- `python3 tools/sync_frontend.py --check` → pages/ 已与 out/ 一致。
+
+---
+
+## v0.24.5 主界面 UI 优化（5项）✅ (completed)
+
+### User constraints / 约束
+
+- 语言切换与退出登录移入设置模态框（外观 tab 改名为通用）。
+- Ask 输入框还原辉光轨道效果（CSS 已存在，接入 className）。
+- 数据流按键加状态脉冲 glow：红（管道未就绪）/ 绿（就绪）/ 紫（配置了 Zotero 或 R2）。
+- 查询设置面板锁定当前集合不可用的检索项（低饱和度）；新增全文检索选项（仅单篇文章时启用，字符上限 60,000）。
+- 遵循 CLAUDE.md 闭环协议。
+
+### Technical implementation path
+
+- [x] **P1 - 设置模态框重组**：SettingModal `onLogout` prop；外观→通用 tab；加退出按钮；TopBar 删除语言/退出 IconButton；layout.tsx 重新接线。
+- [x] **P2 - Ask 输入框辉光**：ChatPanel composer div 接入 `.ask-card` / `.ask-card--collection` / `.ask-card--loading` className。
+- [x] **P3 - 数据流按键脉冲**：globals.css 新增 3 色 pulse keyframe；TopBar 获取 capabilities + zotero config 判断状态并应用 class。
+- [x] **P4 - 查询设置锁定 + 全文检索**：ChatPanel 检索项加 disabled 视觉；新增 fulltext 模式（仅 selectedDocId 存在时启用）；api.ts 类型扩展。
+
+### Verification
+
+- `cd web/frontend && npm run build` → 零 TS 错误（tsc --noEmit 通过）
+
+---
+
+## v0.24.4 Docker dev preview hardening (completed)
+
+### User constraints / 约束
+
+- 大部分开发环境在 Docker 中，3000 前端预览必须从 Docker 内稳定启动。
+- 无论当前前后端状态如何，都能通过 `rebuild.sh` 重新构建并启动后端 `6520` 与前端 `3000`。
+- 浏览器固定使用 `http://127.0.0.1:3000` 查看最新前端；Docker 固定发布 `3000`，不自动换端口。
+- devcontainer 位于仓库外 `D:\dev-workspace\.devcontainer`，本轮按用户明确批准修改。
+
+### Technical implementation path
+
+- [x] **P0 - 治理记录**：新增本计划条目。技术理由：遵循先 TODO 后改代码的项目闭环。
+- [x] **P1 - devcontainer Node 与端口修复**：将 devcontainer NodeSource 升级到 20.x，并发布 `3000:3000`、`6520:6520`，保留 `6186:6185`。技术理由：`next@16.2.6` 要求 Node `>=20.9.0`，且 Docker 层端口发布比编辑器转发稳定。
+- [x] **P2 - rebuild.sh Docker 化加固**：启动前校验 Node 版本；Node 或 lockfile 变化时自动刷新依赖；自动安装轻量后端 `requirements.txt`；后端监听 `0.0.0.0:6520`；前端监听 `0.0.0.0:3000`；健康检查统一使用 `127.0.0.1`。技术理由：让脚本在容器内自诊断、可重入，并避免 `localhost` 命中宿主机 IPv6 旧进程。
+- [x] **P3 - 重建后端到端验证**：重建 devcontainer 后运行 Next build、静态同步校验、`bash rebuild.sh` 与宿主机 3000/6520 curl。技术理由：验证 Docker 内 rebuild 可稳定拉起前后端，并能从宿主机固定端口访问。
+
+### Verification
+
+- `docker exec gifted_williams bash -lc 'cd /root/Astrbot_Knowledge_Repository && chmod +x rebuild.sh && bash -n rebuild.sh && bash rebuild.sh; code=$?; echo REBUILD_EXIT:$code; exit 0'` -> passed for syntax; expected guard failure with Node `18.20.8`, `REBUILD_EXIT:1`
+- `docker inspect gifted_williams --format "{{json .NetworkSettings.Ports}}"` -> current old container only publishes `6186:6185`; `3000:3000` and `6520:6520` require devcontainer rebuild
+- `Get-Content -Encoding Byte -TotalCount 8 D:\dev-workspace\.devcontainer\Dockerfile` -> starts with `46 52 4F 4D`, UTF-8 no BOM
+- `docker buildx build --check -f D:\dev-workspace\.devcontainer\Dockerfile D:\dev-workspace\.devcontainer` -> passed, Dockerfile parse check complete
+- `netstat -ano -p tcp | Select-String ':3000'` -> found stale host `node` PID `30940`; `Stop-Process -Id 30940 -Force` released port `3000`
+- `docker rm 316ddf1cea6c` -> removed failed Created devcontainer from previous port bind error
+- `docker run --rm -p 6186:6185 -p 3000:3000 -p 6520:6520 --entrypoint /bin/true vsc-dev-workspace-558f8f1763b9de33a57c7ce734c75d008cd0fdc29b369b381d19ee4d1c8cc780` -> passed, fixed host ports are bindable
+- `bash rebuild.sh` -> first Node 20 run reached backend startup, then failed because `aiohttp` was missing from fresh devcontainer Python site-packages; `rebuild.sh` now installs `requirements.txt` when `aiohttp` is absent
+- Manual Next dev restart without `NEXT_TEST_WASM=1` -> `http://127.0.0.1:3000/` returned `200`; `.next/dev/routes-manifest.json` and `.next/dev/server/middleware-manifest.json` generated
+- `bash rebuild.sh` -> passed; Node `20.20.2` OK, Python deps OK, Next build generated 11 static routes, synced 163 files, backend `6520` ready, frontend `3000` ready
+- `python3 tools/sync_frontend.py --check` -> passed, `pages/` matches `web/frontend/out`
+- `curl.exe -I --max-time 10 http://127.0.0.1:3000/` -> `200 OK`, `X-Powered-By: Next.js`
+- `curl.exe -I --max-time 10 http://127.0.0.1:6520/` -> `200 OK`, `Server: Python/3.12 aiohttp/3.14.1`
+
+---
+
 ## v0.24.3 Terminal logs panel (completed)
 
 ### User constraints / 约束

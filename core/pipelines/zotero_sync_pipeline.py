@@ -22,7 +22,14 @@ from typing import TYPE_CHECKING
 
 from core.adapters.zotero import paths as zpaths
 from core.adapters.zotero.sqlite_reader import ZoteroSnapshot, ZoteroSqliteReader
+from core.adapters.zotero.web_api import (
+    ZoteroWebApiClient,
+    ZoteroWebApiError,
+    ZoteroWebApiReader,
+    current_key_identity,
+)
 from core.config import (
+    ZOTERO_ACCESS_SERVER,
     ZOTERO_STORAGE_LINKED,
     ZOTERO_SYNC_ARCHIVE,
     ZOTERO_SYNC_STRICT,
@@ -98,6 +105,10 @@ class ZoteroSyncPipeline:
         ingest_manager: IngestManager,
         config: Config,
         reader_factory: Callable[[Path], ZoteroSqliteReader] = ZoteroSqliteReader,
+        web_client_factory: Callable[[str], ZoteroWebApiClient] = ZoteroWebApiClient,
+        web_reader_factory: Callable[..., ZoteroWebApiReader] = ZoteroWebApiReader,
+        zotero_api_key_provider: Callable[[], str] | None = None,
+        web_cache_dir: Path | None = None,
         index_document: IndexCb | None = None,
         remove_index: RemoveIndexCb | None = None,
         lightrag_cleanup: LightRagCb | None = None,
@@ -107,6 +118,10 @@ class ZoteroSyncPipeline:
         self._ingest = ingest_manager
         self._config = config
         self._reader_factory = reader_factory
+        self._web_client_factory = web_client_factory
+        self._web_reader_factory = web_reader_factory
+        self._zotero_api_key_provider = zotero_api_key_provider
+        self._web_cache_dir = web_cache_dir
         self._index_document = index_document
         self._remove_index = remove_index
         self._lightrag_cleanup = lightrag_cleanup
@@ -117,13 +132,74 @@ class ZoteroSyncPipeline:
     def is_available(self) -> dict[str, object]:
         """探测 Zotero 数据目录是否可用（供前端状态卡 / 同步前置校验）。"""
         cfg = self._config.get_zotero_sync_config()
+        if cfg.access_mode == ZOTERO_ACCESS_SERVER:
+            key = self._zotero_api_key(cfg)
+            if not key:
+                return {
+                    "available": False,
+                    "access_mode": cfg.access_mode,
+                    "reason": "Zotero Web API key is not configured",
+                }
+            try:
+                identity = current_key_identity(self._web_client_factory(key).get_current_key())
+                return {
+                    "available": True,
+                    "access_mode": cfg.access_mode,
+                    "server_user_id": identity["user_id"],
+                    "server_username": identity["username"],
+                    "server_access": identity["access"],
+                }
+            except ZoteroWebApiError as exc:
+                return {
+                    "available": False,
+                    "access_mode": cfg.access_mode,
+                    "reason": str(exc),
+                }
+
         data_dir = zpaths.resolve_data_dir(cfg.zotero_data_dir)
         if data_dir is None:
-            return {"available": False, "reason": "未找到 zotero.sqlite（请在设置中配置数据目录）"}
-        result: dict[str, object] = {"available": True, "data_dir": str(data_dir)}
+            return {
+                "available": False,
+                "access_mode": cfg.access_mode,
+                "reason": "未找到 zotero.sqlite（请在设置中配置数据目录）",
+            }
+        result: dict[str, object] = {
+            "available": True,
+            "access_mode": cfg.access_mode,
+            "data_dir": str(data_dir),
+        }
         if cfg.storage_mode == ZOTERO_STORAGE_LINKED:
             result["linked_probe"] = zpaths.probe_linked_root(cfg.linked_root)
         return result
+
+    def probe_local_read(self) -> dict[str, object]:
+        """本地干跑探针：只读快照、不 mirror/不写库，返回可读条目与附件计数（供前端调试）。
+
+        仅本地模式有效；server 模式直接返回 reason（探针不联网，避免误触发下载）。
+        """
+        cfg = self._config.get_zotero_sync_config()
+        if cfg.access_mode == ZOTERO_ACCESS_SERVER:
+            return {"available": False, "reason": "探针仅用于本地模式"}
+        data_dir = zpaths.resolve_data_dir(cfg.zotero_data_dir)
+        if data_dir is None:
+            return {"available": False, "reason": "未找到 zotero.sqlite（请在设置中配置数据目录）"}
+        try:
+            snapshot = self._reader_factory(data_dir).read_snapshot()
+        except Exception as exc:  # noqa: BLE001 — 干读失败原因透传给前端
+            return {"available": False, "data_dir": str(data_dir), "reason": str(exc)}
+        pdf_count = sum(
+            1
+            for att in snapshot.attachments
+            if att.content_type == "application/pdf" or att.filename.lower().endswith(".pdf")
+        )
+        return {
+            "available": True,
+            "data_dir": str(data_dir),
+            "item_count": len(snapshot.items),
+            "collection_count": len(snapshot.collections),
+            "attachment_count": len(snapshot.attachments),
+            "pdf_attachment_count": pdf_count,
+        }
 
     async def pull(self, *, incremental: bool = True) -> ZoteroSyncResult:
         """执行一次整库 Pull。incremental=True 时仅处理新增/变更附件。"""
@@ -133,13 +209,10 @@ class ZoteroSyncPipeline:
             storage_mode=cfg.storage_mode,
             started_at=datetime.now(timezone.utc),
         )
-        data_dir = zpaths.resolve_data_dir(cfg.zotero_data_dir)
-        if data_dir is None:
-            result.errors.append("zotero.sqlite not found")
+        snapshot = self._read_snapshot(cfg, result)
+        if snapshot is None:
             result.finished_at = datetime.now(timezone.utc)
             return result
-
-        snapshot = self._reader_factory(data_dir).read_snapshot()
         await self._mirror_tables(snapshot)
         result.items_mirrored = len(snapshot.items)
         result.collections_mirrored = len(snapshot.collections)
@@ -155,6 +228,41 @@ class ZoteroSyncPipeline:
         result.finished_at = datetime.now(timezone.utc)
         logger.info("Zotero pull done: %s", result.to_dict())
         return result
+
+    def _read_snapshot(
+        self, cfg: ZoteroSyncConfig, result: ZoteroSyncResult
+    ) -> ZoteroSnapshot | None:
+        if cfg.access_mode == ZOTERO_ACCESS_SERVER:
+            key = self._zotero_api_key(cfg)
+            if not key:
+                result.errors.append("Zotero Web API key is not configured")
+                return None
+            try:
+                client = self._web_client_factory(key)
+                identity = current_key_identity(client.get_current_key())
+                reader = self._web_reader_factory(
+                    client,
+                    user_id=identity["user_id"],
+                    username=identity["username"],
+                    download_dir=self._web_cache_dir,
+                )
+                return reader.read_snapshot()
+            except ZoteroWebApiError as exc:
+                result.errors.append(f"Zotero Web API: {exc}")
+                return None
+
+        data_dir = zpaths.resolve_data_dir(cfg.zotero_data_dir)
+        if data_dir is None:
+            result.errors.append("zotero.sqlite not found")
+            return None
+        return self._reader_factory(data_dir).read_snapshot()
+
+    def _zotero_api_key(self, cfg: ZoteroSyncConfig) -> str:
+        if self._zotero_api_key_provider is not None:
+            key = self._zotero_api_key_provider().strip()
+            if key:
+                return key
+        return cfg.cloud_api_key.strip()
 
     # ── 镜像表 ────────────────────────────────────────────────
 

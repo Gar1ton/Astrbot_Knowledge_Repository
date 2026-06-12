@@ -236,13 +236,12 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
 
         {/* Vector DB */}
         <Card title="向量数据库与检索后端" icon="db">
-          <Field label="向量后端">
+          <Field label="向量后端" hint="Milvus Lite 为默认必装向量库；AstrBot KB 仅保留为后端兜底，前端暂不可选择。">
             <Select
-              value={vecBackend}
+              value={vecBackend === "astr" || vecBackend === "astrbot" ? "milvus" : vecBackend}
               onChange={(v) => { setVecBackend(v); save("vector_db", "backend", v); }}
               options={[
                 { value: "milvus", label: "Milvus Lite" },
-                { value: "astrbot", label: "AstrBot KB（回退）" },
               ]}
             />
           </Field>

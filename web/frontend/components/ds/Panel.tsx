@@ -3,6 +3,7 @@ import React from "react";
 interface Crumb {
   label: string;
   onClick?: () => void;
+  separator?: string; // separator shown BEFORE this crumb; defaults to "/"
 }
 
 interface PanelProps {
@@ -62,7 +63,11 @@ export function Panel({ title, crumbs, right, children, style, bodyStyle, flush 
             const showSeparator = Boolean(title) || i > 0;
             return (
               <React.Fragment key={i}>
-                {showSeparator && <span style={{ color: "var(--fg-subtle)", flexShrink: 0 }}>/</span>}
+                {showSeparator && (
+                  <span style={{ color: "var(--fg-subtle)", flexShrink: 0 }}>
+                    {crumb.separator !== undefined ? crumb.separator : "/"}
+                  </span>
+                )}
                 <span
                   style={{
                     color: i === crumbs.length - 1 ? "var(--fg)" : "var(--fg-muted)",

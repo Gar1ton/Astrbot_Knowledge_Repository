@@ -2,9 +2,6 @@
 # 本文件不会被 AstrBot 插件安装器自动安装。
 -r requirements.txt
 
-# Milvus Lite 向量检索
-pymilvus[milvus_lite]>=2.5,<3.0
-
 # 本地 Embedding。Linux CPU 部署建议先安装 CPU-only PyTorch，避免下载大型 CUDA 组件。
 sentence-transformers>=3,<6
 

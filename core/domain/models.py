@@ -135,6 +135,7 @@ class SourceDocument:
     converter_version: str = ""
     lifecycle_state: DocumentLifecycle = DocumentLifecycle.ACTIVE
     last_synced_at: datetime | None = None
+    local_meta: dict[str, Any] = field(default_factory=dict)
 
     @property
     def document_id(self) -> str:

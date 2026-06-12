@@ -11,12 +11,14 @@ import { useI18n, type I18nKey } from "@/lib/i18n";
 import { useToast } from "@/components/ui/Toast";
 import { TerminalPanel } from "@/components/ui/TerminalPanel";
 import {
-  getEffectiveConfig, getZoteroConfig, syncZoteroPull, backupNow,
+  getEffectiveConfig, getZoteroConfig, syncZoteroPull, backupNow, logout,
+  updateConfigValue, saveZoteroServerKey, deleteZoteroServerKey,
   EffectiveConfig, ZoteroConfig,
 } from "@/lib/api";
 
 interface SettingModalProps {
   onClose: () => void;
+  onLogout: () => void;
 }
 
 // ─── Shared primitives ────────────────────────────────────────
@@ -145,9 +147,9 @@ function applyAccent(h: number, s: number, l: number) {
   localStorage.setItem("kr-light", `${l}%`);
 }
 
-// ─── Tab: Appearance ──────────────────────────────────────────
+// ─── Tab: General (previously Appearance) ─────────────────────
 
-function AppearanceTab() {
+function AppearanceTab({ onLogout }: { onLogout: () => void }) {
   const { theme, setTheme } = useTheme();
   const { lang, setLang, t } = useI18n();
   const [accent, setAccent] = useState({ h: 225, s: 72, l: 56 });
@@ -254,21 +256,88 @@ function AppearanceTab() {
           <Badge tone="accent">徽章</Badge>
         </div>
       </Card>
+
+      <Card title={t("settings_section_account")} icon="user">
+        <div style={{ padding: "8px 0 4px" }}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={async () => { await logout(); onLogout(); }}
+          >
+            {t("settings_logout_btn")}
+          </Button>
+        </div>
+      </Card>
     </>
   );
 }
 
 // ─── Tab: Sync/Backup ─────────────────────────────────────────
 
+const ZOTERO_SYNC_MODES = ["strict_mirror", "conservative", "archive"];
+const ZOTERO_SYNC_MODE_LABELS: Record<string, string> = {
+  strict_mirror: "严格镜像",
+  conservative: "保守同步",
+  archive: "归档堆栈",
+};
+
+function ZoteroSyncModeLabel({ value }: { value: string }) {
+  return <>{ZOTERO_SYNC_MODE_LABELS[value] ?? value}</>;
+}
+
 function SyncTab() {
   const { toast } = useToast();
   const [zotero, setZotero] = useState<ZoteroConfig | null>(null);
+  const [effectiveConfig, setEffectiveConfig] = useState<EffectiveConfig | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [backing, setBacking] = useState(false);
+  const [saving, setSaving] = useState<string | null>(null);
+
+  // local/server mode
+  const [accessMode, setAccessMode] = useState<"local" | "server">("local");
+  // local mode fields
+  const [apiPort, setApiPort] = useState("23119");
+  const [dataDirOverride, setDataDirOverride] = useState("");
+  // server mode fields
+  const [serverKeyDraft, setServerKeyDraft] = useState("");
+  const [serverKeySaving, setServerKeySaving] = useState(false);
+  const [serverKeyError, setServerKeyError] = useState("");
+  // common fields
+  const [syncMode, setSyncMode] = useState("conservative");
+  const [autoSync, setAutoSync] = useState(false);
+  const [syncInterval, setSyncInterval] = useState("3600");
 
   useEffect(() => {
-    getZoteroConfig().then(setZotero).catch(() => {});
+    Promise.all([getZoteroConfig(), getEffectiveConfig()]).then(([z, cfg]) => {
+      setZotero(z);
+      setEffectiveConfig(cfg);
+      const zs = (cfg.zotero_sync ?? {}) as Record<string, unknown>;
+      const mode = String(zs.access_mode ?? z.access_mode ?? "local") as "local" | "server";
+      setAccessMode(mode);
+      setApiPort(String(zs.api_port ?? 23119));
+      setDataDirOverride(String(zs.zotero_data_dir ?? ""));
+      setSyncMode(String(zs.sync_mode ?? z.sync_mode ?? "conservative"));
+      setAutoSync(Boolean(zs.auto_sync_enabled ?? z.auto_sync_enabled ?? false));
+      setSyncInterval(String(zs.auto_sync_interval_sec ?? z.auto_sync_interval_sec ?? 3600));
+    }).catch(() => {});
   }, []);
+
+  async function save(section: string, key: string, value: string | boolean | number) {
+    const id = `${section}.${key}`;
+    setSaving(id);
+    try {
+      await updateConfigValue(section, key, value);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "保存失败", "error");
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function handleModeSwitch(mode: "local" | "server") {
+    setAccessMode(mode);
+    await save("zotero_sync", "access_mode", mode);
+  }
 
   async function handleZoteroSync() {
     setSyncing(true);
@@ -299,7 +368,71 @@ function SyncTab() {
     }
   }
 
+  async function handleServerKeySave() {
+    const key = serverKeyDraft.trim();
+    if (!key) return;
+    setServerKeySaving(true);
+    setServerKeyError("");
+    try {
+      const updated = await saveZoteroServerKey(key);
+      setZotero(updated);
+      setServerKeyDraft("");
+      toast("API Key 已保存", "ok");
+    } catch (err: unknown) {
+      setServerKeyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setServerKeySaving(false);
+    }
+  }
+
+  async function handleServerKeyDelete() {
+    setServerKeySaving(true);
+    setServerKeyError("");
+    try {
+      const updated = await deleteZoteroServerKey();
+      setZotero(updated);
+      toast("API Key 已清除", "ok");
+    } catch (err: unknown) {
+      setServerKeyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setServerKeySaving(false);
+    }
+  }
+
   const zoteroConnected = zotero?.connection?.connected ?? false;
+  const resolvedDataDir = String((effectiveConfig?.zotero_sync as Record<string, unknown> | undefined)?.resolved_data_dir ?? "");
+  const serverKeyPresent = Boolean((effectiveConfig?.zotero_sync as Record<string, unknown> | undefined)?.server_key_present ?? zotero?.server_key_present);
+  const serverKeyMasked = String((effectiveConfig?.zotero_sync as Record<string, unknown> | undefined)?.server_key_masked ?? "");
+  const serverUsername = String((effectiveConfig?.zotero_sync as Record<string, unknown> | undefined)?.server_username ?? (effectiveConfig?.zotero_sync as Record<string, unknown> | undefined)?.server_user_id ?? "");
+
+  // Segmented control pill style
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    flex: 1,
+    padding: "5px 0",
+    textAlign: "center",
+    fontSize: 12,
+    fontWeight: active ? 600 : 500,
+    color: active ? "var(--accent)" : "var(--fg-muted)",
+    background: active ? "var(--accent-soft)" : "transparent",
+    border: "none",
+    borderRadius: "var(--radius-md)",
+    cursor: "pointer",
+    fontFamily: "inherit",
+    transition: "all .15s",
+  });
+
+  const inputStyle: React.CSSProperties = {
+    height: 30,
+    padding: "0 10px",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-md)",
+    background: "var(--surface)",
+    color: "var(--fg)",
+    fontSize: 12,
+    fontFamily: "inherit",
+    outline: "none",
+    width: 180,
+  };
 
   return (
     <>
@@ -312,30 +445,164 @@ function SyncTab() {
           </Badge>
         }
       >
-        <Field label="单向 Pull 镜像" hint="只读镜像 Zotero 条目 / 集合 / 标签 / PDF，清洗为 Markdown">
+        {/* Mode switcher */}
+        <div
+          style={{
+            display: "flex",
+            gap: 2,
+            padding: "4px",
+            background: "var(--bg-inset)",
+            borderRadius: "var(--radius-lg)",
+            margin: "8px 0 4px",
+          }}
+        >
+          <button type="button" style={tabStyle(accessMode === "local")} onClick={() => handleModeSwitch("local")}>
+            本地离线
+          </button>
+          <button type="button" style={tabStyle(accessMode === "server")} onClick={() => handleModeSwitch("server")}>
+            在线服务
+          </button>
+        </div>
+
+        {/* Local panel */}
+        {accessMode === "local" && (
+          <div style={{ paddingTop: 4 }}>
+            <Field label="本地通讯端口">
+              <input
+                style={inputStyle}
+                type="number"
+                value={apiPort}
+                onChange={(e) => setApiPort(e.target.value)}
+                onBlur={() => {
+                  const n = parseInt(apiPort, 10);
+                  if (Number.isFinite(n) && n > 0) save("zotero_sync", "api_port", n);
+                }}
+                disabled={saving === "zotero_sync.api_port"}
+              />
+            </Field>
+            {resolvedDataDir && (
+              <Field label="自动解析目录" hint="只读，由插件自动探测">
+                <span style={{ fontSize: 11, color: "var(--fg-muted)", fontFamily: "var(--font-mono)", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {resolvedDataDir}
+                </span>
+              </Field>
+            )}
+            <Field label="目录覆盖" hint="留空使用自动解析路径">
+              <input
+                style={{ ...inputStyle, width: 200 }}
+                type="text"
+                value={dataDirOverride}
+                placeholder="留空自动探测"
+                onChange={(e) => setDataDirOverride(e.target.value)}
+                onBlur={() => save("zotero_sync", "zotero_data_dir", dataDirOverride)}
+                disabled={saving === "zotero_sync.zotero_data_dir"}
+              />
+            </Field>
+            <div style={{ fontSize: 11, color: "var(--fg-subtle)", padding: "6px 0 4px", lineHeight: 1.5 }}>
+              ℹ Zotero 需在同一设备运行，插件将自动探测 {apiPort || "23119"} 端口
+            </div>
+          </div>
+        )}
+
+        {/* Online panel */}
+        {accessMode === "server" && (
+          <div style={{ paddingTop: 4 }}>
+            <Field
+              label="Zotero API Key"
+              hint={serverKeyPresent ? `当前：${serverKeyMasked || "****"}` : "未设置"}
+            >
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <input
+                  style={{ ...inputStyle, width: 160 }}
+                  type="password"
+                  autoComplete="off"
+                  value={serverKeyDraft}
+                  placeholder="输入 Web API key"
+                  disabled={serverKeySaving}
+                  onChange={(e) => setServerKeyDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && serverKeyDraft.trim()) handleServerKeySave(); }}
+                />
+                <Button
+                  variant="outline" size="sm"
+                  loading={serverKeySaving && serverKeyDraft !== ""}
+                  onClick={handleServerKeySave}
+                  style={{ opacity: serverKeyDraft.trim() ? 1 : 0.4, pointerEvents: serverKeyDraft.trim() ? undefined : "none" }}
+                >
+                  保存
+                </Button>
+                {serverKeyPresent && (
+                  <Button variant="ghost" size="sm" onClick={handleServerKeyDelete} loading={serverKeySaving && serverKeyDraft === ""}>
+                    清除
+                  </Button>
+                )}
+              </div>
+            </Field>
+            {serverKeyError && (
+              <div style={{ fontSize: 11, color: "var(--danger)", padding: "2px 0 6px" }}>{serverKeyError}</div>
+            )}
+            {serverUsername && (
+              <Field label="用户名" hint="只读，从 API Key 解析">
+                <span style={{ fontSize: 12, color: "var(--fg-muted)", fontFamily: "var(--font-mono)" }}>{serverUsername}</span>
+              </Field>
+            )}
+            <div style={{ fontSize: 11, color: "var(--fg-subtle)", padding: "6px 0 4px", lineHeight: 1.5 }}>
+              ℹ 在 zotero.org → 设置 → API Keys 中生成私有 API Key
+            </div>
+          </div>
+        )}
+
+        {/* Availability warning */}
+        {zotero?.availability && !zotero.availability.available && (
+          <div style={{ fontSize: 11, color: "var(--warn)", marginTop: 4, padding: "6px 0", lineHeight: 1.5 }}>
+            ⚠ {zotero.availability.reason}
+          </div>
+        )}
+
+        {/* Common fields */}
+        <div style={{ height: 1, background: "var(--border)", margin: "8px 0" }} />
+
+        <Field label="同步模式">
+          <select
+            value={syncMode}
+            onChange={(e) => { setSyncMode(e.target.value); save("zotero_sync", "sync_mode", e.target.value); }}
+            style={{ ...inputStyle, width: 140 }}
+            disabled={saving === "zotero_sync.sync_mode"}
+          >
+            {ZOTERO_SYNC_MODES.map((m) => (
+              <option key={m} value={m}><ZoteroSyncModeLabel value={m} /></option>
+            ))}
+          </select>
+        </Field>
+
+        <Field label="自动同步">
+          <Toggle
+            checked={autoSync}
+            onChange={(v) => { setAutoSync(v); save("zotero_sync", "auto_sync_enabled", v); }}
+          />
+        </Field>
+
+        {autoSync && (
+          <Field label="同步间隔（秒）">
+            <input
+              style={inputStyle}
+              type="number"
+              value={syncInterval}
+              min={60}
+              onChange={(e) => setSyncInterval(e.target.value)}
+              onBlur={() => {
+                const n = parseInt(syncInterval, 10);
+                if (Number.isFinite(n) && n >= 60) save("zotero_sync", "auto_sync_interval_sec", n);
+              }}
+              disabled={saving === "zotero_sync.auto_sync_interval_sec"}
+            />
+          </Field>
+        )}
+
+        <Field label="单向 Pull 镜像" hint="只读镜像 Zotero 条目 / 集合 / PDF，清洗为 Markdown">
           <Button variant="outline" size="sm" loading={syncing} onClick={handleZoteroSync}>
             <Icon name="sync" size={13} /> 立即同步
           </Button>
         </Field>
-        <Field
-          label="自动同步"
-          hint={`间隔 ${zotero?.auto_sync_interval_sec ?? 3600} 秒`}
-        >
-          <Toggle checked={zotero?.auto_sync_enabled ?? false} onChange={() => {}} />
-        </Field>
-        {zotero?.availability && !zotero.availability.available && (
-          <div
-            style={{
-              fontSize: 11,
-              color: "var(--warn)",
-              marginTop: 4,
-              padding: "6px 0",
-              lineHeight: 1.5,
-            }}
-          >
-            ⚠ {zotero.availability.reason}
-          </div>
-        )}
       </Card>
 
       <Card
@@ -437,7 +704,7 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
-export function SettingModal({ onClose }: SettingModalProps) {
+export function SettingModal({ onClose, onLogout }: SettingModalProps) {
   const [tab, setTab] = useState<TabId>("appearance");
   const { t } = useI18n();
 
@@ -490,7 +757,7 @@ export function SettingModal({ onClose }: SettingModalProps) {
             minHeight: 0,
           }}
         >
-          {tab === "appearance" && <AppearanceTab />}
+          {tab === "appearance" && <AppearanceTab onLogout={onLogout} />}
           {tab === "sync" && <SyncTab />}
           {tab === "config" && <ConfigTab />}
           {tab === "terminal" && <TerminalPanel variant="embedded" />}

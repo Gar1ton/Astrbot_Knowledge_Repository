@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { ToastProvider } from "@/components/ui/Toast";
 import { BuildWidget } from "@/components/build/BuildWidget";
 import { I18nContext, Lang, makeT } from "@/lib/i18n";
@@ -69,7 +69,7 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
             letterSpacing: "-0.02em",
           }}
         >
-          Knowledge Repository
+          Knowledge Arch
         </h1>
         <p style={{ margin: "0 0 20px", fontSize: 13, color: "var(--fg-muted)" }}>
           控制台登录
@@ -148,8 +148,66 @@ function I18nProvider({ children }: { children: React.ReactNode }) {
 
 // ─── Three-panel canvas ───────────────────────────────────────
 
+const DEFAULT_CHAT_W = 360;
+const MIN_CHAT_W = 280;
+const DEFAULT_FILE_W = 264;
+const MIN_FILE_W = 200;
+const MAX_FILE_W = 528;
+
+type DragTarget = "file" | "chat" | null;
+
 function ConsoleCanvas({ onLogout }: { onLogout: () => void }) {
-  const { noteDocId, selectedCollection, settingOpen, setSettingOpen, astrBotOpen, setAstrBotOpen, workflowOpen, setWorkflowOpen } = useConsole();
+  const { noteDocId, selectedDocId, selectedCollection, settingOpen, setSettingOpen, astrBotOpen, setAstrBotOpen, workflowOpen, setWorkflowOpen } = useConsole();
+
+  const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_W);
+  const [fileWidth, setFileWidth] = useState(DEFAULT_FILE_W);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragTarget = useRef<DragTarget>(null);
+  const startX = useRef(0);
+  const startChatWidth = useRef(DEFAULT_CHAT_W);
+  const startFileWidth = useRef(DEFAULT_FILE_W);
+  const [fileDividerHover, setFileDividerHover] = useState(false);
+  const [chatDividerHover, setChatDividerHover] = useState(false);
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!dragTarget.current || !containerRef.current) return;
+      if (dragTarget.current === "file") {
+        const delta = e.clientX - startX.current;
+        const next = Math.max(MIN_FILE_W, Math.min(MAX_FILE_W, startFileWidth.current + delta));
+        setFileWidth(next);
+      } else {
+        // chat: dragging left increases chat width
+        const totalPadGap = 40;
+        const availableWidth = containerRef.current.clientWidth - fileWidth - totalPadGap;
+        const maxChatWidth = availableWidth / 2;
+        const delta = startX.current - e.clientX;
+        const next = Math.max(MIN_CHAT_W, Math.min(maxChatWidth, startChatWidth.current + delta));
+        setChatWidth(next);
+      }
+    };
+    const onMouseUp = () => { dragTarget.current = null; };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [fileWidth]);
+
+  const handleFileDragStart = useCallback((e: React.MouseEvent) => {
+    dragTarget.current = "file";
+    startX.current = e.clientX;
+    startFileWidth.current = fileWidth;
+    e.preventDefault();
+  }, [fileWidth]);
+
+  const handleChatDragStart = useCallback((e: React.MouseEvent) => {
+    dragTarget.current = "chat";
+    startX.current = e.clientX;
+    startChatWidth.current = chatWidth;
+    e.preventDefault();
+  }, [chatWidth]);
 
   useEffect(() => {
     const isLightRAG = selectedCollection?.startsWith("lr:") ?? false;
@@ -158,15 +216,15 @@ function ConsoleCanvas({ onLogout }: { onLogout: () => void }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
-      <TopBar onLogout={onLogout} />
+      <TopBar />
 
       {/* Three-panel stage */}
       <div
+        ref={containerRef}
         style={{
           flex: 1,
           minHeight: 0,
           display: "flex",
-          gap: "var(--panel-gap)",
           padding: "0 var(--panel-gap) var(--panel-gap)",
           overflow: "hidden",
         }}
@@ -174,32 +232,84 @@ function ConsoleCanvas({ onLogout }: { onLogout: () => void }) {
         {/* Left: File OR Note */}
         <div
           style={{
-            width: "var(--file-w)",
+            width: fileWidth,
             flexShrink: 0,
             display: "flex",
             flexDirection: "column",
             minHeight: 0,
           }}
         >
-          {noteDocId ? (
-            <NotePanel docId={noteDocId} />
+          {(selectedDocId || noteDocId) ? (
+            <NotePanel docId={selectedDocId ?? noteDocId!} />
           ) : (
             <FilePanel />
           )}
         </div>
 
+        {/* File drag handle */}
+        <div
+          onMouseDown={handleFileDragStart}
+          onMouseEnter={() => setFileDividerHover(true)}
+          onMouseLeave={() => setFileDividerHover(false)}
+          style={{
+            width: "var(--panel-gap)",
+            flexShrink: 0,
+            cursor: "col-resize",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            userSelect: "none",
+          }}
+        >
+          <div
+            style={{
+              width: 2,
+              height: 40,
+              borderRadius: 1,
+              background: fileDividerHover ? "var(--border-strong)" : "var(--border)",
+              transition: "background .15s",
+            }}
+          />
+        </div>
+
         {/* Middle: Documents */}
         <DocumentsPanel />
 
+        {/* Chat drag handle */}
+        <div
+          onMouseDown={handleChatDragStart}
+          onMouseEnter={() => setChatDividerHover(true)}
+          onMouseLeave={() => setChatDividerHover(false)}
+          style={{
+            width: "var(--panel-gap)",
+            flexShrink: 0,
+            cursor: "col-resize",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            userSelect: "none",
+          }}
+        >
+          <div
+            style={{
+              width: 2,
+              height: 40,
+              borderRadius: 1,
+              background: chatDividerHover ? "var(--border-strong)" : "var(--border)",
+              transition: "background .15s",
+            }}
+          />
+        </div>
+
         {/* Right: Chat */}
-        <ChatPanel />
+        <ChatPanel width={chatWidth} />
       </div>
 
       {/* Floating build progress widget */}
       <BuildWidget />
 
       {/* Full-screen modals */}
-      {settingOpen && <SettingModal onClose={() => setSettingOpen(false)} />}
+      {settingOpen && <SettingModal onClose={() => setSettingOpen(false)} onLogout={onLogout} />}
       {astrBotOpen && <AstrBotModal onClose={() => setAstrBotOpen(false)} />}
       {workflowOpen && <WorkflowModal onClose={() => setWorkflowOpen(false)} />}
     </div>

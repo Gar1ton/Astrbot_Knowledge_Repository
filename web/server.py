@@ -209,6 +209,15 @@ async def handle_classify_document(request: web.Request) -> web.Response:
     return web.json_response(await _document_dict(_api(request), doc))
 
 
+async def handle_document_meta_patch(request: web.Request) -> web.Response:
+    doc_id = request.match_info["doc_id"]
+    body = await request.json()
+    doc = await _api(request).update_document_meta(doc_id, body)
+    if doc is None:
+        return web.json_response({"error": "not found or not editable"}, status=404)
+    return web.json_response(await _document_dict(_api(request), doc))
+
+
 async def handle_delete_document(request: web.Request) -> web.Response:
     from core.api import ReadOnlyError
 
@@ -507,6 +516,35 @@ async def handle_sync_status(request: web.Request) -> web.Response:
 
 async def handle_zotero_config(request: web.Request) -> web.Response:
     return web.json_response(await _api(request).get_zotero_config())
+
+
+async def handle_zotero_probe(request: web.Request) -> web.Response:
+    return web.json_response(await _api(request).probe_zotero_local())
+
+
+async def handle_zotero_server_key_post(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    if not isinstance(body, dict):
+        return web.json_response({"status": "error", "message": "invalid JSON"}, status=400)
+    api_key = str(body.get("api_key") or body.get("key") or "").strip()
+    if not api_key:
+        return web.json_response(
+            {"status": "error", "message": "api_key is required"},
+            status=400,
+        )
+    try:
+        return web.json_response(await _api(request).save_zotero_server_key(api_key))
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_zotero_server_key_delete(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(await _api(request).delete_zotero_server_key())
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
 
 
 async def handle_zotero_pull(request: web.Request) -> web.Response:
@@ -1048,6 +1086,10 @@ async def _document_dict(api: KnowledgeRepositoryApi, d: object) -> dict:
         )
         if meta:
             result["zotero_meta"] = meta
+    elif origin_val == "local":
+        local_meta = getattr(d, "local_meta", {}) or {}
+        if local_meta:
+            result["zotero_meta"] = local_meta
     return result
 
 
@@ -1147,6 +1189,7 @@ def build_app(
     app.router.add_get("/api/documents", handle_list_documents)
     app.router.add_post("/api/documents", handle_upload_document)
     app.router.add_patch("/api/documents/{doc_id}", handle_classify_document)
+    app.router.add_patch("/api/documents/{doc_id}/meta", handle_document_meta_patch)
     app.router.add_delete("/api/documents/{doc_id}", handle_delete_document)
     app.router.add_get("/api/documents/{doc_id}/content", handle_document_content)
     app.router.add_get("/api/documents/{doc_id}/chunks", handle_document_chunks)
@@ -1172,6 +1215,9 @@ def build_app(
     app.router.add_post("/api/sync/notion/pull", handle_notion_pull)
     app.router.add_get("/api/sync/status", handle_sync_status)
     app.router.add_get("/api/zotero/config", handle_zotero_config)
+    app.router.add_get("/api/zotero/probe", handle_zotero_probe)
+    app.router.add_post("/api/zotero/server-key", handle_zotero_server_key_post)
+    app.router.add_delete("/api/zotero/server-key", handle_zotero_server_key_delete)
     app.router.add_post("/api/sync/zotero/pull", handle_zotero_pull)
     app.router.add_get("/api/sync/zotero/status", handle_zotero_status)
     app.router.add_post("/api/backup", handle_backup)

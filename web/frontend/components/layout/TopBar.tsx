@@ -1,25 +1,40 @@
 "use client";
-import React, { useContext } from "react";
+import React, { useEffect, useState } from "react";
 import Image from "next/image";
 import { useConsole } from "@/lib/ConsoleContext";
 import { Button } from "@/components/ds/Button";
-import { IconButton } from "@/components/ds/IconButton";
 import { Icon } from "@/components/ds/Icon";
-import { I18nContext } from "@/lib/i18n";
-import { logout } from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
+import { getCapabilities } from "@/lib/api";
+import { deriveWorkflowStatus, type WorkflowStatus } from "@/lib/flowHealth";
 
-interface TopBarProps {
-  onLogout: () => void;
-}
-
-export function TopBar({ onLogout }: TopBarProps) {
+export function TopBar() {
   const { setSettingOpen, setAstrBotOpen, setWorkflowOpen } = useConsole();
-  const { lang, setLang, t } = useContext(I18nContext);
+  const { t } = useI18n();
+  const [wfStatus, setWfStatus] = useState<WorkflowStatus>("red");
 
-  async function handleLogout() {
-    await logout();
-    onLogout();
-  }
+  useEffect(() => {
+    let alive = true;
+    let inFlight = false;
+    const refresh = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const caps = await getCapabilities();
+        if (alive) setWfStatus(deriveWorkflowStatus(caps));
+      } catch {
+        if (alive) setWfStatus("red");
+      } finally {
+        inFlight = false;
+      }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   return (
     <div
@@ -36,29 +51,13 @@ export function TopBar({ onLogout }: TopBarProps) {
       }}
     >
       {/* Brand */}
-      <span
-        style={{
-          width: 24,
-          height: 24,
-          borderRadius: 6,
-          background: "var(--accent)",
-          color: "#fff",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
-          overflow: "hidden",
-        }}
-      >
-        <Image
-          src="/mark-sparkle.svg"
-          alt=""
-          width={16}
-          height={16}
-          style={{ filter: "brightness(0) invert(1)" }}
-          onError={() => {}}
-        />
-      </span>
+      <Image
+        src="/knowledge-arch-icon.svg"
+        alt="Knowledge Arch"
+        width={28}
+        height={28}
+        style={{ borderRadius: 7, flexShrink: 0 }}
+      />
       <span
         style={{
           fontSize: 13,
@@ -68,7 +67,7 @@ export function TopBar({ onLogout }: TopBarProps) {
           flexShrink: 0,
         }}
       >
-        Knowledge Repository
+        Knowledge Arch
       </span>
 
       <span style={{ flex: 1 }} />
@@ -90,24 +89,16 @@ export function TopBar({ onLogout }: TopBarProps) {
       >
         <Icon name="spark2" size={14} /> AstrBot
       </Button>
-      <Button
-        variant="tab"
-        size="sm"
-        style={{ height: 30, gap: 6 }}
-        onClick={() => setWorkflowOpen(true)}
-      >
-        <Icon name="flow" size={14} /> {t("topbar_workflow")}
-      </Button>
-
-      <span style={{ width: 6 }} />
-
-      {/* Theme & logout */}
-      <IconButton
-        name={lang === "zh" ? "globe" : "globe"}
-        label={lang === "zh" ? t("topbar_switch_to_en") : t("topbar_switch_to_zh")}
-        onClick={() => setLang(lang === "zh" ? "en" : "zh")}
-      />
-      <IconButton name="arrowUp" label={t("nav_logout")} side="left" onClick={handleLogout} />
+      <span className={`wf-pulse-${wfStatus}`}>
+        <Button
+          variant="tab"
+          size="sm"
+          style={{ height: 30, gap: 6 }}
+          onClick={() => setWorkflowOpen(true)}
+        >
+          <Icon name="flow" size={14} /> {t("topbar_workflow")}
+        </Button>
+      </span>
     </div>
   );
 }

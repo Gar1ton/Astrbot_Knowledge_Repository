@@ -78,7 +78,7 @@ _DOC_COLUMNS = (
     "doc_id, title, file_path, content_type, size_bytes, content_hash, collection, tags, "
     "created_at, updated_at, needs_reindex, library_id, zotero_item_key, attachment_key, "
     "origin, read_only, zotero_version, markdown_rel_path, pages_rel_path, "
-    "converter, converter_version, lifecycle_state, last_synced_at"
+    "converter, converter_version, lifecycle_state, last_synced_at, local_meta"
 )
 
 
@@ -116,6 +116,7 @@ def _row_to_document(row: tuple) -> SourceDocument:
         converter_version=row[20],
         lifecycle_state=DocumentLifecycle(row[21]),
         last_synced_at=_parse_dt(row[22]),
+        local_meta=_loads_dict(row[23]),
     )
 
 
@@ -237,7 +238,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             await self._db.execute(
                 f"""
                 INSERT INTO documents ({_DOC_COLUMNS})
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document.doc_id,
@@ -263,6 +264,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                     document.converter_version,
                     document.lifecycle_state.value,
                     _format_dt(document.last_synced_at),
+                    json.dumps(document.local_meta),
                 ),
             )
             await self._db.commit()
@@ -325,7 +327,8 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 content_hash = ?, collection = ?, tags = ?, updated_at = ?, needs_reindex = ?,
                 library_id = ?, zotero_item_key = ?, attachment_key = ?, origin = ?,
                 read_only = ?, zotero_version = ?, markdown_rel_path = ?, pages_rel_path = ?,
-                converter = ?, converter_version = ?, lifecycle_state = ?, last_synced_at = ?
+                converter = ?, converter_version = ?, lifecycle_state = ?, last_synced_at = ?,
+                local_meta = ?
             WHERE doc_id = ?
             """,
             (
@@ -350,6 +353,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 document.converter_version,
                 document.lifecycle_state.value,
                 _format_dt(document.last_synced_at),
+                json.dumps(document.local_meta),
                 document.doc_id,
             ),
         ) as cursor:

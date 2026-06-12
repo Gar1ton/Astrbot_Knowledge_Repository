@@ -2,14 +2,14 @@
 /* Extracted from app/(console)/flow/page.tsx — do NOT modify components/flow/ files. */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { FlowDiagram } from "@/components/flow/FlowDiagram";
-import { AlertIcon, CheckIcon, RefreshIcon, XIcon } from "@/components/flow/Icons";
+import { AlertIcon, CheckIcon, XIcon } from "@/components/flow/Icons";
 import { SWITCH_MAP, type FlowStageId } from "@/components/flow/model";
 import type { QuickConfigUpdate } from "@/components/flow/QuickConfigPanel";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
-  getCapabilities,
   getEffectiveConfig,
+  getZoteroConfig,
   installDependency,
   rebuildIndexPending,
   recheckDependencies,
@@ -30,23 +30,49 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [installingKey, setInstallingKey] = useState<string | null>(null);
-  const [rechecking, setRechecking] = useState(false);
   const [rebuildingIndex, setRebuildingIndex] = useState(false);
   const [banner, setBanner] = useState<Banner>(null);
   const [justActivatedId, setJustActivatedId] = useState<string | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(false);
+  const refreshInFlight = useRef(false);
 
   const refreshFlow = useCallback(async () => {
-    const [freshCaps, freshConfig] = await Promise.all([getCapabilities(), getEffectiveConfig()]);
-    setCaps(freshCaps);
-    setConfig(freshConfig);
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    try {
+      const [freshCaps, freshConfig, zoteroConfig] = await Promise.all([
+        recheckDependencies(),
+        getEffectiveConfig(),
+        getZoteroConfig(),
+      ]);
+      if (!mountedRef.current) return;
+      setCaps(freshCaps);
+      setConfig({
+        ...freshConfig,
+        zotero_sync: {
+          ...(freshConfig.zotero_sync ?? {}),
+          ...zoteroConfig,
+        },
+      });
+    } finally {
+      refreshInFlight.current = false;
+    }
   }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
     refreshFlow()
       .catch(() => {})
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (mountedRef.current) setLoading(false);
+      });
+    const timer = window.setInterval(() => {
+      refreshFlow().catch(() => undefined);
+    }, 5000);
     return () => {
+      mountedRef.current = false;
+      window.clearInterval(timer);
       if (flashTimer.current) clearTimeout(flashTimer.current);
     };
   }, [refreshFlow]);
@@ -102,25 +128,13 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
       } else {
         toast(result.message || t("flow_save_failed"), "error");
       }
-      const [freshCaps, freshConfig] = await Promise.all([recheckDependencies(), getEffectiveConfig()]);
-      setCaps(freshCaps);
-      setConfig(freshConfig);
+      await refreshFlow();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : String(err), "error");
     } finally {
       setInstallingKey(null);
     }
   }, [t, toast]);
-
-  const handleRecheck = useCallback(async () => {
-    setRechecking(true);
-    try {
-      const [freshCaps, freshConfig] = await Promise.all([recheckDependencies(), getEffectiveConfig()]);
-      setCaps(freshCaps);
-      setConfig(freshConfig);
-    } catch { /* silent */ }
-    finally { setRechecking(false); }
-  }, []);
 
   const handleRebuildIndex = useCallback(async () => {
     setRebuildingIndex(true);
@@ -165,26 +179,16 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
             <h1 className="flow-topo-title">{t("flow_title")}</h1>
             <p className="flow-topo-subtitle">{t("flow_subtitle")}</p>
           </div>
-          <div className="flow-topo-actions">
-            <button
-              type="button"
-              className="flow-recheck-button"
-              disabled={rechecking}
-              onClick={handleRecheck}
-            >
-              <RefreshIcon className={rechecking ? "flow-spin" : undefined} />
-              {rechecking ? t("flow_rechecking") : t("flow_recheck")}
-            </button>
+          <div className="flow-topo-actions flow-topo-status-panel">
+            <div className="flow-topo-legend">
+              <span className="flow-legend-item"><span className="flow-legend-dot ready" />{t("flow_legend_ready")}</span>
+              <span className="flow-legend-item"><span className="flow-legend-dot degraded" />{t("flow_legend_degraded")}</span>
+              <span className="flow-legend-item"><span className="flow-legend-dot off" />{t("flow_legend_off")}</span>
+              <span className="flow-legend-sep" />
+              <span className="flow-legend-item flow-legend-branch"><span className="flow-legend-line" />{t("flow_parallel_hint")}</span>
+            </div>
+            <span className="flow-legend-hint">{t("flow_auto_refresh_hint")}</span>
           </div>
-        </div>
-
-        <div className="flow-topo-legend">
-          <span className="flow-legend-item"><span className="flow-legend-dot ready" />{t("flow_legend_ready")}</span>
-          <span className="flow-legend-item"><span className="flow-legend-dot degraded" />{t("flow_legend_degraded")}</span>
-          <span className="flow-legend-item"><span className="flow-legend-dot off" />{t("flow_legend_off")}</span>
-          <span className="flow-legend-sep" />
-          <span className="flow-legend-item flow-legend-branch"><span className="flow-legend-line" />{t("flow_parallel_hint")}</span>
-          <span className="flow-legend-hint">{t("flow_canvas_hint")}</span>
         </div>
 
         {banner && (
@@ -215,6 +219,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
           rebuildingIndex={rebuildingIndex}
           onSwitch={handleSwitch}
           onQuickConfigSave={handleQuickConfigSave}
+          onRefresh={refreshFlow}
           onInstall={handleInstall}
           onRebuildIndex={handleRebuildIndex}
           onClose={onClose}

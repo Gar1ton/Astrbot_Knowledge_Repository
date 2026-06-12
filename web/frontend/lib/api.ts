@@ -94,15 +94,30 @@ export interface EffectiveConfig {
 
 export interface ZoteroConfig {
   enabled: boolean;
+  access_mode: "local" | "server";
   zotero_data_dir: string;
+  resolved_data_dir?: string;
   api_port: number;
   storage_mode: "managed_copy" | "linked";
   linked_root: string;
   sync_mode: "strict_mirror" | "conservative" | "archive";
   auto_sync_enabled: boolean;
   auto_sync_interval_sec: number;
+  server_key_present?: boolean;
+  server_key_masked?: string;
+  server_user_id?: string;
+  server_username?: string;
+  server_access?: Record<string, unknown>;
   connection?: { connected: boolean; port: number; detail: string };
-  availability?: { available: boolean; reason?: string; data_dir?: string };
+  availability?: {
+    available: boolean;
+    reason?: string;
+    data_dir?: string;
+    access_mode?: "local" | "server";
+    server_user_id?: string;
+    server_username?: string;
+    server_access?: Record<string, unknown>;
+  };
   linked_probe?: { valid: boolean; reason: string; resolved: string };
 }
 
@@ -123,6 +138,19 @@ export interface ZoteroSyncResult {
   errors?: string[];
   status?: string;
   message?: string;
+}
+
+export interface ZoteroProbeResult {
+  connection: { connected: boolean; port?: number; detail?: string };
+  read: {
+    available: boolean;
+    reason?: string;
+    data_dir?: string;
+    item_count?: number;
+    collection_count?: number;
+    attachment_count?: number;
+    pdf_attachment_count?: number;
+  };
 }
 
 export interface GraphNode {
@@ -227,7 +255,7 @@ export interface AskResult {
   conversation_id: string;
   answer: string;
   sources: AskSource[];
-  requested_retrieval_mode: "default" | "high_precision" | "graph_only";
+  requested_retrieval_mode: "default" | "high_precision" | "graph_only" | "fulltext";
   actual_retrieval_mode: string;
   retrieval_engines: string[];
   fallback_reason?: string | null;
@@ -437,6 +465,7 @@ const MOCK_CONFIG: EffectiveConfig = {
   ask: { conversation_enhancement_mode: "inject" },
   vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true },
   embedding: { provider: "local", model: "intfloat/multilingual-e5-small", base_url: "https://api.openai.com/v1", max_token_size: 512, actual_dimension: 384, api_key: "" },
+  zotero_sync: { enabled: false, access_mode: "local", zotero_data_dir: "", resolved_data_dir: "", api_port: 23119, storage_mode: "managed_copy", linked_root: "", sync_mode: "conservative", auto_sync_enabled: false, auto_sync_interval_sec: 3600, server_key_present: false, server_key_masked: "" },
 };
 
 const MOCK_ASK: AskResult = {
@@ -584,6 +613,17 @@ export async function patchDocument(
   });
 }
 
+export async function updateDocumentMeta(
+  docId: string,
+  meta: Partial<ZoteroMeta> & { title?: string },
+): Promise<KrDocument> {
+  return apiFetch<KrDocument>(`/api/documents/${encodeURIComponent(docId)}/meta`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(meta),
+  });
+}
+
 export async function deleteDocument(id: string): Promise<void> {
   if (isMock()) {
     const idx = MOCK_DOCS.findIndex((d) => d.doc_id === id);
@@ -647,6 +687,9 @@ const MOCK_REBUILD_KEYS = new Set([
   "embedding.model",
   "embedding.base_url",
   "graph.max_doc_chars",
+  "zotero_sync.storage_mode",
+  "zotero_sync.linked_root",
+  "zotero_sync.sync_mode",
 ]);
 
 const MOCK_RESTART_KEYS = new Set([
@@ -663,6 +706,12 @@ const MOCK_RESTART_KEYS = new Set([
   "r2_sync.enabled",
   "notion_sync.enabled",
   "source_store.ocr_enabled",
+  "zotero_sync.enabled",
+  "zotero_sync.access_mode",
+  "zotero_sync.zotero_data_dir",
+  "zotero_sync.api_port",
+  "zotero_sync.auto_sync_enabled",
+  "zotero_sync.auto_sync_interval_sec",
 ]);
 
 function applyMockConfigUpdate(section: string, key: string, value: unknown): void {
@@ -676,6 +725,7 @@ function applyMockConfigUpdate(section: string, key: string, value: unknown): vo
   const ask = stage("ask");
   const sync = stage("sync");
   const ingest = stage("ingest");
+  const zotero = stage("zotero");
 
   if (section === "embedding" && embedding) {
     if (key === "provider") embedding.current = String(value);
@@ -714,6 +764,17 @@ function applyMockConfigUpdate(section: string, key: string, value: unknown): vo
 
   if (section === "source_store" && key === "ocr_enabled" && ingest) {
     ingest.detail.ocr_enabled = Boolean(value);
+  }
+
+  if (section === "zotero_sync" && zotero) {
+    if (key === "enabled") {
+      const enabled = Boolean(value);
+      zotero.current = enabled ? "on" : "off";
+      zotero.status = enabled ? "ready" : "off";
+      zotero.configured = enabled;
+    } else {
+      zotero.detail[key] = value;
+    }
   }
 }
 
@@ -975,20 +1036,52 @@ export async function syncDocuments(
 
 export async function getZoteroConfig(): Promise<ZoteroConfig> {
   if (isMock()) {
+    const z = (MOCK_CONFIG.zotero_sync ?? {}) as Record<string, unknown>;
     return {
-      enabled: false,
-      zotero_data_dir: "",
-      api_port: 23119,
-      storage_mode: "managed_copy",
-      linked_root: "",
-      sync_mode: "conservative",
-      auto_sync_enabled: false,
-      auto_sync_interval_sec: 3600,
+      enabled: Boolean(z.enabled),
+      access_mode: z.access_mode === "server" ? "server" : "local",
+      zotero_data_dir: String(z.zotero_data_dir ?? ""),
+      resolved_data_dir: String(z.resolved_data_dir ?? ""),
+      api_port: Number(z.api_port ?? 23119),
+      storage_mode: z.storage_mode === "linked" ? "linked" : "managed_copy",
+      linked_root: String(z.linked_root ?? ""),
+      sync_mode: z.sync_mode === "strict_mirror" || z.sync_mode === "archive" ? z.sync_mode : "conservative",
+      auto_sync_enabled: Boolean(z.auto_sync_enabled),
+      auto_sync_interval_sec: Number(z.auto_sync_interval_sec ?? 3600),
+      server_key_present: Boolean(z.server_key_present),
+      server_key_masked: String(z.server_key_masked ?? ""),
+      server_user_id: "",
+      server_username: "",
+      server_access: {},
       connection: { connected: false, port: 23119, detail: "mock" },
       availability: { available: false, reason: "mock" },
     };
   }
   return apiFetch<ZoteroConfig>("/api/zotero/config");
+}
+
+export async function saveZoteroServerKey(apiKey: string): Promise<ZoteroConfig> {
+  if (isMock()) {
+    const z = (MOCK_CONFIG.zotero_sync ?? {}) as Record<string, unknown>;
+    z.server_key_present = true;
+    z.server_key_masked = apiKey ? "mo****ck" : "";
+    return getZoteroConfig();
+  }
+  return apiFetch<ZoteroConfig>("/api/zotero/server-key", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+}
+
+export async function deleteZoteroServerKey(): Promise<ZoteroConfig> {
+  if (isMock()) {
+    const z = (MOCK_CONFIG.zotero_sync ?? {}) as Record<string, unknown>;
+    z.server_key_present = false;
+    z.server_key_masked = "";
+    return getZoteroConfig();
+  }
+  return apiFetch<ZoteroConfig>("/api/zotero/server-key", { method: "DELETE" });
 }
 
 export async function syncZoteroPull(incremental = true): Promise<ZoteroSyncResult> {
@@ -1003,6 +1096,17 @@ export async function syncZoteroPull(incremental = true): Promise<ZoteroSyncResu
 export async function getZoteroSyncStatus(): Promise<ZoteroSyncResult> {
   if (isMock()) return {};
   return apiFetch<ZoteroSyncResult>("/api/sync/zotero/status");
+}
+
+// 本地离线探针：连接测试 + zotero.sqlite 干读计数（不写库、不同步）。
+export async function probeZoteroLocal(): Promise<ZoteroProbeResult> {
+  if (isMock()) {
+    return {
+      connection: { connected: false, port: 23119, detail: "mock" },
+      read: { available: false, reason: "mock" },
+    };
+  }
+  return apiFetch<ZoteroProbeResult>("/api/zotero/probe");
 }
 
 export async function backupNow(): Promise<MaybeReserved<unknown>> {
@@ -1022,10 +1126,11 @@ export async function restoreBackup(): Promise<MaybeReserved<unknown>> {
 export async function ask(opts: {
   question: string;
   collection?: string | null;
+  doc_id?: string | null;
   top_k?: number;
   conversation_id?: string | null;
   persona_enabled?: boolean;
-  retrieval_mode?: "default" | "high_precision" | "graph_only";
+  retrieval_mode?: "default" | "high_precision" | "graph_only" | "fulltext";
   use_english_retrieval?: boolean;
   answer_language?: "auto" | "zh" | "en";
 }): Promise<AskResult> {
@@ -1036,8 +1141,8 @@ export async function ask(opts: {
       ...MOCK_ASK,
       conversation_id: `conv-${Date.now()}`,
       requested_retrieval_mode: requested,
-      actual_retrieval_mode: requested === "high_precision" ? "milvus_lightrag" : requested === "graph_only" ? "lightrag_only" : "milvus",
-      retrieval_engines: requested === "high_precision" ? ["milvus", "sqlite_lexical", "lightrag"] : requested === "graph_only" ? ["lightrag"] : ["milvus", "sqlite_lexical"],
+      actual_retrieval_mode: requested === "high_precision" ? "milvus_lightrag" : requested === "graph_only" ? "lightrag_only" : requested === "fulltext" ? "sqlite_lexical" : "milvus",
+      retrieval_engines: requested === "high_precision" ? ["milvus", "sqlite_lexical", "lightrag"] : requested === "graph_only" ? ["lightrag"] : requested === "fulltext" ? ["sqlite_lexical"] : ["milvus", "sqlite_lexical"],
     };
   }
   return apiFetch<AskResult>("/api/ask", {
@@ -1046,6 +1151,7 @@ export async function ask(opts: {
     body: JSON.stringify({
       question: opts.question,
       collection: opts.collection ?? null,
+      doc_id: opts.doc_id ?? null,
       top_k: opts.top_k ?? 5,
       conversation_id: opts.conversation_id ?? null,
       persona_enabled: opts.persona_enabled ?? false,
@@ -1175,6 +1281,7 @@ export interface DependencyStatus {
   pip_spec: string;
   feature: string;
   stages: string[];
+  required?: boolean;
   installed: boolean;
   version: string | null;
 }
@@ -1194,19 +1301,20 @@ export interface InstallResult {
 }
 
 const MOCK_DEPENDENCIES: DependencyStatus[] = [
-  { key: "local_embedding", import_name: "sentence_transformers", dist_name: "sentence-transformers", pip_spec: "sentence-transformers>=3,<6", feature: "local_embedding", stages: ["embedding"], installed: true, version: "3.0.1" },
-  { key: "milvus", import_name: "pymilvus", dist_name: "pymilvus", pip_spec: "pymilvus[milvus_lite]>=2.5,<3.0", feature: "milvus", stages: ["vector_store", "retrieval"], installed: true, version: "2.5.0" },
-  { key: "lightrag", import_name: "lightrag", dist_name: "lightrag-hku", pip_spec: "lightrag-hku>=1.5.0rc1,<2.0.0", feature: "lightrag", stages: ["graph"], installed: false, version: null },
-  { key: "r2", import_name: "boto3", dist_name: "boto3", pip_spec: "boto3", feature: "r2", stages: ["sync"], installed: false, version: null },
+  { key: "local_embedding", import_name: "sentence_transformers", dist_name: "sentence-transformers", pip_spec: "sentence-transformers>=3,<6", feature: "local_embedding", stages: ["embedding"], required: false, installed: true, version: "3.0.1" },
+  { key: "milvus", import_name: "pymilvus", dist_name: "pymilvus", pip_spec: "pymilvus[milvus_lite]>=2.5,<3.0", feature: "milvus", stages: ["vector_store", "retrieval"], required: true, installed: true, version: "2.5.0" },
+  { key: "lightrag", import_name: "lightrag", dist_name: "lightrag-hku", pip_spec: "lightrag-hku>=1.5.0rc1,<2.0.0", feature: "lightrag", stages: ["graph"], required: false, installed: false, version: null },
+  { key: "r2", import_name: "boto3", dist_name: "boto3", pip_spec: "boto3", feature: "r2", stages: ["sync"], required: false, installed: false, version: null },
 ];
 
 const MOCK_CAPABILITIES: CapabilitiesData = {
   pipeline: [
+    { id: "zotero", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { access_mode: "local", api_port: 23119, sync_mode: "conservative", storage_mode: "managed_copy" } },
     { id: "ingest", current: "pymupdf4llm", candidates: ["pymupdf4llm"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { ocr_enabled: false, pdf_converter: "pymupdf4llm", pdf_converter_ready: true, dependency_source: "requirements.txt" } },
     { id: "embedding", current: "local", candidates: ["local", "external"], status: "ready", switchable: true, consequence: "rebuild", required_deps: ["local_embedding"], configured: true, detail: { model: "intfloat/multilingual-e5-small", actual_dimension: 384 } },
-    { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true, compatible: true, rebuild_required: false, pending_reindex_count: 0, document_count: 0, chunk_count: 0, reason: "" } },
+    { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true, astrbot_locked: true, compatible: true, rebuild_required: false, pending_reindex_count: 0, document_count: 0, chunk_count: 0, reason: "" } },
     { id: "retrieval", current: "rrf_fusion", candidates: ["rrf_fusion"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { engines: ["milvus", "sqlite_lexical"] } },
-    { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix", llm_provider: "main" } },
+    { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix", llm_provider: "main", llm_model: "", llm_label: "<main - AstrBot main LLM>" } },
     { id: "ask", current: "inject", candidates: ["inject", "query_agent"], status: "ready", switchable: true, consequence: "none", required_deps: [], configured: true, detail: {} },
     { id: "sync", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { r2_enabled: false, notion_enabled: false } },
   ],

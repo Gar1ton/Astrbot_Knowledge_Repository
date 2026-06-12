@@ -12,11 +12,12 @@ interface ModalProps {
   children: React.ReactNode;
   width?: number | string;
   height?: number | string;
+  fullscreen?: boolean;
   style?: React.CSSProperties;
   contentStyle?: React.CSSProperties;
 }
 
-export function Modal({ title, icon, onClose, footer, children, width = 880, height = "84vh", style, contentStyle }: ModalProps) {
+export function Modal({ title, icon, onClose, footer, children, width = 880, height = "84vh", fullscreen = false, style, contentStyle }: ModalProps) {
   const { t } = useI18n();
 
   useEffect(() => {
@@ -39,18 +40,18 @@ export function Modal({ title, icon, onClose, footer, children, width = 880, hei
         alignItems: "center",
         justifyContent: "center",
         animation: "overlayIn .16s ease",
-        padding: 24,
+        padding: fullscreen ? 0 : 24,
       }}
     >
       <div
         style={{
-          width,
-          maxWidth: "94vw",
-          height,
-          maxHeight: "92vh",
+          width: fullscreen ? "100vw" : width,
+          maxWidth: fullscreen ? "100vw" : "94vw",
+          height: fullscreen ? "100vh" : height,
+          maxHeight: fullscreen ? "100vh" : "92vh",
           background: "var(--bg)",
           border: "1px solid var(--border)",
-          borderRadius: "var(--radius-2xl)",
+          borderRadius: fullscreen ? 0 : "var(--radius-2xl)",
           boxShadow: "var(--shadow-pop)",
           display: "flex",
           flexDirection: "column",

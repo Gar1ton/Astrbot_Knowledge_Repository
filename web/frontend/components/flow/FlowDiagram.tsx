@@ -69,6 +69,7 @@ export function FlowDiagram({
   config,
   onSwitch,
   onQuickConfigSave,
+  onRefresh,
   onInstall,
   onRebuildIndex,
   onClose,
@@ -84,6 +85,7 @@ export function FlowDiagram({
   config: FlowConfigSnapshot;
   onSwitch: (stage: PipelineStage, value: string) => void;
   onQuickConfigSave: (stageId: FlowStageId, updates: QuickConfigUpdate[]) => void;
+  onRefresh?: () => Promise<void>;
   onInstall: (dep: DependencyStatus) => void;
   onRebuildIndex: () => void;
   onClose?: () => void;
@@ -322,11 +324,20 @@ export function FlowDiagram({
     >
       <div
         className="flow-grid-bg"
-        style={{ backgroundSize: `${26 * view.s}px ${26 * view.s}px`, backgroundPosition: `${view.x}px ${view.y}px` }}
+        style={{
+          backgroundSize: `${26 * view.s}px ${26 * view.s}px`,
+          backgroundPosition: `${view.x}px ${view.y}px`,
+          willChange: "background-size, background-position",
+        }}
       />
       <div
         className={`flow-world ${viewReady ? "is-ready" : ""}`}
-        style={{ transform: `translate3d(${view.x}px, ${view.y}px, 0)`, zoom: view.s }}
+        style={{
+          transform: `translate3d(${view.x}px, ${view.y}px, 0)`,
+          zoom: view.s,
+          willChange: "transform, zoom",
+          backfaceVisibility: "hidden",
+        }}
       >
         <div ref={gridRef} className="flow-diagram-grid">
           <Connectors conns={conns} width={geo.w} height={geo.h} />
@@ -376,6 +387,7 @@ export function FlowDiagram({
                   onSelect={() => setSelectedId(stage.id)}
                   onSwitch={onSwitch}
                   onQuickConfigSave={onQuickConfigSave}
+                  onRefresh={onRefresh}
                   onInstall={onInstall}
                   onRebuildIndex={onRebuildIndex}
                   onClose={onClose}

@@ -2,7 +2,6 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { ToastProvider } from "@/components/ui/Toast";
-import { BuildWidget } from "@/components/build/BuildWidget";
 import { I18nContext, Lang, makeT } from "@/lib/i18n";
 import { initPalette } from "@/lib/theme";
 import { getAuth, login } from "@/lib/api";
@@ -304,9 +303,6 @@ function ConsoleCanvas({ onLogout }: { onLogout: () => void }) {
         {/* Right: Chat */}
         <ChatPanel width={chatWidth} />
       </div>
-
-      {/* Floating build progress widget */}
-      <BuildWidget />
 
       {/* Full-screen modals */}
       {settingOpen && <SettingModal onClose={() => setSettingOpen(false)} onLogout={onLogout} />}

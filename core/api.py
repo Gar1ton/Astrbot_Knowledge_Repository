@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import inspect
 import logging
 import time
 import uuid
@@ -43,6 +44,8 @@ SYSTEM_COLLECTION_UNCATEGORIZED = "_uncategorized"
 MILVUS_INDEX_MAX_ATTEMPTS = 3
 MILVUS_INDEX_RETRY_DELAYS = (0.5, 1.5)
 ZOTERO_SERVER_KEY_SECRET = "zotero.server_api_key"
+ACTIVE_BUILD_STATUSES = {"queued", "running", "pause_requested", "paused"}
+TERMINAL_BUILD_STATUSES = {"success", "partial_failure", "error", "interrupted"}
 
 
 def _build_scope(scope_type: str, scope_key: str, scope_library_id: str) -> RetrievalScope | None:
@@ -1631,23 +1634,30 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         col = await self._resolve_collection(collection)
 
-        # 同集合禁止并发构建
+        # 线性单队列：任意集合有活动/暂停任务时，都不启动第二个构建。
         for job in self._graph_build_jobs.values():
-            if job.collection == col and job.status in ("queued", "running"):
+            if job.status in ACTIVE_BUILD_STATUSES:
                 raise RuntimeError(
-                    f"集合 {col!r} 已有构建任务正在进行中（job_id={job.job_id}）"
+                    f"已有构建任务正在进行中（collection={job.collection!r}, job_id={job.job_id}）"
                 )
 
         job_id = uuid.uuid4().hex
         docs = await self._lightrag_docs_for_build(col)
-        job = BuildJob(job_id=job_id, collection=col, total_docs=len(docs))
+        job = BuildJob(
+            job_id=job_id,
+            collection=col,
+            total_docs=len(docs),
+            started_at_iso=_now_iso(),
+        )
+        self._refresh_build_progress(job)
         self._graph_build_jobs[job_id] = job
         ev = asyncio.Event()
         ev.set()
         self._build_pause_events[job_id] = ev
+        await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
         task = asyncio.create_task(self._run_lightrag_build_job(job_id))
         self._build_tasks[job_id] = task
-        return {"job_id": job_id, "status": job.status, "engine": job.engine, "collection": col}
+        return job.to_dict()
 
     async def cancel_build_tasks(self) -> None:
         """取消所有进行中的构建任务并等待其完成（teardown 时调用）。"""
@@ -1667,7 +1677,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     async def get_active_build_job(self) -> dict | None:
         """返回当前正在运行或暂停的构建任务，没有则返回 None。"""
         for job in self._graph_build_jobs.values():
-            if job.status in ("queued", "running") or job.paused:
+            if job.status in ACTIVE_BUILD_STATUSES:
                 return job.to_dict()
         return None
 
@@ -1680,26 +1690,71 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         job = self._graph_build_jobs.get(job_id)
         if job is None:
             raise KeyError(f"Build job {job_id!r} not found")
-        if job.status not in ("queued", "running"):
+        if job.status not in ("queued", "running", "pause_requested", "paused"):
             raise ValueError(f"Job {job_id!r} is not active (status={job.status!r})")
-        job.paused = True
+        if job.status == "paused":
+            return
         ev = self._build_pause_events.get(job_id)
-        if ev is not None:
-            ev.clear()
+        if job.in_llm_call:
+            job.pause_requested = True
+            job.status = "pause_requested"
+            job.stage = "pause_requested"
+            self._refresh_build_progress(job, label="waiting_current_llm")
+            await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
+            if ev is not None:
+                ev.clear()
+            return
+        await self._enter_build_paused(job)
 
     async def resume_build_job(self, job_id: str) -> None:
         """继续被暂停的构建任务。"""
         job = self._graph_build_jobs.get(job_id)
         if job is None:
             raise KeyError(f"Build job {job_id!r} not found")
+        if job.status not in ("pause_requested", "paused"):
+            raise ValueError(f"Job {job_id!r} is not paused (status={job.status!r})")
+        if job.paused and job.paused_at is not None:
+            job.paused_seconds += max(0.0, time.monotonic() - job.paused_at)
+        job.paused_at = None
+        job.paused_at_iso = None
         job.paused = False
+        job.pause_requested = False
+        job.status = "running"
+        if job.stage in ("paused", "pause_requested"):
+            job.stage = "resuming"
+        self._refresh_build_progress(job, label="resuming")
         ev = self._build_pause_events.get(job_id)
-        if ev is not None:
-            ev.set()
+        if ev is None:
+            ev = asyncio.Event()
+            self._build_pause_events[job_id] = ev
+        ev.set()
+        await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
+        task = self._build_tasks.get(job_id)
+        if task is None or task.done():
+            self._build_tasks[job_id] = asyncio.create_task(
+                self._run_lightrag_build_job(job_id)
+            )
+
+    async def restore_paused_build_job(self) -> None:
+        """启动时恢复最新 paused job 到内存队列，但不自动继续执行。"""
+        if self._lightrag_registry is None:
+            return
+        row = await self._source_store.get_latest_resumable_build_job()
+        if row is None:
+            return
+        from core.lightrag_core import BuildJob
+
+        job = self._build_job_from_snapshot(row, paused=True)
+        self._graph_build_jobs[job.job_id] = job
+        self._build_pause_events[job.job_id] = asyncio.Event()
 
     def _build_job_db_snapshot(
-        self, job: BuildJob, started_iso: str, finished_iso: str | None = None
+        self, job: BuildJob, started_iso: str | None = None, finished_iso: str | None = None
     ) -> dict:
+        if started_iso is not None:
+            job.started_at_iso = started_iso
+        if finished_iso is not None:
+            job.finished_at_iso = finished_iso
         return {
             "job_id": job.job_id, "collection": job.collection,
             "status": job.status, "stage": job.stage,
@@ -1708,21 +1763,117 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "processed_chunks": job.processed_chunks, "failed_chunks": job.failed_chunks,
             "total_chunks": job.total_chunks,
             "recent_error": job.recent_error,
-            "started_at": started_iso, "finished_at": finished_iso,
+            "started_at": job.started_at_iso, "finished_at": job.finished_at_iso,
+            "pause_requested": job.pause_requested,
+            "paused_at": job.paused_at_iso,
+            "paused_seconds": job.paused_seconds,
+            "progress_current": job.progress_current,
+            "progress_total": job.progress_total,
         }
+
+    def _build_job_from_snapshot(self, row: dict, *, paused: bool = False) -> BuildJob:
+        from core.lightrag_core import BuildJob
+
+        now_mono = time.monotonic()
+        paused_seconds = float(row.get("paused_seconds", 0) or 0)
+        started_dt = _parse_iso(row.get("started_at"))
+        paused_dt = _parse_iso(row.get("paused_at")) or _now()
+        paused_gap = max(0.0, (_now() - paused_dt).total_seconds()) if paused else 0.0
+        paused_mono = now_mono - paused_gap if paused else None
+        elapsed = 0.0
+        if started_dt is not None:
+            elapsed = max(0.0, (paused_dt - started_dt).total_seconds() - paused_seconds)
+        started_mono = (
+            (paused_mono or now_mono) - elapsed - paused_seconds
+            if paused
+            else now_mono - elapsed - paused_seconds
+        )
+        job = BuildJob(
+            job_id=str(row["job_id"]),
+            collection=str(row["collection"]),
+            status=str(row.get("status") or "paused"),
+            stage=str(row.get("stage") or "paused"),
+            processed_docs=int(row.get("processed_docs", 0) or 0),
+            failed_docs=int(row.get("failed_docs", 0) or 0),
+            total_docs=int(row.get("total_docs", 0) or 0),
+            processed_chunks=int(row.get("processed_chunks", 0) or 0),
+            failed_chunks=int(row.get("failed_chunks", 0) or 0),
+            total_chunks=int(row.get("total_chunks", 0) or 0),
+            recent_error=str(row.get("recent_error", "") or ""),
+            paused=paused,
+            pause_requested=bool(row.get("pause_requested", False)),
+            paused_at=paused_mono,
+            paused_at_iso=row.get("paused_at") if paused else None,
+            paused_seconds=paused_seconds,
+            started_at=started_mono,
+            started_at_iso=str(row.get("started_at") or _now_iso()),
+            progress_current=int(row.get("progress_current", 0) or 0),
+            progress_total=int(row.get("progress_total", 0) or 0),
+        )
+        self._refresh_build_progress(job)
+        return job
+
+    def _refresh_build_progress(self, job: BuildJob, label: str | None = None) -> None:
+        finalize_done = 1 if job.status in ("success", "partial_failure") else 0
+        total = max(1, job.total_chunks + job.total_docs + 1)
+        current = (
+            job.processed_chunks
+            + job.failed_chunks
+            + job.processed_docs
+            + job.failed_docs
+            + finalize_done
+        )
+        job.progress_total = total
+        job.progress_current = min(total, max(0, current))
+        job.progress_label = label or job.stage
+
+    async def _enter_build_paused(self, job: BuildJob) -> None:
+        ev = self._build_pause_events.get(job.job_id)
+        if ev is None:
+            ev = asyncio.Event()
+            self._build_pause_events[job.job_id] = ev
+        ev.clear()
+        job.pause_requested = False
+        job.paused = True
+        job.status = "paused"
+        job.stage = "paused"
+        job.paused_at = time.monotonic()
+        job.paused_at_iso = _now_iso()
+        self._refresh_build_progress(job, label="paused")
+        await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
+
+    async def _build_pause_gate(self, job: BuildJob, label: str) -> None:
+        if job.pause_requested:
+            await self._enter_build_paused(job)
+        if job.paused:
+            ev = self._build_pause_events.get(job.job_id)
+            if ev is None:
+                ev = asyncio.Event()
+                self._build_pause_events[job.job_id] = ev
+            await ev.wait()
+            self._refresh_build_progress(job, label=label)
 
     async def _run_lightrag_build_job(self, job_id: str) -> None:
         job = self._graph_build_jobs[job_id]
         assert self._lightrag_registry is not None
-        job.status = "running"
-        job.stage = "reading_documents"
-        started_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        await self._source_store.upsert_build_job(
-            self._build_job_db_snapshot(job, started_iso)
-        )
         try:
+            await self._build_pause_gate(job, "reading_documents")
+            job.status = "running"
+            job.stage = "reading_documents"
+            job.paused = False
+            job.pause_requested = False
+            job.finished_at = None
+            job.finished_at_iso = None
+            if not job.started_at_iso:
+                job.started_at_iso = _now_iso()
+            self._refresh_build_progress(job, label="reading_documents")
+            await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
+
             docs = await self._lightrag_docs_for_build(job.collection)
-            job.total_docs = len(docs)
+            if job.total_docs <= 0 or job.processed_docs + len(docs) > job.total_docs:
+                job.total_docs = job.processed_docs + len(docs)
+            self._refresh_build_progress(job, label="reading_documents")
+            await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
             if (
                 self._index_compatibility is not None
                 and self._embedding_fingerprint
@@ -1731,7 +1882,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     job.collection, self._embedding_fingerprint
                 )
             ):
+                await self._build_pause_gate(job, "before_workspace_reset")
                 job.stage = "resetting_workspace"
+                self._refresh_build_progress(job, label="resetting_workspace")
+                await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
                 await self._lightrag_registry.reset_workspace(job.collection)
 
             max_chars = 0
@@ -1740,6 +1894,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
             prepared: list[tuple[SourceDocument, str, list[str], str]] = []
             for doc in docs:
+                await self._build_pause_gate(job, "planning_chunks")
                 text = await self._lightrag_text_for_doc(doc)
                 if max_chars > 0 and len(text) > max_chars:
                     text = text[:max_chars]
@@ -1753,46 +1908,86 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     chunks, basis = [text], "estimated_lrag_chunks"
                 prepared.append((doc, text, chunks, basis))
 
-            job.total_chunks = sum(len(chunks) for _, text, chunks, _ in prepared if text.strip())
+            remaining_chunks = sum(
+                len(chunks) for _, text, chunks, _ in prepared if text.strip()
+            )
+            if (
+                job.total_chunks <= 0
+                or job.processed_chunks + remaining_chunks > job.total_chunks
+            ):
+                job.total_chunks = job.processed_chunks + remaining_chunks
             bases = {basis for _, _, _, basis in prepared}
             job.progress_basis = (
                 "lrag_chunks" if bases <= {"lrag_chunks"} else "estimated_lrag_chunks"
             )
+            job.stage = "indexing"
+            self._refresh_build_progress(job, label="indexing")
+            await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
 
             for doc, text, lrag_chunks, _basis in prepared:
-                pause_ev = self._build_pause_events.get(job_id)
-                if pause_ev is not None:
-                    await pause_ev.wait()
+                await self._build_pause_gate(job, "before_document")
                 job.stage = "indexing"
                 job.current_doc_id = doc.doc_id
+                self._refresh_build_progress(job, label="indexing")
+                await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
                 if not text.strip():
                     await self._source_store.set_lightrag_index_status(
                         doc.doc_id, job.collection, "indexed"
                     )
                     job.processed_docs += 1
+                    self._refresh_build_progress(job, label="document_indexed")
+                    await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
+                    await self._build_pause_gate(job, "after_document")
                     continue
 
                 chunk_start = job.processed_chunks
                 chunk_target = min(job.total_chunks, chunk_start + len(lrag_chunks))
 
                 def _on_lightrag_llm(event: dict[str, Any]) -> None:
-                    if event.get("status") == "ok":
+                    status = event.get("status")
+                    if status == "start":
+                        job.in_llm_call = True
+                        if job.pause_requested:
+                            self._refresh_build_progress(job, label="waiting_current_llm")
+                    elif status == "ok":
+                        job.in_llm_call = False
                         if job.total_chunks > 0:
                             job.processed_chunks = min(
-                                job.total_chunks, max(job.processed_chunks + 1, chunk_start)
+                                job.total_chunks,
+                                max(job.processed_chunks + 1, chunk_start + 1),
                             )
                             job.current_chunk_index = job.processed_chunks
-                    elif event.get("status") == "error":
+                        self._refresh_build_progress(job, label="indexing")
+                    elif status == "error":
+                        job.in_llm_call = False
                         job.failed_chunks += 1
+                        self._refresh_build_progress(job, label="indexing")
 
                 try:
-                    await self._lightrag_registry.insert_document(
-                        job.collection,
-                        doc.doc_id,
-                        text,
-                        lrag_chunks=lrag_chunks,
-                        progress_callback=_on_lightrag_llm,
-                    )
+                    insert_document = self._lightrag_registry.insert_document
+                    kwargs: dict[str, Any] = {
+                        "lrag_chunks": lrag_chunks,
+                        "progress_callback": _on_lightrag_llm,
+                    }
+                    try:
+                        params = inspect.signature(insert_document).parameters
+                        if "pause_gate" in params or any(
+                            p.kind == inspect.Parameter.VAR_KEYWORD
+                            for p in params.values()
+                        ):
+                            kwargs["pause_gate"] = (
+                                lambda label: self._build_pause_gate(
+                                    job, str(label or "before_llm")
+                                )
+                            )
+                    except (TypeError, ValueError):
+                        kwargs["pause_gate"] = (
+                            lambda label: self._build_pause_gate(
+                                job, str(label or "before_llm")
+                            )
+                        )
+                    await insert_document(job.collection, doc.doc_id, text, **kwargs)
+                    job.in_llm_call = False
                     if job.processed_chunks < chunk_target:
                         job.processed_chunks = chunk_target
                         job.current_chunk_index = job.processed_chunks
@@ -1800,7 +1995,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                         doc.doc_id, job.collection, "indexed"
                     )
                     job.processed_docs += 1
+                    self._refresh_build_progress(job, label="document_indexed")
+                    await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
+                    await self._build_pause_gate(job, "after_document")
                 except Exception as exc:
+                    job.in_llm_call = False
                     job.failed_docs += 1
                     remaining = max(0, chunk_target - job.processed_chunks)
                     job.failed_chunks += remaining
@@ -1808,11 +2007,18 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     await self._source_store.set_lightrag_index_status(
                         doc.doc_id, job.collection, "error", str(exc)
                     )
+                    self._refresh_build_progress(job, label="document_error")
+                    await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
                     logger.error("LightRAG build failed for doc %s: %s", doc.doc_id, exc)
-            job.stage = "done"
-            job.status = "success" if job.failed_docs == 0 else "partial_failure"
+            await self._build_pause_gate(job, "before_finalize")
+            job.stage = "finalizing"
+            self._refresh_build_progress(job, label="finalizing")
+            await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
+            await self._build_pause_gate(job, "before_compatibility")
+
+            final_status = "success" if job.failed_docs == 0 else "partial_failure"
             if (
-                job.status in ("success", "partial_failure")
+                final_status in ("success", "partial_failure")
                 and job.processed_docs > 0
                 and self._index_compatibility is not None
                 and self._embedding_fingerprint
@@ -1820,24 +2026,33 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 self._index_compatibility.mark_lightrag_compatible(
                     job.collection, self._embedding_fingerprint
                 )
+            job.stage = "done"
+            job.status = final_status
+            self._refresh_build_progress(job, label="done")
         except asyncio.CancelledError:
-            job.stage = "interrupted"
-            job.status = "interrupted"
+            job.in_llm_call = False
+            if job.status != "paused":
+                job.stage = "interrupted"
+                job.status = "interrupted"
             raise  # 重抛，让 asyncio 正确完成取消流程
         except Exception as exc:
+            job.in_llm_call = False
             job.stage = "error"
             job.status = "error"
             job.recent_error = str(exc)
             logger.error("LightRAG build job %s failed: %s", job_id, exc)
         finally:
-            job.finished_at = time.monotonic()
-            job.paused = False
-            self._build_pause_events.pop(job_id, None)
+            if job.status in TERMINAL_BUILD_STATUSES:
+                job.finished_at = job.finished_at or time.monotonic()
+                job.finished_at_iso = job.finished_at_iso or _now_iso()
+                job.paused = False
+                job.pause_requested = False
+                job.paused_at = None
+                job.paused_at_iso = None
+                self._build_pause_events.pop(job_id, None)
+                self._refresh_build_progress(job, label=job.stage)
             self._build_tasks.pop(job_id, None)
-            finished_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            await self._source_store.upsert_build_job(
-                self._build_job_db_snapshot(job, started_iso, finished_iso)
-            )
+            await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
 
     async def _lightrag_text_for_doc(self, doc: SourceDocument) -> str:
         raw = _extract_raw_doc_text(doc)
@@ -2419,6 +2634,24 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 def _now() -> datetime:
     """统一的 UTC aware 时间戳。"""
     return datetime.now(timezone.utc)
+
+
+def _now_iso() -> str:
+    return _now().isoformat(timespec="seconds")
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 __all__ = ["HighPrecisionQueryError", "KnowledgeRepositoryApi", "LightRAGNotReadyError"]

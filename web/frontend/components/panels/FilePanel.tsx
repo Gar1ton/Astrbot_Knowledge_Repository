@@ -4,7 +4,7 @@ import { Panel } from "@/components/ds/Panel";
 import { IconButton } from "@/components/ds/IconButton";
 import { Icon } from "@/components/ds/Icon";
 import { useConsole } from "@/lib/ConsoleContext";
-import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, deleteCollection, createCollection, uploadDocument, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
+import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, createCollection, uploadDocument, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 
@@ -253,32 +253,60 @@ function BuildCard({ job }: BuildCardProps) {
 interface ActiveBuildCardProps {
   job?: GraphBuildJob | null;
   interrupted?: BuildJobRecord | null;
+  onPause: (jobId: string) => void;
+  onResumeJob: (jobId: string) => void;
   onResume: (collection: string) => void;
 }
 
-function ActiveBuildCard({ job, interrupted, onResume }: ActiveBuildCardProps) {
+function isActiveBuildStatus(status?: string): boolean {
+  return status === "queued" || status === "running" || status === "pause_requested" || status === "paused";
+}
+
+function buildProgressPct(job: GraphBuildJob): number {
+  if (typeof job.progress_percent === "number") return Math.min(100, Math.max(0, job.progress_percent));
+  if (job.progress_total && job.progress_total > 0) {
+    return Math.round(((job.progress_current ?? 0) / job.progress_total) * 100);
+  }
+  if (job.total_chunks && job.total_chunks > 0) {
+    return Math.round(((job.processed_chunks ?? 0) / job.total_chunks) * 100);
+  }
+  return 0;
+}
+
+function formatBuildDuration(seconds?: number | null): string {
+  const total = Math.max(0, Math.round(seconds ?? 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function ActiveBuildCard({ job, interrupted, onPause, onResumeJob, onResume }: ActiveBuildCardProps) {
   const { t } = useI18n();
 
-  if (job && (job.status === "running" || job.status === "queued")) {
-    const pct =
-      job.total_chunks && job.total_chunks > 0
-        ? Math.round(((job.processed_chunks ?? 0) / job.total_chunks) * 100)
-        : 0;
+  if (job && isActiveBuildStatus(job.status)) {
+    const pct = buildProgressPct(job);
+    const waitingPause = job.status === "pause_requested" || !!job.pause_requested;
+    const paused = job.status === "paused" || !!job.paused;
+    const tone = paused ? "var(--warning, #f59e0b)" : "var(--accent)";
     const stage =
-      job.status === "running"
-        ? pct < 45
-          ? t("file_build_stage_entity")
-          : pct < 80
-          ? t("file_build_stage_relation")
-          : t("file_build_stage_embedding")
-        : t("file_build_queued");
+      paused ? t("file_build_paused")
+      : waitingPause ? t("file_build_waiting_pause")
+      : job.status === "queued" ? t("file_build_queued")
+      : job.progress_label === "finalizing" ? t("file_build_stage_finalizing")
+      : job.stage || t("file_build_running");
     return (
       <div
         style={{
           margin: "4px 6px 6px",
           padding: "8px 10px",
-          background: "var(--accent-soft)",
-          border: "1px solid var(--accent-border)",
+          background: paused
+            ? "color-mix(in srgb, var(--warning, #f59e0b) 10%, transparent)"
+            : "var(--accent-soft)",
+          border: paused
+            ? "1px solid color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent)"
+            : "1px solid var(--accent-border)",
           borderRadius: "var(--radius-md)",
         }}
       >
@@ -288,16 +316,39 @@ function ActiveBuildCard({ job, interrupted, onResume }: ActiveBuildCardProps) {
               width: 9,
               height: 9,
               borderRadius: "50%",
-              border: "2px solid var(--accent)",
-              borderTopColor: "transparent",
-              animation: "spin .7s linear infinite",
+              border: `2px solid ${tone}`,
+              borderTopColor: paused ? tone : "transparent",
+              animation: paused ? undefined : "spin .7s linear infinite",
               flexShrink: 0,
             }}
           />
-          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)", flex: 1 }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: tone, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {job.collection} · {stage}
           </span>
-          <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--accent)" }}>
+          {paused ? (
+            <IconButton
+              name="play"
+              label={t("file_build_continue")}
+              size={12}
+              side="left"
+              style={{ width: 22, height: 22, color: tone }}
+              onClick={(e) => { e.stopPropagation(); onResumeJob(job.job_id); }}
+            />
+          ) : (
+            <IconButton
+              name={waitingPause ? "clock" : "pause"}
+              label={waitingPause ? t("file_build_waiting_pause") : t("file_build_pause")}
+              size={12}
+              side="left"
+              active={waitingPause}
+              style={{ width: 22, height: 22, color: tone }}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!waitingPause) onPause(job.job_id);
+              }}
+            />
+          )}
+          <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: tone }}>
             {pct}%
           </span>
         </div>
@@ -314,21 +365,19 @@ function ActiveBuildCard({ job, interrupted, onResume }: ActiveBuildCardProps) {
               width: `${pct}%`,
               height: "100%",
               borderRadius: 999,
-              background: "linear-gradient(90deg, var(--accent), var(--accent-strong))",
+              background: paused ? "var(--warning, #f59e0b)" : "linear-gradient(90deg, var(--accent), var(--accent-strong))",
               transition: "width .4s",
             }}
           />
         </div>
-        <div
-          style={{
-            fontSize: 10,
-            color: "var(--fg-muted)",
-            marginTop: 6,
-            fontFamily: "var(--font-mono)",
-          }}
-        >
-          {job.processed_chunks ?? 0}/{job.total_chunks ?? "?"} {t("unit_chunks")}
+        <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 6, fontFamily: "var(--font-mono)" }}>
+          {job.processed_chunks ?? 0}/{job.total_chunks ?? "?"} {t("unit_chunks")} · {job.processed_docs ?? 0}/{job.total_docs ?? "?"} {t("file_build_docs")} · {t("file_build_elapsed")} {formatBuildDuration(job.elapsed_seconds)}
         </div>
+        {waitingPause && (
+          <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.5, color: "var(--warning, #f59e0b)" }}>
+            {job.pause_message || t("file_build_waiting_pause_hint")}
+          </div>
+        )}
       </div>
     );
   }
@@ -345,14 +394,7 @@ function ActiveBuildCard({ job, interrupted, onResume }: ActiveBuildCardProps) {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span
-            style={{
-              fontSize: 11,
-              fontWeight: 600,
-              color: "var(--warning, #f59e0b)",
-              flex: 1,
-            }}
-          >
+          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--warning, #f59e0b)", flex: 1 }}>
             {t("file_build_interrupted")} · {interrupted.collection}
           </span>
           <button
@@ -375,15 +417,8 @@ function ActiveBuildCard({ job, interrupted, onResume }: ActiveBuildCardProps) {
     );
   }
 
-  // idle fallback — always renders something so the toggle is meaningful
   return (
-    <div
-      style={{
-        margin: "4px 6px 6px",
-        padding: "6px 10px",
-        borderRadius: "var(--radius-md)",
-      }}
-    >
+    <div style={{ margin: "4px 6px 6px", padding: "6px 10px", borderRadius: "var(--radius-md)" }}>
       <span style={{ fontSize: 11, color: "var(--fg-subtle)" }}>{t("file_build_idle")}</span>
     </div>
   );
@@ -877,8 +912,7 @@ export function FilePanel() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   function getCollectionGraphStatus(collectionName: string): "not_built" | "building" | "success" {
-    if (buildJob && buildJob.collection === collectionName &&
-        (buildJob.status === "running" || buildJob.status === "queued")) {
+    if (buildJob && buildJob.collection === collectionName && isActiveBuildStatus(buildJob.status)) {
       return "building";
     }
     const latest = buildHistory
@@ -911,6 +945,96 @@ export function FilePanel() {
     setSelectedDocId(null);
   }
 
+  async function refreshBuildState() {
+    const [job, history] = await Promise.all([
+      getActiveBuildJob().catch(() => null),
+      getBuildJobHistory().catch(() => buildHistory),
+    ]);
+    setBuildJob(job);
+    setBuildHistory(history);
+    prevBuildJobRef.current = job;
+  }
+
+  async function startBuild(collectionName: string) {
+    try {
+      const job = await buildGraph(collectionName);
+      setBuildJob(job);
+      prevBuildJobRef.current = job;
+      toast(t("file_build_started"), "ok");
+    } catch {
+      toast(t("file_build_error"), "error");
+    }
+  }
+
+  async function pauseBuild(jobId: string) {
+    try {
+      await pauseBuildJob(jobId);
+      await refreshBuildState();
+    } catch {
+      toast(t("file_build_pause_error"), "error");
+    }
+  }
+
+  async function resumeBuild(jobId: string) {
+    try {
+      await resumeBuildJob(jobId);
+      await refreshBuildState();
+    } catch {
+      toast(t("file_build_resume_error"), "error");
+    }
+  }
+
+  function renderBuildAction(collectionName: string) {
+    const active = buildJob && isActiveBuildStatus(buildJob.status) ? buildJob : null;
+    const baseStyle: React.CSSProperties = {
+      width: 22,
+      height: 22,
+      flexShrink: 0,
+      background: "transparent",
+    };
+    if (active && active.collection !== collectionName) return null;
+    if (active && active.collection === collectionName) {
+      const waitingPause = active.status === "pause_requested" || !!active.pause_requested;
+      const paused = active.status === "paused" || !!active.paused;
+      if (paused) {
+        return (
+          <IconButton
+            name="play"
+            label={t("file_build_continue")}
+            size={12}
+            side="left"
+            style={{ ...baseStyle, color: "var(--warning, #f59e0b)" }}
+            onClick={(e) => { e.stopPropagation(); resumeBuild(active.job_id); }}
+          />
+        );
+      }
+      return (
+        <IconButton
+          name={waitingPause ? "clock" : "pause"}
+          label={waitingPause ? t("file_build_waiting_pause") : t("file_build_pause")}
+          size={12}
+          side="left"
+          active={waitingPause}
+          style={{ ...baseStyle, color: waitingPause ? "var(--warning, #f59e0b)" : "var(--accent)" }}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!waitingPause) pauseBuild(active.job_id);
+          }}
+        />
+      );
+    }
+    return (
+      <IconButton
+        name="play"
+        label={t("file_build_start")}
+        size={12}
+        side="left"
+        style={baseStyle}
+        onClick={(e) => { e.stopPropagation(); startBuild(collectionName); }}
+      />
+    );
+  }
+
   return (
     <>
     <Panel
@@ -925,7 +1049,11 @@ export function FilePanel() {
             onClick={() => {
               const name = selectedCollection?.replace(/^(z:|l:|lr:)/, "");
               if (!name) { toast(t("file_build_no_collection"), "error"); return; }
-              buildGraph(name).catch(() => toast(t("file_build_error"), "error"));
+              if (buildJob && isActiveBuildStatus(buildJob.status)) {
+                toast(t("file_build_active_exists"), "error");
+                return;
+              }
+              startBuild(name);
             }}
           />
           <IconButton name="cloud" label={t("file_action_r2_backup")} />
@@ -1036,7 +1164,9 @@ export function FilePanel() {
           <ActiveBuildCard
             job={buildJob}
             interrupted={interruptedJob}
-            onResume={(col) => { buildGraph(col).catch(() => {}); }}
+            onPause={pauseBuild}
+            onResumeJob={resumeBuild}
+            onResume={(col) => { startBuild(col); }}
           />
         )}
         {lightragCollections.map((c) => {
@@ -1049,6 +1179,7 @@ export function FilePanel() {
                 label={c.name}
                 active={isSel("lr:", c.name)}
                 graphStatus={getCollectionGraphStatus(c.name)}
+                badge={renderBuildAction(c.name)}
                 onClick={() => selectCollection(k)}
               />
             </div>

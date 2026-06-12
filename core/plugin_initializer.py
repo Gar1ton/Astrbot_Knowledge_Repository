@@ -424,6 +424,7 @@ class PluginInitializer:
             embedding_fingerprint=self.embedding_fingerprint,
             secret_store=self.secret_store,
         )
+        await self.api.restore_paused_build_job()
 
         # 5.5) Zotero 单向 Pull 管线（api 构造后注入，回调引用 api 的索引/LRAG 助手）。
         from core.pipelines.zotero_sync_pipeline import ZoteroSyncPipeline

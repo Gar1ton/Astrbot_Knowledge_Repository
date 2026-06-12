@@ -61,7 +61,9 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             # 如果本地无缓存，此处将自动触发 HuggingFace 下载
             self._model = SentenceTransformer(self._model_name)
             # 加载完成后动态获取真实的维度以防字典未命中
-            if hasattr(self._model, "get_sentence_embedding_dimension"):
+            if hasattr(self._model, "get_embedding_dimension"):
+                self._dimension = self._model.get_embedding_dimension()
+            elif hasattr(self._model, "get_sentence_embedding_dimension"):
                 self._dimension = self._model.get_sentence_embedding_dimension()
             logger.info(
                 f"Local model '{self._model_name}' loaded successfully. "

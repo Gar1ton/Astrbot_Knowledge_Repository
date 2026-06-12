@@ -148,6 +148,31 @@ def _row_to_scoped_note(row: tuple) -> ScopedNote:
     )
 
 
+def _row_to_build_job(row: tuple) -> dict:
+    """把 graph_build_jobs 查询行映射为 API 字典。"""
+    return {
+        "job_id": row[0],
+        "collection": row[1],
+        "status": row[2],
+        "stage": row[3],
+        "processed_docs": row[4],
+        "failed_docs": row[5],
+        "total_docs": row[6],
+        "processed_chunks": row[7],
+        "failed_chunks": row[8],
+        "total_chunks": row[9],
+        "recent_error": row[10],
+        "started_at": row[11],
+        "finished_at": row[12],
+        "created_at": row[13],
+        "pause_requested": bool(row[14]),
+        "paused_at": row[15],
+        "paused_seconds": float(row[16] or 0),
+        "progress_current": row[17],
+        "progress_total": row[18],
+    }
+
+
 def _row_to_chat_message(row: tuple) -> dict:
     """把 chat_history 一行映射成前端 API 字典。"""
     return {
@@ -470,8 +495,10 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 (job_id, collection, status, stage,
                  processed_docs, failed_docs, total_docs,
                  processed_chunks, failed_chunks, total_chunks,
-                 recent_error, started_at, finished_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 recent_error, started_at, finished_at,
+                 pause_requested, paused_at, paused_seconds,
+                 progress_current, progress_total)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 status = excluded.status, stage = excluded.stage,
                 processed_docs = excluded.processed_docs,
@@ -481,7 +508,12 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 failed_chunks = excluded.failed_chunks,
                 total_chunks = excluded.total_chunks,
                 recent_error = excluded.recent_error,
-                finished_at = excluded.finished_at
+                finished_at = excluded.finished_at,
+                pause_requested = excluded.pause_requested,
+                paused_at = excluded.paused_at,
+                paused_seconds = excluded.paused_seconds,
+                progress_current = excluded.progress_current,
+                progress_total = excluded.progress_total
             """,
             (
                 job["job_id"], job["collection"], job["status"], job.get("stage", ""),
@@ -491,6 +523,11 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 job.get("total_chunks", 0),
                 job.get("recent_error", ""),
                 job.get("started_at", ""), job.get("finished_at"),
+                int(bool(job.get("pause_requested", False))),
+                job.get("paused_at"),
+                float(job.get("paused_seconds", 0) or 0),
+                int(job.get("progress_current", 0) or 0),
+                int(job.get("progress_total", 0) or 0),
             ),
         )
         await self._db.commit()
@@ -502,7 +539,8 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             async with self._db.execute(
                 "SELECT job_id, collection, status, stage, processed_docs, failed_docs, "
                 "total_docs, processed_chunks, failed_chunks, total_chunks, recent_error, "
-                "started_at, finished_at, created_at "
+                "started_at, finished_at, created_at, pause_requested, paused_at, "
+                "paused_seconds, progress_current, progress_total "
                 "FROM graph_build_jobs WHERE collection = ? ORDER BY created_at DESC LIMIT ?",
                 (collection, limit),
             ) as cursor:
@@ -511,26 +549,30 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             async with self._db.execute(
                 "SELECT job_id, collection, status, stage, processed_docs, failed_docs, "
                 "total_docs, processed_chunks, failed_chunks, total_chunks, recent_error, "
-                "started_at, finished_at, created_at "
+                "started_at, finished_at, created_at, pause_requested, paused_at, "
+                "paused_seconds, progress_current, progress_total "
                 "FROM graph_build_jobs ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ) as cursor:
                 rows = await cursor.fetchall()
-        return [
-            {
-                "job_id": r[0], "collection": r[1], "status": r[2], "stage": r[3],
-                "processed_docs": r[4], "failed_docs": r[5], "total_docs": r[6],
-                "processed_chunks": r[7], "failed_chunks": r[8], "total_chunks": r[9],
-                "recent_error": r[10], "started_at": r[11],
-                "finished_at": r[12], "created_at": r[13],
-            }
-            for r in rows
-        ]
+        return [_row_to_build_job(r) for r in rows]
+
+    async def get_latest_resumable_build_job(self) -> dict | None:
+        async with self._db.execute(
+            "SELECT job_id, collection, status, stage, processed_docs, failed_docs, "
+            "total_docs, processed_chunks, failed_chunks, total_chunks, recent_error, "
+            "started_at, finished_at, created_at, pause_requested, paused_at, "
+            "paused_seconds, progress_current, progress_total "
+            "FROM graph_build_jobs WHERE status = 'paused' "
+            "ORDER BY created_at DESC LIMIT 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _row_to_build_job(row) if row is not None else None
 
     async def mark_interrupted_build_jobs(self) -> int:
         cursor = await self._db.execute(
             "UPDATE graph_build_jobs SET status = 'interrupted', stage = 'interrupted' "
-            "WHERE status IN ('queued', 'running')"
+            "WHERE status IN ('queued', 'running', 'pause_requested')"
         )
         await self._db.commit()
         return cursor.rowcount

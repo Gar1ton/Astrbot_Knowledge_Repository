@@ -2368,7 +2368,17 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     async def _index_document_chunks_with_retry(
         self, doc_id: str, collection: str, *, context: str
     ) -> int:
+        doc = await self._source_store.get_document(doc_id)
         chunks = await self._source_store.list_chunks(doc_id)
+        rebuilder = getattr(self._ingest_manager, "rebuild_document_chunks_from_artifact", None)
+        needs_rebuild = getattr(self._ingest_manager, "chunk_needs_rebuild", None)
+        if doc is not None and callable(rebuilder) and callable(needs_rebuild):
+            try:
+                if needs_rebuild(doc.doc_id, chunks, doc.local_meta):
+                    await rebuilder(doc.doc_id)
+                    chunks = await self._source_store.list_chunks(doc_id)
+            except FileNotFoundError as exc:
+                logger.warning("Legacy chunk rebuild skipped for %s: %s", doc_id, exc)
         if not chunks:
             return 0
         return await self._upsert_milvus_chunks_with_retry(

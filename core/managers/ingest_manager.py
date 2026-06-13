@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import secrets
 import shutil
 import warnings
@@ -32,10 +31,14 @@ from core.domain.models import (
     ZoteroLibrary,
 )
 from core.managers.base import BaseIngestManager
+from core.managers.chunking import CHUNK_SCHEMA, build_structural_chunk_spans
 from core.managers.markdown_extractor import (
     MarkdownArtifact,
+    PageSpan,
     build_single_page_artifact,
     extract_pdf_markdown,
+    join_cleaned_markdown_pages,
+    post_clean_markdown_pages,
 )
 
 if TYPE_CHECKING:
@@ -53,9 +56,7 @@ _ARTIFACT_PDF = "original.pdf"
 _ARTIFACT_MD = "clean.md"
 _ARTIFACT_PAGES = "pages.json"
 _ARTIFACT_META = "meta.json"
-
-# 句末切分符（中英文）。
-_SENTENCE_ENDERS = "。？！.?!"
+_CHUNK_SCHEMA = CHUNK_SCHEMA
 
 
 def gen_zotero_key() -> str:
@@ -216,6 +217,7 @@ class IngestManager(BaseIngestManager):
                 "title": title,
                 "converter": artifact.converter,
                 "converter_version": artifact.converter_version,
+                "chunk_schema": _CHUNK_SCHEMA,
                 "pdf_metadata": artifact.pdf_metadata,
             }
             if meta_extra:
@@ -266,12 +268,14 @@ class IngestManager(BaseIngestManager):
                 converter=artifact.converter,
                 converter_version=artifact.converter_version,
                 last_synced_at=last_synced_at,
+                local_meta={"chunk_schema": _CHUNK_SCHEMA},
             )
             # 幂等：本地首次为 add；Zotero 重同步为 update（覆盖已存在制品包）。
             existing = await self._source_store.get_document(document_id)
             if existing is None:
                 await self._source_store.add_document(doc)
             else:
+                doc.local_meta = {**existing.local_meta, **doc.local_meta}
                 await self._source_store.update_document(doc)
             document_added = existing is None
             await self._source_store.replace_chunks(document_id, chunks)
@@ -291,6 +295,113 @@ class IngestManager(BaseIngestManager):
             len(artifact.page_spans),
         )
         return doc
+
+    async def rebuild_document_chunks_from_artifact(self, document_id: str) -> int:
+        """从现有 clean.md/pages.json 重新清洗并生成 paragraph-aware chunks。
+
+        用于 legacy chunk 修复：不读取或修改 PDF 原件，只更新制品包派生文本、page spans、
+        SQLite chunks，并把文档标记为 Milvus 待重建。
+        """
+        doc = await self._source_store.get_document(document_id)
+        if doc is None:
+            raise FileNotFoundError(f"Document not found: {document_id}")
+        clean_path = self._resolve_artifact_path(doc, doc.markdown_rel_path or _ARTIFACT_MD)
+        if clean_path is None:
+            raise FileNotFoundError(f"Markdown artifact not found for {document_id}")
+
+        artifact = self._load_and_reclean_artifact(doc, clean_path)
+        pages_path = self._resolve_artifact_path(doc, doc.pages_rel_path or _ARTIFACT_PAGES)
+        clean_path.write_text(artifact.clean_markdown, encoding="utf-8")
+        if pages_path is not None:
+            pages_payload = [
+                {"page": s.page, "markdown_start_char": s.start, "markdown_end_char": s.end}
+                for s in artifact.page_spans
+            ]
+            pages_path.write_text(
+                json.dumps(pages_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        chunks = self._chunk_artifact(
+            document_id=doc.doc_id,
+            library_id=doc.library_id,
+            item_key=doc.zotero_item_key,
+            attachment_key=doc.attachment_key,
+            artifact=artifact,
+        )
+        await self._source_store.replace_chunks(doc.doc_id, chunks)
+        doc.needs_reindex = True
+        doc.local_meta = {**doc.local_meta, "chunk_schema": _CHUNK_SCHEMA}
+        await self._source_store.update_document(doc)
+        self.logger.info("Rebuilt %s with %d paragraph-aware chunks.", doc.doc_id, len(chunks))
+        return len(chunks)
+
+    def _resolve_artifact_path(self, doc: SourceDocument, rel_path: str) -> Path | None:
+        candidates = [
+            self._library_dir / doc.doc_id / rel_path,
+            self._data_dir / "managed_docs" / doc.doc_id / rel_path,
+            Path(doc.file_path).parent / rel_path,
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _load_and_reclean_artifact(self, doc: SourceDocument, clean_path: Path) -> MarkdownArtifact:
+        clean_md = clean_path.read_text(encoding="utf-8")
+        page_spans = self._load_page_spans(doc, len(clean_md))
+        raw_pages = [clean_md[span.start:span.end] for span in page_spans] or [clean_md]
+        page_numbers = [span.page for span in page_spans] or [1]
+        clean_markdown, rebuilt_spans = join_cleaned_markdown_pages(
+            post_clean_markdown_pages(raw_pages),
+            page_numbers,
+        )
+        return MarkdownArtifact(
+            clean_markdown=clean_markdown,
+            page_spans=rebuilt_spans,
+            pdf_metadata={},
+            converter=doc.converter or "clean_md",
+            converter_version=doc.converter_version,
+        )
+
+    def _load_page_spans(self, doc: SourceDocument, text_len: int) -> list[PageSpan]:
+        pages_path = self._resolve_artifact_path(doc, doc.pages_rel_path or _ARTIFACT_PAGES)
+        if pages_path is None:
+            return [PageSpan(page=1, start=0, end=text_len)]
+        try:
+            payload = json.loads(pages_path.read_text(encoding="utf-8"))
+        except Exception:
+            return [PageSpan(page=1, start=0, end=text_len)]
+        spans: list[PageSpan] = []
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                start = int(item.get("markdown_start_char", 0))
+                end = int(item.get("markdown_end_char", 0))
+                page = int(item.get("page", len(spans) + 1))
+                if 0 <= start < end <= text_len:
+                    spans.append(PageSpan(page=page, start=start, end=end))
+        return spans or [PageSpan(page=1, start=0, end=text_len)]
+
+    @staticmethod
+    def chunk_needs_rebuild(
+        document_id: str,
+        chunks: list[DocumentChunk],
+        local_meta: dict[str, Any] | None = None,
+    ) -> bool:
+        """判断旧式 chunks 是否需要按当前 clean.md offset schema 重建。"""
+        if not chunks:
+            return True
+        expected_prefix = f"{document_id}_c"
+        for chunk in chunks:
+            if not chunk.chunk_id.startswith(expected_prefix):
+                return True
+            if chunk.metadata.get("chunk_schema") != _CHUNK_SCHEMA:
+                return True
+            if "start_char" not in chunk.metadata or "end_char" not in chunk.metadata:
+                return True
+        return False
 
     # ── 抽取 ──────────────────────────────────────────────────────
 
@@ -324,19 +435,18 @@ class IngestManager(BaseIngestManager):
     ) -> list[DocumentChunk]:
         md = artifact.clean_markdown
         chunk_size = getattr(self._config, "chunk_size", 1000)
-        target_min = int(chunk_size * 0.8)
-        target_max = int(chunk_size * 1.2)
-        hard_limit = int(chunk_size * 1.5)
-
-        spans = self._chunk_spans(md, target_min, target_max, hard_limit)
+        chunk_spans, _, _ = build_structural_chunk_spans(md, chunk_size=chunk_size)
         is_zotero = library_id != LOCAL_LIBRARY_ID
 
         chunks: list[DocumentChunk] = []
-        for idx, (cs, ce) in enumerate(spans):
+        for idx, chunk_span in enumerate(chunk_spans):
+            cs = chunk_span.start
+            ce = chunk_span.end
             text = md[cs:ce]
             pages = [s.page for s in artifact.page_spans if s.start < ce and s.end > cs]
             page_number = pages[0] if pages else 1
             metadata: dict[str, Any] = {
+                **chunk_span.metadata,
                 "pages": pages,
                 "page_number": page_number,
                 "start_char": cs,
@@ -362,81 +472,6 @@ class IngestManager(BaseIngestManager):
                 )
             )
         return chunks
-
-    @staticmethod
-    def _paragraph_spans(md: str) -> list[tuple[int, int]]:
-        """把 clean.md 切为段落字符区间（按空行分隔；退化时按单换行）。
-
-        返回的每个 [start,end) 都是 md 的精确子串区间（不做文本变换），保证 offset 不变量。
-        """
-        if not md.strip():
-            return []
-        spans: list[tuple[int, int]] = []
-        pos = 0
-        for m in re.finditer(r"\n[ \t]*\n[ \t\n]*", md):
-            if m.start() > pos:
-                spans.append((pos, m.start()))
-            pos = m.end()
-        if pos < len(md):
-            spans.append((pos, len(md)))
-        # 退化：整篇没有空行分隔（单段），改按单换行切。
-        if len(spans) <= 1 and "\n" in md:
-            spans = []
-            pos = 0
-            for m in re.finditer(r"\n+", md):
-                if m.start() > pos:
-                    spans.append((pos, m.start()))
-                pos = m.end()
-            if pos < len(md):
-                spans.append((pos, len(md)))
-        return spans
-
-    def _chunk_spans(
-        self, md: str, target_min: int, target_max: int, hard_limit: int
-    ) -> list[tuple[int, int]]:
-        """段落区间贪心合并为分块区间；超长单段按句末切分。返回连续字符区间列表。"""
-        paras = self._paragraph_spans(md)
-        chunks: list[tuple[int, int]] = []
-        cur_start: int | None = None
-        cur_end: int | None = None
-
-        for s, e in paras:
-            if (e - s) > hard_limit:
-                if cur_start is not None and cur_end is not None:
-                    chunks.append((cur_start, cur_end))
-                    cur_start = cur_end = None
-                chunks.extend(self._sentence_spans(md, s, e, target_max))
-                continue
-            if cur_start is None:
-                cur_start, cur_end = s, e
-            elif (e - cur_start) > target_max:
-                chunks.append((cur_start, cur_end))  # type: ignore[arg-type]
-                cur_start, cur_end = s, e
-            else:
-                cur_end = e
-        if cur_start is not None and cur_end is not None:
-            chunks.append((cur_start, cur_end))
-        return chunks
-
-    @staticmethod
-    def _sentence_spans(
-        md: str, start: int, end: int, target_max: int
-    ) -> list[tuple[int, int]]:
-        """把超长段落 [start,end) 按句末贪心切为 <= target_max 的连续区间。"""
-        enders = [i + 1 for i in range(start, end) if md[i] in _SENTENCE_ENDERS]
-        if not enders or enders[-1] != end:
-            enders.append(end)
-        spans: list[tuple[int, int]] = []
-        cs = start
-        prev = start
-        for cut in enders:
-            if (cut - cs) > target_max and prev > cs:
-                spans.append((cs, prev))
-                cs = prev
-            prev = cut
-        if cs < end:
-            spans.append((cs, end))
-        return spans
 
 
 __all__ = ["IngestManager", "gen_zotero_key", "make_document_id", "LOCAL_LIBRARY_ID"]

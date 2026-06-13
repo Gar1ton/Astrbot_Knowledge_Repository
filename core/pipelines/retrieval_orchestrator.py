@@ -1,6 +1,7 @@
 """Unified evidence retrieval for default and high-precision Ask flows."""
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -189,8 +190,12 @@ class RetrievalOrchestrator:
             except Exception as exc:
                 logger.error("AstrBot native search fallback failed: %s", exc)
 
+        anchor_chunks: list[DocumentChunk] = []
         lexical_chunks: list[DocumentChunk] = []
         try:
+            anchor_chunks = await self._search_anchor_sqlite(collection, query, top_k * 2)
+            if anchor_chunks:
+                engines.append("sqlite_anchor")
             lexical_chunks = await self._search_lexical_sqlite(collection, query, top_k * 2)
             if lexical_chunks:
                 engines.append("sqlite_lexical")
@@ -200,6 +205,7 @@ class RetrievalOrchestrator:
         # 硬过滤契约（review #3）：任何候选 chunk 必须先满足 allowed_doc_ids 才进入 RRF。
         if allowed_doc_ids is not None:
             dense_chunks = [c for c in dense_chunks if c.doc_id in allowed_doc_ids]
+            anchor_chunks = [c for c in anchor_chunks if c.doc_id in allowed_doc_ids]
             lexical_chunks = [c for c in lexical_chunks if c.doc_id in allowed_doc_ids]
 
         rrf_scores: dict[str, tuple[DocumentChunk, float]] = {}
@@ -215,6 +221,7 @@ class RetrievalOrchestrator:
                 )
 
         add_rank(dense_chunks)
+        add_rank(anchor_chunks)
         add_rank(lexical_chunks)
         ordered = sorted(rrf_scores.values(), key=lambda item: item[1], reverse=True)
         return RetrievalOutcome(
@@ -248,6 +255,43 @@ class RetrievalOrchestrator:
         if not context:
             raise RuntimeError("LightRAG returned empty context")
         return context
+
+    async def _search_anchor_sqlite(
+        self, collection: str, query: str, limit: int
+    ) -> list[DocumentChunk]:
+        anchors = self._structural_anchors(query)
+        if not anchors:
+            return []
+        db_conn = getattr(self._source_store, "_db", None)
+        if db_conn is None:
+            return []
+
+        doc_ids: list[str] = []
+        async with db_conn.execute(
+            "SELECT doc_id FROM documents WHERE collection = ? AND lifecycle_state = 'active'",
+            (collection,),
+        ) as cursor:
+            async for row in cursor:
+                doc_ids.append(row[0])
+        if not doc_ids:
+            return []
+
+        doc_placeholders = ",".join("?" for _ in doc_ids)
+        sql = (
+            "SELECT chunk_id, doc_id, ordinal, text, content_hash, metadata FROM chunks "
+            f"WHERE doc_id IN ({doc_placeholders}) ORDER BY ordinal ASC"
+        )
+        matched: list[DocumentChunk] = []
+        async with db_conn.execute(sql, doc_ids) as cursor:
+            async for row in cursor:
+                metadata = _loads_metadata(row[5])
+                if self._metadata_matches_anchor(metadata, anchors):
+                    matched.append(
+                        DocumentChunk(row[0], row[1], row[2], row[3], row[4], metadata)
+                    )
+                    if len(matched) >= limit:
+                        break
+        return matched
 
     async def _search_lexical_sqlite(
         self, collection: str, query: str, limit: int
@@ -284,24 +328,116 @@ class RetrievalOrchestrator:
         sql = (
             "SELECT chunk_id, doc_id, ordinal, text, content_hash FROM chunks "
             f"WHERE doc_id IN ({doc_placeholders}) AND ({' OR '.join(like_parts)}) "
-            f"LIMIT {limit * 2}"
+            "ORDER BY ordinal ASC"
         )
-        matched: list[tuple[DocumentChunk, int]] = []
+        matched: list[tuple[DocumentChunk, float]] = []
         async with db_conn.execute(sql, params) as cursor:
             async for row in cursor:
                 chunk = DocumentChunk(row[0], row[1], row[2], row[3], row[4])
-                lower_text = chunk.text.lower()
-                matched.append((chunk, sum(lower_text.count(term) for term in terms)))
-        matched.sort(key=lambda item: item[1], reverse=True)
+                matched.append((chunk, self._lexical_score(chunk.text, terms)))
+        matched.sort(key=lambda item: (-item[1], item[0].ordinal))
         return [item[0] for item in matched[:limit]]
 
     @staticmethod
     def _lexical_terms(query: str) -> list[str]:
         terms = [term.strip().lower() for term in re.split(r"\s+", query) if term.strip()]
+        # 中英混排查询（如“T55具体说了什么”）不会被空白拆开，需显式抽取 ASCII 锚点。
+        terms.extend(match.group(0).lower() for match in re.finditer(r"[A-Za-z]+\d*|\d+", query))
         for cjk_run in re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]+", query):
             if len(cjk_run) > 2:
                 terms.extend(cjk_run[index : index + 2] for index in range(len(cjk_run) - 1))
         return list(dict.fromkeys(term for term in terms if len(term) >= 2))[:32]
+
+    @staticmethod
+    def _lexical_score(text: str, terms: list[str]) -> float:
+        lower_text = text.lower()
+        score = 0.0
+        for term in terms:
+            count = lower_text.count(term)
+            if count <= 0:
+                continue
+            if re.fullmatch(r"t\d{1,3}[a-z]?", term):
+                heading_re = re.compile(
+                    rf"(?im)^[\s#*_`>]*{re.escape(term)}[\s*_`#>]*$"
+                )
+                score += 100.0 if heading_re.search(text) else 10.0 * count
+            elif term.isdigit() or len(term) <= 2:
+                score += 0.25 * count
+            else:
+                score += float(count)
+        return score
+
+    @staticmethod
+    def _structural_anchors(query: str) -> dict[str, set[str]]:
+        anchors: dict[str, set[str]] = {
+            "section_label": set(),
+            "subsection_label": set(),
+            "section_path": set(),
+            "anchor_label": set(),
+        }
+        for match in re.finditer(r"(?<![A-Za-z0-9])T\d{1,3}[A-Za-z]?", query, flags=re.I):
+            value = match.group(0).upper()
+            anchors["section_label"].add(value)
+            anchors["anchor_label"].add(value)
+        for match in re.finditer(r"\b\d+(?:\.\d+){1,4}\b", query):
+            anchors["section_label"].add(match.group(0))
+            anchors["section_path"].add(match.group(0))
+        for match in re.finditer(r"\b(?:Fig(?:ure)?|Table)\.?\s*\d+[A-Za-z]?\b", query, flags=re.I):
+            anchors["anchor_label"].add(_normalize_anchor(match.group(0)))
+        for match in re.finditer(
+            r"\b(?:Scholium(?:\s+[a-z])?|Lemma(?:\s+[a-z])?|Speculative strategy\s+[a-z])\b",
+            query,
+            flags=re.I,
+        ):
+            anchors["subsection_label"].add(_normalize_anchor(match.group(0)))
+        return {key: value for key, value in anchors.items() if value}
+
+    @staticmethod
+    def _metadata_matches_anchor(
+        metadata: dict[str, object], anchors: dict[str, set[str]]
+    ) -> bool:
+        section_label = str(metadata.get("section_label") or "")
+        section_labels = metadata.get("section_labels") or []
+        subsection_label = str(metadata.get("subsection_label") or "")
+        anchor_label = str(metadata.get("anchor_label") or "")
+        section_path = metadata.get("section_path") or []
+        section_paths = metadata.get("section_paths") or []
+        if "section_label" in anchors and _normalize_anchor(section_label) in {
+            _normalize_anchor(value) for value in anchors["section_label"]
+        }:
+            return True
+        if isinstance(section_labels, list) and "section_label" in anchors:
+            normalized_labels = {_normalize_anchor(str(value)) for value in section_labels}
+            if normalized_labels & {
+                _normalize_anchor(value) for value in anchors["section_label"]
+            }:
+                return True
+        if "subsection_label" in anchors and _normalize_anchor(subsection_label) in {
+            _normalize_anchor(value) for value in anchors["subsection_label"]
+        }:
+            return True
+        if "anchor_label" in anchors and _normalize_anchor(anchor_label) in {
+            _normalize_anchor(value) for value in anchors["anchor_label"]
+        }:
+            return True
+        if isinstance(section_path, list) and "section_path" in anchors:
+            normalized_path = {_normalize_anchor(str(value)) for value in section_path}
+            if normalized_path & {
+                _normalize_anchor(value) for value in anchors["section_path"]
+            }:
+                return True
+        if isinstance(section_paths, list) and "section_path" in anchors:
+            normalized_paths: set[str] = set()
+            for path in section_paths:
+                if isinstance(path, list):
+                    normalized_paths.update(_normalize_anchor(str(value)) for value in path)
+                else:
+                    normalized_paths.add(_normalize_anchor(str(path)))
+            if normalized_paths & {
+                _normalize_anchor(value) for value in anchors["section_path"]
+            }:
+                return True
+        return False
 
     async def _find_local_chunk(self, chunk_id: str) -> DocumentChunk | None:
         db_conn = getattr(self._source_store, "_db", None)
@@ -315,13 +451,29 @@ class RetrievalOrchestrator:
             ) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    import json
-
-                    metadata = json.loads(row[4]) if row[4] else {}
+                    metadata = _loads_metadata(row[4])
                     return DocumentChunk(chunk_id, row[0], row[1], row[2], row[3], metadata)
         except Exception as exc:
             logger.error("Failed to find local chunk %s: %s", chunk_id, exc)
         return None
+
+
+def _loads_metadata(raw: object) -> dict[str, object]:
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        payload = json.loads(str(raw))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _normalize_anchor(value: str) -> str:
+    normalized = re.sub(r"[*_`#]+", "", value)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.rstrip(".").upper()
 
 
 __all__ = [

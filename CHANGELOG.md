@@ -25,11 +25,17 @@
 
 ### 新增功能 (Added)
 
+- **structural_v3 结构化分块与召回 handle**：新增 `core/managers/chunking.py`，将 clean Markdown 解析为 front matter、章节标题、子标题、段落、figure/table caption、list/equation 等结构块，再按 block 边界打包 chunk；仅当单个 block 超过硬上限时才启用 citation-aware sentence split，避免在 `et al.`、括号引用或普通段落中间硬切。`IngestManager` 改为调用结构化 chunker，并将 schema 升级为 `clean_md_structural_v3`，chunk metadata 增加 `section_type`、`section_label`、`section_path`、`section_title`、`subsection_label`、`block_types` 与精确 section offset；召回编排层新增 SQLite anchor fast-path，支持 query 中的 T 编号、编号章节、figure/table 和 subsection anchor 直达对应 chunk（`core/managers/chunking.py`、`core/managers/ingest_manager.py`、`core/pipelines/retrieval_orchestrator.py`）。
+- **PDF 清洗后处理与 paragraph-aware Milvus 分块**：在 PyMuPDF4LLM 输出后增加确定性清洗，去除重复页眉、边缘页码，修复软连字符断词、伪段落空行与异常换行；Milvus chunker 改为按标题 / 段落 / 句末 / 词边界分层切分，避免普通句中硬切和短残片，并在 chunk metadata 写入 `chunk_schema`、`section_label`、`section_start_char`、`section_end_char`。Milvus 索引前会识别旧式 chunk id、缺 `start_char/end_char` 或缺 schema 的 legacy chunks，从现有 `clean.md` 重建 SQLite chunks 并标记 `needs_reindex`；SQLite 词汇召回同步加强中英混排 anchor（如 `T55具体...`）和标题锚点排序，避免优先命中跨引用而非正文标题（`core/managers/markdown_extractor.py`、`core/managers/ingest_manager.py`、`core/api.py`、`core/pipelines/retrieval_orchestrator.py`）。
 - **LightRAG 构建暂停/恢复持久化与整体进度修复**：新增 `017_graph_build_pause_state` 迁移并扩展 build job 持久化契约，保存 `pause_requested`、`paused_at`、`paused_seconds`、`progress_current` 与 `progress_total`；后端改为线性单队列，支持 LLM 调用中请求暂停、下一安全点进入 `paused`、同一 `job_id` 恢复、重启后从持久化 paused job 继续未 `indexed` 文档，并让 elapsed 排除真正暂停时间；整体进度覆盖 LRAG chunk、文档收尾与 collection finalize，避免 chunk 完成后提前显示 100%；前端将开始/暂停/等待暂停/继续控制收敛到 FilePanel，ChatPanel 启动构建后关闭确认框并引导到文件面板，移除阻塞聊天区的浮动构建弹窗（`migrations/017_graph_build_pause_state.sql`、`core/api.py`、`core/lightrag_core.py`、`core/plugin_initializer.py`、`core/repository/source_store/base.py`、`core/repository/source_store/memory.py`、`core/repository/source_store/sqlite.py`、`web/frontend/components/panels/FilePanel.tsx`、`web/frontend/components/panels/ChatPanel.tsx`、`web/frontend/app/(console)/layout.tsx`、`web/frontend/lib/api.ts`、`web/frontend/lib/i18n.ts`、`pages/`）。
 - **笔记面板支持本地标签行内编辑**：在文档笔记元信息区新增轻量 `TagEditor`，本地文档可添加/删除标签并通过 `patchDocument(doc_id, { tags })` 保存；Zotero/read_only 文档仅展示只读标签提示，继续由 Zotero 同步维护；同步拆出 `DocumentMeta` 让 `NotePanel` 回到文件大小红线内（`web/frontend/components/panels/NotePanel.tsx`、`web/frontend/components/panels/TagEditor.tsx`、`web/frontend/components/panels/DocumentMeta.tsx`、`web/frontend/lib/i18n.ts`、`pages/`）。
 - **Zotero 快速配置改为标签式可切换面板**：数据流 Zotero 节点不再用下拉框切换 access_mode，改为仿文档面板 md/pdf 的分段标签（`本地离线` / `在线 API`）。本地页签含端口、自动解析目录（截断 + hover）、覆盖目录选择 + 诊断行；在线页签含 API key 保存/清除 + 用户徽标。`sync_mode / storage_mode / linked_root / 自动同步` 收进折叠「高级」区；底部新增「立即同步 + 上次同步状态」动作条（`web/frontend/components/flow/ZoteroQuickConfig.tsx`、`web/frontend/components/flow/QuickConfigPanel.tsx`）。
 - **Zotero 本地干跑探针**：新增 `ZoteroSyncPipeline.probe_local_read()`（只读 zotero.sqlite 快照、返回条目/集合/附件/PDF 计数，不 mirror/不写库；server 模式跳过），`api.probe_zotero_local()` 合并端口连通性与计数，新增 `GET /api/zotero/probe` 路由（`core/pipelines/zotero_sync_pipeline.py`、`core/api.py`、`web/server.py`）。
 - **前端探针客户端**：`lib/api.ts` 新增 `ZoteroProbeResult` 接口与 `probeZoteroLocal()`（含 mock 分支）；`lib/i18n.ts` 中英补齐标签 / 探针 / 同步相关键（`web/frontend/lib/api.ts`、`web/frontend/lib/i18n.ts`）。
+
+### 修复 (Fixed)
+
+- **父章节标题极短 chunk 合并**：结构化 chunker 允许短的父章节标题连续向前合并到第一个子章节正文块，避免 `2` 与 `2.1` 之间产生只有标题的极短 chunk；合并后 metadata 新增 `section_labels` 与 `section_paths`，召回 fast-path 会同时匹配父章节和子章节 anchor，保证 `2` / `2.1` 这类查询都可定位到合并后的正文 chunk（`core/managers/chunking.py`、`core/pipelines/retrieval_orchestrator.py`）。
 
 ### 架构健康 (Refactor)
 
@@ -41,6 +47,7 @@
 
 ### 测试 (Tests)
 
+- **PDF 清洗与分块回归覆盖**：新增页眉/页码/断词/伪段落清洗、paragraph-aware chunk 边界、section metadata、legacy chunk 重建、T 编号标题锚点召回、citation-aware sentence split、编号章节、父章节短标题合并、图表 caption 和 subsection anchor fast-path 测试；验证命令包括 `python -m pytest tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py -q`、`python -m pytest tests\backend\test_api.py -q` 与 `python -m compileall ...`。私有 PDF 仅做本地手工评估，不在变更记录中保存标题、正文或 chunk 预览（`tests/backend/test_ingest_manager.py`、`tests/backend/test_retrieval_orchestrator.py`）。
 - **LightRAG 暂停恢复回归覆盖**：补充 SQLite migration 默认值、启动清理保留 paused job、LLM 中 pause_requested 持久化、pause gate 入库 paused、同进程恢复累计 `paused_seconds`、重启后复用原 `job_id` 处理未 `indexed` 文档、finalize 前进度小于 100% 等用例；验证命令包括 `python -m pytest tests\backend\test_build_hardening.py tests\backend\test_sqlite_source_store.py tests\backend\test_api.py tests\backend\test_web_server.py -q`、`node node_modules/typescript/bin/tsc --noEmit`、`node node_modules/next/dist/bin/next build --webpack`、`python tools\sync_frontend.py` 与 `python tools\sync_frontend.py --check`（`tests/backend/test_build_hardening.py`、`tests/backend/test_sqlite_source_store.py`）。
 - `test_zotero_sync.py` 新增 `probe_local_read` 三例（计数、缺目录、server 跳过）；`test_web_server.py` 新增 `/api/zotero/probe` 路由 smoke（`tests/backend/test_zotero_sync.py`、`tests/backend/test_web_server.py`）。
 
@@ -526,7 +533,7 @@
 
 - **Ask 聊天记录持久化**：新增 `migrations/007_chat_history.sql` 表，每次 ask() 成功后自动将用户问题与 LLM 回答（含来源、召回模式）写入 SQLite；Ask 页加载时从 `localStorage` 读取 `conversation_id` 并拉取历史恢复对话；"新对话"按钮调用 `DELETE /api/chat/history` 清除 DB 记录并生成新 ID（`migrations/007_chat_history.sql`, `core/repository/source_store/base.py`, `core/repository/source_store/sqlite.py`, `core/repository/source_store/memory.py`, `core/api.py`, `web/server.py`, `web/frontend/lib/api.ts`, `web/frontend/app/(console)/ask/page.tsx`）。
 - **Ask 查询设置新增「使用英语召回」与「回答语言」**：用 LLM 将中文问题翻译为英语后再送入 embedding，提升英语文档向量召回精度（默认开启）；新增强制 LLM 用中文/英文/自动回答的三档语言选项，替代原"与问题同语言"自动逻辑（`core/api.py`, `web/server.py`, `web/frontend/lib/api.ts`, `web/frontend/app/(console)/ask/page.tsx`）。
-- **本地集成测试脚本**：新增 `tests/mocks/run_dev_realtime.py`，使用真实 Milvus Lite + LightRAG + Deepseek API 在端口 6521 启动测试 WebUI，直接从 `tests/mock_data/Brian Massumi/` 读取 PDF 播种数据，绕开 IngestManager；新增 `tests/mocks/reset_dev_realtime.py` 一键归档/清理测试数据；新增 `tests/mock_data/Config/config.example.py` 配置模板；相关文件全部入 `.gitignore`（`tests/mocks/`, `tests/mock_data/Config/config.example.py`, `.gitignore`）。
+- **本地集成测试脚本**：新增 `tests/mocks/run_dev_realtime.py`，使用真实 Milvus Lite + LightRAG + Deepseek API 在端口 6521 启动测试 WebUI，直接从用户本地私有 mock_data 目录读取 PDF 播种数据，绕开 IngestManager；新增 `tests/mocks/reset_dev_realtime.py` 一键归档/清理测试数据；新增 `tests/mock_data/Config/config.example.py` 配置模板；相关文件全部入 `.gitignore`（`tests/mocks/`, `tests/mock_data/Config/config.example.py`, `.gitignore`）。
 
 ### 修复 (Fixed)
 

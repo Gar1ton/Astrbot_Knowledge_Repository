@@ -172,6 +172,115 @@ async def test_retrieval_orchestrator_lexical_fallback_supports_chinese_query(sq
 
 
 @pytest.mark.asyncio
+async def test_retrieval_orchestrator_prioritizes_thesis_heading_anchor(sqlite_store):
+    await sqlite_store.add_document(
+        SourceDocument(
+            "doc-anchor",
+            "Synthetic Anchors",
+            "synthetic.pdf",
+            "application/pdf",
+            100,
+            "hash-anchor",
+            "papers",
+        )
+    )
+    await sqlite_store.replace_chunks(
+        "doc-anchor",
+        [
+            DocumentChunk(
+                "c-ref",
+                "doc-anchor",
+                0,
+                "A neighboring paragraph cross-references T42 without explaining it.",
+                "h-ref",
+                metadata={"section_label": "T41", "chunk_schema": "clean_md_structural_v3"},
+            ),
+            DocumentChunk(
+                "c-t42",
+                "doc-anchor",
+                1,
+                "T42\nThis synthetic thesis defines the target anchor directly.",
+                "h-t42",
+                metadata={"section_label": "T42", "chunk_schema": "clean_md_structural_v3"},
+            ),
+        ],
+    )
+    orchestrator = RetrievalOrchestrator(
+        source_store=sqlite_store,
+        kb_reader=MockKnowledgeBaseReader(),
+        config=Config({}),
+    )
+
+    result = await orchestrator.retrieve_with_outcome(
+        "papers", "T42具体说了什么，同时能附带一些原文来说明吗", top_k=2
+    )
+
+    assert [chunk.chunk_id for chunk in result.chunks] == ["c-t42", "c-ref"]
+    assert "sqlite_anchor" in result.engines
+    assert "sqlite_lexical" in result.engines
+
+
+@pytest.mark.asyncio
+async def test_retrieval_orchestrator_matches_section_label_lists(sqlite_store):
+    await sqlite_store.add_document(
+        SourceDocument(
+            "doc-numbered",
+            "Synthetic Numbered Sections",
+            "numbered.pdf",
+            "application/pdf",
+            100,
+            "hash-numbered",
+            "papers",
+        )
+    )
+    await sqlite_store.replace_chunks(
+        "doc-numbered",
+        [
+            DocumentChunk(
+                "c-merged",
+                "doc-numbered",
+                0,
+                "2 Materials and methods\n2.1 Study area\nSynthetic body text.",
+                "h-merged",
+                metadata={
+                    "section_label": "2",
+                    "section_labels": ["2", "2.1"],
+                    "section_path": ["2"],
+                    "section_paths": [["2"], ["2", "2.1"]],
+                    "chunk_schema": "clean_md_structural_v3",
+                },
+            ),
+            DocumentChunk(
+                "c-other",
+                "doc-numbered",
+                1,
+                "2.2 Data sources\nSynthetic neighboring section.",
+                "h-other",
+                metadata={
+                    "section_label": "2.2",
+                    "section_labels": ["2", "2.2"],
+                    "section_path": ["2", "2.2"],
+                    "section_paths": [["2"], ["2", "2.2"]],
+                    "chunk_schema": "clean_md_structural_v3",
+                },
+            ),
+        ],
+    )
+    orchestrator = RetrievalOrchestrator(
+        source_store=sqlite_store,
+        kb_reader=MockKnowledgeBaseReader(),
+        config=Config({}),
+    )
+
+    result = await orchestrator.retrieve_with_outcome(
+        "papers", "2.1 section details", top_k=2
+    )
+
+    assert result.chunks[0].chunk_id == "c-merged"
+    assert "sqlite_anchor" in result.engines
+
+
+@pytest.mark.asyncio
 async def test_lightrag_context_queries_workspace_regardless_of_doc_status(tmp_path):
     """构建完成（含部分失败）后查询不应因单文档状态而阻断。"""
     from core.index_compatibility import IndexCompatibilityStore

@@ -44,6 +44,85 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.24.12 parent heading chunk 合并修复 (completed)
+
+### User constraints / 约束
+
+- 只做小修，修复父章节标题独立成极小 chunk 的问题。
+- 不把私有论文标题、正文、`clean.md` 或 chunk 预览写入可提交文件；测试只使用合成 fixture。
+
+### Technical implementation path
+
+- [x] **P1 - 合并策略修复**：允许短的父章节标题 chunk 合并到第一个子章节 chunk，例如 `2` 合并到 `2/2.1`。技术理由：父章节标题本身不是可检索语义正文，单独进入向量库会制造极短噪声 chunk。
+- [x] **P2 - metadata 保真**：合并后保留 chunk 覆盖到的全部 `section_labels` / `section_paths`，让父章节和子章节 anchor 都能命中。技术理由：不能为了消除小 chunk 牺牲 `2.1` 一类精确召回。
+- [x] **P3 - 合成回归测试**：补 synthetic numbered-section fixture，断言父标题不会独立成短 chunk，且 `2` 与 `2.1` metadata 都存在。技术理由：复现结构形态，不写入私有论文内容。
+
+### Verification
+
+- `python -m pytest tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py -q` → passed，16 passed / 1 skipped。
+- `python -m pytest tests\backend\test_api.py -q` → passed，37 passed。
+- 私有 PDF 手工验证 → 本地临时目录重建 chunk 预览，匿名指标为 `chunks=53`、`MIN_LEN=439`、`SHORT_UNDER_160=0`、`HEADING_ONLY_SHORT=0`；不记录论文标题、正文或 chunk 预览。
+
+---
+
+## v0.24.11 structural_v3 分块与召回 handle (completed)
+
+### User constraints / 约束
+
+- 私有论文内容、导出的 `clean.md`、chunk 预览和长摘录不得进入可提交文件；私有样本只允许本地手工验证。
+- 分块链路按 `clean → chunk → handle` 分层：clean 只做文本规范化，chunk 只做结构切分，handle 负责召回友好性。
+- chunk 边界优先依据章节、段落、caption、list/equation/reference entry 结尾；普通段落不因接近字符目标而硬切。
+- `chunk_size` 作为软目标，不破坏结构边界；只有单个 block 极端超长时才启用 citation-aware 句子兜底。
+- 继续保持 offset 不变量：`clean_md[start_char:end_char] == chunk.text`。
+
+### Technical implementation path
+
+- [x] **P1 - chunking 模块拆分**：新增 `core/managers/chunking.py`，定义 `TextBlock` / `SectionSpan` / `ChunkSpan` 与 parse / pack / validate 流程；`IngestManager` 只负责调用。技术理由：把结构解析从摄入流程中解耦，避免继续堆私有 helper。
+- [x] **P2 - block parser**：识别 front matter、章节标题、子标题、段落、figure/table caption、equation/list/reference entry，并保留每个 block 的精确字符区间。技术理由：chunk 必须建立在结构块上，而不是裸字符位置上。
+- [x] **P3 - section tree metadata**：生成 `section_type`、`section_label`、`section_path`、`section_title`、`subsection_label`、`section_start_char/end_char` 与 `block_types`。技术理由：让 T 编号、编号章节、图表和 introduction 能被召回层稳定定位。
+- [x] **P4 - structural packer**：仅在 block 边界打包 chunk，短 heading/thesis 向同 section 后续正文合并，超长单 block 才走 citation-aware sentence split。技术理由：解决引用缩写、括号引用和段落中途断裂。
+- [x] **P5 - retrieval handle**：基于 query 中的 T 编号、section path、figure/table anchor 和 subsection label 做 fast-path，并对短 chunk 自动扩展同 section 相邻内容。技术理由：结构化 chunk 需要结构化召回兜底，降低非对称 chunk 对向量召回的影响。
+- [x] **P6 - legacy rebuild 与 schema 升级**：将新分块 schema 标记为 `clean_md_structural_v3`，旧 schema 或缺 metadata 的文档从现有 `clean.md` 重建并标记 Milvus reindex。技术理由：已有库需要从 v2 边界平滑迁移到 structural_v3。
+- [x] **P7 - 测试与收口**：补合成 fixture 覆盖引用缩写、括号引用、introduction、T 编号、小节、图表 caption、offset invariant 和召回 fast-path；通过后追加 CHANGELOG。技术理由：测试不得包含私有论文正文，同时要复现已发现的边界类型。
+
+### Verification
+
+- `python -m pytest tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py -q` → passed，14 passed / 1 skipped。
+- `python -m pytest tests\backend\test_api.py -q` → passed，37 passed。
+- `python -m compileall core\managers\chunking.py core\managers\ingest_manager.py core\managers\markdown_extractor.py core\api.py core\pipelines\retrieval_orchestrator.py tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py` → passed。
+- `python -m ruff check ...` → blocked，本环境未安装 `ruff`（`No module named ruff`）。
+- `git diff --check -- TODO.md CHANGELOG.md core\managers\chunking.py core\managers\ingest_manager.py core\managers\markdown_extractor.py core\api.py core\pipelines\retrieval_orchestrator.py tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py` → passed。
+- 私有内容扫描 → 本轮新增代码、测试与文档只保留匿名描述，未写入私有论文标题、正文、`clean.md` 或 chunk 预览。
+
+---
+
+## v0.24.10 数据清洗与 Milvus 分块优化 (completed)
+
+### User constraints / 约束
+
+- `clean.md` 允许作为检索文本做确定性规范化清洗；PDF 原件不改。
+- 修复页眉、页码、软连字符断词与异常空白，保留段落结构。
+- Milvus chunk 需优先按段落 / 句末 / 标题边界切分，避免句中硬切和短残片。
+- 不新增独立 `document_sections` 表，先把 section 信息写入 chunk metadata。
+- 既有 legacy chunks 需要可重建为新分块，并标记 Milvus 需重建。
+
+### Technical implementation path
+
+- [x] **P1 - 清洗后处理**：在 PyMuPDF4LLM 输出后增加 deterministic post-clean，去除重复页眉与边缘页码，修复软连字符换行和异常空白。技术理由：先降低输入噪声，避免页眉页码进入 chunk 与向量索引。
+- [x] **P2 - paragraph-aware chunker**：重写 clean.md 分块策略，按标题 / 段落 / 句末 / 词边界分层切分，保留 offset 不变量并补 section metadata。技术理由：Milvus chunk 应保持语义完整，不能在普通句子中间硬截断。
+- [x] **P3 - legacy chunk rebuild path**：为已有 `clean.md` 文档提供重建 chunks 的路径，识别旧式 chunk / 缺 metadata / converter 缺失并标记 `needs_reindex`。技术理由：已有库需要可从脏分块迁移到新分块。
+- [x] **P4 - 回归测试与收口**：补清洗、分块、T55/paragraph fixture 测试，运行目标 pytest；通过后标记完成并追加 CHANGELOG。技术理由：锁住 offset、分块边界和 legacy 检测契约。
+
+### Verification
+
+- `python -m pytest tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py -q` → passed，11 passed / 1 skipped。
+- `python -m pytest tests\backend\test_api.py -q` → passed，37 passed。
+- `python -m compileall core\managers\markdown_extractor.py core\managers\ingest_manager.py core\api.py core\pipelines\retrieval_orchestrator.py tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py` → passed。
+- `python -m ruff check core\managers\markdown_extractor.py core\managers\ingest_manager.py core\api.py core\pipelines\retrieval_orchestrator.py tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py` → blocked，本环境未安装 `ruff`（`No module named ruff`）。
+- 用户私有 PDF 手工评估 → 仅本地验证，确认 chunk 生成耗时为毫秒级且无词中断裂；不记录论文标题、正文或 chunk 预览。
+
+---
+
 ## v0.24.9 LightRAG 暂停持久化与进度修复 (completed)
 
 ### User constraints / 约束

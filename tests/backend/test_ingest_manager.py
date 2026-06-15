@@ -16,6 +16,7 @@ import pytest
 from core.config import SourceStoreConfig
 from core.domain.models import DocumentChunk, SourceDocument
 from core.managers.ingest_manager import LOCAL_LIBRARY_ID, IngestManager
+from core.managers.chunking import parse_markdown_blocks
 from core.managers.markdown_extractor import (
     MarkdownArtifact,
     PageSpan,
@@ -195,6 +196,81 @@ def test_structural_chunker_adds_numbered_section_and_caption_metadata(tmp_path:
     assert numbered
     assert numbered[0].metadata["section_path"] == ["2", "2.1"]
     assert "figure_caption" in numbered[-1].metadata["block_types"]
+    assert "FIGURE 1" in numbered[-1].metadata["anchor_labels"]
+
+
+def test_structural_chunker_handles_generic_paper_headings_without_numeric_noise(
+    tmp_path: Path,
+) -> None:
+    store = InMemorySourceDocumentStore()
+    manager = _manager(store, tmp_path)
+    md = (
+        "0\n\n"
+        "00\n\n"
+        "203\n\n"
+        "1 Introduction\n\n"
+        "The introduction paragraph is synthetic and describes the paper setup.\n\n"
+        "2 Methods\n\n"
+        "2.1 Study area\n\n"
+        "The study area paragraph is synthetic and complete.\n\n"
+        "Figure 1. Synthetic workflow caption.\n\n"
+        "Table 1. Synthetic parameter summary.\n\n"
+        "Equation 2. Synthetic equation description."
+    )
+    artifact = MarkdownArtifact(md, [PageSpan(page=1, start=0, end=len(md))])
+
+    blocks = parse_markdown_blocks(md)
+    heading_labels = [block.label for block in blocks if block.kind == "section_heading"]
+    assert "0" not in heading_labels
+    assert "00" not in heading_labels
+    assert "203" not in heading_labels
+    assert {"1", "2", "2.1"}.issubset(set(heading_labels))
+
+    chunks = manager._chunk_artifact(
+        document_id="doc",
+        library_id=LOCAL_LIBRARY_ID,
+        item_key="ITEM",
+        attachment_key="ATTACH",
+        artifact=artifact,
+    )
+
+    method_chunks = [
+        chunk for chunk in chunks if chunk.metadata.get("section_label") == "2.1"
+    ]
+    assert method_chunks
+    metadata = method_chunks[-1].metadata
+    assert metadata["section_path"] == ["2", "2.1"]
+    assert metadata["section_level"] == 2
+    assert "FIGURE 1" in metadata["anchor_labels"]
+    assert "TABLE 1" in metadata["anchor_labels"]
+    assert "EQUATION 2" in metadata["anchor_labels"]
+    assert all(chunk.text.strip() not in {"0", "00", "203"} for chunk in chunks)
+
+
+def test_structural_chunker_supports_appendix_sections(tmp_path: Path) -> None:
+    store = InMemorySourceDocumentStore()
+    manager = _manager(store, tmp_path)
+    md = (
+        "1 Main text\n\n"
+        "The main text is synthetic.\n\n"
+        "Appendix A: Supplemental checks\n\n"
+        "A.1 Extra setup\n\n"
+        "The appendix paragraph is synthetic and complete."
+    )
+    artifact = MarkdownArtifact(md, [PageSpan(page=1, start=0, end=len(md))])
+
+    chunks = manager._chunk_artifact(
+        document_id="doc",
+        library_id=LOCAL_LIBRARY_ID,
+        item_key="ITEM",
+        attachment_key="ATTACH",
+        artifact=artifact,
+    )
+
+    appendix = next(chunk for chunk in chunks if chunk.metadata.get("section_label") == "A.1")
+    assert appendix.metadata["section_path"] == ["Appendix A", "A.1"]
+    assert appendix.metadata["section_type"] == "numbered_section"
+    assert ["Appendix A", "A.1"] in appendix.metadata["section_paths"]
 
 
 def test_structural_chunker_merges_short_parent_heading_with_first_child(

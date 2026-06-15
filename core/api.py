@@ -36,6 +36,13 @@ from core.domain.models import (
     SourceDocument,
     SyncTargetKind,
 )
+from core.milvus_build import (
+    MILVUS_BUILD_ERROR,
+    MILVUS_BUILD_PARTIAL,
+    MILVUS_BUILD_RUNNING,
+    MILVUS_BUILD_SUCCESS,
+    MilvusBuildJob,
+)
 from core.pipelines.retrieval_orchestrator import RetrievalScope
 
 logger = logging.getLogger("KnowledgeRepositoryApi")
@@ -55,6 +62,100 @@ def _build_scope(scope_type: str, scope_key: str, scope_library_id: str) -> Retr
     return RetrievalScope(
         scope_type=scope_type, scope_key=scope_key, library_id=scope_library_id
     )
+
+
+def _serialize_deep_thinking(outcome: Any) -> dict:
+    """把 DeepThinkingOutcome 序列化为前端可渲染的「思考过程」字典（含清单/逐轮 gaps）。"""
+    return {
+        "degraded": outcome.degraded,
+        "degraded_reason": outcome.degraded_reason,
+        "verified": outcome.verified,
+        "verify_missing": outcome.verify_missing,
+        "est_total_tokens": outcome.est_total_tokens,
+        "checklist": [
+            {
+                "id": i.id,
+                "text": i.text,
+                "critical": i.critical,
+                "satisfied": i.satisfied,
+                "origin": i.origin,
+            }
+            for i in outcome.checklist.items
+        ],
+        "rounds": [
+            {
+                "round": r.round,
+                "queries": r.queries,
+                "gaps": r.gaps,
+                "discovered": r.discovered,
+                "kept_chunk_ids": r.kept_chunk_ids,
+                "llm_calls": r.llm_calls,
+                "est_tokens": r.est_tokens,
+            }
+            for r in outcome.trace
+        ],
+    }
+
+
+def _uses_chinese(text: str) -> bool:
+    """粗略判断文本是否包含中文，用于 answer_language=auto 的警告语言。"""
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
+def _deep_warning_prefix(outcome: Any, answer_language: str, question: str) -> str:
+    """为 deep thinking 证据不足/未验证答案生成正文警告前缀。"""
+    zh = answer_language == "zh" or (answer_language == "auto" and _uses_chinese(question))
+    if getattr(outcome, "degraded", False):
+        reason = str(getattr(outcome, "degraded_reason", "") or "").strip()
+        if zh:
+            reason_part = f"原因：{reason}。" if reason else ""
+            return (
+                f"**提示：深度思考证据不足，已降级为基线证据。** {reason_part}"
+                "以下回答仅基于当前检索片段，可能不完整。\n\n"
+            )
+        reason_part = f" Reason: {reason}." if reason else ""
+        return (
+            "**Note: Deep Thinking found insufficient evidence and fell back to baseline evidence.**"
+            f"{reason_part} The answer below is limited to the currently retrieved passages and may be incomplete.\n\n"
+        )
+    if getattr(outcome, "verified", False):
+        return ""
+    missing = [
+        str(item).strip()
+        for item in (getattr(outcome, "verify_missing", []) or [])
+        if str(item).strip()
+    ]
+    if zh:
+        if missing:
+            return (
+                "**提示：以下回答未完全通过证据校验。** "
+                f"共 {len(missing)} 项缺失或未被支撑，详见下方「思考过程」。"
+                "请将后文视为基于当前证据的有限回答。\n\n"
+            )
+        return (
+            "**提示：以下回答尚未完成证据校验。** "
+            "请将后文视为基于当前证据的有限回答。\n\n"
+        )
+    if missing:
+        return (
+            "**Note: The answer below did not fully pass evidence verification.** "
+            f"{len(missing)} point(s) are missing or unsupported; see “Thinking process” below. "
+            "Treat the rest as a limited answer based on the current evidence.\n\n"
+        )
+    return (
+        "**Note: The answer below has not completed evidence verification.** "
+        "Treat the rest as a limited answer based on the current evidence.\n\n"
+    )
+
+
+def _apply_deep_answer_warning(
+    answer: str, outcome: Any | None, answer_language: str, question: str
+) -> str:
+    """deep thinking 证据不足/未验证时，把警告写进答案正文。"""
+    if outcome is None or not answer:
+        return answer
+    prefix = _deep_warning_prefix(outcome, answer_language, question)
+    return f"{prefix}{answer}" if prefix else answer
 
 
 def _note_html(content: str) -> str:
@@ -138,6 +239,7 @@ if TYPE_CHECKING:
     from core.lightrag_core import BuildJob, LightRAGCoreRegistry
     from core.managers.base import BaseCategoryManager, BaseIngestManager, BaseQuotaManager
     from core.metrics import PerformanceTracker
+    from core.pipelines.deep_thinking_orchestrator import DeepThinkingOrchestrator
     from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
     from core.pipelines.sync_pipeline import SyncPipeline
     from core.repository.embedding.base import EmbeddingProvider
@@ -264,6 +366,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         vector_store: VectorStore | None = None,
         embedding_provider: EmbeddingProvider | None = None,
         retrieval_orchestrator: RetrievalOrchestrator | None = None,
+        deep_thinking_orchestrator: DeepThinkingOrchestrator | None = None,
         metrics: PerformanceTracker | None = None,
         progress_store: ProgressStore | None = None,
         index_compatibility: IndexCompatibilityStore | None = None,
@@ -275,6 +378,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._vector_store = vector_store
         self._embedding_provider = embedding_provider
         self._retrieval_orchestrator = retrieval_orchestrator
+        self._deep_thinking_orchestrator = deep_thinking_orchestrator
         self._sync_targets = sync_targets or {}
         self._ingest_manager = ingest_manager
         self._category_manager = category_manager
@@ -284,6 +388,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._graph_build_jobs: dict[str, BuildJob] = {}
         self._build_pause_events: dict[str, asyncio.Event] = {}
         self._build_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
+        # Milvus 向量库重建：全局单任务的进度快照 + 后台任务句柄（无暂停）。
+        self._milvus_build_job: MilvusBuildJob | None = None
+        self._milvus_build_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._config = config
         self._config_persist = config_persist
         self._llm_adapter = llm_adapter
@@ -392,7 +499,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
     async def list_document_chunks(self, doc_id: str) -> list[DocumentChunk]:
         """列出单个文档的本地文本分块，供管理端展示摘要统计。"""
-        return await self._source_store.list_chunks(doc_id)
+        chunks = await self._source_store.list_chunks(doc_id)
+        return await self._ensure_document_chunks_current(doc_id, chunks)
 
     async def get_document_markdown_content(self, doc_id: str) -> str | None:
         """读取文档制品包中的 clean.md；文档不存在返回 None。"""
@@ -817,6 +925,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             self._unlink_managed_document(doc.file_path)
         return deleted
 
+    async def reextract_document(self, doc_id: str) -> dict:
+        """从制品包中已存储的原件重新提取 Markdown，覆写 clean.md/pages.json，并重新分块。
+
+        适用于提取代码升级后修复已摄入文档的陈旧内容（如 ignore_alpha=True 修复后）。
+        返回 {"chunk_count": int, "converter_version": str}。
+        """
+        if self._ingest_manager is None:
+            raise RuntimeError("IngestManager not configured")
+        return await self._ingest_manager.reextract_document(doc_id)
+
     # ── AstrBot 知识库（调用 / 检索）────────────────────────────
 
     async def list_kb_collections(self) -> list[str]:
@@ -842,7 +960,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self, doc_id: str, chunk_id: str, window: int = 2
     ) -> dict:
         """返回指定 chunk 及其前后 window 个相邻 chunk（按 ordinal 排序）。"""
-        all_chunks = await self._source_store.list_chunks(doc_id)
+        all_chunks = await self._ensure_document_chunks_current(doc_id)
         all_chunks.sort(key=lambda c: c.ordinal)
         matched_idx = next(
             (i for i, c in enumerate(all_chunks) if c.chunk_id == chunk_id), None
@@ -863,8 +981,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "matched_chunk_id": chunk_id,
         }
 
-    async def rebuild_vector_store(self) -> dict[str, Any]:
-        """清除并从 SQLite 事实源全量 rebuild 本地向量数据库。"""
+    async def rebuild_vector_store(self, job: MilvusBuildJob | None = None) -> dict[str, Any]:
+        """清除并从 SQLite 事实源全量 rebuild 本地向量数据库。
+
+        可选 `job`：传入则在逐文档循环中更新 `processed_docs/failed_docs/total_chunks`
+        供进度条轮询；不传则行为与旧版完全一致（返回值/签名兼容）。
+        """
         if not self._config or not self._vector_store or not self._embedding_provider:
             raise RuntimeError("VectorStore or EmbeddingProvider is not configured.")
 
@@ -875,15 +997,21 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         # 2. 从 SQLite 中读取所有的文档
         docs = await self._source_store.list_documents()
+        if job is not None:
+            job.total_docs = len(docs)
         total_chunks = 0
         errors: list[dict[str, str]] = []
 
         # 3. 逐个文档批量进行 Embedding 计算与 upsert
         for doc in docs:
             try:
-                total_chunks += await self._index_document_chunks_with_retry(
+                chunks = await self._index_document_chunks_with_retry(
                     doc.doc_id, doc.collection, context="full rebuild"
                 )
+                total_chunks += chunks
+                if job is not None:
+                    job.processed_docs += 1
+                    job.total_chunks += chunks
             except Exception as exc:
                 logger.error(
                     "Milvus indexing failed after retries for %s during full rebuild: %s",
@@ -892,6 +1020,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 )
                 await self._mark_document_needs_reindex(doc.doc_id)
                 errors.append({"doc_id": doc.doc_id, "error": str(exc)})
+                if job is not None:
+                    job.failed_docs += 1
+                    job.errors.append({"doc_id": doc.doc_id, "error": str(exc)})
 
         if errors:
             failed_ids = {e["doc_id"] for e in errors}
@@ -917,8 +1048,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             await self._clear_document_needs_reindex(doc.doc_id)
         return {"rebuilt_chunks": total_chunks, "failed_docs": 0, "errors": []}
 
-    async def rebuild_index_pending(self) -> dict[str, Any]:
-        """仅对 needs_reindex=True 的文档进行增量索引重建，完成后清除标记。"""
+    async def rebuild_index_pending(self, job: MilvusBuildJob | None = None) -> dict[str, Any]:
+        """仅对 needs_reindex=True 的文档进行增量索引重建，完成后清除标记。
+
+        可选 `job`：传入则在逐文档循环中更新进度供进度条轮询；不兼容触发的全量
+        rebuild 分支会把同一 `job` 透传给 `rebuild_vector_store`。
+        """
         if not self._vector_store or not self._embedding_provider:
             raise RuntimeError(
                 "VectorStore 未配置（请安装 Milvus 并重启插件，或配置 embedding provider）"
@@ -934,10 +1069,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             )
         ):
             docs = await self._source_store.list_documents()
-            result = await self.rebuild_vector_store()
+            result = await self.rebuild_vector_store(job)
             return {"rebuilt_docs": len(docs), **result}
 
         docs = await self._source_store.list_pending_reindex_documents()
+        if job is not None:
+            job.total_docs = len(docs)
         total_chunks = 0
         rebuilt_docs = 0
         errors: list[dict[str, str]] = []
@@ -945,11 +1082,15 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         for doc in docs:
             try:
-                total_chunks += await self._index_document_chunks_with_retry(
+                chunks = await self._index_document_chunks_with_retry(
                     doc.doc_id, doc.collection, context="pending rebuild"
                 )
+                total_chunks += chunks
                 await self._clear_document_needs_reindex(doc.doc_id)
                 rebuilt_docs += 1
+                if job is not None:
+                    job.processed_docs += 1
+                    job.total_chunks += chunks
             except Exception as exc:
                 logger.error(
                     "Milvus indexing failed after retries for %s during pending rebuild: %s",
@@ -958,6 +1099,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 )
                 await self._mark_document_needs_reindex(doc.doc_id)
                 errors.append({"doc_id": doc.doc_id, "error": str(exc)})
+                if job is not None:
+                    job.failed_docs += 1
+                    job.errors.append({"doc_id": doc.doc_id, "error": str(exc)})
 
         logger.info(
             "rebuild_index_pending 完成: %d docs, %d chunks, %d failed",
@@ -976,6 +1120,58 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         """返回待重建索引的文档数量。"""
         docs = await self._source_store.list_pending_reindex_documents()
         return len(docs)
+
+    # ── Milvus 后台重建（进度条）─────────────────────────────────
+
+    async def start_milvus_rebuild(self) -> dict[str, Any]:
+        """在后台启动一次 Milvus 增量重建并立即返回任务快照。
+
+        全局单任务：已有 running 任务时直接返回当前任务（防并发）。进度由后台任务在
+        `rebuild_index_pending` 的逐文档循环中更新，前端经 `get_active_milvus_build_job`
+        轮询。终态（success/partial_failure/error）由 `_run_milvus_rebuild` 写回。
+        """
+        if not self._vector_store or not self._embedding_provider:
+            raise RuntimeError(
+                "VectorStore 未配置（请安装 Milvus 并重启插件，或配置 embedding provider）"
+            )
+        current = self._milvus_build_job
+        if current is not None and current.status == MILVUS_BUILD_RUNNING:
+            return current.to_dict()
+
+        job = MilvusBuildJob(mode="pending", started_at_iso=_now_iso())
+        self._milvus_build_job = job
+        self._milvus_build_task = asyncio.create_task(self._run_milvus_rebuild(job))
+        return job.to_dict()
+
+    async def _run_milvus_rebuild(self, job: MilvusBuildJob) -> None:
+        """后台执行 rebuild_index_pending，并把终态写回 job（不打崩任务循环）。"""
+        try:
+            await self.rebuild_index_pending(job)
+            job.status = MILVUS_BUILD_PARTIAL if job.failed_docs > 0 else MILVUS_BUILD_SUCCESS
+            if job.errors:
+                job.recent_error = job.errors[0].get("error", "")
+        except asyncio.CancelledError:
+            job.status = MILVUS_BUILD_ERROR
+            job.recent_error = "cancelled"
+            raise
+        except Exception as exc:  # noqa: BLE001 - 终态统一兜底，后台任务不应抛出
+            logger.error("Milvus 后台重建失败: %s", exc)
+            job.status = MILVUS_BUILD_ERROR
+            job.recent_error = str(exc)
+        finally:
+            job.finished_at = time.monotonic()
+            job.finished_at_iso = _now_iso()
+
+    def get_active_milvus_build_job(self) -> dict[str, Any] | None:
+        """返回当前需展示的 Milvus 构建任务快照（无则 None）。
+
+        running / partial_failure / error → 返回（后两者供前端显示「重试」）；
+        success 或无任务 → 返回 None（前端隐藏进度条）。
+        """
+        job = self._milvus_build_job
+        if job is None or job.status == MILVUS_BUILD_SUCCESS:
+            return None
+        return job.to_dict()
 
     async def get_chat_history(self, conversation_id: str) -> list[dict]:
         """返回某会话的全部消息记录，按时间升序。"""
@@ -1045,9 +1241,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     ) -> dict:
         """Retrieve evidence and generate one final answer."""
         scope = _build_scope(scope_type, scope_key, scope_library_id)
-        if retrieval_mode not in {"default", "high_precision", "graph_only"}:
-            raise ValueError("retrieval_mode must be 'default', 'high_precision', or 'graph_only'")
-        if retrieval_mode in {"high_precision", "graph_only"} and not collection:
+        if retrieval_mode not in {"default", "high_precision", "graph_only", "deep_thinking"}:
+            raise ValueError(
+                "retrieval_mode must be 'default', 'high_precision', 'graph_only', or 'deep_thinking'"
+            )
+        if retrieval_mode in {"high_precision", "graph_only", "deep_thinking"} and not collection:
             raise ValueError(f"{retrieval_mode} retrieval requires a collection")
         if answer_language not in {"auto", "zh", "en"}:
             answer_language = "auto"
@@ -1132,6 +1330,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 system_prompt = (
                     "You are a helpful academic assistant. "
                     "Answer the question based solely on the provided context. "
+                    "If the context is insufficient, state the limitation clearly "
+                    "and only answer what the context supports. "
+                    "Do not fill gaps with outside knowledge. "
                     f"{lang_instr}"
                 )
                 user_prompt = f"Context:\n\n{lightrag_context}\n\nQuestion: {question}"
@@ -1158,35 +1359,59 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 "fallback_reason": None,
             }
 
-        _progress("vector_search", 20)
-        t_vs = time.monotonic()
-        seen_ids: set[str] = set()
-        for col in await self._resolve_ask_collections(collection):
-            try:
-                if self._retrieval_orchestrator is not None:
-                    outcome = await self._retrieval_orchestrator.retrieve_with_outcome(
-                        col, retrieval_question, top_k, scope
-                    )
-                    current_chunks = outcome.chunks
-                    engines.extend(outcome.engines)
-                    fallback_reason = fallback_reason or outcome.fallback_reason
-                else:
-                    fallback_reason = fallback_reason or milvus_fallback_reason
-                    current_chunks = await self._kb_reader.search(col, retrieval_question, top_k)
-                    engines.append("astrbot")
-            except Exception as exc:
-                logger.warning("Ask retrieval failed for collection %s: %s", col, exc)
-                fallback_reason = fallback_reason or f"collection_error:{col}"
-                continue
-            for chunk in current_chunks:
-                if chunk.chunk_id not in seen_ids:
-                    seen_ids.add(chunk.chunk_id)
-                    chunks.append(chunk)
+        deep_outcome = None  # DeepThinkingOutcome | None（仅 deep_thinking 路径非空）。
+        if retrieval_mode == "deep_thinking" and self._deep_thinking_orchestrator is not None:
+            _progress("deep_thinking", 20)
+            t_dt = time.monotonic()
+            deep_outcome = await self._deep_thinking_orchestrator.run(
+                collection or "",
+                retrieval_question,
+                scope,
+                progress=_progress,
+                answer_language=answer_language,
+                answer_question=question,
+            )
+            chunks = list(deep_outcome.evidence)
+            engines.append("deep_thinking")
+            _record(
+                "deep_thinking_total",
+                t_dt,
+                rounds=len(deep_outcome.trace),
+                degraded=deep_outcome.degraded,
+                est_tokens=deep_outcome.est_total_tokens,
+            )
+        else:
+            _progress("vector_search", 20)
+            t_vs = time.monotonic()
+            seen_ids: set[str] = set()
+            for col in await self._resolve_ask_collections(collection):
+                try:
+                    if self._retrieval_orchestrator is not None:
+                        outcome = await self._retrieval_orchestrator.retrieve_with_outcome(
+                            col, retrieval_question, top_k, scope
+                        )
+                        current_chunks = outcome.chunks
+                        engines.extend(outcome.engines)
+                        fallback_reason = fallback_reason or outcome.fallback_reason
+                    else:
+                        fallback_reason = fallback_reason or milvus_fallback_reason
+                        current_chunks = await self._kb_reader.search(
+                            col, retrieval_question, top_k
+                        )
+                        engines.append("astrbot")
+                except Exception as exc:
+                    logger.warning("Ask retrieval failed for collection %s: %s", col, exc)
+                    fallback_reason = fallback_reason or f"collection_error:{col}"
+                    continue
+                for chunk in current_chunks:
+                    if chunk.chunk_id not in seen_ids:
+                        seen_ids.add(chunk.chunk_id)
+                        chunks.append(chunk)
+                    if len(chunks) >= top_k:
+                        break
                 if len(chunks) >= top_k:
                     break
-            if len(chunks) >= top_k:
-                break
-        _record("vector_search", t_vs, hits=len(chunks))
+            _record("vector_search", t_vs, hits=len(chunks))
 
         _record("embed_query", t0)
 
@@ -1244,7 +1469,37 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         t_llm = time.monotonic()
 
         has_evidence = bool(context_parts or lightrag_context)
-        if self._llm_adapter is not None and has_evidence:
+        deep_answer = deep_outcome.answer if deep_outcome is not None else None
+        if (
+            not deep_answer
+            and deep_outcome is not None
+            and self._llm_adapter is not None
+            and chunks
+        ):
+            # deep 模式但 verify 关闭/synth 失败：仍走 deep 合成，避免答案深度退回普通风格（P2-b）；
+            # 失败则优雅退回下方通用合成。[n] 与 sources 同序对齐（均按 chunks 顺序）。
+            from core.pipelines.answer_synthesis import synthesize_answer
+
+            # 每条证据标注来源文档（Zotero 优先短引「作者 年份」，否则标题），防跨文档串线。
+            source_labels = {
+                s["doc_id"]: (s.get("citation") or s["title"]) for s in sources
+            }
+            try:
+                deep_answer = await synthesize_answer(
+                    self._llm_adapter,
+                    question,
+                    chunks,
+                    answer_language,
+                    style="deep",
+                    source_labels=source_labels,
+                )
+            except Exception as exc:
+                logger.warning("deep fallback synth failed, falling back to generic: %s", exc)
+
+        if deep_answer:
+            # deep 答案（verification 闭环合成或上面的 deep fallback 合成）直接用，不套 persona。
+            answer = deep_answer
+        elif self._llm_adapter is not None and has_evidence:
             if answer_language == "zh":
                 lang_instr = "Answer in Chinese (中文)."
             elif answer_language == "en":
@@ -1254,6 +1509,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             system_prompt = (
                 "You are a helpful academic assistant. "
                 "Answer the question based solely on the provided context. "
+                "If the context is insufficient, state the limitation clearly "
+                "and only answer what the context supports. "
+                "Do not fill gaps with outside knowledge. "
                 f"Cite sources using [n] notation (e.g. [1], [2]). "
                 f"{lang_instr}"
             )
@@ -1285,12 +1543,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         else:
             answer = "未在知识库中找到与该问题相关的内容。请尝试其他关键词或上传相关文档。"
 
+        answer = _apply_deep_answer_warning(answer, deep_outcome, answer_language, question)
+
         _record("llm_generate", t_llm)
         _record("ask_total", ask_start, sources=len(sources))
         _progress("done", 100)
 
         engines = list(dict.fromkeys(engines))
-        if retrieval_mode == "high_precision":
+        if retrieval_mode == "deep_thinking" and deep_outcome is not None:
+            actual_mode = deep_outcome.actual_mode
+        elif retrieval_mode == "high_precision":
             if "astrbot" in engines:
                 actual_mode = "astrbot_lightrag"
             elif "milvus" in engines:
@@ -1327,6 +1589,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "actual_retrieval_mode": actual_mode,
             "retrieval_engines": engines,
             "fallback_reason": fallback_reason,
+            "thinking_trace": _serialize_deep_thinking(deep_outcome) if deep_outcome else None,
         }
 
     async def _resolve_ask_collections(self, collection: str | None) -> list[str]:
@@ -2365,20 +2628,29 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             doc.needs_reindex = False
             await self._source_store.update_document(doc)
 
+    async def _ensure_document_chunks_current(
+        self, doc_id: str, chunks: list[DocumentChunk] | None = None
+    ) -> list[DocumentChunk]:
+        chunks = chunks if chunks is not None else await self._source_store.list_chunks(doc_id)
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return chunks
+        rebuilder = getattr(self._ingest_manager, "rebuild_document_chunks_from_artifact", None)
+        needs_rebuild = getattr(self._ingest_manager, "chunk_needs_rebuild", None)
+        if not (callable(rebuilder) and callable(needs_rebuild)):
+            return chunks
+        try:
+            if needs_rebuild(doc.doc_id, chunks, doc.local_meta):
+                await rebuilder(doc.doc_id)
+                return await self._source_store.list_chunks(doc_id)
+        except FileNotFoundError as exc:
+            logger.warning("Legacy chunk rebuild skipped for %s: %s", doc_id, exc)
+        return chunks
+
     async def _index_document_chunks_with_retry(
         self, doc_id: str, collection: str, *, context: str
     ) -> int:
-        doc = await self._source_store.get_document(doc_id)
-        chunks = await self._source_store.list_chunks(doc_id)
-        rebuilder = getattr(self._ingest_manager, "rebuild_document_chunks_from_artifact", None)
-        needs_rebuild = getattr(self._ingest_manager, "chunk_needs_rebuild", None)
-        if doc is not None and callable(rebuilder) and callable(needs_rebuild):
-            try:
-                if needs_rebuild(doc.doc_id, chunks, doc.local_meta):
-                    await rebuilder(doc.doc_id)
-                    chunks = await self._source_store.list_chunks(doc_id)
-            except FileNotFoundError as exc:
-                logger.warning("Legacy chunk rebuild skipped for %s: %s", doc_id, exc)
+        chunks = await self._ensure_document_chunks_current(doc_id)
         if not chunks:
             return 0
         return await self._upsert_milvus_chunks_with_retry(

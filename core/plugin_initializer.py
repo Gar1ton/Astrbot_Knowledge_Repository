@@ -401,6 +401,47 @@ class PluginInitializer:
             embedding_fingerprint=self.embedding_fingerprint,
         )
 
+        # 4.8) 构造 reranker 与 Deep Thinking 编排器（FAIR-RAG 迭代检索）。
+        # reranker 懒加载，构造不触发模型下载；缺依赖自动 noop，不影响普通 ask。
+        from core.pipelines.deep_thinking_orchestrator import DeepThinkingOrchestrator
+        from core.repository.reranker import build_reranker
+
+        rerank_cfg = self._config.get_rerank_config()
+        self.reranker = build_reranker(
+            provider=rerank_cfg.provider,
+            model=rerank_cfg.model,
+            device=rerank_cfg.device,
+            batch_size=rerank_cfg.batch_size,
+            max_candidates=rerank_cfg.max_candidates,
+        )
+        dt_cfg = self._config.get_deep_thinking_config()
+        # 深度思考优先使用独立 OpenAI-compatible endpoint（若已配置），
+        # 回退使用 AstrBot 主 LLM adapter（可能无 real LLM 而静默降级）。
+        if dt_cfg.llm_base_url and dt_cfg.llm_model:
+            from core.adapters.llm import LMStudioLLMAdapter
+            from core.config import ENV_DEEP_THINKING_LLM_API_KEY
+
+            dt_api_key = os.environ.get(ENV_DEEP_THINKING_LLM_API_KEY) or dt_cfg.llm_api_key
+            dt_llm_adapter = LMStudioLLMAdapter(
+                base_url=dt_cfg.llm_base_url,
+                model=dt_cfg.llm_model,
+                api_key=dt_api_key,
+            )
+            logger.info(
+                "深度思考将使用独立 OpenAI-compat LLM：%s  model=%s",
+                dt_cfg.llm_base_url,
+                dt_cfg.llm_model,
+            )
+        else:
+            dt_llm_adapter = llm_adapter
+        self.deep_thinking_orchestrator = DeepThinkingOrchestrator(
+            retrieval_orchestrator=self.retrieval_orchestrator,
+            reranker=self.reranker,
+            llm_adapter=dt_llm_adapter,
+            dt_config=dt_cfg,
+            rerank_config=rerank_cfg,
+        )
+
         # 5) 业务门面（依赖已装配的仓储/managers）。
         self.api = KnowledgeRepositoryApi(
             source_store=self.source_store,
@@ -418,6 +459,7 @@ class PluginInitializer:
             vector_store=self.vector_store,
             embedding_provider=self.embedding_provider,
             retrieval_orchestrator=self.retrieval_orchestrator,
+            deep_thinking_orchestrator=self.deep_thinking_orchestrator,
             metrics=self.metrics,
             progress_store=self.progress_store,
             index_compatibility=self.index_compatibility,

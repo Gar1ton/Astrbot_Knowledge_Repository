@@ -336,6 +336,72 @@ class IngestManager(BaseIngestManager):
         self.logger.info("Rebuilt %s with %d paragraph-aware chunks.", doc.doc_id, len(chunks))
         return len(chunks)
 
+    async def reextract_document(self, doc_id: str) -> dict[str, Any]:
+        """从制品包中已存储的原件（original.pdf）重新提取 Markdown，覆写 clean.md/pages.json，
+        重新分块，并标记 Milvus 待重建。
+
+        适用于：提取代码升级（如 ignore_alpha=True）后，修复已摄入文档的陈旧内容。
+        不支持 txt/md 纯文本文档（无需重新提取）。
+
+        返回：{"chunk_count": int, "converter_version": str}
+        """
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            raise FileNotFoundError(f"Document not found: {doc_id}")
+
+        # 定位原件：优先制品包内 original.pdf，其次 file_path（Zotero linked 模式）。
+        bundle_pdf = self._library_dir / doc_id / _ARTIFACT_PDF
+        if bundle_pdf.is_file():
+            source_pdf = bundle_pdf
+        elif doc.file_path and Path(doc.file_path).is_file():
+            source_pdf = Path(doc.file_path)
+        else:
+            raise FileNotFoundError(
+                f"Original PDF not found for {doc_id}. "
+                "Please delete and re-upload the document."
+            )
+
+        if doc.content_type not in ("application/pdf", "") and not str(source_pdf).lower().endswith(".pdf"):
+            raise ValueError(f"reextract_document only supports PDF files, got content_type={doc.content_type!r}")
+
+        # 重新提取（使用当前已修复的 ignore_alpha=True 代码）。
+        artifact = self._extract_artifact(source_pdf, doc.content_type or "application/pdf")
+
+        # 覆写制品包中的派生文件。
+        bundle_dir = self._library_dir / doc_id
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        (bundle_dir / _ARTIFACT_MD).write_text(artifact.clean_markdown, encoding="utf-8")
+        pages_payload = [
+            {"page": s.page, "markdown_start_char": s.start, "markdown_end_char": s.end}
+            for s in artifact.page_spans
+        ]
+        (bundle_dir / _ARTIFACT_PAGES).write_text(
+            json.dumps(pages_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        # 重新分块并替换 SQLite 中的 chunks。
+        chunks = self._chunk_artifact(
+            document_id=doc.doc_id,
+            library_id=doc.library_id,
+            item_key=doc.zotero_item_key,
+            attachment_key=doc.attachment_key,
+            artifact=artifact,
+        )
+        await self._source_store.replace_chunks(doc.doc_id, chunks)
+
+        # 更新元数据并标记待重建。
+        doc.converter = artifact.converter
+        doc.converter_version = artifact.converter_version
+        doc.needs_reindex = True
+        doc.local_meta = {**doc.local_meta, "chunk_schema": _CHUNK_SCHEMA}
+        await self._source_store.update_document(doc)
+
+        self.logger.info(
+            "Re-extracted %s → %d chunks, converter_version=%s",
+            doc_id, len(chunks), artifact.converter_version,
+        )
+        return {"chunk_count": len(chunks), "converter_version": artifact.converter_version}
+
     def _resolve_artifact_path(self, doc: SourceDocument, rel_path: str) -> Path | None:
         candidates = [
             self._library_dir / doc.doc_id / rel_path,

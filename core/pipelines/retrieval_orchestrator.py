@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -47,11 +48,25 @@ class RetrievalScope:
         return self.scope_type in _GRAPH_BLOCKED_SCOPES
 
 
+@dataclass(frozen=True)
+class ChunkSignal:
+    """单个候选 chunk 的旁路检索信号（供上层 reranker / pinned 决策使用）。
+
+    rrf_score 为该 chunk 的 RRF 融合累计分；anchor_hit 表示该 chunk 命中了结构锚点
+    通道（_search_anchor_sqlite），是 deep thinking 判定 pinned（不被重排截断）的依据。
+    """
+
+    rrf_score: float
+    anchor_hit: bool
+
+
 @dataclass
 class RetrievalOutcome:
     chunks: list[DocumentChunk]
     engines: list[str] = field(default_factory=list)
     fallback_reason: str | None = None
+    # 旁路信号：chunk_id → ChunkSignal。仅对返回的 chunks 填充，不影响 chunks 排序与既有契约。
+    per_chunk_signals: dict[str, ChunkSignal] = field(default_factory=dict)
 
     @property
     def actual_mode(self) -> str:
@@ -97,6 +112,19 @@ class RetrievalOrchestrator:
     ) -> list[DocumentChunk]:
         """Keep the existing chunk-only public contract."""
         return (await self.retrieve_with_outcome(collection, query, top_k, scope)).chunks
+
+    async def document_labels(self, doc_ids: Iterable[str]) -> dict[str, str]:
+        """批量把 doc_id 解析为来源标签（文档标题），title 为空时回退 doc_id。
+
+        供 deep thinking 合成/审计给每条证据标注来源文档、防跨文档知识串线。
+        DocumentChunk 只带 doc_id，故在调用点经 source_store 解析标题构造映射。
+        """
+        labels: dict[str, str] = {}
+        for doc_id in {d for d in doc_ids if d}:
+            doc = await self._source_store.get_document(doc_id)
+            title = (doc.title or "").strip() if doc else ""
+            labels[doc_id] = title or doc_id
+        return labels
 
     async def resolve_scope(self, scope: RetrievalScope | None) -> set[str] | None:
         """把作用域解析为 allowed_document_ids（None 表示不施加 doc 级硬过滤）。
@@ -223,11 +251,31 @@ class RetrievalOrchestrator:
         add_rank(dense_chunks)
         add_rank(anchor_chunks)
         add_rank(lexical_chunks)
+        anchor_ids = {chunk.chunk_id for chunk in anchor_chunks}
         ordered = sorted(rrf_scores.values(), key=lambda item: item[1], reverse=True)
+        # 内容去重：不同 chunk_id 但 content_hash 相同（同段落跨文献 / 分块重叠）只保留最高分项，
+        # 避免重复内容冗余上下文、挤占覆盖并误导下游充分性判断。空 hash 不参与去重。
+        seen_hashes: set[str] = set()
+        deduped: list[tuple[DocumentChunk, float]] = []
+        for chunk, score in ordered:
+            content_hash = chunk.content_hash
+            if content_hash and content_hash in seen_hashes:
+                continue
+            if content_hash:
+                seen_hashes.add(content_hash)
+            deduped.append((chunk, score))
+        top = deduped[:top_k]
+        per_chunk_signals = {
+            chunk.chunk_id: ChunkSignal(
+                rrf_score=score, anchor_hit=chunk.chunk_id in anchor_ids
+            )
+            for chunk, score in top
+        }
         return RetrievalOutcome(
-            chunks=[item[0] for item in ordered[:top_k]],
+            chunks=[chunk for chunk, _ in top],
             engines=list(dict.fromkeys(engines)),
             fallback_reason=fallback_reason,
+            per_chunk_signals=per_chunk_signals,
         )
 
     async def retrieve_lightrag_context(
@@ -379,10 +427,43 @@ class RetrievalOrchestrator:
             value = match.group(0).upper()
             anchors["section_label"].add(value)
             anchors["anchor_label"].add(value)
+        for match in re.finditer(
+            r"\b(?:section|sec\.?|chapter|chap\.?)\s+"
+            r"(?P<label>\d+(?:\.\d+){0,4}|[A-Z](?:\.\d+){0,4})\b",
+            query,
+            flags=re.I,
+        ):
+            value = match.group("label").upper()
+            anchors["section_label"].add(value)
+            anchors["section_path"].add(value)
+        for match in re.finditer(r"第\s*(?P<label>\d+(?:\.\d+){0,4})\s*[章节]", query):
+            value = match.group("label")
+            anchors["section_label"].add(value)
+            anchors["section_path"].add(value)
+        for match in re.finditer(
+            r"\bappendix\s+(?P<label>[A-Z](?:\.\d+){0,4})\b",
+            query,
+            flags=re.I,
+        ):
+            value = match.group("label").upper()
+            if "." in value:
+                anchors["section_label"].add(value)
+                anchors["section_path"].add(value)
+            else:
+                anchors["section_label"].add(f"APPENDIX {value}")
+                anchors["section_path"].add(f"APPENDIX {value}")
+        for match in re.finditer(r"\b[A-Z]\.\d+(?:\.\d+){0,4}\b", query, flags=re.I):
+            value = match.group(0).upper()
+            anchors["section_label"].add(value)
+            anchors["section_path"].add(value)
         for match in re.finditer(r"\b\d+(?:\.\d+){1,4}\b", query):
             anchors["section_label"].add(match.group(0))
             anchors["section_path"].add(match.group(0))
-        for match in re.finditer(r"\b(?:Fig(?:ure)?|Table)\.?\s*\d+[A-Za-z]?\b", query, flags=re.I):
+        for match in re.finditer(
+            r"\b(?:Fig(?:ure)?|Table|Eq(?:uation)?)\.?\s*\d+[A-Za-z]?\b",
+            query,
+            flags=re.I,
+        ):
             anchors["anchor_label"].add(_normalize_anchor(match.group(0)))
         for match in re.finditer(
             r"\b(?:Scholium(?:\s+[a-z])?|Lemma(?:\s+[a-z])?|Speculative strategy\s+[a-z])\b",
@@ -400,6 +481,7 @@ class RetrievalOrchestrator:
         section_labels = metadata.get("section_labels") or []
         subsection_label = str(metadata.get("subsection_label") or "")
         anchor_label = str(metadata.get("anchor_label") or "")
+        anchor_labels = metadata.get("anchor_labels") or []
         section_path = metadata.get("section_path") or []
         section_paths = metadata.get("section_paths") or []
         if "section_label" in anchors and _normalize_anchor(section_label) in {
@@ -420,6 +502,14 @@ class RetrievalOrchestrator:
             _normalize_anchor(value) for value in anchors["anchor_label"]
         }:
             return True
+        if isinstance(anchor_labels, list) and "anchor_label" in anchors:
+            normalized_anchor_labels = {
+                _normalize_anchor(str(value)) for value in anchor_labels
+            }
+            if normalized_anchor_labels & {
+                _normalize_anchor(value) for value in anchors["anchor_label"]
+            }:
+                return True
         if isinstance(section_path, list) and "section_path" in anchors:
             normalized_path = {_normalize_anchor(str(value)) for value in section_path}
             if normalized_path & {
@@ -473,12 +563,26 @@ def _loads_metadata(raw: object) -> dict[str, object]:
 def _normalize_anchor(value: str) -> str:
     normalized = re.sub(r"[*_`#]+", "", value)
     normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized.rstrip(".").upper()
+    normalized = normalized.rstrip(".")
+    figure = re.fullmatch(r"Fig(?:ure)?\.?\s*(\d+[A-Za-z]?)", normalized, flags=re.I)
+    if figure:
+        return f"FIGURE {figure.group(1).upper()}"
+    table = re.fullmatch(r"Table\.?\s*(\d+[A-Za-z]?)", normalized, flags=re.I)
+    if table:
+        return f"TABLE {table.group(1).upper()}"
+    equation = re.fullmatch(r"Eq(?:uation)?\.?\s*(\d+[A-Za-z]?)", normalized, flags=re.I)
+    if equation:
+        return f"EQUATION {equation.group(1).upper()}"
+    appendix = re.fullmatch(r"Appendix\s+([A-Z])", normalized, flags=re.I)
+    if appendix:
+        return f"APPENDIX {appendix.group(1).upper()}"
+    return normalized.upper()
 
 
 __all__ = [
     "RetrievalOrchestrator",
     "RetrievalOutcome",
+    "ChunkSignal",
     "RetrievalScope",
     "SCOPE_COLLECTION",
     "SCOPE_ITEM",

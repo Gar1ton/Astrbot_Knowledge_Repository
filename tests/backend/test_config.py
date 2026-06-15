@@ -218,3 +218,53 @@ def test_runtime_config_store_permits_vector_db_and_ask_keys(tmp_path: Path) -> 
     assert data["embedding"]["provider"] == "local"
     assert data["embedding"]["model"] == "BAAI/bge-m3"
     assert data["ask"]["conversation_enhancement_mode"] == "query_agent"
+
+
+# ── Deep Thinking / Rerank config ───────────────────────────
+def test_deep_thinking_and_rerank_defaults() -> None:
+    cfg = Config({})
+    r = cfg.get_rerank_config()
+    assert r.provider == "noop"
+    assert r.model == "BAAI/bge-reranker-v2-m3"
+    assert r.keep == 8
+    d = cfg.get_deep_thinking_config()
+    assert d.max_rounds == 4
+    assert d.max_sub_queries == 4
+    assert d.wide_top_k == 24
+    assert d.gap_ratio_threshold == 0.5
+    # v0.25.9 新增字段默认值。
+    assert d.sea_evidence_clip == 700
+    assert d.verify_evidence_clip == 1500
+    assert d.rerank_weight == 0.0
+    assert d.deep_keep == 12
+    assert d.max_discovered_per_round == 3
+    assert d.max_discovered_total == 8
+
+
+def test_rerank_provider_falls_back_on_invalid() -> None:
+    cfg = Config({"rerank": {"provider": "bogus"}})
+    assert cfg.get_rerank_config().provider == "noop"
+
+
+def test_rerank_legacy_provider_normalized_to_noop() -> None:
+    """历史值 auto/mmr 归一到 noop（不再自动下载 cross-encoder、不做 MMR）。"""
+    assert Config({"rerank": {"provider": "auto"}}).get_rerank_config().provider == "noop"
+    assert Config({"rerank": {"provider": "mmr"}}).get_rerank_config().provider == "noop"
+
+
+def test_deep_thinking_values_are_clamped() -> None:
+    cfg = Config(
+        {"deep_thinking": {"max_rounds": 0, "max_sub_queries": -2, "json_max_retries": -1}}
+    )
+    d = cfg.get_deep_thinking_config()
+    assert d.max_rounds == 1
+    assert d.max_sub_queries == 1
+    assert d.json_max_retries == 0
+
+
+def test_rerank_overrides_are_parsed() -> None:
+    cfg = Config({"rerank": {"provider": "noop", "model": "BAAI/bge-reranker-base", "keep": 5}})
+    r = cfg.get_rerank_config()
+    assert r.provider == "noop"
+    assert r.model == "BAAI/bge-reranker-base"
+    assert r.keep == 5

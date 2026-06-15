@@ -1,15 +1,18 @@
 "use client";
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Badge } from "@/components/ds/Badge";
 import { Icon } from "@/components/ds/Icon";
 import { IconButton } from "@/components/ds/IconButton";
 import { Button } from "@/components/ds/Button";
 import { Tooltip } from "@/components/ds/Tooltip";
+import { Popover } from "@/components/ds/Popover";
+import { Z } from "@/lib/zLayers";
 import { useConsole } from "@/lib/ConsoleContext";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n, type I18nKey } from "@/lib/i18n";
 import {
-  AskResult, AskSource, ApiError, GraphBuildEstimate,
+  AskResult, AskSource, ApiError, GraphBuildEstimate, ThinkingTrace,
   ChatMessage, ask, buildGraph, estimateGraphBuild,
   listCollections, getChatHistory, clearChatHistory, lockChatAnswer,
   createDocumentNote, createCollectionNote,
@@ -17,7 +20,7 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────
 
-type RetrievalMode = "default" | "high_precision" | "graph_only" | "fulltext";
+type RetrievalMode = "default" | "high_precision" | "graph_only" | "fulltext" | "deep_thinking";
 
 interface Message {
   id?: number;
@@ -25,6 +28,7 @@ interface Message {
   content: string;
   sources?: AskSource[];
   actualRetrievalMode?: string;
+  thinkingTrace?: ThinkingTrace;
   pinned?: boolean;
 }
 
@@ -49,7 +53,142 @@ function retrievalModeLabel(
   if (mode === "astrbot") return t("chat_retrieval_astrbot");
   if (mode === "sqlite_lexical") return t("chat_retrieval_lexical");
   if (mode === "none") return t("chat_retrieval_none");
+  if (mode === "milvus_deep" || mode === "astrbot_deep_fallback") return t("chat_retrieval_deep_mode");
+  if (mode === "deep_degraded_to_default") return t("chat_retrieval_deep_degraded");
   return t("chat_retrieval_milvus");
+}
+
+// 思考过程：默认收起、可点击展开的可折叠区块（与 sources 一致的轻量样式）。
+function ThinkingTraceView({
+  trace,
+  t,
+}: {
+  trace: ThinkingTrace;
+  t: (key: I18nKey, vars?: Record<string, string | number>) => string;
+}) {
+  const [open, setOpen] = useState(false);
+  const statusLabel = trace.degraded
+    ? t("chat_thinking_degraded")
+    : trace.verified
+      ? t("chat_thinking_verified")
+      : t("chat_thinking_unverified");
+  return (
+    <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          width: "100%",
+          background: "transparent",
+          border: "none",
+          padding: 0,
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+      >
+        <Icon name="sparkle" size={11} />
+        <span
+          style={{
+            fontSize: 9.5,
+            fontWeight: 700,
+            letterSpacing: ".06em",
+            textTransform: "uppercase",
+            color: "var(--fg-subtle)",
+          }}
+        >
+          {t("chat_thinking_title")}
+        </span>
+        <Badge tone={trace.degraded ? "warn" : trace.verified ? "ok" : "neutral"}>
+          {statusLabel}
+        </Badge>
+        {!trace.verified && trace.verify_missing.length > 0 && (
+          <span style={{ fontSize: 9.5, color: "var(--warn)" }}>
+            {t("chat_thinking_gap_count", { n: trace.verify_missing.length })}
+          </span>
+        )}
+        <span
+          style={{
+            marginLeft: "auto",
+            fontSize: 11,
+            color: "var(--fg-subtle)",
+            transform: open ? "rotate(90deg)" : "none",
+            transition: "transform .15s",
+          }}
+        >
+          ▸
+        </span>
+      </button>
+      {trace.degraded && trace.degraded_reason && (
+        <div
+          style={{
+            fontSize: 10,
+            color: "var(--warn)",
+            marginTop: 3,
+            marginLeft: 2,
+            lineHeight: 1.5,
+            wordBreak: "break-all",
+          }}
+        >
+          {trace.degraded_reason}
+        </div>
+      )}
+      {open && (
+        <div style={{ marginTop: 7, fontSize: 11, lineHeight: 1.65, color: "var(--fg-muted)" }}>
+          {trace.checklist.length > 0 && (
+            <div style={{ marginBottom: 7 }}>
+              <div style={{ fontWeight: 600, color: "var(--fg-subtle)", marginBottom: 2 }}>
+                {t("chat_thinking_checklist")}
+              </div>
+              {trace.checklist.map((item) => (
+                <div key={item.id} style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
+                  <span style={{ color: item.satisfied ? "var(--ok)" : "var(--fg-subtle)" }}>
+                    {item.satisfied ? "✓" : "○"}
+                  </span>
+                  <span style={{ color: "var(--fg)" }}>
+                    {item.text}
+                    {item.critical && <span style={{ color: "var(--warn)", marginLeft: 4 }}>*</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {trace.rounds.map((r) => (
+            <div key={r.round} style={{ marginBottom: 5 }}>
+              <div style={{ fontWeight: 600, color: "var(--fg-subtle)" }}>
+                {t("chat_thinking_round", { n: r.round })}
+              </div>
+              {r.queries.length > 0 && (
+                <div>
+                  {t("chat_thinking_queries")}: {r.queries.join(" · ")}
+                </div>
+              )}
+              {r.gaps.length > 0 && (
+                <div>
+                  {t("chat_thinking_gaps")}: {r.gaps.join(" · ")}
+                </div>
+              )}
+              {r.discovered && r.discovered.length > 0 && (
+                <div style={{ color: "var(--ok)" }}>
+                  ✦ {t("chat_thinking_discovered")}: {r.discovered.join(" · ")}
+                </div>
+              )}
+            </div>
+          ))}
+          {trace.verify_missing.length > 0 && (
+            <div style={{ color: "var(--warn)", marginBottom: 4 }}>
+              {t("chat_thinking_missing")}: {trace.verify_missing.join(" · ")}
+            </div>
+          )}
+          <div style={{ color: "var(--fg-subtle)" }}>
+            {t("chat_thinking_tokens", { n: trace.est_total_tokens })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function formatDuration(seconds?: number | null): string {
@@ -268,6 +407,7 @@ function MessageBubble({
             ))}
           </div>
         )}
+        {msg.thinkingTrace && <ThinkingTraceView trace={msg.thinkingTrace} t={t} />}
       </div>
       <div
         style={{
@@ -323,7 +463,9 @@ function PrecisionDialog({
       ]
     : [[t("chat_est_collection"), state.collection]];
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -332,7 +474,7 @@ function PrecisionDialog({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 600,
+        zIndex: Z.dialog,
       }}
       onClick={(e) => e.target === e.currentTarget && !state.building && onCancel()}
     >
@@ -412,7 +554,8 @@ function PrecisionDialog({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -484,21 +627,6 @@ export function ChatPanel({ width }: { width?: number }) {
       .catch(() => {});
   }, [conversationId]);
 
-  useEffect(() => {
-    if (!showSettings) return;
-    const onDown = (e: MouseEvent) => {
-      if (!settingsRef.current?.contains(e.target as Node)) setShowSettings(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setShowSettings(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [showSettings]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -506,7 +634,10 @@ export function ChatPanel({ width }: { width?: number }) {
 
   useEffect(() => {
     if (!selectedDocId && retrievalMode === "fulltext") setRetrievalMode("default");
-  }, [selectedDocId, retrievalMode]);
+    if (!collectionName && (retrievalMode === "deep_thinking" || retrievalMode === "high_precision" || retrievalMode === "graph_only")) {
+      setRetrievalMode("default");
+    }
+  }, [selectedDocId, collectionName, retrievalMode]);
 
   function handleCite(msg: Message, n: number) {
     const src = msg.sources?.find((s) => s.n === n);
@@ -595,6 +726,7 @@ export function ChatPanel({ width }: { width?: number }) {
           content: result.answer,
           sources: result.sources,
           actualRetrievalMode: result.actual_retrieval_mode,
+          thinkingTrace: result.thinking_trace ?? undefined,
         },
       ]);
     } catch (err) {
@@ -815,19 +947,23 @@ export function ChatPanel({ width }: { width?: number }) {
                   active={personaEnabled || retrievalMode !== "default" || showSettings}
                   onClick={() => setShowSettings((v) => !v)}
                 />
-                {showSettings && (
+                <Popover
+                  open={showSettings}
+                  anchorRef={settingsRef}
+                  side="top"
+                  align="start"
+                  gap={8}
+                  zIndex={Z.dropdown}
+                  onClose={() => setShowSettings(false)}
+                >
                   <div
                     style={{
-                      position: "absolute",
-                      bottom: "calc(100% + 8px)",
-                      left: 0,
                       background: "var(--surface)",
                       border: "1px solid var(--border)",
                       borderRadius: 12,
                       padding: "8px 6px",
                       boxShadow: "var(--shadow-pop)",
                       minWidth: 220,
-                      zIndex: 500,
                     }}
                   >
                     <div
@@ -849,6 +985,7 @@ export function ChatPanel({ width }: { width?: number }) {
                           { value: "default" as RetrievalMode,        label: t("chat_retrieval_semantic"), desc: t("chat_retrieval_semantic_desc"), disabled: false },
                           { value: "graph_only" as RetrievalMode,     label: t("chat_retrieval_graph"),    desc: t("chat_retrieval_graph_desc"),    disabled: !isLightRAG },
                           { value: "high_precision" as RetrievalMode, label: t("chat_retrieval_hybrid"),   desc: t("chat_retrieval_hybrid_desc"),   disabled: !isLightRAG },
+                          { value: "deep_thinking" as RetrievalMode,  label: t("chat_retrieval_deep"),     desc: t("chat_retrieval_deep_desc"),     disabled: !collectionName },
                           { value: "fulltext" as RetrievalMode,       label: t("chat_retrieval_fulltext"), desc: t("chat_retrieval_fulltext_desc"), disabled: !selectedDocId },
                         ]
                       ).map(({ value, label, desc, disabled }) => {
@@ -996,7 +1133,7 @@ export function ChatPanel({ width }: { width?: number }) {
                       </div>
                     </div>
                   </div>
-                )}
+                </Popover>
               </div>
 
               <span style={{ flex: 1 }} />

@@ -261,14 +261,48 @@ export interface AskSource {
   rrf_score?: number;
 }
 
+export interface ThinkingChecklistItem {
+  id: string;
+  text: string;
+  critical: boolean;
+  satisfied: boolean;
+  origin?: string;
+}
+
+export interface ThinkingRound {
+  round: number;
+  queries: string[];
+  gaps: string[];
+  discovered?: string[];
+  kept_chunk_ids: string[];
+  llm_calls: number;
+  est_tokens: number;
+}
+
+export interface ThinkingTrace {
+  degraded: boolean;
+  degraded_reason?: string;
+  verified: boolean;
+  verify_missing: string[];
+  est_total_tokens: number;
+  checklist: ThinkingChecklistItem[];
+  rounds: ThinkingRound[];
+}
+
 export interface AskResult {
   conversation_id: string;
   answer: string;
   sources: AskSource[];
-  requested_retrieval_mode: "default" | "high_precision" | "graph_only" | "fulltext";
+  requested_retrieval_mode:
+    | "default"
+    | "high_precision"
+    | "graph_only"
+    | "fulltext"
+    | "deep_thinking";
   actual_retrieval_mode: string;
   retrieval_engines: string[];
   fallback_reason?: string | null;
+  thinking_trace?: ThinkingTrace | null;
 }
 
 export interface ReservedResult {
@@ -645,6 +679,10 @@ export async function deleteDocument(id: string): Promise<void> {
   });
 }
 
+export async function reextractDocument(id: string): Promise<{ chunk_count: number; converter_version: string }> {
+  return apiFetch(`/api/documents/${encodeURIComponent(id)}/reextract`, { method: "POST" });
+}
+
 export function downloadDocument(id: string): void {
   if (isMock() || typeof window === "undefined") return;
   window.location.assign(`/api/documents/${encodeURIComponent(id)}/raw`);
@@ -825,16 +863,42 @@ export interface ConfigUpdateResult {
 
 export interface RebuildIndexResult {
   status?: string;
-  rebuilt_docs: number;
-  rebuilt_chunks: number;
+  rebuilt_docs?: number;
+  rebuilt_chunks?: number;
   failed_docs?: number;
   errors?: Array<{ doc_id: string; error: string }>;
   message?: string;
+  job?: MilvusBuildJob | null;
 }
 
+// Milvus 向量库后台重建任务快照（参考 LightRAG GraphBuildJob，无暂停）。
+export interface MilvusBuildJob {
+  job_id: string;
+  type?: string;
+  mode?: string;
+  status: string; // running | success | partial_failure | error
+  total_docs: number;
+  processed_docs: number;
+  failed_docs: number;
+  total_chunks: number;
+  progress_percent: number;
+  elapsed_seconds?: number;
+  started_at?: string;
+  finished_at?: string | null;
+  recent_error?: string;
+  errors?: Array<{ doc_id: string; error: string }>;
+}
+
+// 触发后台重建：立即返回 { status: "started", job }，进度交给 getActiveMilvusBuildJob 轮询。
 export async function rebuildIndexPending(): Promise<RebuildIndexResult> {
-  if (isMock()) return { status: "ok", rebuilt_docs: 0, rebuilt_chunks: 0, failed_docs: 0, errors: [] };
+  if (isMock()) return { status: "started", job: null };
   return apiFetch("/api/documents/rebuild-index", { method: "POST" });
+}
+
+export async function getActiveMilvusBuildJob(): Promise<MilvusBuildJob | null> {
+  if (isMock()) return null;
+  const res = await apiFetch<{ job: MilvusBuildJob | null }>("/api/documents/rebuild-index/active");
+  return res.job;
 }
 
 export async function getPendingReindexCount(): Promise<{ count: number }> {
@@ -1146,7 +1210,7 @@ export async function ask(opts: {
   top_k?: number;
   conversation_id?: string | null;
   persona_enabled?: boolean;
-  retrieval_mode?: "default" | "high_precision" | "graph_only" | "fulltext";
+  retrieval_mode?: "default" | "high_precision" | "graph_only" | "fulltext" | "deep_thinking";
   use_english_retrieval?: boolean;
   answer_language?: "auto" | "zh" | "en";
 }): Promise<AskResult> {

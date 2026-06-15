@@ -2,6 +2,7 @@
 
 import React, { createContext, useCallback, useContext, useState, useEffect, useRef } from "react";
 import { postLogEvent } from "@/lib/api";
+import { Z } from "@/lib/zLayers";
 
 interface ToastItem {
   id: number;
@@ -45,7 +46,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           display: "flex",
           flexDirection: "column",
           gap: 8,
-          zIndex: 9999,
+          zIndex: Z.toast,
           pointerEvents: "none",
         }}
       >

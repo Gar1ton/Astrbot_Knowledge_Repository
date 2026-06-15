@@ -11,10 +11,12 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from core.capabilities import dependency_statuses, detect_capabilities, resolve_install_spec
+from core.milvus_build import MILVUS_BUILD_RUNNING
 
 if TYPE_CHECKING:
     from core.config import Config
     from core.index_compatibility import IndexCompatibilityStore
+    from core.milvus_build import MilvusBuildJob
     from core.pipelines.zotero_sync_pipeline import ZoteroSyncPipeline
     from core.repository.embedding.base import EmbeddingProvider
     from core.repository.source_store.base import SourceDocumentStore
@@ -33,6 +35,7 @@ class CapabilitiesApiMixin:
     _index_compatibility: IndexCompatibilityStore | None
     _embedding_fingerprint: str | None
     _zotero_pipeline: ZoteroSyncPipeline | None
+    _milvus_build_job: MilvusBuildJob | None
 
     async def get_capabilities(self) -> dict[str, Any]:
         """返回数据流各环节、依赖状态与运行态诊断。"""
@@ -134,13 +137,21 @@ class CapabilitiesApiMixin:
         elif pending_count:
             reason = f"{pending_count} document(s) still require Milvus reindex."
 
+        # 构建进行中强制保持 degraded（黄）：避免最后一个文档清除 needs_reindex 后过早变绿。
+        build_job = getattr(self, "_milvus_build_job", None)
+        building = bool(build_job is not None and build_job.status == MILVUS_BUILD_RUNNING)
+        if building and build_job is not None:
+            done = build_job.processed_docs + build_job.failed_docs
+            reason = f"正在构建向量库索引…（{done}/{build_job.total_docs}）"
+
         return {
             "compatible": compatible,
-            "rebuild_required": bool(reason or pending_count),
+            "rebuild_required": bool(reason or pending_count or building),
             "pending_reindex_count": pending_count,
             "document_count": len(docs),
             "chunk_count": chunk_count,
             "reason": reason,
+            "building": building,
         }
 
     async def install_dependency(self, package: str) -> dict[str, Any]:

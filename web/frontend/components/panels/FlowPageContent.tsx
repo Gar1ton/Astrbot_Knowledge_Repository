@@ -137,25 +137,13 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
   }, [t, toast]);
 
   const handleRebuildIndex = useCallback(async () => {
+    // 后台触发即返回：详细进度/成败由 FilePanel 底部的 MilvusBuildCard 展示，
+    // 构建期间向量库节点由能力健康检查保持黄色（degraded）。
     setRebuildingIndex(true);
-    toast(t("flow_milvus_rebuild_running"), "info");
     try {
-      const result = await rebuildIndexPending();
+      await rebuildIndexPending();
+      toast(t("flow_milvus_rebuild_running"), "info");
       await refreshFlow();
-      if ((result.failed_docs ?? 0) > 0) {
-        const firstError = result.errors?.[0]?.error;
-        toast(
-          `${t("flow_milvus_rebuild_failed")}: ${firstError || result.message || `${result.failed_docs} failed`}`,
-          "error",
-        );
-      } else {
-        toast(
-          t("flow_milvus_rebuild_done")
-            .replace("{docs}", String(result.rebuilt_docs))
-            .replace("{chunks}", String(result.rebuilt_chunks)),
-          "ok",
-        );
-      }
     } catch (err: unknown) {
       toast(`${t("flow_milvus_rebuild_failed")}: ${err instanceof Error ? err.message : String(err)}`, "error");
     } finally {

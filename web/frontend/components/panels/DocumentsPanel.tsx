@@ -12,10 +12,13 @@ import {
   KrDocument,
   listDocumentChunks,
   listDocuments,
+  reextractDocument,
   ZoteroAnnotation,
 } from "@/lib/api";
+import { useToast } from "@/components/ui/Toast";
 import { PdfViewer } from "@/components/panels/PdfViewer";
 import { useI18n } from "@/lib/i18n";
+import { parseChunkText, ChunkTextPart } from "@/lib/chunkText";
 
 // ─── Doc type badge ───────────────────────────────────────────
 
@@ -192,6 +195,84 @@ interface ChunkItem {
   text: string;
 }
 
+function ChunkHeading({ part }: { part: Extract<ChunkTextPart, { type: "heading" }> }) {
+  const isThesis = part.kind === "thesis";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "baseline",
+        gap: 8,
+        flexWrap: "wrap",
+        margin: "2px 0 7px",
+      }}
+    >
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          minHeight: 20,
+          padding: isThesis ? "2px 8px" : "1px 7px",
+          borderRadius: "var(--radius-sm)",
+          border: "1px solid var(--accent-border)",
+          background: "var(--accent-soft)",
+          color: "var(--accent)",
+          fontFamily: "var(--font-mono)",
+          fontSize: isThesis ? 12 : 10.5,
+          fontWeight: 800,
+          lineHeight: 1,
+        }}
+      >
+        {part.label}
+      </span>
+      {part.title && (
+        <span
+          style={{
+            color: "var(--heading)",
+            fontSize: part.kind === "section" ? 14 : 13.5,
+            fontWeight: part.kind === "subsection" ? 650 : 700,
+            lineHeight: 1.35,
+          }}
+        >
+          {part.title}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function ChunkText({ text }: { text: string }) {
+  const parts = parseChunkText(text);
+  if (parts.length === 0) return null;
+
+  return (
+    <div style={{ fontSize: 13, lineHeight: 1.7, color: "var(--fg)" }}>
+      {parts.map((part, index) => {
+        if (part.type === "heading") {
+          return (
+            <div key={`${part.type}-${index}`} style={{ marginTop: index === 0 ? 0 : 12 }}>
+              <ChunkHeading part={part} />
+            </div>
+          );
+        }
+
+        return (
+          <p
+            key={`${part.type}-${index}`}
+            style={{
+              margin: index === 0 ? 0 : "7px 0 0",
+              color: "var(--fg)",
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {part.text}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 function ReadingView({
   doc,
   mode,
@@ -203,11 +284,25 @@ function ReadingView({
 }) {
   const { highlightedChunk, setHighlightedChunk } = useConsole();
   const { t } = useI18n();
+  const { toast } = useToast();
   const chunkRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [chunks, setChunks] = useState<ChunkItem[]>([]);
   const [annotations, setAnnotations] = useState<ZoteroAnnotation[]>([]);
   const [chunkLoading, setChunkLoading] = useState(false);
+  const [reextracting, setReextracting] = useState(false);
   const meta = doc.zotero_meta;
+
+  async function handleReextract() {
+    setReextracting(true);
+    try {
+      const result = await reextractDocument(doc.doc_id);
+      toast(`重新提取完成：${result.chunk_count} 个 chunk`, "ok");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "重新提取失败", "error");
+    } finally {
+      setReextracting(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -279,6 +374,26 @@ function ReadingView({
             <Icon name="graph" size={10} /> {t("documents_graph_built")}
           </Badge>
         )}
+        {doc.ext?.toLowerCase() === "pdf" && !doc.read_only && (
+          <button
+            type="button"
+            disabled={reextracting}
+            onClick={handleReextract}
+            style={{
+              fontSize: 10.5,
+              fontWeight: 600,
+              padding: "2px 8px",
+              borderRadius: "var(--radius-sm)",
+              border: "1px solid var(--border)",
+              background: "transparent",
+              color: reextracting ? "var(--fg-subtle)" : "var(--fg-muted)",
+              cursor: reextracting ? "not-allowed" : "pointer",
+              letterSpacing: ".03em",
+            }}
+          >
+            {reextracting ? t("documents_reextracting") : t("documents_reextract")}
+          </button>
+        )}
       </div>
     </>
   );
@@ -348,9 +463,7 @@ function ReadingView({
                 </span>
               )}
             </div>
-            <p style={{ margin: 0, fontSize: 13, lineHeight: 1.7, color: "var(--fg)" }}>
-              {c.text}
-            </p>
+            <ChunkText text={c.text} />
           </div>
         ))
       )}

@@ -21,12 +21,22 @@ type PdfPage = {
   render: (context: {
     canvasContext: CanvasRenderingContext2D;
     viewport: { width: number; height: number };
+    transform?: number[];
   }) => { promise: Promise<void>; cancel: () => void };
+};
+
+type PdfDocumentSource = {
+  url: string;
+  // pdfjs v6 把 JBIG2/JPEG2000 解码器迁到 WASM，扫描件 PDF 需要这些资源 URL 才能渲染图像。
+  wasmUrl?: string;
+  cMapUrl?: string;
+  cMapPacked?: boolean;
+  standardFontDataUrl?: string;
 };
 
 type PdfJsModule = {
   GlobalWorkerOptions: { workerSrc: string };
-  getDocument: (source: { url: string }) => { promise: Promise<PdfDocument>; destroy?: () => void };
+  getDocument: (source: PdfDocumentSource) => { promise: Promise<PdfDocument>; destroy?: () => void };
 };
 
 const MIN_SCALE = 0.5;
@@ -64,7 +74,13 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
           "pdfjs-dist/build/pdf.worker.mjs",
           import.meta.url,
         ).toString();
-        loadingTask = pdfjs.getDocument({ url: pdfUrl });
+        loadingTask = pdfjs.getDocument({
+          url: pdfUrl,
+          wasmUrl: "/pdfjs/wasm/",
+          cMapUrl: "/pdfjs/cmaps/",
+          cMapPacked: true,
+          standardFontDataUrl: "/pdfjs/standard_fonts/",
+        });
         const doc = await loadingTask.promise;
         if (cancelled) {
           await doc.destroy?.();
@@ -309,12 +325,20 @@ function PdfPageCanvas({ pdf, pageNumber, scale }: { pdf: PdfDocument; pageNumbe
       canvas.height = Math.floor(viewport.height * ratio);
       canvas.style.width = `${Math.floor(viewport.width)}px`;
       canvas.style.height = `${Math.floor(viewport.height)}px`;
-      context.setTransform(ratio, 0, 0, ratio, 0, 0);
-      renderTask = page.render({ canvasContext: context, viewport });
+      // pdfjs v6 会从 canvasContext 反推 canvas 并重新 getContext，预设的 context 变换会被忽略；
+      // 设备像素比通过 render 的 transform 参数传入才能在高 DPR 屏正确缩放。
+      renderTask = page.render({
+        canvasContext: context,
+        viewport,
+        transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined,
+      });
       try {
         await renderTask.promise;
-      } catch {
-        // Render cancellation during zoom/doc switches is expected.
+      } catch (err) {
+        // 缩放 / 切换文档时的渲染取消属正常，其余错误打印出来便于排障。
+        if (err instanceof Error && err.name !== "RenderingCancelledException") {
+          console.error(`PDF page ${pageNumber} render failed:`, err);
+        }
       } finally {
         if (!cancelled) setRendering(false);
       }

@@ -354,5 +354,88 @@
         "hint": "用于检测 Zotero 是否正在运行。通常无需修改，除非你在 Zotero 设置中更改了默认端口"
       }
     }
+  },
+  "deep_thinking": {
+    "description": "深度思考检索（FAIR-RAG 迭代）",
+    "type": "object",
+    "hint": "手动 retrieval_mode=deep_thinking 时启用：把综述/多跳问题分解为子查询，多轮检索+重排+充分性审计后再回答。精度优先，消耗高于普通问答。",
+    "items": {
+      "max_rounds": {
+        "description": "最大迭代轮数",
+        "type": "int",
+        "default": 4,
+        "hint": "含开放式发现的追踪轮次；轮数越多越全也越慢越贵"
+      },
+      "max_sub_queries": {
+        "description": "每轮最大子查询数",
+        "type": "int",
+        "default": 4
+      },
+      "wide_top_k": {
+        "description": "每个子查询的检索宽度",
+        "type": "int",
+        "default": 24,
+        "hint": "重排/排序前的候选召回量。精度优先可调大"
+      },
+      "rerank_weight": {
+        "description": "重排器权重（0~1）",
+        "type": "float",
+        "default": 0,
+        "hint": "深挖排序以每个子查询的检索分(rrf)为主信号。未引入本地 cross-encoder 重排模型时保持 0（纯 rrf）；引入后可调高让重排参与混合排序"
+      },
+      "verify_enabled": {
+        "description": "启用答案级校验闭环",
+        "type": "bool",
+        "default": true,
+        "hint": "合成答案后校验是否被证据完全支撑、是否完整；不合格则把缺失点当作补充检索方向再检一轮。提升精度但增加 LLM 调用"
+      },
+      "max_verify_rounds": {
+        "description": "校验不合格后的最大补检轮数",
+        "type": "int",
+        "default": 1,
+        "hint": "答案校验不通过时最多再补充检索几轮。0 表示只校验不补检"
+      },
+      "llm_base_url": {
+        "description": "深度思考专用 LLM 端点",
+        "type": "string",
+        "default": "",
+        "hint": "OpenAI-compatible endpoint。填写后深度思考使用此 endpoint 而非 AstrBot 主 LLM，解决主 LLM 不可用时的静默降级问题。示例：https://api.openai.com/v1"
+      },
+      "llm_model": {
+        "description": "深度思考专用 LLM 模型",
+        "type": "string",
+        "default": "",
+        "hint": "填写对应端点上的模型名称，例如 gpt-4o、claude-3-5-sonnet-20241022、gemini-2.0-flash 等"
+      },
+      "llm_api_key": {
+        "description": "深度思考专用 LLM API Key",
+        "type": "string",
+        "default": "",
+        "hint": "机密字段。建议通过环境变量 KR_DEEP_THINKING_LLM_API_KEY 注入，不要直接填写在此处"
+      }
+    }
+  },
+  "rerank": {
+    "description": "Cross-encoder 重排器",
+    "type": "object",
+    "hint": "对召回候选按 query 语义相关度二次打分。需安装可选依赖 sentence-transformers（见 requirements-additional.txt）；缺依赖时自动降级为不重排，不影响普通问答。",
+    "items": {
+      "provider": {
+        "description": "重排器后端",
+        "type": "string",
+        "default": "noop",
+        "options": [
+          "noop",
+          "cross_encoder"
+        ],
+        "hint": "noop（推荐）：不重排，零模型零部署，精度交给 deep thinking 的 verification；cross_encoder：本地 cross-encoder，需安装 sentence-transformers 且首次使用下载模型"
+      },
+      "model": {
+        "description": "本地 cross-encoder 模型",
+        "type": "string",
+        "default": "BAAI/bge-reranker-v2-m3",
+        "hint": "首次使用会下载模型。CPU 部署建议改用更小的 BAAI/bge-reranker-base"
+      }
+    }
   }
 }

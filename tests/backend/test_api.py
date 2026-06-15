@@ -60,6 +60,71 @@ async def test_get_document() -> None:
     assert await api.get_document("missing") is None
 
 
+async def test_list_document_chunks_rebuilds_legacy_preview_chunks() -> None:
+    store = InMemorySourceDocumentStore()
+    doc = _doc("doc-preview", "papers")
+    await store.add_document(doc)
+    await store.replace_chunks(
+        "doc-preview",
+        [DocumentChunk("doc-preview-0001", "doc-preview", 0, "legacy text", "old")],
+    )
+
+    class FakeIngestManager:
+        calls = 0
+
+        @staticmethod
+        def chunk_needs_rebuild(
+            document_id: str,
+            chunks: list[DocumentChunk],
+            local_meta: dict | None = None,
+        ) -> bool:
+            del document_id, local_meta
+            return any(
+                chunk.metadata.get("chunk_schema") != "clean_md_structural_v3"
+                for chunk in chunks
+            )
+
+        async def rebuild_document_chunks_from_artifact(self, document_id: str) -> int:
+            self.calls += 1
+            rebuilt = [
+                DocumentChunk(
+                    f"{document_id}_c0000",
+                    document_id,
+                    0,
+                    "current structural chunk",
+                    "new",
+                    metadata={
+                        "chunk_schema": "clean_md_structural_v3",
+                        "start_char": 0,
+                        "end_char": 24,
+                    },
+                )
+            ]
+            await store.replace_chunks(document_id, rebuilt)
+            current = await store.get_document(document_id)
+            assert current is not None
+            current.needs_reindex = True
+            await store.update_document(current)
+            return len(rebuilt)
+
+    ingest = FakeIngestManager()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        ingest_manager=ingest,  # type: ignore[arg-type]
+    )
+
+    chunks = await api.list_document_chunks("doc-preview")
+    context = await api.get_chunk_context("doc-preview", "doc-preview_c0000")
+    rebuilt_doc = await store.get_document("doc-preview")
+
+    assert ingest.calls == 1
+    assert [chunk.chunk_id for chunk in chunks] == ["doc-preview_c0000"]
+    assert chunks[0].metadata["chunk_schema"] == "clean_md_structural_v3"
+    assert context["matched_chunk_id"] == "doc-preview_c0000"
+    assert rebuilt_doc is not None and rebuilt_doc.needs_reindex is True
+
+
 async def test_document_and_collection_notes_are_zotero_shaped() -> None:
     api = await _make_api()
     doc_note = await api.create_document_note("d1", "hello\nworld")
@@ -767,6 +832,153 @@ async def test_rebuild_index_pending_retries_transient_embedding_failure(tmp_pat
     assert "c1" in vector_store._data
 
 
+# ── Milvus 后台重建进度条 ────────────────────────────────────────────
+
+async def test_start_milvus_rebuild_progresses_to_success(tmp_path: Path) -> None:
+    from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "papers")
+    doc.needs_reindex = True
+    await store.add_document(doc)
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "evidence", "h1")])
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=InMemoryVectorStore(),
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    snapshot = await api.start_milvus_rebuild()
+    assert snapshot["status"] == "running"
+
+    assert api._milvus_build_task is not None
+    await api._milvus_build_task
+
+    # 成功后隐藏进度条（None），任务终态为 success，needs_reindex 已清空
+    assert api.get_active_milvus_build_job() is None
+    assert api._milvus_build_job is not None
+    assert api._milvus_build_job.status == "success"
+    assert api._milvus_build_job.processed_docs == 1
+    assert api._milvus_build_job.total_docs == 1
+    assert await store.list_pending_reindex_documents() == []
+
+
+async def test_start_milvus_rebuild_is_single_flight(tmp_path: Path) -> None:
+    from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.milvus_build import MilvusBuildJob
+    from core.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    store = InMemorySourceDocumentStore()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=InMemoryVectorStore(),
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=IndexCompatibilityStore(tmp_path / "compat.json"),
+        embedding_fingerprint="fp",
+    )
+    # 预置一个 running 任务 → 再次 start 应返回同一任务而不新建
+    existing = MilvusBuildJob(status="running", total_docs=5, processed_docs=2)
+    api._milvus_build_job = existing
+    snapshot = await api.start_milvus_rebuild()
+    assert snapshot["job_id"] == existing.job_id
+    assert api._milvus_build_task is None  # 未创建新后台任务
+
+
+async def test_capabilities_degraded_while_milvus_building(tmp_path: Path) -> None:
+    from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.milvus_build import MilvusBuildJob
+    from core.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "papers")  # 未标记 needs_reindex → 正常应不需重建
+    await store.add_document(doc)
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "evidence", "h1")])
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=InMemoryVectorStore(),
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    caps_before = await api.get_capabilities()
+    vs_before = next(s for s in caps_before["pipeline"] if s["id"] == "vector_store")
+    assert vs_before["detail"]["rebuild_required"] is False
+    assert vs_before["detail"]["building"] is False
+
+    # 模拟构建进行中 → 即便无 pending，也应强制 degraded（黄）
+    api._milvus_build_job = MilvusBuildJob(status="running", total_docs=3, processed_docs=1)
+    caps = await api.get_capabilities()
+    vs = next(s for s in caps["pipeline"] if s["id"] == "vector_store")
+    assert vs["status"] == "degraded"
+    assert vs["detail"]["building"] is True
+    assert vs["detail"]["rebuild_required"] is True
+
+
+async def test_start_milvus_rebuild_partial_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.api as api_module
+    from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.vector_store.memory import InMemoryVectorStore
+
+    monkeypatch.setattr(api_module, "MILVUS_INDEX_RETRY_DELAYS", (0.0, 0.0))
+
+    class AlwaysFailEmbedding:
+        dimension = 4
+
+        async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            raise RuntimeError("boom")
+
+        async def embed_query(self, text: str) -> list[float]:
+            return [0.1] * self.dimension
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "papers")
+    doc.needs_reindex = True
+    await store.add_document(doc)
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "evidence", "h1")])
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=InMemoryVectorStore(),
+        embedding_provider=AlwaysFailEmbedding(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    await api.start_milvus_rebuild()
+    assert api._milvus_build_task is not None
+    await api._milvus_build_task
+
+    active = api.get_active_milvus_build_job()
+    assert active is not None
+    assert active["status"] == "partial_failure"
+    assert active["failed_docs"] == 1
+    assert active["processed_docs"] == 0
+
+
 # ── LightRAG API 层覆盖补充 ──────────────────────────────────────────
 
 async def test_lightrag_readiness_fully_ready(tmp_path: Path) -> None:
@@ -984,3 +1196,315 @@ async def test_query_graph_delegates_to_registry_when_ready(tmp_path: Path) -> N
     assert queries == ["transformer attention"]
     assert result["status"] == "success"
     assert result["answer"] == "graph answer"
+
+
+# ── Deep Thinking 模式端到端 ────────────────────────────────
+class _MockSynthLLM:
+    async def generate(
+        self, prompt: str, system_prompt: str = "", *, allow_mock: bool = True
+    ) -> str:
+        return "deep answer [1]"
+
+
+class _MockDeepThinking:
+    def __init__(self, outcome) -> None:
+        self._outcome = outcome
+        self.query = ""
+        self.answer_question = None
+
+    async def run(
+        self,
+        collection,
+        query,
+        scope=None,
+        progress=None,
+        answer_language="auto",
+        answer_question=None,
+    ):
+        self.query = query
+        self.answer_question = answer_question
+        return self._outcome
+
+
+async def test_deep_thinking_requires_collection() -> None:
+    """deep_thinking 必须显式 collection（校验先于 orchestrator 调用）。"""
+    api = await _make_api()
+    with pytest.raises(ValueError):
+        await api.ask(question="q", retrieval_mode="deep_thinking")
+
+
+async def test_deep_thinking_returns_trace_and_synthesizes() -> None:
+    from core.domain.deep_thinking import (
+        Checklist,
+        ChecklistItem,
+        DeepThinkingOutcome,
+        RoundTrace,
+    )
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "evidence text", "h0")],
+        checklist=Checklist([ChecklistItem("c1", "方法", critical=True, satisfied=True)]),
+        trace=[
+            RoundTrace(
+                round=1, queries=["q1"], gaps=[], kept_chunk_ids=["c0"], llm_calls=2, est_tokens=900
+            )
+        ],
+        degraded=False,
+        actual_mode="milvus_deep",
+        est_total_tokens=1500,
+    )
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    kb = InMemoryKnowledgeBaseReader(
+        {"papers": [DocumentChunk("c0", "d1", 0, "evidence text", "h0")]}
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=kb,
+        llm_adapter=_MockSynthLLM(),  # type: ignore[arg-type]
+        deep_thinking_orchestrator=_MockDeepThinking(outcome),  # type: ignore[arg-type]
+    )
+    result = await api.ask(
+        question="综述问题", collection="papers", retrieval_mode="deep_thinking"
+    )
+    assert result["actual_retrieval_mode"] == "milvus_deep"
+    assert result["answer"].startswith("**提示：以下回答尚未完成证据校验。**")
+    assert result["answer"].endswith("deep answer [1]")
+    assert len(result["sources"]) == 1
+    trace = result["thinking_trace"]
+    assert trace is not None
+    assert trace["degraded"] is False
+    assert trace["rounds"][0]["round"] == 1
+    assert trace["checklist"][0]["satisfied"] is True
+
+
+async def test_deep_thinking_trace_serializes_discovered_and_origin() -> None:
+    """v0.25.9：开放式发现写入 trace.rounds[].discovered，checklist 暴露 origin。"""
+    from core.domain.deep_thinking import (
+        Checklist,
+        ChecklistItem,
+        DeepThinkingOutcome,
+        RoundTrace,
+    )
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
+        checklist=Checklist(
+            [
+                ChecklistItem("c1", "方法", critical=True, satisfied=True),
+                ChecklistItem("d1", "新机制X", origin="discovered"),
+            ]
+        ),
+        trace=[
+            RoundTrace(
+                round=1, queries=["q1"], gaps=[], discovered=["新机制X"], kept_chunk_ids=["c0"]
+            )
+        ],
+        answer="ans [1]",
+        verified=True,
+        actual_mode="milvus_deep",
+    )
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    kb = InMemoryKnowledgeBaseReader({"papers": [DocumentChunk("c0", "d1", 0, "ev", "h0")]})
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=kb,
+        llm_adapter=_MockSynthLLM(),  # type: ignore[arg-type]
+        deep_thinking_orchestrator=_MockDeepThinking(outcome),  # type: ignore[arg-type]
+    )
+    result = await api.ask(question="综述", collection="papers", retrieval_mode="deep_thinking")
+    trace = result["thinking_trace"]
+    assert trace["rounds"][0]["discovered"] == ["新机制X"]
+    origins = {i["id"]: i["origin"] for i in trace["checklist"]}
+    assert origins["d1"] == "discovered"
+    assert origins["c1"] == "plan"
+
+
+async def test_deep_thinking_verify_disabled_uses_deep_synth_fallback() -> None:
+    """v0.25.9 (P2-b)：deep 模式即便无 deep_outcome.answer 也走 deep 合成，不退回普通 prompt。"""
+    from core.domain.deep_thinking import DeepThinkingOutcome
+
+    class _RecordingLLM:
+        def __init__(self) -> None:
+            self.system_prompts: list[str] = []
+
+        async def generate(self, prompt, system_prompt="", *, allow_mock=True):
+            self.system_prompts.append(system_prompt)
+            return "deep fallback answer [1]"
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
+        answer=None,  # verify 关闭 → orchestrator 不产出 answer。
+        verified=False,
+        actual_mode="milvus_deep",
+    )
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    kb = InMemoryKnowledgeBaseReader({"papers": [DocumentChunk("c0", "d1", 0, "ev", "h0")]})
+    llm = _RecordingLLM()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=kb,
+        llm_adapter=llm,  # type: ignore[arg-type]
+        deep_thinking_orchestrator=_MockDeepThinking(outcome),  # type: ignore[arg-type]
+    )
+    result = await api.ask(question="综述", collection="papers", retrieval_mode="deep_thinking")
+    assert result["answer"].endswith("deep fallback answer [1]")
+    assert any("mechanism" in s.lower() for s in llm.system_prompts)
+
+
+async def test_deep_thinking_degraded_reports_mode() -> None:
+    from core.domain.deep_thinking import DeepThinkingOutcome
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "baseline text", "h0")],
+        degraded=True,
+        actual_mode="deep_degraded_to_default",
+    )
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    kb = InMemoryKnowledgeBaseReader({"papers": []})
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=kb,
+        llm_adapter=_MockSynthLLM(),  # type: ignore[arg-type]
+        deep_thinking_orchestrator=_MockDeepThinking(outcome),  # type: ignore[arg-type]
+    )
+    result = await api.ask(question="q", collection="papers", retrieval_mode="deep_thinking")
+    assert result["actual_retrieval_mode"] == "deep_degraded_to_default"
+    assert result["thinking_trace"]["degraded"] is True
+
+
+async def test_default_mode_has_null_thinking_trace() -> None:
+    """回归：非 deep_thinking 路径 thinking_trace 为 None。"""
+    api = await _make_api()
+    result = await api.ask(question="alpha", collection="kb1")
+    assert result["thinking_trace"] is None
+
+
+async def test_deep_thinking_english_retrieval_keeps_original_answer_question() -> None:
+    """英语召回只影响检索 query，最终回答问题仍传用户原文。"""
+    from core.domain.deep_thinking import DeepThinkingOutcome
+
+    class _TranslateOnlyLLM:
+        async def generate(self, prompt, system_prompt="", *, allow_mock=True):
+            assert "Translate the following query to English" in prompt
+            return "translated retrieval query"
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
+        answer="verified answer [1]",
+        verified=True,
+        actual_mode="milvus_deep",
+    )
+    deep = _MockDeepThinking(outcome)
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({"papers": []}),
+        llm_adapter=_TranslateOnlyLLM(),  # type: ignore[arg-type]
+        deep_thinking_orchestrator=deep,  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(
+        question="用户原始问题",
+        collection="papers",
+        retrieval_mode="deep_thinking",
+        use_english_retrieval=True,
+    )
+
+    assert result["answer"] == "verified answer [1]"
+    assert deep.query == "translated retrieval query"
+    assert deep.answer_question == "用户原始问题"
+
+
+async def test_deep_thinking_uses_verified_answer_when_present() -> None:
+    """orchestrator 产出 answer（verification 闭环）时，api.ask 直接用之，不重复合成。"""
+    from core.domain.deep_thinking import DeepThinkingOutcome
+
+    class _ShouldNotSynth:
+        async def generate(self, prompt, system_prompt="", *, allow_mock=True):
+            return "SHOULD NOT BE USED"
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
+        answer="verified answer [1]",
+        verified=True,
+        actual_mode="milvus_deep",
+    )
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    kb = InMemoryKnowledgeBaseReader({"papers": []})
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=kb,
+        llm_adapter=_ShouldNotSynth(),  # type: ignore[arg-type]
+        deep_thinking_orchestrator=_MockDeepThinking(outcome),  # type: ignore[arg-type]
+    )
+    result = await api.ask(question="q", collection="papers", retrieval_mode="deep_thinking")
+    assert result["answer"] == "verified answer [1]"
+    assert result["thinking_trace"]["verified"] is True
+
+
+async def test_deep_thinking_degraded_answer_gets_warning_prefix() -> None:
+    from core.domain.deep_thinking import DeepThinkingOutcome
+
+    class _SynthLLM:
+        async def generate(self, prompt, system_prompt="", *, allow_mock=True):
+            return "有限回答 [1]"
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "baseline text", "h0")],
+        degraded=True,
+        degraded_reason="关键检查项未满足",
+        actual_mode="deep_degraded_to_default",
+    )
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({"papers": []}),
+        llm_adapter=_SynthLLM(),  # type: ignore[arg-type]
+        deep_thinking_orchestrator=_MockDeepThinking(outcome),  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(question="综述问题", collection="papers", retrieval_mode="deep_thinking")
+
+    assert result["answer"].startswith("**提示：深度思考证据不足")
+    assert "关键检查项未满足" in result["answer"]
+    assert result["answer"].endswith("有限回答 [1]")
+
+
+async def test_deep_thinking_unverified_missing_gets_warning_prefix() -> None:
+    from core.domain.deep_thinking import DeepThinkingOutcome
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
+        answer="草稿回答 [1]",
+        verified=False,
+        verify_missing=["缺少定义", "缺少对比"],
+        actual_mode="milvus_deep",
+    )
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({"papers": []}),
+        llm_adapter=_MockSynthLLM(),  # type: ignore[arg-type]
+        deep_thinking_orchestrator=_MockDeepThinking(outcome),  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(question="综述问题", collection="papers", retrieval_mode="deep_thinking")
+
+    assert result["answer"].startswith("**提示：以下回答未完全通过证据校验。**")
+    # 告警瘦身（v0.25.9）：正文只留缺口计数 notice，不再 join 全量 missing 进正文。
+    assert "共 2 项" in result["answer"]
+    assert "缺少定义" not in result["answer"]
+    assert "缺少对比" not in result["answer"]
+    assert result["answer"].endswith("草稿回答 [1]")
+    assert result["actual_retrieval_mode"] == "milvus_deep"
+    assert result["thinking_trace"]["degraded"] is False
+    # 完整明细仍经 thinking_trace.verify_missing 暴露（前端折叠渲染）。
+    assert result["thinking_trace"]["verify_missing"] == ["缺少定义", "缺少对比"]

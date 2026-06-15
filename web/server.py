@@ -230,6 +230,20 @@ async def handle_delete_document(request: web.Request) -> web.Response:
     return web.json_response({"ok": ok}, status=200 if ok else 404)
 
 
+async def handle_reextract_document(request: web.Request) -> web.Response:
+    doc_id = request.match_info["doc_id"]
+    _mw_logger.info("Re-extract document: doc_id=%s", doc_id)
+    try:
+        result = await _api(request).reextract_document(doc_id)
+    except FileNotFoundError as exc:
+        return web.json_response({"status": "not_found", "message": str(exc)}, status=404)
+    except ValueError as exc:
+        return web.json_response({"status": "unsupported", "message": str(exc)}, status=400)
+    except RuntimeError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+    return web.json_response({"status": "ok", **result})
+
+
 async def handle_document_content(request: web.Request) -> web.Response:
     doc_id = request.match_info["doc_id"]
     fmt = (request.query.get("format") or "md").lower()
@@ -489,12 +503,17 @@ async def handle_update_config(request: web.Request) -> web.Response:
 async def handle_rebuild_index_pending(request: web.Request) -> web.Response:
     _mw_logger.info("Index rebuild requested")
     try:
-        result = await _api(request).rebuild_index_pending()
-        _mw_logger.info("Index rebuild completed: %s", result)
-        return web.json_response({"status": "ok", **result})
+        # 后台触发即返回；进度由前端轮询 /api/documents/rebuild-index/active 获取。
+        job = await _api(request).start_milvus_rebuild()
+        return web.json_response({"status": "started", "job": job})
     except Exception as exc:
-        _mw_logger.error("Index rebuild failed: %s", exc, exc_info=True)
+        _mw_logger.error("Index rebuild failed to start: %s", exc, exc_info=True)
         return web.json_response({"status": "error", "message": str(exc)}, status=503)
+
+
+async def handle_milvus_build_active(request: web.Request) -> web.Response:
+    result = _api(request).get_active_milvus_build_job()
+    return web.json_response({"job": result})
 
 
 async def handle_pending_reindex_count(request: web.Request) -> web.Response:
@@ -1191,6 +1210,7 @@ def build_app(
     app.router.add_patch("/api/documents/{doc_id}", handle_classify_document)
     app.router.add_patch("/api/documents/{doc_id}/meta", handle_document_meta_patch)
     app.router.add_delete("/api/documents/{doc_id}", handle_delete_document)
+    app.router.add_post("/api/documents/{doc_id}/reextract", handle_reextract_document)
     app.router.add_get("/api/documents/{doc_id}/content", handle_document_content)
     app.router.add_get("/api/documents/{doc_id}/chunks", handle_document_chunks)
     app.router.add_get("/api/documents/{doc_id}/annotations", handle_document_annotations)
@@ -1208,6 +1228,7 @@ def build_app(
     app.router.add_post("/api/config/update", handle_update_config)
     app.router.add_post("/api/config/test-embedding", handle_test_embedding)
     app.router.add_post("/api/documents/rebuild-index", handle_rebuild_index_pending)
+    app.router.add_get("/api/documents/rebuild-index/active", handle_milvus_build_active)
     app.router.add_get("/api/documents/pending-reindex-count", handle_pending_reindex_count)
     # 预留端口（reserved，未实现回 501 + available_in）
     app.router.add_post("/api/sync/{target}", handle_sync)

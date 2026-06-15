@@ -213,6 +213,7 @@ def extract_pdf_markdown(pdf_path: str) -> MarkdownArtifact:
         str(pdf_path),
         page_chunks=True,
         page_separators=False,
+        ignore_alpha=True,
     )
 
     pdf_metadata: dict[str, Any] = {}

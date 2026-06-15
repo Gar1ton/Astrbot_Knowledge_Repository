@@ -3,6 +3,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Z } from "@/lib/zLayers";
 import { getLogs, type LogLine } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 
@@ -193,7 +194,7 @@ export function TerminalPanel({
         borderRadius: embedded ? "var(--radius-xl)" : 14,
         boxShadow: embedded ? "var(--shadow-card)" : "var(--shadow-pop)",
         overflow: "hidden",
-        zIndex: embedded ? undefined : 9500,
+        zIndex: embedded ? undefined : Z.panel,
         animation: embedded ? undefined : "terminalIn 0.16s cubic-bezier(0.4,0,0.2,1) both",
       }}
     >

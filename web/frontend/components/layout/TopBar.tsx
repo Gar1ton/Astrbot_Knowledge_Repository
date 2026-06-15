@@ -7,6 +7,7 @@ import { Icon } from "@/components/ds/Icon";
 import { useI18n } from "@/lib/i18n";
 import { getCapabilities } from "@/lib/api";
 import { deriveWorkflowStatus, type WorkflowStatus } from "@/lib/flowHealth";
+import { Z } from "@/lib/zLayers";
 
 export function TopBar() {
   const { setSettingOpen, setAstrBotOpen, setWorkflowOpen } = useConsole();
@@ -47,7 +48,7 @@ export function TopBar() {
         gap: 10,
         padding: "0 14px",
         position: "relative",
-        zIndex: 10,
+        zIndex: Z.raised,
       }}
     >
       {/* Brand */}

@@ -26,6 +26,7 @@ ENV_R2_SECRET_ACCESS_KEY = "KR_R2_SECRET_ACCESS_KEY"
 ENV_WEB_PASSWORD = "KR_WEB_PASSWORD"
 ENV_EMBEDDING_API_KEY = "KR_EMBEDDING_API_KEY"
 ENV_LIGHTRAG_LLM_API_KEY = "KR_LIGHTRAG_LLM_API_KEY"
+ENV_DEEP_THINKING_LLM_API_KEY = "KR_DEEP_THINKING_LLM_API_KEY"
 ENV_ZOTERO_API_KEY = "KR_ZOTERO_API_KEY"
 
 
@@ -183,6 +184,51 @@ class AskAgentConfig:
     """Ask Agent 的会话增强和回答配置。"""
 
     conversation_enhancement_mode: str = "inject"
+
+
+@dataclass
+class RerankConfig:
+    """Cross-encoder 重排器配置。单一开关 provider（无 enabled 双开关）。"""
+
+    provider: str = "noop"  # noop（默认，不重排）| cross_encoder（显式启用本地模型）
+    model: str = "BAAI/bge-reranker-v2-m3"
+    device: str = "auto"
+    batch_size: int = 32
+    max_candidates: int = 30
+    keep: int = 8
+
+
+@dataclass
+class DeepThinkingConfig:
+    """Deep Thinking（FAIR-RAG 迭代检索）配置。无 enabled——手动 retrieval_mode 即开关。"""
+
+    max_rounds: int = 4  # v0.25.9：3→4，给开放式发现（discovered_aspects）留追踪轮次。
+    max_sub_queries: int = 4
+    wide_top_k: int = 24  # v0.25.9：20→24，每个 sub_query 多给候选以捞具体机制 chunk。
+    gap_ratio_threshold: float = 0.5  # gaps 占 checklist 比例 ≥ 此值视为证据不足。
+    max_final_evidence: int = 18  # v0.25.9：16→18，合成上下文更厚；fallback 仍用 baseline。
+    token_budget: int = 36000  # 内部安全阀（字符近似估算，不暴露 schema）；含多轮+更长证据。
+    call_budget: int = 18  # 内部安全阀（PLAN+SEA+REFINE 全局计数）。
+    json_max_retries: int = 2
+    verify_enabled: bool = True  # 答案级 verification 闭环（合成→校验→不合格再检索）。
+    max_verify_rounds: int = 1  # verification 不合格后最多再补检的轮数。
+    # 证据注入 prompt 的截断长度：SEA 求广度用中等 clip，VERIFY 审 final 求深度用大 clip。
+    # 历史 bug：写死 320 而合成用全文，导致 VERIFY 对第 320 字后的断言系统性误判为「证据外」。
+    sea_evidence_clip: int = 700
+    verify_evidence_clip: int = 1500
+    # per-aspect 排序：以每个 sub_query 的 rrf_score 为主信号，rerank 仅作可调加成；
+    # 默认 0 = 纯 rrf（契合「未引入 rerank 模型」，无模型时不退化为候选插入顺序）。
+    rerank_weight: float = 0.0
+    deep_keep: int = 12  # 每轮 rerank+cutoff 保留上限（deep 专用，不动共享 RerankConfig.keep）。
+    # 开放式发现护栏：每轮新增 aspect 上限与累计上限，防止 checklist 无限膨胀、循环不收敛。
+    max_discovered_per_round: int = 3
+    max_discovered_total: int = 8
+    # 独立 LLM 配置（OpenAI-compatible endpoint）。
+    # 若 llm_base_url 与 llm_model 均非空，深度思考使用此 endpoint 而非 AstrBot 主 LLM。
+    # API key 优先读取环境变量 KR_DEEP_THINKING_LLM_API_KEY，其次读此字段。
+    llm_base_url: str = ""
+    llm_model: str = ""
+    llm_api_key: str = ""
 
 
 # Zotero 同步模式常量（杜绝魔法字面量散落）。
@@ -571,6 +617,72 @@ class Config:
             ),
         )
 
+    def get_rerank_config(self) -> RerankConfig:
+        s = _section(self.raw, "rerank")
+        provider = str(s.get("provider", RerankConfig.provider)).strip().lower()
+        if provider in {"auto", "mmr"}:  # 历史值归一：不再自动下载 cross-encoder，不做 MMR。
+            provider = "noop"
+        if provider not in {"noop", "cross_encoder"}:
+            provider = RerankConfig.provider
+        return RerankConfig(
+            provider=provider,
+            model=str(s.get("model", RerankConfig.model)),
+            device=str(s.get("device", RerankConfig.device)),
+            batch_size=max(1, int(s.get("batch_size", RerankConfig.batch_size))),
+            max_candidates=max(1, int(s.get("max_candidates", RerankConfig.max_candidates))),
+            keep=max(1, int(s.get("keep", RerankConfig.keep))),
+        )
+
+    def get_deep_thinking_config(self) -> DeepThinkingConfig:
+        s = _section(self.raw, "deep_thinking")
+        return DeepThinkingConfig(
+            max_rounds=max(1, int(s.get("max_rounds", DeepThinkingConfig.max_rounds))),
+            max_sub_queries=max(
+                1, int(s.get("max_sub_queries", DeepThinkingConfig.max_sub_queries))
+            ),
+            wide_top_k=max(1, int(s.get("wide_top_k", DeepThinkingConfig.wide_top_k))),
+            gap_ratio_threshold=float(
+                s.get("gap_ratio_threshold", DeepThinkingConfig.gap_ratio_threshold)
+            ),
+            max_final_evidence=max(
+                1, int(s.get("max_final_evidence", DeepThinkingConfig.max_final_evidence))
+            ),
+            token_budget=max(1, int(s.get("token_budget", DeepThinkingConfig.token_budget))),
+            call_budget=max(1, int(s.get("call_budget", DeepThinkingConfig.call_budget))),
+            json_max_retries=max(
+                0, int(s.get("json_max_retries", DeepThinkingConfig.json_max_retries))
+            ),
+            verify_enabled=bool(s.get("verify_enabled", DeepThinkingConfig.verify_enabled)),
+            max_verify_rounds=max(
+                0, int(s.get("max_verify_rounds", DeepThinkingConfig.max_verify_rounds))
+            ),
+            sea_evidence_clip=max(
+                1, int(s.get("sea_evidence_clip", DeepThinkingConfig.sea_evidence_clip))
+            ),
+            verify_evidence_clip=max(
+                1, int(s.get("verify_evidence_clip", DeepThinkingConfig.verify_evidence_clip))
+            ),
+            rerank_weight=min(
+                1.0, max(0.0, float(s.get("rerank_weight", DeepThinkingConfig.rerank_weight)))
+            ),
+            deep_keep=max(1, int(s.get("deep_keep", DeepThinkingConfig.deep_keep))),
+            max_discovered_per_round=max(
+                0,
+                int(
+                    s.get(
+                        "max_discovered_per_round",
+                        DeepThinkingConfig.max_discovered_per_round,
+                    )
+                ),
+            ),
+            max_discovered_total=max(
+                0, int(s.get("max_discovered_total", DeepThinkingConfig.max_discovered_total))
+            ),
+            llm_base_url=str(s.get("llm_base_url", "")),
+            llm_model=str(s.get("llm_model", "")),
+            llm_api_key=str(s.get("llm_api_key", "")),
+        )
+
 
 # ── 可写配置键登记（API 写入 / 运行时持久化的唯一真相源）────────────
 #
@@ -654,6 +766,18 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "sync_mode": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "auto_sync_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "auto_sync_interval_sec": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+    },
+    "deep_thinking": {
+        "max_rounds": ConfigKeyPolicy(True, True),
+        "max_sub_queries": ConfigKeyPolicy(True, True),
+        "wide_top_k": ConfigKeyPolicy(True, True),
+        "rerank_weight": ConfigKeyPolicy(True, True),
+        "llm_base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "llm_model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+    },
+    "rerank": {
+        "provider": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
     },
 }
 

@@ -1,8 +1,10 @@
 "use client";
 import React, { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "./Icon";
 import { IconButton } from "./IconButton";
 import { useI18n } from "@/lib/i18n";
+import { Z } from "@/lib/zLayers";
 
 interface ModalProps {
   title: string;
@@ -28,13 +30,15 @@ export function Modal({ title, icon, onClose, footer, children, width = 880, hei
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 1000,
+        zIndex: Z.dialog,
         background: "rgba(22,23,26,.38)",
         display: "flex",
         alignItems: "center",
@@ -108,6 +112,7 @@ export function Modal({ title, icon, onClose, footer, children, width = 880, hei
           </footer>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

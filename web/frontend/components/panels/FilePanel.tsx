@@ -1,10 +1,12 @@
 "use client";
 import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
+import { Z } from "@/lib/zLayers";
 import { Panel } from "@/components/ds/Panel";
 import { IconButton } from "@/components/ds/IconButton";
 import { Icon } from "@/components/ds/Icon";
 import { useConsole } from "@/lib/ConsoleContext";
-import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, createCollection, uploadDocument, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
+import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, createCollection, uploadDocument, getActiveMilvusBuildJob, rebuildIndexPending, Collection, GraphBuildJob, BuildJobRecord, MilvusBuildJob } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 
@@ -248,6 +250,94 @@ function BuildCard({ job }: BuildCardProps) {
   );
 }
 
+// ─── Milvus 向量库构建进度卡片（file 页面底部，无暂停）──────────
+
+function MilvusBuildCard({ job, onRetry }: { job: MilvusBuildJob; onRetry: () => void }) {
+  const { t } = useI18n();
+  const failed =
+    job.status === "error" || job.status === "partial_failure" || (job.failed_docs ?? 0) > 0;
+  const running = job.status === "running";
+  const pct = Math.min(100, Math.max(0, job.progress_percent ?? 0));
+  const accentColor = failed ? "var(--danger)" : "var(--accent)";
+
+  return (
+    <div
+      style={{
+        margin: "8px 6px 2px",
+        padding: "8px 10px",
+        background: failed ? "color-mix(in srgb, var(--danger) 9%, var(--surface))" : "var(--accent-soft)",
+        border: `1px solid ${failed ? "var(--danger)" : "var(--accent-border)"}`,
+        borderRadius: "var(--radius-md)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
+        {running && (
+          <span
+            style={{
+              width: 9,
+              height: 9,
+              borderRadius: "50%",
+              border: "2px solid var(--accent)",
+              borderTopColor: "transparent",
+              animation: "spin .7s linear infinite",
+              flexShrink: 0,
+            }}
+          />
+        )}
+        <span style={{ fontSize: 11, fontWeight: 600, color: accentColor, flex: 1 }}>
+          {failed ? t("file_milvus_build_failed") : t("file_milvus_build_running")}
+        </span>
+        <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: accentColor }}>{pct}%</span>
+      </div>
+      <div
+        style={{
+          height: 5,
+          borderRadius: 999,
+          background: failed
+            ? "color-mix(in srgb, var(--danger) 18%, transparent)"
+            : "color-mix(in srgb, var(--accent) 18%, transparent)",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            width: `${pct}%`,
+            height: "100%",
+            borderRadius: 999,
+            background: failed ? "var(--danger)" : "linear-gradient(90deg, var(--accent), var(--accent-strong))",
+            transition: "width .4s",
+          }}
+        />
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+        <span style={{ fontSize: 10, color: "var(--fg-muted)", fontFamily: "var(--font-mono)", flex: 1 }}>
+          {job.processed_docs ?? 0}/{job.total_docs ?? "?"} {t("file_milvus_build_docs_unit")}
+          {(job.failed_docs ?? 0) > 0 ? ` · ${job.failed_docs} ${t("file_milvus_build_failed_unit")}` : ""}
+        </span>
+        {failed && (
+          <button
+            type="button"
+            onClick={onRetry}
+            style={{
+              fontSize: 10,
+              fontWeight: 600,
+              padding: "3px 9px",
+              borderRadius: 999,
+              border: "1px solid var(--danger)",
+              background: "transparent",
+              color: "var(--danger)",
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+          >
+            {t("file_milvus_build_retry")}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Active build status card (section-level, above all collections) ──────────
 
 interface ActiveBuildCardProps {
@@ -446,13 +536,15 @@ function DeleteCollectionDialog({ collectionName, onConfirm, onCancel, deleting 
     if (e.key === "Enter" && canConfirm) onConfirm();
   }
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 2000,
+        zIndex: Z.dialog,
         background: "rgba(22,23,26,.46)",
         display: "flex",
         alignItems: "center",
@@ -588,7 +680,8 @@ function DeleteCollectionDialog({ collectionName, onConfirm, onCancel, deleting 
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -626,11 +719,13 @@ function NewCollectionDialog({ onClose, onCreated }: NewCollectionDialogProps) {
     if (e.key === "Enter" && name.trim() && !creating) handleCreate();
   }
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
-        position: "fixed", inset: 0, zIndex: 2000,
+        position: "fixed", inset: 0, zIndex: Z.dialog,
         background: "rgba(22,23,26,.46)",
         display: "flex", alignItems: "center", justifyContent: "center",
         animation: "overlayIn .15s ease",
@@ -705,7 +800,8 @@ function NewCollectionDialog({ onClose, onCreated }: NewCollectionDialogProps) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -746,11 +842,13 @@ function UploadDocumentDialog({ defaultCollection, localCollections, onClose }: 
     if (dropped) setFile(dropped);
   }
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
-        position: "fixed", inset: 0, zIndex: 2000,
+        position: "fixed", inset: 0, zIndex: Z.dialog,
         background: "rgba(22,23,26,.46)",
         display: "flex", alignItems: "center", justifyContent: "center",
         animation: "overlayIn .15s ease",
@@ -862,7 +960,8 @@ function UploadDocumentDialog({ defaultCollection, localCollections, onClose }: 
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -876,6 +975,7 @@ export function FilePanel() {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [buildJob, setBuildJob] = useState<GraphBuildJob | null>(null);
   const [buildHistory, setBuildHistory] = useState<BuildJobRecord[]>([]);
+  const [milvusJob, setMilvusJob] = useState<MilvusBuildJob | null>(null);
   const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
   const [deletingCollection, setDeletingCollection] = useState<string | null>(null);
   const [deleteInProgress, setDeleteInProgress] = useState(false);
@@ -910,6 +1010,36 @@ export function FilePanel() {
     poll();
     return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Milvus 向量库后台构建轮询（running 时加快、空闲减速；无任务/成功 → null 隐藏）。
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      if (cancelled) return;
+      let active = false;
+      try {
+        const job = await getActiveMilvusBuildJob();
+        if (!cancelled) {
+          active = !!job && job.status === "running";
+          setMilvusJob(job);
+        }
+      } catch { /* ignore */ }
+      if (!cancelled) setTimeout(poll, active ? 1500 : 5000);
+    }
+    poll();
+    return () => { cancelled = true; };
+  }, []);
+
+  async function retryMilvusBuild() {
+    try {
+      await rebuildIndexPending();
+      const job = await getActiveMilvusBuildJob();
+      setMilvusJob(job);
+      toast(t("file_milvus_build_started"), "ok");
+    } catch {
+      toast(t("file_milvus_build_error"), "error");
+    }
+  }
 
   function getCollectionGraphStatus(collectionName: string): "not_built" | "building" | "success" {
     if (buildJob && buildJob.collection === collectionName && isActiveBuildStatus(buildJob.status)) {
@@ -1185,6 +1315,22 @@ export function FilePanel() {
             </div>
           );
         })}
+
+        {/* Milvus 向量库构建进度（贴 file 页面底部，无任务/成功时不显示）*/}
+        {milvusJob && (
+          <div
+            style={{
+              position: "sticky",
+              bottom: 0,
+              marginTop: 10,
+              paddingBottom: 2,
+              background: "var(--surface)",
+              borderTop: "1px solid var(--border)",
+            }}
+          >
+            <MilvusBuildCard job={milvusJob} onRetry={retryMilvusBuild} />
+          </div>
+        )}
       </div>
     </Panel>
 

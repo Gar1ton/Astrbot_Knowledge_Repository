@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/copy-pdfjs-assets.mjs",
     "dev": "rm -rf .next tsconfig.tsbuildinfo && next dev --webpack",
+    "prebuild": "node scripts/copy-pdfjs-assets.mjs",
     "build": "rm -rf .next tsconfig.tsbuildinfo && next build --webpack",
     "start": "next start",
     "lint": "eslint"

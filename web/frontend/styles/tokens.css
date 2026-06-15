@@ -20,6 +20,18 @@
   [data-panel="inspector"] { display: none !important; }
 }
 
+/* ─── z-index 量表（与 lib/zLayers.ts 同步，浮层层级单一真源） ─── */
+:root {
+  --z-base: 0;
+  --z-raised: 10;     /* 固定外壳：TopBar、Rail */
+  --z-widget: 100;    /* 常驻小部件 / 登录遮罩 */
+  --z-dialog: 1000;   /* modal 遮罩 + 对话框 */
+  --z-panel: 1100;    /* 浮动开发面板 */
+  --z-dropdown: 1200; /* 下拉 / popover / 菜单（高于 dialog 以支持嵌套） */
+  --z-tooltip: 1300;
+  --z-toast: 1400;
+}
+
 /* ─── 浅色主题（默认 · cream） ─────────────────────────────── */
 :root {
   /* 背景层 */
@@ -1477,7 +1489,7 @@
   border-radius: 8px;
   box-shadow: var(--flow-shadow-pop);
   padding: 3px;
-  z-index: 700;
+  z-index: var(--z-dropdown);
   animation: selectIn .12s cubic-bezier(0.4,0,0.2,1) both;
 }
 
@@ -1562,7 +1574,7 @@
 .dir-picker-overlay {
   position: fixed;
   inset: 0;
-  z-index: 900;
+  z-index: var(--z-dialog);
   display: flex;
   align-items: center;
   justify-content: center;

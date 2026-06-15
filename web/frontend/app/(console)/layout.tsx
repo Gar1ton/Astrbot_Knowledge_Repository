@@ -7,6 +7,7 @@ import { initPalette } from "@/lib/theme";
 import { getAuth, login } from "@/lib/api";
 import { ConsoleProvider, useConsole } from "@/lib/ConsoleContext";
 import { TopBar } from "@/components/layout/TopBar";
+import { Z } from "@/lib/zLayers";
 import { FilePanel } from "@/components/panels/FilePanel";
 import { DocumentsPanel } from "@/components/panels/DocumentsPanel";
 import { ChatPanel } from "@/components/panels/ChatPanel";
@@ -46,7 +47,7 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 100,
+        zIndex: Z.widget,
       }}
     >
       <div

@@ -23,11 +23,23 @@ _INLINE_ANCHOR_RE = re.compile(
 )
 _THESIS_RE = re.compile(r"^\*\*(T\d{1,3}[A-Za-z]?)\*\*", re.IGNORECASE)
 _NUMBERED_MD_RE = re.compile(
-    r"^(?:#+\s*)?(?:\*\*)?(?P<label>\d+(?:\.\d+){0,4})(?:\.)?(?:\*\*)?"
+    r"^(?P<prefix>#+\s*)?(?P<strong>\*\*)?(?P<label>\d+(?:\.\d+){0,4})(?:\.)?(?(strong)\*\*)"
     r"(?:\s+|$)(?P<title>.*)$"
+)
+_NUMBERED_BOLD_LINE_RE = re.compile(
+    r"^\*\*(?P<label>\d+(?:\.\d+){0,4})(?:\.)?\s+(?P<title>[^*\n]+?)\*\*$"
 )
 _ITALIC_NUMBERED_RE = re.compile(
     r"^_(?P<label>\d+(?:\.\d+){0,4})\._\s*(?P<title>.*)$"
+)
+_APPENDIX_RE = re.compile(
+    r"^(?:#+\s*)?(?:\*\*)?(?P<label>Appendix\s+[A-Z])(?:\.)?(?:\*\*)?"
+    r"(?:[:.\s]+(?P<title>.*))?$",
+    re.I,
+)
+_APPENDIX_SUBSECTION_RE = re.compile(
+    r"^(?:#+\s*)?(?:\*\*)?(?P<label>[A-Z]\.\d+(?:\.\d+){0,3})(?:\.)?(?:\*\*)?"
+    r"(?:\s+|$)(?P<title>.*)$"
 )
 _SUBSECTION_RE = re.compile(
     r"^\*\*(?P<label>Scholium(?:\s+[a-z])?\.|Lemma(?:\s+[a-z])?\.|"
@@ -36,6 +48,11 @@ _SUBSECTION_RE = re.compile(
 )
 _FIGURE_RE = re.compile(r"^(?:\*\*)?(?P<label>Fig(?:ure)?\.?\s*\d+[A-Za-z]?\.?)", re.I)
 _TABLE_RE = re.compile(r"^(?:\*\*)?(?P<label>Table\s*\d+[A-Za-z]?\.?)", re.I)
+_EQUATION_LABEL_RE = re.compile(r"^(?:\*\*)?(?P<label>Eq(?:uation)?\.?\s*\d+[A-Za-z]?\.?)", re.I)
+_ANCHOR_LABEL_RE = re.compile(
+    r"\b(?P<label>(?:Fig(?:ure)?|Table|Eq(?:uation)?)\.?\s*\d+[A-Za-z]?\.?)",
+    re.I,
+)
 _REFERENCES_RE = re.compile(r"^(?:#+\s*)?(?:\*\*)?references(?:\*\*)?$", re.I)
 _ABBREVIATION_TAIL_RE = re.compile(
     r"(?:\bet al|fig|figure|eq|e\.g|i\.e|no|vol|pp|dr|mr|mrs|ms|prof|vs)\.$",
@@ -62,6 +79,7 @@ class SectionSpan:
     section_type: str
     path: tuple[str, ...] = field(default_factory=tuple)
     title: str = ""
+    level: int = 0
 
 
 @dataclass(frozen=True)
@@ -131,7 +149,9 @@ def build_structural_chunk_spans(
 def build_section_spans(md: str, blocks: list[TextBlock]) -> list[SectionSpan]:
     headings = [block for block in blocks if block.kind == "section_heading"]
     if not headings:
-        return [SectionSpan("front_matter", 0, len(md), "front_matter", ("front_matter",))]
+        return [
+            SectionSpan("front_matter", 0, len(md), "front_matter", ("front_matter",))
+        ]
 
     sections: list[SectionSpan] = []
     first = headings[0]
@@ -144,6 +164,7 @@ def build_section_spans(md: str, blocks: list[TextBlock]) -> list[SectionSpan]:
                 "front_matter",
                 ("front_matter",),
                 "front matter",
+                0,
             )
         )
 
@@ -162,6 +183,7 @@ def build_section_spans(md: str, blocks: list[TextBlock]) -> list[SectionSpan]:
                 _section_type(heading),
                 path or (heading.label,),
                 heading.title,
+                heading.level,
             )
         )
     return sections
@@ -293,6 +315,11 @@ def _classify_block(start: int, end: int, text: str) -> TextBlock:
         title = _strip_markup(stripped[thesis.end() :]).strip()
         return TextBlock(start, end, "section_heading", text, label, title, 1)
 
+    appendix = _appendix_heading(stripped)
+    if appendix is not None:
+        label, title, level = appendix
+        return TextBlock(start, end, "section_heading", text, label, title, level)
+
     numbered = _numbered_heading(stripped)
     if numbered is not None:
         label, title = numbered
@@ -319,6 +346,10 @@ def _classify_block(start: int, end: int, text: str) -> TextBlock:
     if table:
         return TextBlock(start, end, "table_caption", text, table.group("label"), "", 0)
 
+    equation_label = _EQUATION_LABEL_RE.match(stripped)
+    if equation_label:
+        return TextBlock(start, end, "equation", text, equation_label.group("label"), "", 0)
+
     if _looks_like_list_item(stripped):
         return TextBlock(start, end, "list_item", text)
     if _looks_like_equation(stripped):
@@ -326,18 +357,87 @@ def _classify_block(start: int, end: int, text: str) -> TextBlock:
     return TextBlock(start, end, "paragraph", text)
 
 
+def _appendix_heading(stripped: str) -> tuple[str, str, int] | None:
+    appendix = _APPENDIX_RE.match(stripped)
+    if appendix:
+        label = _strip_markup(appendix.group("label")).title()
+        title = _strip_markup(appendix.group("title") or "").strip()
+        return label, title, 1
+    subsection = _APPENDIX_SUBSECTION_RE.match(stripped)
+    if not subsection:
+        return None
+    label = subsection.group("label")
+    title = _strip_markup(subsection.group("title")).strip()
+    if not _looks_like_heading_title(title):
+        return None
+    return label, title, label.count(".") + 1
+
+
 def _numbered_heading(stripped: str) -> tuple[str, str] | None:
+    bold_line = _NUMBERED_BOLD_LINE_RE.match(stripped)
+    if bold_line:
+        label = bold_line.group("label")
+        title = _strip_markup(bold_line.group("title")).strip()
+        if _valid_numeric_section_label(label) and _looks_like_heading_title(title):
+            return label, title
+        return None
+
     italic = _ITALIC_NUMBERED_RE.match(stripped)
     if italic:
-        return italic.group("label"), _strip_markup(italic.group("title")).strip()
+        label = italic.group("label")
+        title = _strip_markup(italic.group("title")).strip()
+        if _valid_numeric_section_label(label) and _looks_like_heading_title(title):
+            return label, title
+        return None
     match = _NUMBERED_MD_RE.match(stripped)
     if not match:
         return None
     label = match.group("label")
     title = _strip_markup(match.group("title")).strip()
-    if title or label.count(".") > 0:
+    if _valid_numeric_section_label(label) and _looks_like_heading_title(title):
         return label, title
     return None
+
+
+def _valid_numeric_section_label(label: str) -> bool:
+    parts = label.split(".")
+    if not parts or len(parts) > 5:
+        return False
+    for idx, part in enumerate(parts):
+        if not part.isdigit():
+            return False
+        if part.startswith("0") or int(part) <= 0:
+            return False
+        if idx == 0 and int(part) > 30:
+            return False
+        if idx > 0 and int(part) > 99:
+            return False
+    return True
+
+
+def _looks_like_heading_title(title: str) -> bool:
+    title = _strip_markup(title)
+    if len(title) < 2 or len(title) > 180:
+        return False
+    if _looks_like_equation(title):
+        return False
+    word_count = len(re.findall(r"[A-Za-z][A-Za-z0-9-]*|[\u3400-\u4dbf\u4e00-\u9fff]", title))
+    if word_count > 14:
+        return False
+    if re.search(r"[.!?]\s+\S", title) or title.rstrip().endswith((".", "!", "?")):
+        return False
+    if title.count(",") > 1 or title.count(";") > 0:
+        return False
+    alpha_count = sum(1 for char in title if char.isalpha())
+    cjk_count = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", title))
+    digit_count = sum(1 for char in title if char.isdigit())
+    if alpha_count + cjk_count < 2:
+        return False
+    if digit_count > alpha_count + cjk_count and digit_count > 2:
+        return False
+    if re.fullmatch(r"[\d\s.,;:()\\/\-+*=<>%]+", title):
+        return False
+    return True
 
 
 def _section_type(block: TextBlock) -> str:
@@ -347,6 +447,8 @@ def _section_type(block: TextBlock) -> str:
         return "references"
     if block.label == "front_matter":
         return "front_matter"
+    if block.label.lower().startswith("appendix"):
+        return "appendix"
     return "numbered_section"
 
 
@@ -556,6 +658,7 @@ def _chunk_metadata(
                 "section_label": section.label,
                 "section_path": list(section.path),
                 "section_title": section.title,
+                "section_level": section.level,
                 "section_start_char": section.start,
                 "section_end_char": section.end,
             }
@@ -574,6 +677,9 @@ def _chunk_metadata(
     anchor = _chunk_anchor(md[start:end])
     if anchor:
         metadata["anchor_label"] = anchor
+    anchor_labels = _chunk_anchor_labels(md[start:end], blocks)
+    if anchor_labels:
+        metadata["anchor_labels"] = anchor_labels
     return metadata
 
 
@@ -634,14 +740,45 @@ def _is_descendant_section(parent: SectionSpan, child: SectionSpan) -> bool:
 
 def _chunk_anchor(text: str) -> str:
     stripped = text.lstrip()
-    for regex in (_THESIS_RE, _FIGURE_RE, _TABLE_RE):
+    for regex in (_THESIS_RE, _FIGURE_RE, _TABLE_RE, _EQUATION_LABEL_RE):
         match = regex.match(stripped)
         if match:
-            return match.group(1)
+            return _normalize_anchor_label(match.group(1))
     subsection = _SUBSECTION_RE.match(stripped)
     if subsection:
         return _normalize_subsection_label(subsection.group("label"))
     return ""
+
+
+def _chunk_anchor_labels(text: str, blocks: list[TextBlock]) -> list[str]:
+    labels: list[str] = []
+    for block in blocks:
+        if block.kind in {"figure_caption", "table_caption", "equation"} and block.label:
+            labels.append(_normalize_anchor_label(block.label))
+    labels.extend(
+        _normalize_anchor_label(match.group("label"))
+        for match in _ANCHOR_LABEL_RE.finditer(text)
+    )
+    return list(dict.fromkeys(label for label in labels if label))
+
+
+def _normalize_anchor_label(label: str) -> str:
+    label = _strip_markup(label)
+    label = re.sub(r"\s+", " ", label).strip().rstrip(".")
+    match = re.match(
+        r"^(Fig(?:ure)?|Table|Eq(?:uation)?)\.?\s*(\d+[A-Za-z]?)$",
+        label,
+        flags=re.I,
+    )
+    if not match:
+        return label.upper()
+    kind = match.group(1).lower().rstrip(".")
+    number = match.group(2).upper()
+    if kind.startswith("fig"):
+        return f"FIGURE {number}"
+    if kind.startswith("tab"):
+        return f"TABLE {number}"
+    return f"EQUATION {number}"
 
 
 def _normalize_subsection_label(label: str) -> str:

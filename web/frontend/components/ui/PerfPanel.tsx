@@ -3,6 +3,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Z } from "@/lib/zLayers";
 
 // ─── 类型 ──────────────────────────────────────────────────────
 
@@ -151,7 +152,7 @@ export function PerfPanel({ collapsed = false }: PerfPanelProps) {
             borderRadius: 14,
             boxShadow: "var(--shadow-pop)",
             overflow: "hidden",
-            zIndex: 9500,
+            zIndex: Z.panel,
             animation: "perfPanelIn 0.16s cubic-bezier(0.4,0,0.2,1) both",
           }}
         >

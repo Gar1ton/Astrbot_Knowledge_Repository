@@ -1,6 +1,8 @@
 "use client";
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef } from "react";
 import { Icon } from "./Icon";
+import { Popover } from "./Popover";
+import { Z } from "@/lib/zLayers";
 
 interface SelectOption {
   value: string;
@@ -22,15 +24,6 @@ export function Select({ value, onChange, options, size = "sm", style, disabled 
   const h = size === "sm" ? 30 : 34;
   const fs = size === "sm" ? 12 : 13;
   const sel = options.find((o) => o.value === value);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
 
   return (
     <div ref={ref} style={{ position: "relative", display: "inline-block", ...style }}>
@@ -75,19 +68,23 @@ export function Select({ value, onChange, options, size = "sm", style, disabled 
           }}
         />
       </button>
-      {open && (
+      <Popover
+        open={open}
+        anchorRef={ref}
+        side="bottom"
+        align="start"
+        gap={5}
+        zIndex={Z.dropdown}
+        matchAnchorWidth
+        onClose={() => setOpen(false)}
+      >
         <div
           style={{
-            position: "absolute",
-            top: "calc(100% + 5px)",
-            left: 0,
-            minWidth: "100%",
             background: "var(--surface)",
             border: "1px solid var(--border)",
             borderRadius: "var(--radius-lg)",
             boxShadow: "var(--shadow-pop)",
             padding: 4,
-            zIndex: 700,
           }}
         >
           {options.map((o) => {
@@ -125,7 +122,7 @@ export function Select({ value, onChange, options, size = "sm", style, disabled 
             );
           })}
         </div>
-      )}
+      </Popover>
     </div>
   );
 }

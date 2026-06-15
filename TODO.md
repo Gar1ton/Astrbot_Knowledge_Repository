@@ -44,6 +44,397 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.25.11 Deep Thinking 可靠性小步优化 (completed)
+
+### User constraints / 约束
+
+- 按已确认计划实施，重点放在 Deep Thinking 整体优化：prompt 约束、循环控制、证据选择、校验状态修正。
+- 尽量减少代码增加数量，不新增生产模块、不改外部 API schema、不新增前端页面、不引入新检索后端。
+- 优先提升多论文问题的证据可靠性：减少关键文献漏召回、跨文档张冠李戴、引用不支撑断言、关键缺口被隐藏和答案过度自信。
+
+### Technical implementation path
+
+- [x] **Phase 1 - prompt 与循环控制**：精修 PLAN/SEA/REFINE/VERIFY prompt；修正收敛条件，未满足 critical 或 coverage 缺口时继续 REFINE。技术理由：减少 LLM 漂移与“sufficient 误收敛”。
+- [x] **Phase 2 - 证据选择与校验状态**：在 `_compute_final` 中增加轻量 doc-aware 交错选择；最终 `verify_missing` 非空时强制 `verified=False`。技术理由：降低同源证据垄断，并避免有缺口但显示已验证。
+- [x] **Phase 3 - 回归测试**：补充收敛/补检、证据多样性、校验状态、prompt 契约测试。技术理由：锁住本次可靠性行为，不依赖人工判断。
+
+### Verification
+
+- `python -m pytest tests/backend/test_deep_thinking_orchestrator.py -q` → passed，36 passed。
+- `python -m pytest tests/backend/test_api.py -q` → passed，52 passed。
+- `python -m pytest tests/backend/test_cross_document_attribution.py -q` → passed，6 passed。
+- `python -m pytest tests/backend/test_retrieval_orchestrator.py tests/backend/test_reranker.py -q` → passed，22 passed / 1 skipped。
+- `python -m compileall core/pipelines/deep_thinking_prompts.py core/pipelines/deep_thinking_orchestrator.py tests/backend/test_deep_thinking_orchestrator.py` → passed。
+- `python -m ruff check core/pipelines/deep_thinking_prompts.py core/pipelines/deep_thinking_orchestrator.py tests/backend/test_deep_thinking_orchestrator.py` → 未执行：当前 Python 环境无 `ruff` 模块。
+- `python -m pytest tests/backend -q` → blocked：收集 `tests/backend/test_r2_target.py` 时当前环境缺 `botocore`。
+- `python -m pytest tests/backend -q --ignore=tests/backend/test_r2_target.py` → 367 passed / 2 skipped / 2 failed；失败为当前环境缺 `boto3`（`test_lifecycle_and_cli.py`）与 Windows 路径分隔符断言（`test_zotero_sync.py`），均不在本次改动文件范围内。
+
+## v0.25.10 Deep Thinking 跨文档知识串线修复（来源标注）(completed)
+
+### User constraints / 约束
+
+- 问题：deep thinking 在「Lean4Agent 这篇文章的局限性」一题把 LeanMarathon 论文的 `goal drift / lost-in-the-middle` 当作 Lean4Agent 自身局限输出（跨文档串线）。罕见但危害高。
+- 根因在**生成侧**：SEA/VERIFY/合成三处 prompt 拼接证据时只带 `[chunk_id]`/`[n]`，**不标注来源论文**，模型把多篇视为同一文本池。
+- **只修生成侧**：给每条证据加来源标注 + system prompt 加反张冠李戴约束。不动检索召回，**保留跨文档对比能力**（不做硬过滤）。
+- 向后兼容（`source_labels` 默认 `None` 时行为不变）；版本号 **patch v0.25.10**，未经允许不 bump minor/major。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 证据来源标注**：`synthesize_answer` 加 `source_labels: dict[str,str]|None` + 复用 `source_tag()` 拼 `[{n}]（来源：{label}）`；`build_sea_prompt`/`build_verify_prompt` 同加 `source_labels` 并标注证据行。技术理由：让模型在拼接的证据池里能区分每条来自哪篇论文（`core/pipelines/answer_synthesis.py`、`core/pipelines/deep_thinking_prompts.py`）。
+- [x] **Phase 2 - 反串线 system 约束**：抽 `_SOURCE_ISOLATION_RULE` 追加到 `_SYNTH_SYSTEM_DEEP`/`_SYNTH_SYSTEM_BASE`（禁止跨来源张冠李戴）；`VERIFY_SYSTEM`/verify prompt 加跨来源归属检查项计入 `citation_mismatches`。技术理由：双侧（生成 + 校验）兜住串线（`core/pipelines/answer_synthesis.py`、`core/pipelines/deep_thinking_prompts.py`）。
+- [x] **Phase 3 - doc_id→label 映射**：`RetrievalOrchestrator.document_labels()` 批量经 `_source_store.get_document()` 解析 title（空回退 doc_id）；orchestrator SEA + verify 闭环（合成/校验同享）构造并传入；`api.ask` deep fallback 据已构造的 `sources`（Zotero 优先 citation）拼 map 传入。技术理由：`DocumentChunk` 不带 title，需在调用点解析（`core/pipelines/retrieval_orchestrator.py`、`core/pipelines/deep_thinking_orchestrator.py`、`core/api.py`）。
+- [x] **Phase 4 - 回归测试**：新增 `test_cross_document_attribution.py`（6 例）——混两篇论文证据集断言三个 prompt 每条证据带正确来源标签且 `[n]` 序不变；`document_labels` 解析与回退；`source_labels=None`/`source_tag` 向后兼容。MockRetrieval/SequenceRetrieval 补 `document_labels` 替身。
+
+### Verification
+
+- `python -m pytest tests/backend/test_cross_document_attribution.py -q` → passed，6 passed。
+- `python -m pytest -q`（全量回归）→ passed，374 passed。
+- `python -m ruff check`（本次改动文件）→ All checks passed（api.py 仅余既有长行，非本次引入）；`mypy`（改动文件）→ 本次代码 0 error（余项为 lightrag/config/base 既有 repo-wide 噪声）。
+
+---
+
+## v0.25.9 Deep Thinking 深挖 + 答案质量 + 告警分界 (completed)
+
+### User constraints / 约束
+
+- deep thinking 要「从 loop 里发现更多相关内容深挖、优化论点」，不能只围预设 checklist 收敛填空；答案要达到 NotebookLM 式机制级、分维度、跨实体对比的深度。
+- **rerank 模型未必引入，其权重应可调到很低甚至为 0**；无 rerank 时排序不能退化为候选插入顺序。
+- **告警与真实答案要有明确分界**：正文表面只留一行 notice，完整缺口明细折叠在思考过程里。
+- 新增字段/prompt 字段一律向后兼容；版本号沿用 patch；不改 `/api/ask` 对外响应结构语义、不改 Milvus/SQLite/LightRAG/reranker 接口签名。
+
+### Technical implementation path
+
+- [x] **Phase 4a - 后端告警瘦身**：`_deep_warning_prefix` 正文只留一行 notice（含缺口计数），移除全量 missing 列表；明细保留在 `thinking_trace.verify_missing`（`core/api.py`）。
+- [x] **Phase 1a - 证据可见度**：`DeepThinkingConfig` 加 `sea_evidence_clip=700`/`verify_evidence_clip=1500`，`build_sea_prompt`/`build_verify_prompt` 加 `clip` 形参，orchestrator 分别传入。技术理由：SEA/VERIFY 只看前 320 字、合成用全文，造成系统性假阴性（`core/config.py`、`core/pipelines/deep_thinking_prompts.py`、`core/pipelines/deep_thinking_orchestrator.py`）。
+- [x] **Phase 3 - 预算口径 + 调参**：`_over_budget` 改用全局 `llm_calls_used`（PLAN/SEA/REFINE；VERIFY/合成另由 max_verify_rounds 限界）；`wide_top_k`24、`deep_keep`12、`max_rounds`4、`max_final_evidence`18、`token_budget`36000、`call_budget`18（`core/pipelines/deep_thinking_orchestrator.py`、`core/config.py`）。
+- [x] **Phase 1b - per-aspect 排序**：以每个 sub_query 的 `rrf_score` 为主排序信号；`rerank_weight=0` 默认纯 rrf，>0 时按 query 分池 rerank 混合；新增 `Reranker.is_passthrough` 自动置零失效 reranker 权重（`core/pipelines/deep_thinking_orchestrator.py`、`core/repository/reranker/*`、`core/config.py`）。
+- [x] **Phase 1c - 开放式发现**：SEA 输出 `discovered_aspects`（独立于 gaps，不进告警），追加非 critical checklist + 驱动 REFINE + 写入 `RoundTrace.discovered` 并序列化（`core/pipelines/deep_thinking_prompts.py`、`core/pipelines/deep_thinking_orchestrator.py`、`core/domain/deep_thinking.py`、`core/api.py`）。
+- [x] **Phase 1d - PLAN enumerate-then-cover**：对比/共享类问题要求 sub_queries 按实体并行铺机制探针 + 跨维度对比探针（`core/pipelines/deep_thinking_prompts.py`）。
+- [x] **Phase 2 - deep 合成 prompt**：`synthesize_answer` 加 `style`，新增 `_SYNTH_SYSTEM_DEEP`；verify 闭环与 api.ask fallback 两条路径都走 `style="deep"`（`core/pipelines/answer_synthesis.py`、`core/pipelines/deep_thinking_orchestrator.py`、`core/api.py`）。
+- [x] **Phase 4b - 前端折叠告警**：`ThinkingTraceView` 收起态显示紧凑缺口计数、展开区加「本轮发现」行；类型补 `discovered`/`origin`（`web/frontend/components/panels/ChatPanel.tsx`、`web/frontend/lib/api.ts`、`web/frontend/lib/i18n.ts`）。
+- [x] **Phase T - 测试**：新增 orchestrator 7 例（discovered 分离/吸收、per-aspect 排序、is_passthrough、clip 透传、deep 合成、全局 calls 计数）+ api 2 例（discovered/origin 序列化、verify 关闭走 deep fallback 合成）；更新 config 默认值与告警瘦身断言。
+
+### Verification
+
+- `python -m pytest tests/ -q` → passed，368 passed。
+- `ruff check`（改动文件）→ 新增代码 0 error（仅余既有 api.py/test 长行，非本次引入）；`mypy` → Success（core/domain/ 3 files）。
+- `web/frontend` `tsc --noEmit` → passed（EXIT 0）；`npm run build` → passed，`python tools/sync_frontend.py` → 同步 360 文件到 `pages/`。
+
+---
+
+## v0.25.8 Deep Thinking 展开召回与软降级 (completed)
+
+### User constraints / 约束
+
+- deep thinking 应尽量散开子查询并保留更多 chunk，而不是证据不完美就固定降级到 5 个 baseline chunk。
+- 常规证据缺口、critical 未满足、VERIFY 未通过应作为未验证/部分充分返回；只有硬失败才 `degraded=True`。
+- 不改变 `/api/ask` 对外响应结构，不改 Milvus/SQLite/LightRAG/reranker 接口。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 软降级策略**：将 SEA gap、未满足 checklist、critical 未满足从硬降级条件移除；这些情况保留探索 evidence，并通过 `verify_missing`/trace 暴露缺口。技术理由：deep thinking 的价值在于累积多轮证据，不能因部分缺口丢弃探索结果。
+- [x] **Phase 2 - final evidence 上限**：新增内部 `max_final_evidence=16`，final evidence 按 structural anchor、baseline floor、rerank score 优先级截断。技术理由：允许超过 5 个 chunk，同时避免上下文无限膨胀。
+- [x] **Phase 3 - 回归测试**：覆盖 gap/critical 不再降级、硬失败仍降级、final cap 生效、verification 补检证据进入 final、API partial warning 不显示 degraded mode。
+
+### Verification
+
+- `python -m pytest tests/backend/test_deep_thinking_orchestrator.py -q` → passed，24 passed。
+- `python -m pytest tests/backend/test_deep_thinking_orchestrator.py tests/backend/test_api.py -q` → passed，74 passed。
+- `python -m compileall core/config.py core/pipelines/deep_thinking_prompts.py core/pipelines/deep_thinking_orchestrator.py tests/backend/test_deep_thinking_orchestrator.py tests/backend/test_api.py` → passed。
+- `python -m ruff check core\config.py core\pipelines\deep_thinking_prompts.py core\pipelines\deep_thinking_orchestrator.py tests\backend\test_deep_thinking_orchestrator.py tests\backend\test_api.py` → 未执行：当前 Python 环境无 `ruff` 模块（`No module named ruff`）。
+
+---
+
+## v0.25.7 Deep Thinking 缺口率文案修正 (completed)
+
+### User constraints / 约束
+
+- 前端展示「证据缺口率 175%」不可理解，缺口率不应超过 100%。
+- 不改变 deep thinking 对外响应结构，只修正降级判定指标与文案。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 缺口指标修正**：把降级判定从 `len(gaps) / len(checklist)` 改为未满足 checklist 项占比，并将展示文案改为「未满足检查项 X/Y」而非超过 100% 的缺口率。技术理由：一个检查项可能产生多个 gap，按 gap 数量除以 checklist 数量会产生无意义百分比。
+- [x] **Phase 2 - 回归测试**：新增多 gap 少 checklist 的回归用例，确认降级原因不出现超过 100% 的百分比。
+
+### Verification
+
+- `python -m pytest tests/backend/test_deep_thinking_orchestrator.py -q` → passed，22 passed。
+- `python -m pytest tests/backend/test_deep_thinking_orchestrator.py tests/backend/test_api.py -q` → passed，72 passed。
+- `python -m compileall core\pipelines\deep_thinking_orchestrator.py tests\backend\test_deep_thinking_orchestrator.py` → passed。
+
+---
+
+## v0.24.3 扫描件 PDF 阅读面板空白页修复 (completed)
+
+### User constraints / 约束
+
+- 仅修前端 PDF 渲染空白问题（如 Massumi 1995 扫描件），chunk/文本抽取已正常，不动后端。
+- 只做 patch 版本升级（0.24.2 → 0.24.3）。
+- 不改动现有 worker 加载方式（生产构建里工作正常）。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 暴露 pdfjs-dist 运行时资源**：新增 `web/frontend/scripts/copy-pdfjs-assets.mjs`，把 `node_modules/pdfjs-dist/{wasm,cmaps,standard_fonts}` 拷到 `public/pdfjs/`；`package.json` 加 `prebuild`/`predev` 自动执行；`.gitignore` 忽略 `public/pdfjs/`。技术理由：`output: "export"` 下 public/ → out/ → pages/ 是唯一一处 dev 与 prod 都能在 `/pdfjs/...` 访问的位置。
+- [x] **Phase 2 - getDocument 指向资源**：`PdfViewer.tsx` 给 `getDocument` 传 `wasmUrl`/`cMapUrl`/`cMapPacked`/`standardFontDataUrl`，并扩展本地类型签名。技术理由：pdfjs v6 把 JBIG2/JPEG2000 解码器迁到 WASM，缺 `wasmUrl` 导致扫描页图像解码失败、整页全白。
+- [x] **Phase 3 - 渲染健壮性**：渲染异常只忽略 `RenderingCancelledException`，其余 `console.error`；HiDPI 改用 render `transform` 参数而非预设 `context.setTransform`（v6 会忽略预设变换）。技术理由：避免空白页无线索，并修高 DPR 屏内容缩到左上角。
+
+### Verification
+
+- `cd web/frontend && node scripts/copy-pdfjs-assets.mjs` → passed，生成 `public/pdfjs/wasm/jbig2.wasm`（104852 B）等。
+- `npx tsc --noEmit` → passed，无类型错误。
+- `npm run build` → passed（prebuild 自动拷贝，`out/pdfjs/wasm/jbig2.wasm` 存在）。
+- `python tools/sync_frontend.py` → passed，`pages/pdfjs/wasm/jbig2.wasm` 存在，mimetype `application/wasm`。
+- `python -m pytest -q` → passed，356 passed。
+- 离线复现（排查阶段）：`@napi-rs/canvas` + pdfjs 渲染第 2 页，配置 `wasmUrl` 后 `nonwhite` 由 `0.00%` 升至 `6.06%`（第 3 页 `13.42%`）。
+
+---
+
+## v0.25.6 Deep Thinking prompt 协议与数据流图 (completed)
+
+### User constraints / 约束
+
+- 实施 deep thinking prompt/data-flow 优化，保持 `/api/ask` 对外响应结构不变。
+- PLAN/SEA/REFINE/VERIFY 增强结构化控制信号，旧 JSON 输出必须继续兼容。
+- 输出 `docs/deep_thinking_flow.png`，并保留 Mermaid 源方便审阅。
+- 不新增运行时依赖；PNG 使用当前环境已有的 Pillow 生成。
+
+### Technical implementation path
+
+- [x] **Phase 1 - prompt 协议增强**：扩展 PLAN/SEA/REFINE/VERIFY prompt，加入 evidence plan、coverage matrix、typed gap queries 与 claim-level audit。技术理由：让 LLM 输出更可控的检索/审计信号。
+- [x] **Phase 2 - 解析与领域模型兼容扩展**：扩展 `ChecklistItem` 和 prompt 解析 dataclass，所有新增字段带默认值；解析器同时兼容旧格式与新格式。技术理由：不改变对外 API 和主流程契约。
+- [x] **Phase 3 - orchestrator 数据流接入**：SEA 结果派生 satisfied/gaps/conflicts，REFINE 使用 typed gaps，VERIFY claim-level 问题合并到 `verify_missing`。技术理由：提升补检命中率和未验证原因质量。
+- [x] **Phase 4 - 文档图输出**：新增 Mermaid 源 `docs/deep_thinking_flow.md` 与 PNG `docs/deep_thinking_flow.png`。技术理由：让数据流可审阅、可复现。
+- [x] **Phase 5 - 回归测试**：补充新旧 JSON 兼容、coverage matrix、typed gaps、claim-level verify 与现有 API 行为测试。
+
+### Verification
+
+- `python -m pytest tests/backend/test_deep_thinking_orchestrator.py tests/backend/test_api.py -q` → passed，71 passed。
+- `python -m compileall core/domain/deep_thinking.py core/pipelines/deep_thinking_prompts.py core/pipelines/deep_thinking_orchestrator.py tests/backend/test_deep_thinking_orchestrator.py` → passed。
+- `python -c "from PIL import Image; p='docs/deep_thinking_flow.png'; im=Image.open(p); print(p, im.size, im.mode)"` → passed，`(1800, 1500) RGB`。
+- `python -m ruff check core\domain\deep_thinking.py core\pipelines\deep_thinking_prompts.py core\pipelines\deep_thinking_orchestrator.py tests\backend\test_deep_thinking_orchestrator.py` → 未执行：当前 Python 环境无 `ruff` 模块（`No module named ruff`）。
+
+---
+
+## v0.25.5 Deep Thinking 证据不足回答警告 (completed)
+
+### User constraints / 约束
+
+- deep thinking 在证据不足或未验证时仍可保留回答，但答案正文开头必须明确提示证据不足/未验证。
+- 开启英语召回时，检索可使用翻译 query，最终合成与 verification 必须使用用户原始问题。
+- 不改变 `/api/ask` 响应结构，复用现有 `thinking_trace` 字段。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 问题源与合成约束对齐**：`DeepThinkingOrchestrator.run()` 新增 `answer_question`，检索/PLAN/SEA/REFINE 保持用 `query`，最终合成与 VERIFY 改用 `answer_question or query`；`api.ask()` deep_thinking 调用传入原始 `question`；同步增强普通与 deep 合成 prompt 的证据不足约束。技术理由：避免英语召回翻译污染最终回答意图。
+- [x] **Phase 2 - 证据不足/未验证答案前缀**：在 `api.ask()` 对 deep outcome 生成的答案统一加警告前缀：degraded 展示降级原因，unverified 展示 missing 或通用未验证提示；警告语言跟随 `answer_language`/原问题。技术理由：保留草稿答案但不伪装成已充分支撑结论。
+- [x] **Phase 3 - verification 语义收紧**：VERIFY JSON 解析失败不再视为通过，改为返回当前 draft 且 `verified=False`。技术理由：校验失败应暴露为未验证，而不是误标通过。
+- [x] **Phase 4 - 回归测试**：覆盖英文召回原问题合成、degraded 警告、unverified missing 警告、VERIFY 解析失败未通过，以及 verified 通过路径不加警告。
+
+### Verification
+
+- `python -m pytest tests/backend/test_deep_thinking_orchestrator.py tests/backend/test_api.py -q` → passed，66 passed。
+- `python -m ruff check core\api.py core\pipelines\answer_synthesis.py core\pipelines\deep_thinking_orchestrator.py tests\backend\test_deep_thinking_orchestrator.py tests\backend\test_api.py` → 未执行：当前 Python 环境无 `ruff` 模块（`No module named ruff`）。
+
+---
+
+## v0.25.4 深度思考降级原因暴露 + PDF 重提取 + 独立 LLM 配置 (completed)
+
+### User constraints / 约束
+
+- 深度思考模式静默降级到 baseline 时，前端无法得知原因；用户无法区分「LLM 不可用」还是「证据不足」。
+- 已摄入的 PDF（如 Massumi 1995）因 `ignore_alpha=True` 修复前摄入，`clean.md` 只含首页内容，需要重新提取而无需重新上传。
+- `cmd_config.json` 的 `provider: []` 导致 AstrBot LLM 接口不可用；深度思考应能配置独立 OpenAI-compat endpoint 绕过此限制。
+- 版本号为 **patch v0.25.4**，未经允许不 bump minor/major。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 降级原因链路**：`DeepThinkingOutcome` 新增 `degraded_reason: str = ""`；`_degraded()` 增加 `reason` 参数；各 `except Exception` 传 `str(exc)`；证据不足路径拼接人类可读原因；`_serialize_deep_thinking()` 暴露字段；`ThinkingTraceView` 在 badge 下展示（`core/domain/deep_thinking.py`、`core/pipelines/deep_thinking_orchestrator.py`、`core/api.py`、`web/frontend/components/panels/ChatPanel.tsx`、`web/frontend/lib/api.ts`）。
+- [x] **Phase 2 - PDF 重提取**：`IngestManager.reextract_document()` 定位原件 PDF、重跑修复后提取代码、覆写 `clean.md`/`pages.json`、重新分块写库并标 `needs_reindex`；新增 `POST /api/documents/{doc_id}/reextract` 路由；前端 `DocumentsPanel` 对 PDF 文档显示「重新提取」按钮（`core/managers/ingest_manager.py`、`core/api.py`、`web/server.py`、`web/frontend/components/panels/DocumentsPanel.tsx`、`web/frontend/lib/api.ts`、`web/frontend/lib/i18n.ts`）。
+- [x] **Phase 3 - 深度思考独立 LLM**：`DeepThinkingConfig` 新增 `llm_base_url`/`llm_model`/`llm_api_key`；`plugin_initializer.py` 条件选择 `LMStudioLLMAdapter` 或回退 AstrBot 主 LLM；`ENV_DEEP_THINKING_LLM_API_KEY` 常量支持环境变量（`core/config.py`、`core/plugin_initializer.py`）。
+- [x] **Phase 4 - 测试补全**：`test_deep_thinking_orchestrator.py` 为所有降级路径补 `degraded_reason` 断言；新增 `test_sea_llm_unavailable_degrades_to_baseline` 与 `test_refine_llm_unavailable_degrades_to_baseline` 用例。
+
+### Verification
+
+- `python -m pytest tests/backend/test_deep_thinking_orchestrator.py -v` → 14 passed（含 4 个新/更新断言）。
+- `python -m pytest -q` → 344 passed（全量回归）。
+- `cd web/frontend && npm run build` + `python tools/sync_frontend.py` → 构建并同步产物。
+
+---
+
+## v0.25.3 Milvus 向量库构建进度条 (in progress)
+
+### User constraints / 约束
+
+- 参考 LightRAG 进度条：Milvus 构建/更新（`rebuild_vector_store` 全量 / `rebuild_index_pending` 增量）也要有实时进度条。
+- **位置**：统一一条放在 file 页面（FilePanel）左下角/底部，**无任务时不显示**（不按 Zotero/本地分区分散）。
+- **无暂停功能**（必须构建成功，与 LightRAG 不同）。
+- **失败处理**：构建结束若有 `failed_docs>0`，进度条转红色 + 「重试」按钮；向量库节点保持黄色不可用直到全部成功。
+- 构建未成功前，数据流呈 pending 色、向量库节点黄色，示意功能暂不可用。
+- 版本号为 **patch v0.25.3**，未经允许不 bump minor/major。
+
+### Technical implementation path
+
+- [ ] 🚧 **Phase 1 - 后端任务对象 + 后台执行**：新增 `core/milvus_build.py`（`MilvusBuildJob` dataclass + `to_dict()` 含 `progress_percent`）；`core/api.py` 加 `self._milvus_build_job/_task` 状态、`start_milvus_rebuild()`（后台 `create_task`、立即返回、防并发）、`_run_milvus_rebuild()`、`get_active_milvus_build_job()`；给 `rebuild_vector_store/rebuild_index_pending` 加可选 `job` 进度钩子（保持原签名/返回兼容）。技术理由：复用现有逐文档循环作进度源，最小侵入。
+- [ ] **Phase 2 - 构建中保持黄色**：`core/api_capabilities.py:_milvus_runtime_health()` 在存在 running 的 `_milvus_build_job` 时强制 `rebuild_required=True` + `building=True`。技术理由：避免最后一个文档清除 `needs_reindex` 后过早变绿。
+- [ ] **Phase 3 - HTTP 路由**：`web/server.py` 改 `handle_rebuild_index_pending` 为后台触发即返回 `{status:"started", job}`；新增 `GET /api/documents/rebuild-index/active`。技术理由：前端需轮询进度。
+- [ ] **Phase 4 - 前端 API + 进度卡片**：`api.ts` 加 `MilvusBuildJob` 类型 + `getActiveMilvusBuildJob()`；`FilePanel.tsx` 加轮询 + 底部 `MilvusBuildCard`（复用 `BuildCard` 视觉、无暂停、失败转红 + 重试）；`FlowPageContent.tsx:handleRebuildIndex` 改触发即返回；`i18n.ts` 补 `file_milvus_build_*` 中英文案。技术理由：UI 与 LightRAG 体验一致。
+- [ ] **Phase 5 - 测试与验证**：补后端单测（进度推进、构建中保持黄、partial_failure）；保持现有 rebuild 测试绿；前端 build + sync。
+
+### Verification
+
+- `python -m pytest tests/backend/test_api.py -q` → 待执行
+- `python -m pytest -q` / `ruff check . && mypy` → 待执行
+- `cd web/frontend && npm run build` + `python tools/sync_frontend.py` → 待执行
+
+---
+
+## v0.25.2 弹窗层级（z-index / 浮层裁切）系统性修复 (completed)
+
+### User constraints / 约束
+
+- 现象：ChatPanel 齿轮「设置 popover」等浮层被相邻面板盖住 / 在面板边缘被裁切，多处复现。
+- 根因：浮层内联渲染（`position:absolute/fixed` + 散乱 z-index），被祖先 stacking context（`fx-glass` 的 `backdrop-filter`、面板 `transform`/`will-change`、`position:relative+z-index`）与 `overflow:hidden/auto` 关住——单纯调大 z-index 修不好。
+- 修法：统一 z-index 量表（单一真源）+ 浮层 portal 到 `document.body`，复用仓库已有 portal 范式（`TerminalPanel`/`PerfPanel`）。
+- 版本号为 **patch v0.25.2**，未经允许不 bump minor/major。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 统一 z-index 量表**：新增 `web/frontend/lib/zLayers.ts` 导出语义化 `Z`（base/raised/widget/dialog/panel/dropdown/tooltip/toast，单调递增，`dropdown/tooltip > dialog` 以支持嵌套）；`styles/tokens.css` `:root` 同步 `--z-*` CSS 变量，`.flow-custom-select`/`.dir-picker-overlay` 改引用。
+- [x] **Phase 2 - 锚定浮层原语**：新增 `components/ds/Popover.tsx`（headless，`createPortal` 到 body + `getBoundingClientRect` 定位 + scroll/resize 重算 + outside-click/Escape），并入 `ds/index.ts`。
+- [x] **Phase 3 - 锚定型改造**：`ds/Tooltip.tsx`、`ds/Select.tsx`、`ChatPanel` 设置 popover 改用 Popover；移除 Select/ChatPanel 各自重复的 outside-click effect。
+- [x] **Phase 4 - 全屏 modal portal 化**：`ds/Modal.tsx`、`ChatPanel` 精度弹窗、`FilePanel` ×3 统一 `createPortal` 到 body + `Z.dialog`。
+- [x] **Phase 5 - 对齐量表**：`PerfPanel`/`TerminalPanel`/`Toast`/`TopBar`/`BuildWidget`/login 取 `Z.*`。（`Rail.tsx` 未被任何页面引用且无 zIndex，跳过不动死代码。）
+
+### Verification
+
+- `cd web/frontend && node_modules/.bin/tsc --noEmit` → passed（本任务改动文件零错误）。
+- `cd web/frontend && npm run build` → ✓ Compiled successfully（基于本任务改动；随后 sync 162 文件到 `pages/`）。
+- `python tools/sync_frontend.py`（out/ → pages/，未手改 pages/）→ done。
+- ⚠️ 注：之后并行进行中的 v0.25.3（Milvus 进度条）在 `FilePanel.tsx` 引入了 7 个尚未补的 `file_milvus_build_*` i18n key（其 Phase 4 仍 `[ ]`），会使**当前** `tsc`/`npm run build` 失败；该报错全部位于 v0.25.3 新代码，与本任务无关，待其补齐文案后即恢复绿。
+- 手测：齿轮 popover / Select / Tooltip 不再被裁切遮挡；modal 内 Select 盖在 modal 之上；Toast 最顶 → 待用户手测确认。
+
+---
+
+## v0.25.1 Rerank 去模型依赖 + 内容去重 + Answer Verification 闭环 (completed)
+
+### User constraints / 约束
+
+- rerank 默认退到零模型零部署（`provider=noop`）；cross-encoder 改为显式 `cross_encoder` 才下载，不再自动；**不做 MMR**（复用 bge-en embedding 算 relevance 是重复 dense 召回 + 继承语言偏差）。
+- 多路召回的内容重复：同 `chunk_id` 已由 RRF 去重；新增**零模型 `content_hash` 去重**处理「不同 chunk_id 内容相同」。
+- verification 做**完整再检索闭环**（答案不合格→未支撑点当 gap 回 orchestrator 补检→再合成），成为精度主承担者；LLM verify 异常不打崩。
+- 版本号为 **patch v0.25.1**，未经允许不 bump minor/major。
+
+### Technical implementation path
+
+- [x] **Phase 1 - rerank 去模型依赖 + 内容去重**：`RerankConfig.provider` 默认 `noop`、枚举 `{noop, cross_encoder}`（旧 `auto`/`mmr`→`noop`）；`build_reranker` 仅 `cross_encoder` 时懒加载，去掉自动下载；`retrieve_with_outcome` RRF 后按 `content_hash` 去重。技术理由：rerank 在 loop+verification 下降为收敛加速器，精度交给 verification；内容去重避免冗余上下文误导 SEA/verify。
+- [x] **Phase 2 - Answer verification 完整闭环**：新增 `answer_synthesis.py` 共享合成；`DeepThinkingOutcome` 增 `answer`；orchestrator finalize `合成 draft→VERIFY→missing 当 gap 再检索` 循环（`max_verify_rounds` + budget 限）；`DeepThinkingConfig` 增 `verify_enabled`/`max_verify_rounds`；api.ask 优先用 `outcome.answer`。技术理由：答案级闭环让精度由「答案是否被证据支撑」驱动，调整决策10（orchestrator 承担合成）。
+
+### Verification
+
+- `python -m pytest tests/backend/test_reranker.py tests/backend/test_deep_thinking_orchestrator.py tests/backend/test_api.py tests/backend/test_config.py tests/backend/test_retrieval_orchestrator.py -q` → passed，99 passed。
+- `python -m pytest -q`（全量回归）→ passed，340 passed。
+- `ruff check`（新增/改动文件）→ All checks passed；`mypy`（strict `core/domain/`）→ Success, no issues。
+
+---
+
+## v0.25.0 Deep Thinking 迭代检索（FAIR-RAG + Reranker）(completed)
+
+### User constraints / 约束
+
+- `retrieval_mode="deep_thinking"` 手动触发，`collection` 必填；不污染 `default` / `high_precision` / `graph_only`。
+- 不重写 Milvus/SQLite/AstrBot 混合召回内核；只在其上层加 rerank、迭代编排。
+- 不碰 LightRAG；不改 `LLMAdapter` 接口（token 用字符近似估算）。
+- 精度优先：deep thinking 内部不为省钱取舍；但 LLM 不可用/异常必须优雅回退 baseline，绝不打崩请求。
+- 无 `enabled` 双开关：手动 mode 即开关；reranker 单开关 `provider: auto|noop`，缺依赖自动 noop 不影响普通 ask。
+
+### Technical implementation path
+
+- [x] **Phase 1 - Reranker 组件 + RetrievalOutcome 信号扩展**：新增 `core/repository/reranker/`（base ABC + noop + bge_local 可选依赖 + `build_reranker` 工厂）与 `core/utils/cutoff.py`（`adaptive_cutoff` 纯函数）；扩展 `RetrievalOutcome` 旁路字段 `per_chunk_signals`（rrf_score/anchor_hit），不改 RRF 排序与既有 `chunks` 契约。技术理由：reranker 作独立组件供单轮与迭代复用；pinned 结构命中需 `anchor_hit` 信号支撑。
+- [x] **Phase 2 - domain 模型 + 类型化配置 + 治理**：新增 `core/domain/deep_thinking.py`（Checklist/EvidenceItem/RoundTrace/DeepThinkingOutcome，无 answer）；config 新增 `RerankConfig`/`DeepThinkingConfig` + getter；最小暴露 `_conf_schema.json` 与 `CONFIG_KEY_POLICY`。技术理由：checklist 带 `id` 供 SEA 按 id 引用，避免字符串匹配误判。
+- [x] **Phase 3 - DeepThinkingOrchestrator 迭代循环**：新增 `core/pipelines/deep_thinking_orchestrator.py` + `deep_thinking_prompts.py`；baseline 先于 PLAN（无 LLM）、pinned+baseline_floor 保底、conflicting 循环后过滤、LLM 调用异常→degraded 回退 baseline、JSON 不合格按步降级。技术理由：保证「永不比 baseline 差」可判定，LLM 全挂仍优雅降级。
+- [x] **Phase 4 - api.ask 集成 + 组合根装配**：`ask()` 加 deep_thinking 分支（collection 必填校验、复用现有 sources/generate 合成、三态 `actual_mode`、`thinking_trace` 返回）；`plugin_initializer` 装配 reranker + orchestrator 并注入 api。技术理由：合成唯一归 api.ask 杜绝重复合成；向后兼容（新参数默认 None）。
+
+### Verification
+
+- `python -m pytest tests/backend/test_reranker.py tests/backend/test_deep_thinking_orchestrator.py tests/backend/test_config.py tests/backend/test_api.py tests/backend/test_retrieval_orchestrator.py -q` → passed，89 passed。
+- `python -m pytest -q`（全量回归）→ passed，330 passed。
+- `ruff check`（本次新增文件）→ All checks passed；`mypy`（strict 范围 `core/domain/` 含 deep_thinking.py）→ Success, no issues。
+
+---
+
+## v0.24.15 通用论文结构识别与召回优化 (completed)
+
+### User constraints / 约束
+
+- 用户私有样本仅作为例子，结构识别和召回应面向通用论文，不做私有论文专用逻辑。
+- 私密论文标题、正文、`clean.md` 或 chunk 预览不得写入可提交文件；测试只使用合成样例。
+- 保持 `clean_md[start_char:end_char] == chunk.text` offset 不变量。
+
+### Technical implementation path
+
+- [x] **P1 - 收紧标题识别**：降低纯数字、公式编号、表格数字被误判为 `section_heading` 的概率，同时保留 `1 Introduction`、`2.1 Method`、`Appendix A`、References 等通用结构。技术理由：arXiv 复杂版式中数字误判会制造短 chunk 与错误 section metadata。
+- [x] **P2 - 通用锚点 metadata**：为 chunk 保存覆盖范围内的 `anchor_labels`，包含 figure/table/equation/caption label，并补 `section_level`。技术理由：caption 被合并进正文 chunk 后仍应可被结构召回命中。
+- [x] **P3 - 召回 anchor 泛化**：支持 `section 2`、`section 2.1`、`chapter 3`、`第2节`、`appendix A`、`Figure/Table/Eq`；单独数字仍不作为强锚点。技术理由：避免为某一论文体例写死，同时降低页码/公式编号误召回。
+- [x] **P4 - 合成回归与验证**：补通用论文结构 fixture，运行目标后端测试与编译检查，通过后补 CHANGELOG。技术理由：覆盖普通论文标题、图表锚点和误判防线，不暴露私密内容。
+
+### Verification
+
+- `python -m pytest tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py -q` → passed，21 passed / 1 skipped。
+- `python -m pytest tests\backend\test_api.py -q` → passed，38 passed。
+- `python -m compileall core\managers\chunking.py core\pipelines\retrieval_orchestrator.py tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py` → passed。
+- 公开 arXiv smoke（临时目录，不写入仓库）→ `1706.03762`、`1512.03385`、`1602.07261`、`1602.03837` 均无 suspicious numeric heading；Figure/Table anchor probe 可命中；私密论文未写入测试或文档。
+
+---
+
+## v0.24.14 文档面板 chunk 标题渲染 (completed)
+
+### User constraints / 约束
+
+- 前端 chunk 预览需要把 `**T14**`、`**2.** **Title**`、`_2.1._ _Title_` 这类结构标记渲染为标题样式。
+- 标题后的换行正文或同一行正文必须继续显示，不丢内容。
+- 这是纯展示层优化，不改变后端 API、SQLite chunk、Milvus 索引、检索逻辑和 offset 不变量。
+- 不把私密论文标题、正文、`clean.md` 或 chunk 预览写入可提交文件；测试只使用合成样例。
+
+### Technical implementation path
+
+- [x] **P1 - 轻量 parser**：新增纯 TypeScript chunk 文本解析函数，只识别 chunk/段落开头的结构标题。技术理由：避免引入完整 Markdown renderer，也避免正文中的普通 `**bold**` 被误判。
+- [x] **P2 - DocumentsPanel 渲染接入**：用 `ChunkText` 组件替换原始 `{c.text}` 直出，标题用紧凑标签样式，正文保留段落和换行。技术理由：只改 UI 展示，不影响数据层。
+- [x] **P3 - 验证与收口**：用合成样例验证 parser，运行前端 typecheck/build/sync，通过后补充 CHANGELOG。技术理由：保证静态产物与源码一致。
+
+### Verification
+
+- `python -m pytest tests\frontend\test_chunk_text_parser.py -q` → passed，1 passed。
+- `node node_modules/typescript/bin/tsc --noEmit` → passed。
+- `node node_modules/next/dist/bin/next build --webpack` → passed，13 static routes。
+- `python tools\sync_frontend.py` → synced 164 files to `pages/`。
+- `python tools\sync_frontend.py --check` → passed，`pages/` 已与 `web\frontend\out` 一致。
+
+---
+
+## v0.24.13 文档面板 chunk 预览自动刷新 (completed)
+
+### User constraints / 约束
+
+- 前端文档面板应显示当前 structural_v3 chunking，而不是旧 SQLite legacy chunks。
+- 不写入私有论文标题、正文、`clean.md` 或 chunk 预览；测试使用合成数据。
+
+### Technical implementation path
+
+- [x] **P1 - 读接口接入 legacy rebuild**：`list_document_chunks()` 在返回前复用 `chunk_needs_rebuild()` / `rebuild_document_chunks_from_artifact()`。技术理由：文档面板是读 SQLite chunks，不走 Milvus 索引路径，必须在读接口处保证 schema 新鲜。
+- [x] **P2 - chunk context 同步**：`get_chunk_context()` 也先确保 chunks 当前化。技术理由：引用跳转或上下文窗口不能继续围绕旧 chunk id/ordinal 展示。
+- [x] **P3 - runtime seed 对齐**：本地 6521 runtime 播种脚本改为直接生成 structural_v3 chunks 与 `pages.json`。技术理由：mock runtime 之前绕过 IngestManager 手写旧 chunk，导致前端预览仍是旧切片。
+- [x] **P4 - API 回归测试**：补合成测试验证旧 chunk 在前端读取路径会自动替换为新版 chunk。技术理由：避免以后只修索引路径、忘记管理端预览路径。
+
+### Verification
+
+- `python -m pytest tests\backend\test_api.py -q` → passed，38 passed。
+- `python -m pytest tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py -q` → passed，16 passed / 1 skipped。
+- `python -m compileall core\api.py tests\backend\test_api.py` → passed。
+- `python -m py_compile tests\mocks\run_dev_realtime.py` → passed。
+
+---
+
 ## v0.24.12 parent heading chunk 合并修复 (completed)
 
 ### User constraints / 约束
@@ -955,7 +1346,7 @@
 - [x] **Phase 1 后端基础**：新建 `core/capabilities.py`（可选依赖清单 + 唯一 `module_available` + 数据流环节快照 `detect_pipeline`/`detect_capabilities`）；消除 `config.py`、`plugin_initializer.py` 重复的 `_module_available`（改为 import 同一实现，保留模块名兼容既有 monkeypatch）；在 `core/config.py` 建立 `CONFIG_KEY_POLICY` 单一登记表，`api._CONFIG_UPDATE_KEYS`/`_STRUCTURAL_KEYS` 与 `runtime_config._ALLOWED_RUNTIME_KEYS` 改为派生；`r2_sync.enabled`/`notion_sync.enabled`/`source_store.ocr_enabled` 纳入可写（非机密）。
 - [x] **Phase 2 后端接口**：`KnowledgeRepositoryApi` 新增 `get_capabilities`/`list_dependencies`/`install_dependency`/`recheck_dependencies`；`web/server.py` 注册 `/api/capabilities`、`/api/dependencies`、`/api/dependencies/install`、`/api/dependencies/recheck`；安装经 `sys.executable -m pip install`，仅限白名单包（`resolve_install_spec` 防注入），输出逐行转发到日志缓冲（终端日志页可见）。
 - [x] **Phase 3 后端结构**：能力检测/允许键去重收敛（请求 #3 实质）；抽出 `core/api_capabilities.py::CapabilitiesApiMixin`，确立 mixin 拆分范式。
-- [ ] **Phase 3b（deferred 跟进）**：将 `core/api.py`（仍 ~1360 行，超 CONVENTIONS §4 红线）的 documents/retrieval/graph/sync 公共方法进一步拆为 mixin 子门面，并把 `plugin_initializer.initialize()` 分阶段化。理由：该门面耦合密集、被 web/event_handler/测试广泛依赖，宜在独立 session 单独评审与回归；本次优先交付前端可见价值，去重已完成。按 CONVENTIONS §4 以本条登记跟进。
+- [x] **Phase 3b（deferred 跟进）**：将 `core/api.py`（仍 ~1360 行，超 CONVENTIONS §4 红线）的 documents/retrieval/graph/sync 公共方法进一步拆为 mixin 子门面，并把 `plugin_initializer.initialize()` 分阶段化。理由：该门面耦合密集、被 web/event_handler/测试广泛依赖，宜在独立 session 单独评审与回归；本次优先交付前端可见价值，去重已完成。按 CONVENTIONS §4 以本条登记跟进。
 - [x] **Phase 4 前端**：`lib/api.ts` 新增 capabilities/dependencies 类型、客户端与 mock；`lib/i18n.ts` 新增 `nav_flow` + `flow_*` 中英键；`components/rail/Rail.tsx` 新增「数据流」入口；新建 `app/(console)/flow/page.tsx` 数据流流程图（① → ⑦ 节点 + TODO 式状态徽章 + 节点内切换后端 + 切换后果横幅 + 缺失依赖就地安装），数据源为 `/api/capabilities`（取代前端字符串匹配）。
 - [x] **Phase 5 前端**：flow 页内依赖管理面板（安装 / 版本 / 重新检测）+ 终端日志链接 + 安装后「需重启 + Docker 持久化」提示。
 - [x] **Phase 6 前端**：`settings/page.tsx` 精简（移除与 flow 重复的状态概览卡与「基础召回」说明，新增指向 `/flow` 的入口横幅；保留外观与高级字段编辑）。
@@ -1313,11 +1704,11 @@
 
 ### Technical implementation path
 
-- [ ] **Phase 1 — 配置持久化收敛**：为 `RuntimeConfigStore` 增加更清晰的加载/覆盖/写回边界，并预留 AstrBot 原生配置写回适配口；技术理由：v0.8.0 已能回写 `database_id`，但当前落点是 `data_dir/runtime_config.json`，需要把运行时覆盖与框架配置的职责固定下来。
-- [ ] **Phase 2 — Notion schema 与分页健壮性**：补 `query_database` 分页、标准属性存在性检查、缺失属性诊断信息；技术理由：真实 Notion 数据库页数变多或属性被用户改名时，当前 pull/push 需要更清楚地失败或降级。
-- [ ] **Phase 3 — 同步状态可审计性**：增强 Notion init/pull/push 的结果统计与错误消息，保证 `sync_records` 与 API 返回能区分 skipped、failed、schema_missing、remote_missing；技术理由：后续排查同步问题时不能只看泛化 error。
-- [ ] **Phase 4 — 历史 TODO 清理**：修正 v0.1.0 历史残留状态，把已被 v0.2.0+ 覆盖的初始化工作闭环；技术理由：避免后续 agent 误判项目仍卡在初始化阶段。
-- [ ] **Phase 5 — 回归与契约测试补强**：补 Notion 分页、schema 缺失、运行时配置覆盖优先级、错误消息稳定性的单元测试；技术理由：这些优化都在后端内部，不应改变前端端口或现有 UI 使用方式。
+- [x] **Phase 1 — 配置持久化收敛**：为 `RuntimeConfigStore` 增加更清晰的加载/覆盖/写回边界，并预留 AstrBot 原生配置写回适配口；技术理由：v0.8.0 已能回写 `database_id`，但当前落点是 `data_dir/runtime_config.json`，需要把运行时覆盖与框架配置的职责固定下来。
+- [x] **Phase 2 — Notion schema 与分页健壮性**：补 `query_database` 分页、标准属性存在性检查、缺失属性诊断信息；技术理由：真实 Notion 数据库页数变多或属性被用户改名时，当前 pull/push 需要更清楚地失败或降级。
+- [x] **Phase 3 — 同步状态可审计性**：增强 Notion init/pull/push 的结果统计与错误消息，保证 `sync_records` 与 API 返回能区分 skipped、failed、schema_missing、remote_missing；技术理由：后续排查同步问题时不能只看泛化 error。
+- [x] **Phase 4 — 历史 TODO 清理**：修正 v0.1.0 历史残留状态，把已被 v0.2.0+ 覆盖的初始化工作闭环；技术理由：避免后续 agent 误判项目仍卡在初始化阶段。
+- [x] **Phase 5 — 回归与契约测试补强**：补 Notion 分页、schema 缺失、运行时配置覆盖优先级、错误消息稳定性的单元测试；技术理由：这些优化都在后端内部，不应改变前端端口或现有 UI 使用方式。
 
 ### Verification
 

@@ -1,5 +1,7 @@
 "use client";
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
+import { Popover } from "./Popover";
+import { Z } from "@/lib/zLayers";
 
 interface TooltipProps {
   label?: string;
@@ -9,43 +11,35 @@ interface TooltipProps {
 
 export function Tooltip({ label, side = "bottom", children }: TooltipProps) {
   const [show, setShow] = useState(false);
-
-  const pos: React.CSSProperties =
-    side === "bottom"
-      ? { top: "calc(100% + 7px)", left: "50%", transform: "translateX(-50%)" }
-      : side === "left"
-      ? { right: "calc(100% + 7px)", top: "50%", transform: "translateY(-50%)" }
-      : side === "right"
-      ? { left: "calc(100% + 7px)", top: "50%", transform: "translateY(-50%)" }
-      : { bottom: "calc(100% + 7px)", left: "50%", transform: "translateX(-50%)" };
+  const ref = useRef<HTMLSpanElement>(null);
 
   return (
     <span
-      style={{ position: "relative", display: "inline-flex" }}
+      ref={ref}
+      style={{ display: "inline-flex" }}
       onMouseEnter={() => setShow(true)}
       onMouseLeave={() => setShow(false)}
     >
       {children}
-      {show && label && (
-        <span
-          style={{
-            position: "absolute",
-            ...pos,
-            zIndex: 900,
-            whiteSpace: "nowrap",
-            background: "#26272b",
-            color: "#fff",
-            fontSize: 11,
-            fontWeight: 500,
-            padding: "4px 8px",
-            borderRadius: 6,
-            pointerEvents: "none",
-            boxShadow: "0 4px 14px rgba(0,0,0,.22)",
-            letterSpacing: ".01em",
-          }}
-        >
-          {label}
-        </span>
+      {label && (
+        <Popover open={show} anchorRef={ref} side={side} align="center" gap={7} zIndex={Z.tooltip}>
+          <span
+            style={{
+              whiteSpace: "nowrap",
+              background: "#26272b",
+              color: "#fff",
+              fontSize: 11,
+              fontWeight: 500,
+              padding: "4px 8px",
+              borderRadius: 6,
+              pointerEvents: "none",
+              boxShadow: "0 4px 14px rgba(0,0,0,.22)",
+              letterSpacing: ".01em",
+            }}
+          >
+            {label}
+          </span>
+        </Popover>
       )}
     </span>
   );

@@ -689,6 +689,42 @@ async def test_embedding_change_marks_docs_pending_and_rebuilds_incompatible_mil
     assert compatibility.is_milvus_compatible("fp")
 
 
+async def test_rerank_config_update_hot_swaps_deep_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.config import Config
+    from core.repository.reranker.noop import NoopReranker
+
+    class HotSwapProbe:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def update_reranker(self, reranker, rerank_config) -> None:
+            self.calls.append((reranker, rerank_config))
+
+        @property
+        def reranker_status(self) -> dict:
+            if not self.calls:
+                return NoopReranker().status
+            return self.calls[-1][0].status
+
+    monkeypatch.setattr("core.repository.reranker._has_sentence_transformers", lambda: False)
+    probe = HotSwapProbe()
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"rerank": {"provider": "noop"}}),
+        deep_thinking_orchestrator=probe,  # type: ignore[arg-type]
+    )
+
+    result = await api.update_config_value("rerank", "provider", "cross_encoder")
+
+    assert result["restart_required"] is False
+    assert result["rebuild_required"] is False
+    assert len(probe.calls) == 1
+    reranker, rerank_cfg = probe.calls[0]
+    assert isinstance(reranker, NoopReranker)
+    assert rerank_cfg.provider == "cross_encoder"
+
+
 async def test_vector_db_sync_and_rebuild(tmp_path: Path) -> None:
     """测试在 milvus 模式下
     rebuild_vector_store、delete_document 和 delete_collection 的联动一致性。

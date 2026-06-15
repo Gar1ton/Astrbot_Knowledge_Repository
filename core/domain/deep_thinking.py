@@ -94,7 +94,10 @@ class DeepThinkingOutcome:
     # verification 启用时由 orchestrator 合成并校验后产出；否则 None，由 api.ask 合成。
     answer: str | None = None
     verified: bool = False
+    # 硬缺失（臆造/矛盾/跨来源错配/关键项未满足）——驱动正文告警与 verified=False。
     verify_missing: list[str] = field(default_factory=list)
+    # 软项（部分支持·有据推断 + 信息缺口）——仅入「思考过程」展示，不堆告警墙。
+    verify_notes: list[str] = field(default_factory=list)
     degraded_reason: str = ""  # 降级原因；空字符串表示未降级
 
 

@@ -44,6 +44,7 @@ class CapabilitiesApiMixin:
         data = detect_capabilities(self._config)
         await self._overlay_milvus_runtime_health(data)
         self._overlay_zotero_availability(data)
+        self._overlay_reranker_runtime_status(data)
         return data
 
     def list_dependencies(self) -> list[dict[str, Any]]:
@@ -60,7 +61,32 @@ class CapabilitiesApiMixin:
         data = detect_capabilities(self._config)
         await self._overlay_milvus_runtime_health(data)
         self._overlay_zotero_availability(data)
+        self._overlay_reranker_runtime_status(data)
         return data
+
+    def _overlay_reranker_runtime_status(self, data: dict[str, Any]) -> None:
+        orchestrator = getattr(self, "_deep_thinking_orchestrator", None)
+        if orchestrator is None:
+            return
+        status = getattr(orchestrator, "reranker_status", None)
+        if status is None:
+            return
+        for stage in data.get("pipeline", []):
+            if not isinstance(stage, dict) or stage.get("id") != "ask":
+                continue
+            detail = stage.setdefault("detail", {})
+            if not isinstance(detail, dict):
+                detail = {}
+                stage["detail"] = detail
+            detail["rerank_runtime"] = status
+            detail["rerank_status"] = status.get("status", detail.get("rerank_status"))
+            if status.get("model"):
+                detail["rerank_model"] = status.get("model")
+            if status.get("provider"):
+                detail["rerank_provider"] = status.get("provider")
+            if status.get("status") == "failed":
+                stage["status"] = "degraded"
+            return
 
     def _overlay_zotero_availability(self, data: dict[str, Any]) -> None:
         """若 Zotero 已启用但数据目录探针未就绪，将状态降为 degraded（黄色）。"""

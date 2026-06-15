@@ -28,6 +28,7 @@ ENV_EMBEDDING_API_KEY = "KR_EMBEDDING_API_KEY"
 ENV_LIGHTRAG_LLM_API_KEY = "KR_LIGHTRAG_LLM_API_KEY"
 ENV_DEEP_THINKING_LLM_API_KEY = "KR_DEEP_THINKING_LLM_API_KEY"
 ENV_ZOTERO_API_KEY = "KR_ZOTERO_API_KEY"
+DEFAULT_RERANK_MODEL = "Alibaba-NLP/gte-reranker-modernbert-base"
 
 
 def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
@@ -190,8 +191,8 @@ class AskAgentConfig:
 class RerankConfig:
     """Cross-encoder 重排器配置。单一开关 provider（无 enabled 双开关）。"""
 
-    provider: str = "noop"  # noop（默认，不重排）| cross_encoder（显式启用本地模型）
-    model: str = "BAAI/bge-reranker-v2-m3"
+    provider: str = "auto"  # auto（有 sentence-transformers 则启用）| noop | cross_encoder
+    model: str = DEFAULT_RERANK_MODEL
     device: str = "auto"
     batch_size: int = 32
     max_candidates: int = 30
@@ -218,7 +219,7 @@ class DeepThinkingConfig:
     verify_evidence_clip: int = 1500
     # per-aspect 排序：以每个 sub_query 的 rrf_score 为主信号，rerank 仅作可调加成；
     # 默认 0 = 纯 rrf（契合「未引入 rerank 模型」，无模型时不退化为候选插入顺序）。
-    rerank_weight: float = 0.0
+    rerank_weight: float = 0.2
     deep_keep: int = 12  # 每轮 rerank+cutoff 保留上限（deep 专用，不动共享 RerankConfig.keep）。
     # 开放式发现护栏：每轮新增 aspect 上限与累计上限，防止 checklist 无限膨胀、循环不收敛。
     max_discovered_per_round: int = 3
@@ -306,6 +307,8 @@ class Config:
         vector_db = self.get_vector_db_config()
         embedding = self.get_embedding_config()
         ask = self.get_ask_agent_config()
+        rerank = self.get_rerank_config()
+        deep_thinking = self.get_deep_thinking_config()
         zotero = self.get_zotero_sync_config()
         return {
             "source_store": {
@@ -364,6 +367,17 @@ class Config:
             },
             "ask": {
                 "conversation_enhancement_mode": ask.conversation_enhancement_mode,
+            },
+            "rerank": {
+                "provider": rerank.provider,
+                "model": rerank.model,
+                "device": rerank.device,
+                "batch_size": rerank.batch_size,
+                "max_candidates": rerank.max_candidates,
+                "keep": rerank.keep,
+            },
+            "deep_thinking": {
+                "rerank_weight": deep_thinking.rerank_weight,
             },
             "zotero_sync": {
                 "enabled": zotero.enabled,
@@ -620,10 +634,17 @@ class Config:
     def get_rerank_config(self) -> RerankConfig:
         s = _section(self.raw, "rerank")
         provider = str(s.get("provider", RerankConfig.provider)).strip().lower()
-        if provider in {"auto", "mmr"}:  # 历史值归一：不再自动下载 cross-encoder，不做 MMR。
+        if provider == "auto":
+            # auto（默认或显式均同义）：装了 sentence-transformers 即启用本地 cross-encoder，
+            # 否则回退 noop。不再因「key 是否显式写入」而区别对待，避免持久化为 "auto" 后被误关。
+            provider = (
+                "cross_encoder" if _module_available("sentence_transformers") else "noop"
+            )
+        elif provider == "mmr":
+            # 历史值归一：不做 MMR provider，显式旧值保持关闭。
             provider = "noop"
         if provider not in {"noop", "cross_encoder"}:
-            provider = RerankConfig.provider
+            provider = "noop"
         return RerankConfig(
             provider=provider,
             model=str(s.get("model", RerankConfig.model)),
@@ -776,8 +797,8 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "llm_model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
     },
     "rerank": {
-        "provider": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
-        "model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "provider": ConfigKeyPolicy(True, True),
+        "model": ConfigKeyPolicy(True, True),
     },
 }
 

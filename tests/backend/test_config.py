@@ -221,11 +221,12 @@ def test_runtime_config_store_permits_vector_db_and_ask_keys(tmp_path: Path) -> 
 
 
 # ── Deep Thinking / Rerank config ───────────────────────────
-def test_deep_thinking_and_rerank_defaults() -> None:
+def test_deep_thinking_and_rerank_defaults_without_st(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("core.config._module_available", lambda name: False)
     cfg = Config({})
     r = cfg.get_rerank_config()
     assert r.provider == "noop"
-    assert r.model == "BAAI/bge-reranker-v2-m3"
+    assert r.model == "Alibaba-NLP/gte-reranker-modernbert-base"
     assert r.keep == 8
     d = cfg.get_deep_thinking_config()
     assert d.max_rounds == 4
@@ -235,10 +236,30 @@ def test_deep_thinking_and_rerank_defaults() -> None:
     # v0.25.9 新增字段默认值。
     assert d.sea_evidence_clip == 700
     assert d.verify_evidence_clip == 1500
-    assert d.rerank_weight == 0.0
+    assert d.rerank_weight == 0.2
     assert d.deep_keep == 12
     assert d.max_discovered_per_round == 3
     assert d.max_discovered_total == 8
+
+
+def test_rerank_default_auto_enables_cross_encoder_with_st(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "core.config._module_available",
+        lambda name: name == "sentence_transformers",
+    )
+    r = Config({}).get_rerank_config()
+    assert r.provider == "cross_encoder"
+    assert r.model == "Alibaba-NLP/gte-reranker-modernbert-base"
+
+
+def test_explicit_rerank_noop_stays_disabled_with_st(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "core.config._module_available",
+        lambda name: name == "sentence_transformers",
+    )
+    assert Config({"rerank": {"provider": "noop"}}).get_rerank_config().provider == "noop"
 
 
 def test_rerank_provider_falls_back_on_invalid() -> None:
@@ -246,9 +267,19 @@ def test_rerank_provider_falls_back_on_invalid() -> None:
     assert cfg.get_rerank_config().provider == "noop"
 
 
-def test_rerank_legacy_provider_normalized_to_noop() -> None:
-    """历史值 auto/mmr 归一到 noop（不再自动下载 cross-encoder、不做 MMR）。"""
+def test_rerank_explicit_auto_resolves_like_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """显式写入的 provider:"auto" 与缺省同义：装了 ST → cross_encoder，否则 noop。"""
+    monkeypatch.setattr(
+        "core.config._module_available",
+        lambda name: name == "sentence_transformers",
+    )
+    assert Config({"rerank": {"provider": "auto"}}).get_rerank_config().provider == "cross_encoder"
+    monkeypatch.setattr("core.config._module_available", lambda name: False)
     assert Config({"rerank": {"provider": "auto"}}).get_rerank_config().provider == "noop"
+
+
+def test_rerank_legacy_mmr_normalized_to_noop() -> None:
+    """历史值 mmr 归一到 noop（不再做 MMR provider）。"""
     assert Config({"rerank": {"provider": "mmr"}}).get_rerank_config().provider == "noop"
 
 

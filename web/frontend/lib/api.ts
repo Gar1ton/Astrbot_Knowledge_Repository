@@ -86,6 +86,8 @@ export interface EffectiveConfig {
   web_console?: Record<string, unknown>;
   graph?: Record<string, unknown>;
   ask?: Record<string, unknown>;
+  rerank?: Record<string, unknown>;
+  deep_thinking?: Record<string, unknown>;
   vector_db?: Record<string, unknown>;
   embedding?: Record<string, unknown>;
   zotero_sync?: Record<string, unknown>;
@@ -283,7 +285,8 @@ export interface ThinkingTrace {
   degraded: boolean;
   degraded_reason?: string;
   verified: boolean;
-  verify_missing: string[];
+  verify_missing: string[]; // 硬缺失（臆造/矛盾/错配/关键项未满足）
+  verify_notes?: string[]; // 软项（部分支持·有据推断 + 信息缺口）
   est_total_tokens: number;
   checklist: ThinkingChecklistItem[];
   rounds: ThinkingRound[];
@@ -507,6 +510,8 @@ const MOCK_CONFIG: EffectiveConfig = {
   web_console: { enabled: true, host: "0.0.0.0", port: 6520, username: "admin", password: "****" },
   graph: { enabled: false, query_mode: "mix", llm_max_async: 4, embedding_max_async: 8, working_dir: "lightrag_workspaces", max_doc_chars: 30000, lightrag_llm_provider: "main", lightrag_llm_base_url: "", lightrag_llm_model: "", lightrag_llm_timeout_seconds: 900 },
   ask: { conversation_enhancement_mode: "inject" },
+  rerank: { provider: "cross_encoder", model: "Alibaba-NLP/gte-reranker-modernbert-base", device: "auto", batch_size: 32, max_candidates: 30, keep: 12 },
+  deep_thinking: { rerank_weight: 0.2 },
   vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true },
   embedding: { provider: "local", model: "intfloat/multilingual-e5-small", base_url: "https://api.openai.com/v1", max_token_size: 512, actual_dimension: 384, api_key: "" },
   zotero_sync: { enabled: false, access_mode: "local", zotero_data_dir: "", resolved_data_dir: "", api_port: 23119, storage_mode: "managed_copy", linked_root: "", sync_mode: "conservative", auto_sync_enabled: false, auto_sync_interval_sec: 3600, server_key_present: false, server_key_masked: "" },
@@ -788,6 +793,26 @@ function applyMockConfigUpdate(section: string, key: string, value: unknown): vo
 
   if (section === "ask" && key === "conversation_enhancement_mode" && ask) {
     ask.current = String(value);
+  }
+
+  if (section === "rerank" && ask) {
+    if (key === "provider") {
+      const provider = String(value);
+      ask.detail.rerank_provider = provider;
+      ask.detail.rerank_status = provider === "noop" ? "off" : "idle";
+      ask.detail.rerank_runtime = {
+        provider,
+        status: provider === "noop" ? "off" : "idle",
+        model: MOCK_CONFIG.rerank?.model,
+        enabled: provider !== "noop",
+        last_error: null,
+      };
+    }
+    if (key === "model") {
+      ask.detail.rerank_model = value;
+      const runtime = ask.detail.rerank_runtime as Record<string, unknown> | undefined;
+      if (runtime) runtime.model = value;
+    }
   }
 
   if (section === "graph" && graph) {
@@ -1242,6 +1267,31 @@ export async function ask(opts: {
   });
 }
 
+// deep thinking 实时进度：检索/校验进行中轮询时携带的逐轮增量 trace（与最终 thinking_trace 同形）。
+export interface LiveProgressDetail {
+  phase: string; // "plan" | "round" | "finalize"
+  checklist: ThinkingChecklistItem[];
+  rounds: ThinkingRound[];
+}
+
+export interface AskProgress {
+  stage: string;
+  pct: number;
+  detail?: LiveProgressDetail;
+}
+
+/** 轮询单次 ask 进度；无进度（404）或网络抖动时返回 null，不打断调用方的轮询循环。 */
+export async function getAskProgress(conversationId: string): Promise<AskProgress | null> {
+  if (isMock()) return null;
+  try {
+    return await apiFetch<AskProgress>(
+      `/api/ask/progress/${encodeURIComponent(conversationId)}`
+    );
+  } catch {
+    return null;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 // 图谱统计 & 性能指标
 // ─────────────────────────────────────────────────────────────
@@ -1381,7 +1431,7 @@ export interface InstallResult {
 }
 
 const MOCK_DEPENDENCIES: DependencyStatus[] = [
-  { key: "local_embedding", import_name: "sentence_transformers", dist_name: "sentence-transformers", pip_spec: "sentence-transformers>=3,<6", feature: "local_embedding", stages: ["embedding"], required: false, installed: true, version: "3.0.1" },
+  { key: "local_embedding", import_name: "sentence_transformers", dist_name: "sentence-transformers", pip_spec: "sentence-transformers>=3,<6", feature: "local_embedding", stages: ["embedding", "ask"], required: false, installed: true, version: "3.0.1" },
   { key: "milvus", import_name: "pymilvus", dist_name: "pymilvus", pip_spec: "pymilvus[milvus_lite]>=2.5,<3.0", feature: "milvus", stages: ["vector_store", "retrieval"], required: true, installed: true, version: "2.5.0" },
   { key: "lightrag", import_name: "lightrag", dist_name: "lightrag-hku", pip_spec: "lightrag-hku>=1.5.0rc1,<2.0.0", feature: "lightrag", stages: ["graph"], required: false, installed: false, version: null },
   { key: "r2", import_name: "boto3", dist_name: "boto3", pip_spec: "boto3", feature: "r2", stages: ["sync"], required: false, installed: false, version: null },
@@ -1395,7 +1445,7 @@ const MOCK_CAPABILITIES: CapabilitiesData = {
     { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true, astrbot_locked: true, compatible: true, rebuild_required: false, pending_reindex_count: 0, document_count: 0, chunk_count: 0, reason: "" } },
     { id: "retrieval", current: "rrf_fusion", candidates: ["rrf_fusion"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { engines: ["milvus", "sqlite_lexical"] } },
     { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix", llm_provider: "main", llm_model: "", llm_label: "<main - AstrBot main LLM>" } },
-    { id: "ask", current: "inject", candidates: ["inject", "query_agent"], status: "ready", switchable: true, consequence: "none", required_deps: [], configured: true, detail: {} },
+    { id: "ask", current: "inject", candidates: ["inject", "query_agent"], status: "ready", switchable: true, consequence: "none", required_deps: [], configured: true, detail: { rerank_provider: "cross_encoder", rerank_model: "Alibaba-NLP/gte-reranker-modernbert-base", rerank_status: "idle", rerank_dependency_ready: true, rerank_runtime: { provider: "cross_encoder", status: "idle", model: "Alibaba-NLP/gte-reranker-modernbert-base", enabled: true, last_error: null } } },
     { id: "sync", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { r2_enabled: false, notion_enabled: false } },
   ],
   dependencies: MOCK_DEPENDENCIES,

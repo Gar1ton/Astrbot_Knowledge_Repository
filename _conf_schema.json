@@ -380,8 +380,8 @@
       "rerank_weight": {
         "description": "重排器权重（0~1）",
         "type": "float",
-        "default": 0,
-        "hint": "深挖排序以每个子查询的检索分(rrf)为主信号。未引入本地 cross-encoder 重排模型时保持 0（纯 rrf）；引入后可调高让重排参与混合排序"
+        "default": 0.2,
+        "hint": "深挖排序以每个子查询的检索分(rrf)为主信号。无真实本地 cross-encoder 时会自动退回纯 rrf；有模型时默认用少量重排分参与混合排序"
       },
       "verify_enabled": {
         "description": "启用答案级校验闭环",
@@ -423,18 +423,19 @@
       "provider": {
         "description": "重排器后端",
         "type": "string",
-        "default": "noop",
+        "default": "auto",
         "options": [
+          "auto",
           "noop",
           "cross_encoder"
         ],
-        "hint": "noop（推荐）：不重排，零模型零部署，精度交给 deep thinking 的 verification；cross_encoder：本地 cross-encoder，需安装 sentence-transformers 且首次使用下载模型"
+        "hint": "auto：未显式配置时安装 sentence-transformers 即启用本地 cross-encoder，否则 noop；noop：显式关闭；cross_encoder：本地 cross-encoder，首次 Deep Thinking 使用时下载/加载模型"
       },
       "model": {
         "description": "本地 cross-encoder 模型",
         "type": "string",
-        "default": "BAAI/bge-reranker-v2-m3",
-        "hint": "首次使用会下载模型。CPU 部署建议改用更小的 BAAI/bge-reranker-base"
+        "default": "Alibaba-NLP/gte-reranker-modernbert-base",
+        "hint": "首次 Deep Thinking 使用时下载模型。AB test 可改为 BAAI/bge-reranker-v2-m3"
       }
     }
   }

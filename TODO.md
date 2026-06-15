@@ -44,6 +44,50 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.25.13 Deep Thinking 召回整合 + 实时进度 + 并行提速 + 瘦身 (completed)
+
+### User constraints / 约束
+
+- 召回修复用「新增部分支持层级」：允许带 hedge 的有据推断进答案，只有真无证据/矛盾/跨来源张冠李戴才计入告警与降级。
+- 实时进度走轮询，复用现有 `ProgressStore` + `/api/ask/progress/{cid}`，体积最小。
+- 耗时优化仅并行子查询检索、不减轮（保留 4 轮深度，不改语义）。
+- 最终答案与「思考过程」区块格式保持与现状一致（仅告警前缀措辞更诚实）。
+- 版本只 patch（v0.25.12 → v0.25.13）。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 召回质量（A）**：`_SYNTH_SYSTEM_DEEP` 加「有据推断」档；VERIFY prompt/`VerifyResult`/`parse_verify` 三档化（硬=unsupported+citation_mismatch+contradiction，软=partial+info_gap，不再拍平进单一 missing）；orchestrator `verify_missing` 只取硬项、新增 `verify_notes` 软项；`_deep_warning_prefix` 按硬项计数、无硬项仅软项时温和提示；序列化与 `ThinkingTraceView` 硬/软分行。理由：根除「部分可支持→全盘否定」与「74 项虚高」。
+- [x] **Phase 2 - 代码瘦身（D）**：新建 `core/pipelines/deep_thinking_evidence.py`（`rank_candidates`/`select_final_evidence`）与 `deep_thinking_view.py`（`live_detail`/`serialize_outcome`，实时进度与最终 trace 共用序列化），orchestrator 降到 600 行红线内。理由：满足 CONVENTIONS §4 单文件红线 + 单一职责。
+- [x] **Phase 3 - 调用提速（C）**：`_gather_round` 子查询检索改 `asyncio.gather` 并发，去重/合并不变。理由：纯提速、不改语义、不减轮。
+- [x] **Phase 4 - 实时进度（B）**：`ProgressStore.set/get` 增可选 `detail`；orchestrator `progress` 回调扩为带 detail 并逐轮增量推送（形状复用 round 结构）；前端预生成 `conversation_id` + 轮询 `getAskProgress` 增量渲染，返回后替换为最终 trace。理由：让推演过程逐轮可见、最终格式不变。
+
+### Verification
+
+- [x] `python -m pytest tests/backend -q` → 390 passed（含新增 `test_progress_pushes_incremental_round_detail`、`test_detail_roundtrip_and_optional`、`parse_verify` 三档用例）。
+- [x] `ruff check`（新增/改动文件全通过；剩余 E501/F401 为未触及区域既有债务）、`mypy` → domain 3 文件 0 issue；orchestrator = 600 行（红线内）。
+- [x] `npx tsc --noEmit` exit 0；`npm run build` exit 0；`python tools/sync_frontend.py` 同步 360 文件。
+
+## v0.25.12 本地 rerank 模型集成与 AB Test (completed)
+
+### User constraints / 约束
+
+- 只在 Deep Thinking 路径启用 rerank，普通 Ask / high_precision 不变。
+- 不新增依赖包，复用现有可选依赖 sentence-transformers。
+- 未安装 sentence-transformers 时保持 noop；安装后缺省自动启用 gte-reranker-modernbert-base。
+- 数据流 Ask 节点开关与模型选择需要即时生效，支持 AB test。
+- tests/mocks/run_dev_realtime.py 同步兼容默认 GTE rerank 与开关对照。
+
+### Technical implementation path
+
+- ✅ **Phase 1 - 后端默认与热应用**：调整 RerankConfig 默认模型、provider 自动解析、Deep Thinking reranker 热替换与状态暴露。
+- ✅ **Phase 2 - 数据流 UI**：在 Ask 快速配置中增加 rerank 开关、模型配置与状态提示，复用现有 flow-quick 样式。
+- ✅ **Phase 3 - realtime 与测试**：更新 realtime mock 配置入口、补充后端/前端 mock 测试并跑聚焦验证。
+
+### Verification
+
+- ✅ `python -m pytest tests/backend/test_config.py tests/backend/test_reranker.py tests/backend/test_deep_thinking_orchestrator.py tests/backend/test_capabilities.py tests/backend/test_api.py -q`（140 passed）。
+- ✅ `node node_modules/next/dist/bin/next build --webpack`（Windows 下 `npm run build` 被 PowerShell 执行策略与 Unix `rm` 阻断，已用等价 Next build 入口验证）。
+
 ## v0.25.11 Deep Thinking 可靠性小步优化 (completed)
 
 ### User constraints / 约束

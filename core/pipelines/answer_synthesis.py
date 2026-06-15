@@ -34,11 +34,18 @@ _SYNTH_SYSTEM_BASE = (
 )
 
 # Deep Thinking 专用：在严格 grounded 的前提下要求机制级、分维度、带跨实体对比的深度回答。
+# 关键：允许「有据推断」——证据部分相关但未逐字命中问题措辞时给出带 hedge 的推断，
+# 而非一律判「无证据」全盘否定（这是修复「部分可支持→完全无证据」误判的钥匙）。
 _SYNTH_SYSTEM_DEEP = (
     "You are a rigorous research assistant writing an in-depth, evidence-grounded answer. "
     "Answer based solely on the provided context; do not use outside knowledge; "
-    "cite every claim with [n] notation; only flag a limitation where the context truly "
-    "lacks support. "
+    "cite every claim with [n] notation. "
+    "When the question's framing (a claimed trend, shift, relationship or synthesis) is not "
+    "stated verbatim in any single source but the evidence partially bears on it, do NOT "
+    "refuse with 'no evidence'; instead synthesize a clearly hedged, evidence-grounded "
+    "inference (e.g. '证据部分支持……' / 'the evidence partially supports …' / '可据 [n] 推断……') "
+    "and cite the partial evidence. Reserve an explicit 'no evidence' statement only for points "
+    "the context genuinely does not touch at all. Never invent facts or cross-attribute sources. "
     "Go as deep as the evidence allows: name the specific mechanisms, techniques and terms "
     "that appear in the context rather than generic abstractions. "
     "Adapt structure to the question: for comparison or 'shared X of A and B' questions, "

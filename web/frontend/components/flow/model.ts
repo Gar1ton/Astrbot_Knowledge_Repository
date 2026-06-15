@@ -153,6 +153,12 @@ const BACKEND_LABEL_ZH: Record<string, string> = {
   off: "关闭",
   inject: "原生注入",
   query_agent: "内部代理",
+  cross_encoder: "本地 Rerank",
+  noop: "关闭 Rerank",
+  idle: "待首次使用",
+  loading: "加载中",
+  ready: "已就绪",
+  failed: "加载失败",
   rrf_fusion: "RRF",
   sqlite: "SQLite",
   sqlite_lexical: "SQLite",
@@ -174,6 +180,12 @@ const BACKEND_LABEL_EN: Record<string, string> = {
   off: "Off",
   inject: "Inject",
   query_agent: "Query Agent",
+  cross_encoder: "Local Rerank",
+  noop: "Rerank Off",
+  idle: "Idle",
+  loading: "Loading",
+  ready: "Ready",
+  failed: "Failed",
   rrf_fusion: "RRF",
   sqlite: "SQLite",
   sqlite_lexical: "SQLite",
@@ -201,11 +213,19 @@ export function buildDetailParts(stage: PipelineStage, lang: Lang, flowEnginesLa
   const pending = stage.detail.pending_reindex_count;
   const docs = stage.detail.document_count;
   const chunks = stage.detail.chunk_count;
+  const rerankModel = stage.detail.rerank_model;
+  const rerankStatus = stage.detail.rerank_status;
 
   if (typeof model === "string" && model) parts.push(model);
   if (typeof dim === "number" || typeof dim === "string") parts.push(`${dim}d`);
   if (stage.id === "retrieval" && Array.isArray(engines) && engines.length > 0) {
     parts.push(`${flowEnginesLabel} ${engines.map((e) => backendLabel(String(e), lang)).join(" + ")}`);
+  }
+  if (stage.id === "ask") {
+    if (typeof rerankStatus === "string" && rerankStatus) {
+      parts.push(lang === "zh" ? `Rerank ${backendLabel(rerankStatus, lang)}` : `Rerank ${backendLabel(rerankStatus, lang)}`);
+    }
+    if (typeof rerankModel === "string" && rerankModel) parts.push(rerankModel);
   }
   if (stage.id === "vector_store") {
     if (typeof docs === "number") parts.push(lang === "zh" ? `${docs} 文档` : `${docs} docs`);

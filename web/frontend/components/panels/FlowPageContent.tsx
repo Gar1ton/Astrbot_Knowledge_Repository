@@ -36,6 +36,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(false);
   const refreshInFlight = useRef(false);
+  const rerankStatusRef = useRef<string | null>(null);
 
   const refreshFlow = useCallback(async () => {
     if (refreshInFlight.current) return;
@@ -47,6 +48,22 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
         getZoteroConfig(),
       ]);
       if (!mountedRef.current) return;
+      const askStage = freshCaps.pipeline.find((stage) => stage.id === "ask");
+      const runtime = askStage?.detail?.rerank_runtime as Record<string, unknown> | undefined;
+      const status = String(runtime?.status ?? askStage?.detail?.rerank_status ?? "");
+      const model = String(runtime?.model ?? askStage?.detail?.rerank_model ?? "");
+      const error = String(runtime?.last_error ?? "");
+      const nextRerankKey = status ? `${status}:${model}:${error}` : null;
+      if (
+        rerankStatusRef.current &&
+        nextRerankKey &&
+        nextRerankKey !== rerankStatusRef.current
+      ) {
+        if (status === "loading") toast(t("flow_rerank_loading"), "info");
+        else if (status === "ready") toast(t("flow_rerank_ready"), "ok");
+        else if (status === "failed") toast(`${t("flow_rerank_failed")}${error ? `: ${error}` : ""}`, "error");
+      }
+      rerankStatusRef.current = nextRerankKey;
       setCaps(freshCaps);
       setConfig({
         ...freshConfig,
@@ -58,7 +75,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
     } finally {
       refreshInFlight.current = false;
     }
-  }, []);
+  }, [t, toast]);
 
   useEffect(() => {
     mountedRef.current = true;

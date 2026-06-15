@@ -10,7 +10,7 @@ export type QuickConfigValue = string | number | boolean;
 export type QuickConfigValues = Record<string, string | boolean>;
 export type QuickConfigUpdate = { section: string; key: string; value: QuickConfigValue };
 
-export type ConfigSection = "source_store" | "r2_sync" | "notion_sync" | "graph" | "vector_db" | "embedding" | "zotero_sync";
+export type ConfigSection = "source_store" | "r2_sync" | "notion_sync" | "graph" | "vector_db" | "embedding" | "zotero_sync" | "rerank";
 
 export const ZOTERO_SYNC_MODES = ["strict_mirror", "conservative", "archive"];
 export const ZOTERO_STORAGE_MODES = ["managed_copy", "linked"];
@@ -37,6 +37,7 @@ type QuickConfigModel = {
 };
 
 const QUERY_MODES = ["mix", "local", "global", "hybrid", "naive", "bypass"];
+const RERANK_PROVIDERS = ["cross_encoder", "noop"];
 
 function fieldId(section: ConfigSection, key: string): string {
   return `${section}.${key}`;
@@ -171,6 +172,42 @@ function buildQuickConfig(stage: PipelineStage, config: FlowConfigSnapshot): Qui
     return { fields, hints };
   }
 
+  if (id === "ask") {
+    fields.push(
+      selectField(
+        "rerank",
+        "provider",
+        "flow_quick_rerank_provider",
+        readString(config, "rerank", "provider", stageStringDetail(stage, "rerank_provider", "noop")),
+        RERANK_PROVIDERS,
+        false,
+        "flow_quick_rerank_provider_help",
+      ),
+    );
+    fields.push(
+      textField(
+        "rerank",
+        "model",
+        "flow_quick_rerank_model",
+        readString(config, "rerank", "model", stageStringDetail(stage, "rerank_model", "Alibaba-NLP/gte-reranker-modernbert-base")),
+        true,
+        false,
+        "flow_quick_rerank_model_help",
+      ),
+    );
+    fields.push(
+      readonlyField(
+        "rerank",
+        "runtime_status",
+        "flow_quick_rerank_status",
+        stageStringDetail(stage, "rerank_status", "off"),
+        true,
+      ),
+    );
+    hints.push("flow_quick_rerank_hint");
+    return { fields, hints };
+  }
+
   if (id === "sync") {
     fields.push(booleanField("r2_sync", "enabled", "flow_quick_r2_enabled", readBoolean(config, "r2_sync", "enabled", false)));
     fields.push(booleanField("notion_sync", "enabled", "flow_quick_notion_enabled", readBoolean(config, "notion_sync", "enabled", false)));
@@ -286,11 +323,16 @@ export function FieldControl({
   onBrowseDir?: () => void;
 }) {
   if (field.kind === "readonly") {
-    const display = String(value) || t("flow_value_empty");
+    const raw = String(value);
+    const display = raw
+      ? field.id === "rerank.runtime_status"
+        ? backendLabel(raw, lang)
+        : raw
+      : t("flow_value_empty");
     return (
       <div
-        className={`flow-quick-readonly ${String(value) ? "" : "is-empty"}`}
-        title={String(value) || undefined}
+        className={`flow-quick-readonly ${raw ? "" : "is-empty"}`}
+        title={raw || undefined}
       >
         {display}
       </div>

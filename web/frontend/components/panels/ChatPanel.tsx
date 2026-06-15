@@ -16,6 +16,7 @@ import {
   ChatMessage, ask, buildGraph, estimateGraphBuild,
   listCollections, getChatHistory, clearChatHistory, lockChatAnswer,
   createDocumentNote, createCollectionNote,
+  getAskProgress, type LiveProgressDetail,
 } from "@/lib/api";
 
 // ─── Types ────────────────────────────────────────────────────
@@ -182,11 +183,70 @@ function ThinkingTraceView({
               {t("chat_thinking_missing")}: {trace.verify_missing.join(" · ")}
             </div>
           )}
+          {trace.verify_notes && trace.verify_notes.length > 0 && (
+            <div style={{ color: "var(--fg-muted)", marginBottom: 4 }}>
+              {t("chat_thinking_notes")}: {trace.verify_notes.join(" · ")}
+            </div>
+          )}
           <div style={{ color: "var(--fg-subtle)" }}>
             {t("chat_thinking_tokens", { n: trace.est_total_tokens })}
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// 深度思考进行中的实时推演视图：随轮询逐轮出现，复用与最终 ThinkingTraceView 一致的行布局。
+function LiveThinkingView({
+  detail,
+  t,
+}: {
+  detail: LiveProgressDetail;
+  t: (key: I18nKey, vars?: Record<string, string | number>) => string;
+}) {
+  return (
+    <div style={{ fontSize: 11, lineHeight: 1.65, color: "var(--fg-muted)", flex: 1 }}>
+      {detail.checklist.length > 0 && (
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ fontWeight: 600, color: "var(--fg-subtle)", marginBottom: 2 }}>
+            {t("chat_thinking_checklist")}
+          </div>
+          {detail.checklist.map((item) => (
+            <div key={item.id} style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
+              <span style={{ color: item.satisfied ? "var(--ok)" : "var(--fg-subtle)" }}>
+                {item.satisfied ? "✓" : "○"}
+              </span>
+              <span style={{ color: "var(--fg)" }}>
+                {item.text}
+                {item.critical && <span style={{ color: "var(--warn)", marginLeft: 4 }}>*</span>}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {detail.rounds.map((r) => (
+        <div key={r.round} style={{ marginBottom: 5 }}>
+          <div style={{ fontWeight: 600, color: "var(--fg-subtle)" }}>
+            {t("chat_thinking_round", { n: r.round })}
+          </div>
+          {r.queries.length > 0 && (
+            <div>
+              {t("chat_thinking_queries")}: {r.queries.join(" · ")}
+            </div>
+          )}
+          {r.gaps.length > 0 && (
+            <div>
+              {t("chat_thinking_gaps")}: {r.gaps.join(" · ")}
+            </div>
+          )}
+          {r.discovered && r.discovered.length > 0 && (
+            <div style={{ color: "var(--ok)" }}>
+              ✦ {t("chat_thinking_discovered")}: {r.discovered.join(" · ")}
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -590,6 +650,9 @@ export function ChatPanel({ width }: { width?: number }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // 深度思考进行中的实时推演详情（轮询 /api/ask/progress 增量更新）。
+  const [liveProgress, setLiveProgress] = useState<LiveProgressDetail | null>(null);
+  const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("default");
   const [personaEnabled, setPersonaEnabled] = useState(false);
   const [useEnglishRetrieval, setUseEnglishRetrieval] = useState(true);
@@ -598,6 +661,14 @@ export function ChatPanel({ width }: { width?: number }) {
   const [precisionDialog, setPrecisionDialog] = useState<PrecisionDialogState | null>(null);
 
   const graphModeReady = Boolean(collectionName && localCollections.includes(collectionName));
+
+  // 卸载时兜底清除轮询定时器，避免组件被销毁后仍在轮询。
+  useEffect(
+    () => () => {
+      if (liveTimerRef.current) clearInterval(liveTimerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     listCollections()
@@ -705,13 +776,33 @@ export function ChatPanel({ width }: { width?: number }) {
       setMessages((prev) => [...prev, { role: "user", content: question }]);
     }
     setLoading(true);
+    // 预生成 conversation_id：首条消息时前端也能在请求进行中轮询进度（否则拿不到 cid 无法轮询）。
+    const cid =
+      conversationId ??
+      (typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `conv-${Date.now()}`);
+    // deep thinking 才有逐轮 detail；进行中每 ~600ms 轮询，把增量 trace 渲染为实时推演视图。
+    setLiveProgress(null);
+    if (mode === "deep_thinking") {
+      liveTimerRef.current = setInterval(async () => {
+        const p = await getAskProgress(cid);
+        if (p?.detail) setLiveProgress(p.detail);
+      }, 600);
+    }
+    const stopPolling = () => {
+      if (liveTimerRef.current) {
+        clearInterval(liveTimerRef.current);
+        liveTimerRef.current = null;
+      }
+    };
     try {
       const result: AskResult = await ask({
         question,
         collection: collectionName ?? null,
         doc_id: mode === "fulltext" ? selectedDocId : null,
         top_k: 5,
-        conversation_id: conversationId,
+        conversation_id: cid,
         persona_enabled: personaEnabled,
         retrieval_mode: mode,
         use_english_retrieval: useEnglishRetrieval,
@@ -746,6 +837,8 @@ export function ChatPanel({ width }: { width?: number }) {
         toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
       }
     } finally {
+      stopPolling();
+      setLiveProgress(null);
       setLoading(false);
     }
   }
@@ -869,7 +962,7 @@ export function ChatPanel({ width }: { width?: number }) {
               padding: "6px 0",
               color: "var(--fg-muted)",
               fontSize: 12,
-              alignItems: "center",
+              alignItems: "flex-start",
             }}
           >
             <span
@@ -881,9 +974,13 @@ export function ChatPanel({ width }: { width?: number }) {
                 borderRadius: "50%",
                 animation: "spin 0.6s linear infinite",
                 flexShrink: 0,
+                marginTop: 1,
               }}
             />
-            {t("ask_thinking")}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ marginBottom: liveProgress ? 6 : 0 }}>{t("ask_thinking")}</div>
+              {liveProgress && <LiveThinkingView detail={liveProgress} t={t} />}
+            </div>
           </div>
         )}
       </div>

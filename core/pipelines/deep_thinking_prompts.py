@@ -46,6 +46,15 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+def _dedup(items: list[str]) -> list[str]:
+    """保序去重非空字符串。"""
+    out: list[str] = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
 # ── 通用 JSON 抽取 ──────────────────────────────────────────
 def extract_json_object(raw: str) -> dict[str, Any]:
     """从 LLM 原始输出中抽取首个 JSON 对象。
@@ -337,25 +346,48 @@ def parse_refine(raw: str) -> list[str]:
     return queries
 
 
-# ── VERIFY：答案级 verification（response scoring）─────────────
+# ── VERIFY：答案级 verification（三档支持度 response scoring）──
+# 三档：supported（直接支撑）/ partial（部分支持·有据推断，软项不阻塞）/
+# unsupported（臆造·矛盾·跨来源张冠李戴，硬违规）。只有硬违规计入告警与降级，
+# partial/info_gap 仅供透明展示——根除「部分可支持→全盘否定 + 告警墙」。
 VERIFY_SYSTEM = (
-    "你是答案校验助手。逐条审计答案中的断言是否被证据和引用支撑，检查遗漏、"
-    "引用错配、证据外断言和矛盾。每条证据都标注了来源文档（来源），"
-    "若某断言把某来源文档的发现/方法/局限归到了另一来源（跨来源张冠李戴），"
-    "一律计入 citation_mismatches。missing 应输出可直接补检的短句；citation_mismatches 必须写明"
-    "「断言 X 引用了 [n]，但 [n] 属于 Y 来源/不支持该断言」。只输出 JSON，不要任何额外文字。"
+    "你是答案校验助手。逐条审计答案中的断言，区分三档支持度："
+    "supported（被证据直接支撑）、partial（证据部分支持或可据证据合理推断、但未被直接断言；"
+    "只要答案对其用了明确的 hedge 措辞即视为允许保留，不算违规）、"
+    "unsupported（证据完全未触及的臆造、与证据矛盾、或跨来源张冠李戴）。"
+    "每条证据都标注了来源文档（来源）：若某断言把某来源文档的发现/方法/局限归到了另一来源，"
+    "一律计入 citation_mismatches。"
+    "supported 为整体判据：仅当不存在任何 "
+    "unsupported_claims/contradictions/citation_mismatches 时才为 true"
+    "（partial 不影响 supported）。只输出 JSON，不要任何额外文字。"
 )
 
 
 @dataclass
 class VerifyResult:
+    """答案校验结果。硬项（违规，阻塞）与软项（透明展示，不阻塞）严格分离。
+
+    hard_missing = 三类硬违规之和（计入告警/触发未通过）；
+    soft_notes = partial_claims + info_gaps（仅入思考过程，不堆告警墙、不全盘否定）。
+    """
+
     supported: bool = False
     complete: bool = False
-    missing: list[str] = field(default_factory=list)
+    # 硬违规（阻塞）。
     unsupported_claims: list[str] = field(default_factory=list)
-    missing_citations: list[str] = field(default_factory=list)
     citation_mismatches: list[str] = field(default_factory=list)
     contradictions: list[str] = field(default_factory=list)
+    # 软项（不阻塞）：partial_claims=有据推断；info_gaps=仍缺、可作补检 query 的信息点。
+    partial_claims: list[str] = field(default_factory=list)
+    info_gaps: list[str] = field(default_factory=list)
+
+    @property
+    def hard_missing(self) -> list[str]:
+        return _dedup(self.unsupported_claims + self.citation_mismatches + self.contradictions)
+
+    @property
+    def soft_notes(self) -> list[str]:
+        return _dedup(self.partial_claims + self.info_gaps)
 
 
 def build_verify_prompt(
@@ -373,43 +405,46 @@ def build_verify_prompt(
         f"问题：{question}\n\n"
         f"答案：\n{answer}\n\n"
         f"证据（每条前缀为编号）：\n{evidence_lines or '（空）'}\n\n"
-        '请输出 JSON：{"supported":true,"complete":true,"missing":[],'
-        '"unsupported_claims":[],"missing_citations":[],"citation_mismatches":[],'
-        '"contradictions":[]}\n'
-        "supported：答案的每个断言是否都能在证据中找到支撑（有任何证据外断言/幻觉则 false）；"
-        "complete：是否完整回答了问题；missing：仍缺失或未被证据支撑的点（用于补充检索）；"
-        "unsupported_claims 逐条列出无证据支撑的答案断言；"
-        "missing_citations 列出需要引用但没有引用的断言；"
-        "citation_mismatches 列出引用编号与证据不匹配的断言，格式应说明断言、引用编号和该编号实际来源；"
-        "missing 里的每项都应能直接作为下一轮补检 query；contradictions 列出与证据冲突的断言。"
+        '请输出 JSON：{"supported":true,"complete":true,'
+        '"unsupported_claims":[],"citation_mismatches":[],"contradictions":[],'
+        '"partial_claims":[],"info_gaps":[]}\n'
+        "supported：是否不存在任何臆造/矛盾/跨来源错配（partial 不影响 supported）；"
+        "complete：是否完整回答了问题；"
+        "unsupported_claims 逐条列出证据完全不支撑的臆造断言；"
+        "contradictions 列出与证据冲突的断言；"
+        "citation_mismatches 列出引用编号与证据不匹配的断言，"
+        "格式应说明断言、引用编号和该编号实际来源；"
+        "partial_claims 列出『证据部分支持/可据证据合理推断、答案已用 hedge 措辞』的断言"
+        "（允许保留，不要塞进 unsupported_claims）；"
+        "info_gaps 列出仍缺、可直接作为下一轮补检 query 的信息点；"
+        "把『主题相关但不能直接证实』的断言归入 partial_claims 而非 unsupported_claims。"
     )
 
 
 def parse_verify(raw: str) -> VerifyResult:
-    """解析 VERIFY 输出。缺 supported/complete → JsonContractError（核心判据必须有）。"""
+    """解析 VERIFY 输出。缺 supported/complete → JsonContractError（核心判据必须有）。
+
+    向后兼容旧契约：旧字段 `missing` 视为 info_gaps，`missing_citations` 并入 citation_mismatches。
+    """
     obj = extract_json_object(raw)
     if "supported" not in obj or "complete" not in obj:
         raise JsonContractError("missing 'supported'/'complete'")
-    missing: list[str] = []
-    for entry in obj.get("missing", []) or []:
+    info_gaps: list[str] = []
+    for entry in obj.get("info_gaps", obj.get("missing", [])) or []:
         text = str(entry.get("text", "")).strip() if isinstance(entry, dict) else str(entry).strip()
         if text:
-            missing.append(text)
-    unsupported_claims = _str_list(obj.get("unsupported_claims"))
-    missing_citations = _str_list(obj.get("missing_citations"))
-    citation_mismatches = _str_list(obj.get("citation_mismatches"))
-    contradictions = _str_list(obj.get("contradictions"))
-    for text in unsupported_claims + missing_citations + citation_mismatches + contradictions:
-        if text and text not in missing:
-            missing.append(text)
+            info_gaps.append(text)
+    citation_mismatches = _dedup(
+        _str_list(obj.get("citation_mismatches")) + _str_list(obj.get("missing_citations"))
+    )
     return VerifyResult(
         supported=bool(obj.get("supported", False)),
         complete=bool(obj.get("complete", False)),
-        missing=missing,
-        unsupported_claims=unsupported_claims,
-        missing_citations=missing_citations,
+        unsupported_claims=_str_list(obj.get("unsupported_claims")),
         citation_mismatches=citation_mismatches,
-        contradictions=contradictions,
+        contradictions=_str_list(obj.get("contradictions")),
+        partial_claims=_str_list(obj.get("partial_claims")),
+        info_gaps=_dedup(info_gaps),
     )
 
 

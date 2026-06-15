@@ -17,6 +17,11 @@
     Embedding 有两种选择：
         EMBEDDING_PROVIDER = "local"    → sentence_transformers 本地运行，无需 key
         EMBEDDING_PROVIDER = "external" → 云端 API（OpenAI 兼容），需填入 API 配置
+
+    Rerank（Deep Thinking 专用）：
+        默认不写 RERANK_PROVIDER；安装 sentence-transformers 后自动使用
+        Alibaba-NLP/gte-reranker-modernbert-base。AB test 关闭可设置
+        RERANK_PROVIDER = "noop"。
 """
 
 # ── 主 LLM（答案生成，必填）────────────────────────────────────────
@@ -59,3 +64,12 @@ EMBEDDING_LOCAL_MODEL = "intfloat/multilingual-e5-small"  # dim=384
 EMBEDDING_API_KEY = "sk-your-key-here"
 EMBEDDING_MODEL = "text-embedding-v3"
 EMBEDDING_API_URL = "https://api.openai.com/v1"
+
+# ── Deep Thinking Rerank（可选，AB test 用）───────────────────────
+# 不设置 RERANK_PROVIDER 时：安装 sentence-transformers 后默认启用本地 cross-encoder；
+# 未安装时自动 noop，不影响启动。显式 "noop" 会保持关闭。
+# RERANK_PROVIDER = "noop"
+# RERANK_PROVIDER = "cross_encoder"
+RERANK_MODEL = "Alibaba-NLP/gte-reranker-modernbert-base"
+# 也可切换：RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+DEEP_THINKING_RERANK_WEIGHT = 0.2

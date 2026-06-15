@@ -32,6 +32,7 @@ def _stage(pipeline: list[dict], stage_id: str) -> dict:
 
 def _patch_modules(monkeypatch: pytest.MonkeyPatch, available: set[str]) -> None:
     monkeypatch.setattr("core.capabilities.module_available", lambda name: name in available)
+    monkeypatch.setattr("core.config._module_available", lambda name: name in available)
 
 
 # ── 安装白名单 ────────────────────────────────────────────────────
@@ -56,6 +57,7 @@ def test_dependency_statuses_cover_all_optional(monkeypatch: pytest.MonkeyPatch)
     }
     assert next(d for d in deps if d["key"] == "milvus")["required"] is True
     assert next(d for d in deps if d["key"] == "lightrag")["required"] is False
+    assert "ask" in next(d for d in deps if d["key"] == "local_embedding")["stages"]
     assert all(d["installed"] is False for d in deps)
 
 
@@ -130,3 +132,33 @@ def test_sync_off_when_no_target_enabled(monkeypatch: pytest.MonkeyPatch) -> Non
     _patch_modules(monkeypatch, {"sentence_transformers"})
     sync = _stage(detect_pipeline(_cfg(dim=384)), "sync")
     assert sync["status"] == STATUS_OFF
+
+
+def test_ask_rerank_detail_ready_when_st_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_modules(monkeypatch, {"sentence_transformers"})
+    ask = _stage(detect_pipeline(_cfg(dim=384)), "ask")
+    assert ask["detail"]["rerank_provider"] == "cross_encoder"
+    assert ask["detail"]["rerank_model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
+    assert ask["detail"]["rerank_status"] == STATUS_READY
+    assert ask["detail"]["rerank_dependency_ready"] is True
+
+
+def test_ask_rerank_detail_off_when_no_st(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_modules(monkeypatch, set())
+    ask = _stage(detect_pipeline(_cfg(dim=384)), "ask")
+    assert ask["detail"]["rerank_provider"] == "noop"
+    assert ask["detail"]["rerank_status"] == STATUS_OFF
+    assert ask["required_deps"] == []
+
+
+def test_ask_rerank_degraded_when_explicit_cross_encoder_without_st(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_modules(monkeypatch, set())
+    ask = _stage(
+        detect_pipeline(_cfg({"rerank": {"provider": "cross_encoder"}}, dim=384)),
+        "ask",
+    )
+    assert ask["status"] == STATUS_DEGRADED
+    assert ask["detail"]["rerank_provider"] == "cross_encoder"
+    assert "local_embedding" in ask["required_deps"]

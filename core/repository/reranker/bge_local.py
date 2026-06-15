@@ -52,11 +52,23 @@ class CrossEncoderReranker(Reranker):
         self._max_candidates = max_candidates
         self._model: Any = None
         self._disabled = False
+        self._state = "idle"
+        self._last_error: str | None = None
 
     @property
     def is_passthrough(self) -> bool:
         # 加载/推理失败后永久退化为按序（_disabled=True），此时视为 passthrough。
         return self._disabled
+
+    @property
+    def status(self) -> dict[str, str | bool | None]:
+        return {
+            "provider": "cross_encoder",
+            "status": self._state,
+            "model": self._model_name,
+            "enabled": not self._disabled,
+            "last_error": self._last_error,
+        }
 
     def _ensure_model(self) -> None:
         if self._model is None:
@@ -73,7 +85,11 @@ class CrossEncoderReranker(Reranker):
         if self._disabled:
             return _passthrough(pool, top_n)
         try:
+            if self._model is None:
+                self._state = "loading"
             await asyncio.to_thread(self._ensure_model)
+            self._state = "ready"
+            self._last_error = None
             pairs = [(query, chunk.text) for chunk in pool]
             scores = await asyncio.to_thread(
                 self._model.predict, pairs, batch_size=self._batch_size
@@ -81,6 +97,8 @@ class CrossEncoderReranker(Reranker):
         except Exception as exc:  # 加载/推理失败 → 永久退化为按序，不抛崩 deep thinking。
             logger.warning("CrossEncoder rerank failed, fallback to input order: %s", exc)
             self._disabled = True
+            self._state = "failed"
+            self._last_error = str(exc)
             return _passthrough(pool, top_n)
         scored = [
             ScoredChunk(chunk=chunk, score=float(score))

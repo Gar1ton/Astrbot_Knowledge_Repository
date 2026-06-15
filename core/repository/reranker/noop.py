@@ -20,6 +20,16 @@ class NoopReranker(Reranker):
     def is_passthrough(self) -> bool:
         return True
 
+    @property
+    def status(self) -> dict[str, str | bool | None]:
+        return {
+            "provider": "noop",
+            "status": "off",
+            "model": None,
+            "enabled": False,
+            "last_error": None,
+        }
+
     async def rerank(
         self, query: str, candidates: list[DocumentChunk], *, top_n: int | None = None
     ) -> list[ScoredChunk]:

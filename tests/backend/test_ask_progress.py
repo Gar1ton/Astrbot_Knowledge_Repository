@@ -59,3 +59,15 @@ def test_done_stage():
     result = store.get("cid-done")
     assert result is not None
     assert result["pct"] == 100
+
+
+def test_detail_roundtrip_and_optional():
+    store = ProgressStore()
+    # 不带 detail 时返回结构保持向后兼容（无 detail 键）。
+    store.set("c", "deep_baseline", 10)
+    assert store.get("c") == {"stage": "deep_baseline", "pct": 10}
+    # 带 detail 时透传逐轮增量 trace。
+    detail = {"phase": "round", "checklist": [], "rounds": [{"round": 1, "gaps": ["缺X"]}]}
+    store.set("c", "deep_round_1", 45, detail)
+    result = store.get("c")
+    assert result == {"stage": "deep_round_1", "pct": 45, "detail": detail}

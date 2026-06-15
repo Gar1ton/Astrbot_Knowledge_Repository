@@ -21,33 +21,44 @@ class ProgressStore:
     def __init__(self) -> None:
         self._store: dict[str, dict[str, Any]] = {}
 
-    def set(self, conversation_id: str, stage: str, pct: int) -> None:
+    def set(
+        self,
+        conversation_id: str,
+        stage: str,
+        pct: int,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
         """更新进度。
 
         Args:
             conversation_id: 对话 ID（与 ask() 返回的 conversation_id 一致）。
             stage: 阶段标识，如 "embed_query", "vector_search", "llm_generate", "done"。
             pct: 完成百分比（0–100）。
+            detail: 可选的结构化进度详情（如 deep thinking 的逐轮增量 trace），
+                供前端实时渲染推演过程；None 时不携带（向后兼容）。
         """
-        self._store[conversation_id] = {
+        entry: dict[str, Any] = {
             "stage": stage,
             "pct": pct,
             "updated_at": time.time(),
         }
+        if detail is not None:
+            entry["detail"] = detail
+        self._store[conversation_id] = entry
         self._gc()
 
     def get(self, conversation_id: str) -> dict[str, Any] | None:
-        """获取进度，不存在时返回 None。"""
+        """获取进度，不存在时返回 None。detail 仅在曾写入时出现（向后兼容）。"""
         entry = self._store.get(conversation_id)
         if entry is None:
             return None
         if time.time() - entry["updated_at"] > TTL_SEC:
             del self._store[conversation_id]
             return None
-        return {
-            "stage": entry["stage"],
-            "pct": entry["pct"],
-        }
+        result: dict[str, Any] = {"stage": entry["stage"], "pct": entry["pct"]}
+        if "detail" in entry:
+            result["detail"] = entry["detail"]
+        return result
 
     def _gc(self) -> None:
         """清除超时记录。"""

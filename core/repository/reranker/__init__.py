@@ -17,6 +17,7 @@ logger = logging.getLogger("Reranker")
 # ── provider 常量（杜绝魔法字面量）─────────────────────────────
 PROVIDER_NOOP = "noop"
 PROVIDER_CROSS_ENCODER = "cross_encoder"
+DEFAULT_RERANK_MODEL = "Alibaba-NLP/gte-reranker-modernbert-base"
 
 
 def _has_sentence_transformers() -> bool:
@@ -27,7 +28,7 @@ def _has_sentence_transformers() -> bool:
 def build_reranker(
     *,
     provider: str = PROVIDER_NOOP,
-    model: str = "BAAI/bge-reranker-v2-m3",
+    model: str = DEFAULT_RERANK_MODEL,
     device: str = "auto",
     batch_size: int = 32,
     max_candidates: int = 30,
@@ -57,4 +58,5 @@ __all__ = [
     "build_reranker",
     "PROVIDER_NOOP",
     "PROVIDER_CROSS_ENCODER",
+    "DEFAULT_RERANK_MODEL",
 ]

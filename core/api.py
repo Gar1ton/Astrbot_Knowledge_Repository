@@ -65,36 +65,14 @@ def _build_scope(scope_type: str, scope_key: str, scope_library_id: str) -> Retr
 
 
 def _serialize_deep_thinking(outcome: Any) -> dict:
-    """把 DeepThinkingOutcome 序列化为前端可渲染的「思考过程」字典（含清单/逐轮 gaps）。"""
-    return {
-        "degraded": outcome.degraded,
-        "degraded_reason": outcome.degraded_reason,
-        "verified": outcome.verified,
-        "verify_missing": outcome.verify_missing,
-        "est_total_tokens": outcome.est_total_tokens,
-        "checklist": [
-            {
-                "id": i.id,
-                "text": i.text,
-                "critical": i.critical,
-                "satisfied": i.satisfied,
-                "origin": i.origin,
-            }
-            for i in outcome.checklist.items
-        ],
-        "rounds": [
-            {
-                "round": r.round,
-                "queries": r.queries,
-                "gaps": r.gaps,
-                "discovered": r.discovered,
-                "kept_chunk_ids": r.kept_chunk_ids,
-                "llm_calls": r.llm_calls,
-                "est_tokens": r.est_tokens,
-            }
-            for r in outcome.trace
-        ],
-    }
+    """把 DeepThinkingOutcome 序列化为前端可渲染的「思考过程」字典。
+
+    与 orchestrator 实时进度的 live_detail 共用 deep_thinking_view 的底层序列化，
+    从根上保证「实时进度格式 == 最终 thinking_trace 格式」。
+    """
+    from core.pipelines.deep_thinking_view import serialize_outcome
+
+    return serialize_outcome(outcome)
 
 
 def _uses_chinese(text: str) -> bool:
@@ -118,13 +96,29 @@ def _deep_warning_prefix(outcome: Any, answer_language: str, question: str) -> s
             "**Note: Deep Thinking found insufficient evidence and fell back to baseline evidence.**"
             f"{reason_part} The answer below is limited to the currently retrieved passages and may be incomplete.\n\n"
         )
-    if getattr(outcome, "verified", False):
-        return ""
     missing = [
         str(item).strip()
         for item in (getattr(outcome, "verify_missing", []) or [])
         if str(item).strip()
     ]
+    notes = [
+        str(item).strip()
+        for item in (getattr(outcome, "verify_notes", []) or [])
+        if str(item).strip()
+    ]
+    if getattr(outcome, "verified", False):
+        # 通过校验：含「有据推断」软项时给一行温和说明（不报数字、不全盘否定）；否则无前缀。
+        if not notes:
+            return ""
+        if zh:
+            return (
+                "**提示：部分结论为基于证据的有限推断，已在文中标注。** "
+                "详见下方「思考过程」。\n\n"
+            )
+        return (
+            "**Note: Some conclusions are limited, evidence-grounded inferences "
+            "(flagged inline).** See “Thinking process” below.\n\n"
+        )
     if zh:
         if missing:
             return (
@@ -1253,9 +1247,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         cid = conversation_id or uuid.uuid4().hex
         ask_start = time.monotonic()
 
-        def _progress(stage: str, pct: int) -> None:
+        def _progress(stage: str, pct: int, detail: dict | None = None) -> None:
             if self._progress_store is not None:
-                self._progress_store.set(cid, stage, pct)
+                self._progress_store.set(cid, stage, pct, detail)
 
         def _record(op: str, t0: float, **meta: object) -> None:
             if self._metrics is not None:
@@ -1778,6 +1772,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             raise ValueError("embedding.provider must be 'local' or 'external'.")
         if section == "vector_db" and key == "backend" and value not in {"milvus", "astr"}:
             raise ValueError("vector_db.backend must be 'milvus' or 'astr'.")
+        if section == "rerank" and key == "provider" and value not in {"cross_encoder", "noop"}:
+            raise ValueError("rerank.provider must be 'cross_encoder' or 'noop'.")
 
         changed = self._current_config_value(section, key) != value
         self._persist_config_value(section, key, value)
@@ -1788,6 +1784,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             await self._invalidate_embedding_indexes(
                 f"Configuration changed: {section}.{key}"
             )
+        if changed and section == "rerank":
+            self._apply_rerank_runtime_config()
 
         logger.info("update_config ok: %s.%s persisted", section, key)
         return {
@@ -2556,6 +2554,26 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         if self._config_persist is not None:
             self._config_persist(section, key, value)
 
+    def _apply_rerank_runtime_config(self) -> None:
+        if self._config is None or self._deep_thinking_orchestrator is None:
+            return
+        from core.repository.reranker import build_reranker
+
+        rerank_cfg = self._config.get_rerank_config()
+        reranker = build_reranker(
+            provider=rerank_cfg.provider,
+            model=rerank_cfg.model,
+            device=rerank_cfg.device,
+            batch_size=rerank_cfg.batch_size,
+            max_candidates=rerank_cfg.max_candidates,
+        )
+        self._deep_thinking_orchestrator.update_reranker(reranker, rerank_cfg)
+        logger.info(
+            "reranker hot-swapped: provider=%s model=%s",
+            rerank_cfg.provider,
+            rerank_cfg.model,
+        )
+
     def _current_config_value(self, section: str, key: str) -> object | None:
         if self._config is None:
             return None
@@ -2563,6 +2581,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "vector_db": self._config.get_vector_db_config,
             "embedding": self._config.get_embedding_config,
             "ask": self._config.get_ask_agent_config,
+            "rerank": self._config.get_rerank_config,
             "graph": self._config.get_graph_config,
             "r2_sync": self._config.get_r2_sync_config,
             "notion_sync": self._config.get_notion_sync_config,

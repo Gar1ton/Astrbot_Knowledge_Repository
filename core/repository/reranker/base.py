@@ -38,6 +38,17 @@ class Reranker(ABC):
         """
         return False
 
+    @property
+    def status(self) -> dict[str, str | bool | None]:
+        """返回运行态快照，供数据流面板展示；实现不得触发模型加载。"""
+        return {
+            "provider": "unknown",
+            "status": "ready",
+            "model": None,
+            "enabled": not self.is_passthrough,
+            "last_error": None,
+        }
+
     @abstractmethod
     async def rerank(
         self, query: str, candidates: list[DocumentChunk], *, top_n: int | None = None

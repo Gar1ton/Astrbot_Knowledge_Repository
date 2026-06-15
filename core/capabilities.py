@@ -81,7 +81,7 @@ OPTIONAL_DEPENDENCIES: tuple[OptionalDependency, ...] = (
         dist_name="sentence-transformers",
         pip_spec="sentence-transformers>=3,<6",
         feature="local_embedding",
-        stages=("embedding",),
+        stages=("embedding", "ask"),
     ),
     OptionalDependency(
         key="milvus",
@@ -185,6 +185,7 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
     vdb_cfg = config.get_vector_db_config()
     graph_cfg = config.get_graph_config()
     ask_cfg = config.get_ask_agent_config()
+    rerank_cfg = config.get_rerank_config()
     r2_cfg = config.get_r2_sync_config()
     notion_cfg = config.get_notion_sync_config()
 
@@ -336,17 +337,29 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         },
     }
 
-    # ⑥ 问答模式：纯配置，无依赖，即时生效。
+    # ⑥ 问答模式：普通 Ask 配置即时生效；rerank 仅供 Deep Thinking 路径使用。
+    rerank_enabled = rerank_cfg.provider == "cross_encoder"
+    rerank_ready = rerank_enabled and has_local
+    rerank_status = (
+        STATUS_OFF
+        if not rerank_enabled
+        else (STATUS_READY if rerank_ready else STATUS_DEGRADED)
+    )
     ask = {
         "id": "ask",
         "current": ask_cfg.conversation_enhancement_mode,
         "candidates": ["inject", "query_agent"],
-        "status": STATUS_READY,
+        "status": STATUS_DEGRADED if rerank_enabled and not has_local else STATUS_READY,
         "switchable": True,
         "consequence": CONSEQUENCE_NONE,
-        "required_deps": [],
+        "required_deps": ["local_embedding"] if rerank_enabled and not has_local else [],
         "configured": True,
-        "detail": {},
+        "detail": {
+            "rerank_provider": rerank_cfg.provider,
+            "rerank_model": rerank_cfg.model,
+            "rerank_status": rerank_status,
+            "rerank_dependency_ready": has_local,
+        },
     }
 
     # ⑦ 同步：R2 需 boto3 + 凭证（密钥走 env）；Notion 经 MCP。启用为非机密开关，需重启。

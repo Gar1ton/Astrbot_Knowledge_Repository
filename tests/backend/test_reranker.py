@@ -43,6 +43,13 @@ async def test_noop_empty():
     assert await NoopReranker().rerank("q", []) == []
 
 
+def test_noop_status_reports_off():
+    status = NoopReranker().status
+    assert status["provider"] == "noop"
+    assert status["status"] == "off"
+    assert status["enabled"] is False
+
+
 # ── adaptive_cutoff ─────────────────────────────────────────
 def _scored(scores: list[float]) -> list[ScoredChunk]:
     return [ScoredChunk(chunk=_chunk(f"c{i}"), score=s) for i, s in enumerate(scores)]
@@ -96,3 +103,24 @@ def test_build_cross_encoder_lazy_when_dep_present(monkeypatch):
     reranker = build_reranker(provider=PROVIDER_CROSS_ENCODER)
     assert isinstance(reranker, CrossEncoderReranker)
     assert reranker._model is None  # 懒加载：构造时尚未加载模型。
+    assert reranker.status["status"] == "idle"
+    assert reranker.status["model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
+
+
+@pytest.mark.asyncio
+async def test_cross_encoder_failure_sets_failed_status(monkeypatch):
+    from core.repository.reranker.bge_local import CrossEncoderReranker
+
+    reranker = CrossEncoderReranker(model="missing-model")
+    monkeypatch.setattr(
+        reranker,
+        "_ensure_model",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    out = await reranker.rerank("q", [_chunk("c1")])
+
+    assert [item.chunk.chunk_id for item in out] == ["c1"]
+    assert reranker.status["status"] == "failed"
+    assert reranker.status["last_error"] == "boom"
+    assert reranker.is_passthrough is True

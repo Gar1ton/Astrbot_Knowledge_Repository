@@ -11,6 +11,7 @@ import pytest
 from core.config import DeepThinkingConfig, RerankConfig
 from core.domain.deep_thinking import Checklist, ChecklistItem, EvidenceItem
 from core.domain.models import DocumentChunk
+from core.pipelines.deep_thinking_evidence import select_final_evidence
 from core.pipelines.deep_thinking_orchestrator import DeepThinkingOrchestrator
 from core.pipelines.deep_thinking_prompts import (
     build_plan_prompt,
@@ -162,21 +163,35 @@ def test_parse_sea_coverage_matrix_derives_legacy_fields():
     assert sea.coverage[1].confidence == 0.4
 
 
-def test_parse_verify_claim_level_issues_merge_into_missing():
+def test_parse_verify_splits_hard_and_soft():
+    # 旧契约向后兼容：missing→info_gaps（软）；missing_citations→并入 citation_mismatches（硬）。
     result = parse_verify(VERIFY_CLAIM_BAD)
     assert result.supported is False
     assert result.complete is False
     assert result.unsupported_claims == ["断言A无证据"]
-    assert result.missing_citations == ["断言B缺引用"]
-    assert result.citation_mismatches == ["[2]不支持断言C"]
+    assert result.citation_mismatches == ["[2]不支持断言C", "断言B缺引用"]
     assert result.contradictions == ["断言D与证据冲突"]
-    assert result.missing == [
-        "缺少背景",
+    assert result.info_gaps == ["缺少背景"]
+    # 硬项（违规）进告警；软项（信息缺口）仅供展示，不堆告警墙。
+    assert result.hard_missing == [
         "断言A无证据",
-        "断言B缺引用",
         "[2]不支持断言C",
+        "断言B缺引用",
         "断言D与证据冲突",
     ]
+    assert result.soft_notes == ["缺少背景"]
+
+
+def test_parse_verify_three_tier_partial_is_soft():
+    raw = (
+        '{"supported":true,"complete":true,"unsupported_claims":[],'
+        '"citation_mismatches":[],"contradictions":[],'
+        '"partial_claims":["范式转变为有据推断"],"info_gaps":["缺X定义"]}'
+    )
+    result = parse_verify(raw)
+    assert result.supported is True
+    assert result.hard_missing == []
+    assert result.soft_notes == ["范式转变为有据推断", "缺X定义"]
 
 
 def test_prompt_contracts_include_reliability_constraints():
@@ -290,12 +305,31 @@ async def test_sufficient_with_unmet_critical_refines_instead_of_converging():
 
 
 @pytest.mark.asyncio
+async def test_progress_pushes_incremental_round_detail():
+    outcome = _outcome([_chunk("c1"), _chunk("c2")])
+    events: list[tuple[str, int, dict | None]] = []
+    orch = _make(outcome, [PLAN_1ITEM, SEA_SUFFICIENT])
+    await orch.run(
+        "papers",
+        "综述",
+        progress=lambda stage, pct, detail: events.append((stage, pct, detail)),
+    )
+    # PLAN 后推送带 checklist 的 detail；某轮 SEA 后推送带 rounds 的增量 trace。
+    plan_details = [d for s, _, d in events if s == "deep_plan" and d]
+    assert plan_details and plan_details[0]["checklist"]
+    round_details = [d for s, _, d in events if s.startswith("deep_round") and d]
+    assert round_details and round_details[-1]["rounds"][0]["round"] == 1
+
+
+@pytest.mark.asyncio
 async def test_explicit_gaps_return_partial_evidence_without_degrade():
     outcome = _outcome([_chunk("c1"), _chunk("c2")])
     orch = _make(outcome, [PLAN_1ITEM, SEA_ONE_ITEM_MULTI_GAPS])
     result = await orch.run("papers", "综述问题")
     assert result.degraded is False
-    assert result.verify_missing == ["缺定义", "缺原文"]
+    # 非关键 SEA gap 不再进正文告警，改入软项 verify_notes（仅供「思考过程」展示）。
+    assert result.verify_missing == []
+    assert result.verify_notes == ["缺定义", "缺原文"]
     assert result.degraded_reason == ""
 
 
@@ -384,9 +418,8 @@ def test_compute_final_interleaves_documents_within_same_role():
         chunk.chunk_id: EvidenceItem(chunk, "rerank_score", 1.0 / (i + 1))
         for i, chunk in enumerate(chunks)
     }
-    orch = _make(_outcome([]), [PLAN_1ITEM, SEA_SUFFICIENT], max_final_evidence=4)
 
-    final = orch._compute_final(evidence, set(), set())
+    final = select_final_evidence(evidence, set(), set(), max_final_evidence=4)
 
     assert [chunk.doc_id for chunk in final] == ["docA", "docB", "docC", "docA"]
 
@@ -398,9 +431,8 @@ def test_compute_final_keeps_structural_anchor_before_doc_interleaving():
         anchor.chunk_id: EvidenceItem(anchor, "structural_anchor", 0.1),
         other.chunk_id: EvidenceItem(other, "rerank_score", 1.0),
     }
-    orch = _make(_outcome([]), [PLAN_1ITEM, SEA_SUFFICIENT], max_final_evidence=1)
 
-    final = orch._compute_final(evidence, {"anchor"}, set())
+    final = select_final_evidence(evidence, {"anchor"}, set(), max_final_evidence=1)
 
     assert [chunk.chunk_id for chunk in final] == ["anchor"]
 
@@ -583,7 +615,7 @@ async def test_verify_json_contract_error_marks_answer_unverified():
 
 
 @pytest.mark.asyncio
-async def test_verify_claim_level_missing_is_returned_for_warning_and_refine():
+async def test_verify_claim_level_hard_to_warning_soft_to_notes():
     outcome = _outcome([_chunk("c1")])
     orch = _make_verify(
         outcome,
@@ -592,13 +624,15 @@ async def test_verify_claim_level_missing_is_returned_for_warning_and_refine():
     )
     result = await orch.run("papers", "综述")
     assert result.verified is False
+    # 硬违规（臆造/矛盾/引用错配）进正文告警 verify_missing。
     assert result.verify_missing == [
-        "缺少背景",
         "断言A无证据",
-        "断言B缺引用",
         "[2]不支持断言C",
+        "断言B缺引用",
         "断言D与证据冲突",
     ]
+    # 信息缺口属软项，仅入 verify_notes（不堆告警墙）。
+    assert result.verify_notes == ["缺少背景"]
 
 
 @pytest.mark.asyncio

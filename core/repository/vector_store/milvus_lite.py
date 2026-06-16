@@ -90,6 +90,11 @@ class MilvusLiteVectorStore(VectorStore):
                     f"Milvus collection dimension is {existing_dim}, but the configured "
                     f"embedding dimension is {self._dim}. Rebuild the Milvus index."
                 )
+
+        # 打开磁盘上已存在的集合时其处于 released 状态，必须显式 load 才能 search/get/query；
+        # 新建集合 create_collection 已自动 load，这里再 load 是幂等的。统一保证 loaded，
+        # 避免「跳过 rebuild 直接复用既有索引」时首次检索报 code=101 collection released。
+        self._client.load_collection(self._collection_name)
         self._initialized = True
 
     def _existing_dimension(self) -> int | None:

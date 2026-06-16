@@ -199,6 +199,9 @@ async def test_milvus_clear_recreates_mismatched_schema(
             state["exists"] = True
             state["dim"] = schema.dim
 
+        def load_collection(self, name: str) -> None:
+            pass
+
     monkeypatch.setitem(
         sys.modules,
         "pymilvus",

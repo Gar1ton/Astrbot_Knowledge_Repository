@@ -5,10 +5,20 @@ __pycache__/
 .eggs/
 build/
 dist/
+# Keep exported console assets under pages/ trackable.
+!pages/_next/static/chunks/next/
+!pages/_next/static/chunks/next/dist/
+!pages/_next/static/chunks/next/dist/**
 .venv/
 venv/
 .env
 .env.*
+
+# Agent local state
+.claude/
+.codex/
+.codex-remote-attachments/
+.agents/
 
 # ── 测试 / 类型 / lint 缓存 ─────────────────────────────
 .pytest_cache/
@@ -29,6 +39,8 @@ run_config.py          # 由 dev/run_config.example.py 复制而来，含本地�
 web/frontend/node_modules/
 web/frontend/.next/
 web/frontend/out/
+web/frontend/public/pdfjs/
+web/frontend/next-env.d.ts
 
 # ── 编辑器 / 系统 ───────────────────────────────────────
 .DS_Store
@@ -40,5 +52,7 @@ web/frontend/out/
 tests/mocks/run_dev_realtime.py
 tests/mocks/reset_dev_realtime.py
 tests/mock_data/Config/config.py
+tests/mock_data/Test_Library/
+tests/mock_data/**/__pycache__/
 /.test_data/
 /tests/archive/

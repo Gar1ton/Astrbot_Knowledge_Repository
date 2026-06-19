@@ -15,8 +15,8 @@ import pytest
 
 from core.config import SourceStoreConfig
 from core.domain.models import DocumentChunk, SourceDocument
-from core.managers.ingest_manager import LOCAL_LIBRARY_ID, IngestManager
 from core.managers.chunking import parse_markdown_blocks
+from core.managers.ingest_manager import LOCAL_LIBRARY_ID, IngestManager
 from core.managers.markdown_extractor import (
     MarkdownArtifact,
     PageSpan,
@@ -70,8 +70,14 @@ def _manager(store: InMemorySourceDocumentStore, data_dir: Path) -> IngestManage
 
 def test_post_clean_removes_marginal_noise_and_repairs_wrapped_words() -> None:
     pages = [
-        "REPEATED TEST HEADER\n1\nformal opera-\ntions stay readable.\n\nA clean paragraph stays visible.\n",
-        "REPEATED TEST HEADER\n2\nco-\xad\nmotional potential remains.\n\nsystems,\n\nwhile edges continue.\n",
+        (
+            "REPEATED TEST HEADER\n1\nformal opera-\ntions stay readable.\n\n"
+            "A clean paragraph stays visible.\n"
+        ),
+        (
+            "REPEATED TEST HEADER\n2\nco-\xad\nmotional potential remains.\n\n"
+            "systems,\n\nwhile edges continue.\n"
+        ),
         "REPEATED TEST HEADER\n3\nplain text.\n",
     ]
 

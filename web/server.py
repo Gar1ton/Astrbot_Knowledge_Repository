@@ -13,7 +13,7 @@ import logging as _logging
 import secrets
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from aiohttp import web
 
@@ -26,6 +26,13 @@ if TYPE_CHECKING:
 SESSION_COOKIE = "kr_session"
 _API_PREFIX = "/api/"
 _PUBLIC_PATHS = frozenset({"/api/login", "/api/auth"})
+_API_KEY = web.AppKey("api", object)
+_UPLOAD_DIR_KEY = web.AppKey("upload_dir", Path)
+_AUTH_REQUIRED_KEY = web.AppKey("auth_required", bool)
+_USERNAME_KEY = web.AppKey("username", str)
+_PASSWORD_KEY = web.AppKey("password", str)
+_SESSIONS_KEY = web.AppKey("sessions", set)
+_LOG_HANDLER_KEY = web.AppKey("log_handler", object)
 
 
 # ── 中间件 ──────────────────────────────────────────────────────
@@ -55,12 +62,12 @@ async def _error_middleware(request: web.Request, handler: web.Handler) -> web.S
 async def _auth_middleware(request: web.Request, handler: web.Handler) -> web.StreamResponse:
     """保护 /api/*（登录/鉴权探测除外）；auth_required=False 时直接放行。"""
     app = request.app
-    if not app["auth_required"]:
+    if not app[_AUTH_REQUIRED_KEY]:
         return await handler(request)
     path = request.path
     if path.startswith(_API_PREFIX) and path not in _PUBLIC_PATHS:
         token = request.cookies.get(SESSION_COOKIE)
-        if token not in app["sessions"]:
+        if token not in app[_SESSIONS_KEY]:
             return web.json_response({"error": "unauthorized"}, status=401)
     return await handler(request)
 
@@ -69,22 +76,25 @@ async def _auth_middleware(request: web.Request, handler: web.Handler) -> web.St
 
 
 def _api(request: web.Request) -> KnowledgeRepositoryApi:
-    return request.app["api"]
+    return cast("KnowledgeRepositoryApi", request.app[_API_KEY])
 
 
 async def handle_auth(request: web.Request) -> web.Response:
     """前端探测是否需要登录 / 当前是否已登录。"""
     app = request.app
-    logged_in = not app["auth_required"] or request.cookies.get(SESSION_COOKIE) in app["sessions"]
-    return web.json_response({"auth_required": app["auth_required"], "logged_in": logged_in})
+    logged_in = (
+        not app[_AUTH_REQUIRED_KEY]
+        or request.cookies.get(SESSION_COOKIE) in app[_SESSIONS_KEY]
+    )
+    return web.json_response({"auth_required": app[_AUTH_REQUIRED_KEY], "logged_in": logged_in})
 
 
 async def handle_login(request: web.Request) -> web.Response:
     app = request.app
     body = await request.json()
-    if body.get("username") == app["username"] and body.get("password") == app["password"]:
+    if body.get("username") == app[_USERNAME_KEY] and body.get("password") == app[_PASSWORD_KEY]:
         token = secrets.token_urlsafe(24)
-        app["sessions"].add(token)
+        app[_SESSIONS_KEY].add(token)
         resp = web.json_response({"ok": True})
         resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="Lax")
         return resp
@@ -94,8 +104,8 @@ async def handle_login(request: web.Request) -> web.Response:
 async def handle_logout(request: web.Request) -> web.Response:
     app = request.app
     token = request.cookies.get(SESSION_COOKIE)
-    if token in app["sessions"]:
-        app["sessions"].remove(token)
+    if token in app[_SESSIONS_KEY]:
+        app[_SESSIONS_KEY].remove(token)
     resp = web.json_response({"ok": True})
     resp.del_cookie(SESSION_COOKIE)
     return resp
@@ -156,7 +166,7 @@ async def handle_upload_document(request: web.Request) -> web.Response:
         return web.json_response({"error": "empty file"}, status=400)
 
     _mw_logger.info("Upload: file=%r size=%d collection=%r", filename, len(payload), collection)
-    upload_dir: Path = request.app["upload_dir"]
+    upload_dir = request.app[_UPLOAD_DIR_KEY]
     upload_dir.mkdir(parents=True, exist_ok=True)
     content_hash = hashlib.sha256(payload).hexdigest()
     dest = upload_dir / f"{content_hash[:16]}_{filename}"
@@ -248,7 +258,10 @@ async def handle_document_content(request: web.Request) -> web.Response:
     doc_id = request.match_info["doc_id"]
     fmt = (request.query.get("format") or "md").lower()
     if fmt != "md":
-        return web.json_response({"error": "only format=md is supported; use /raw for pdf"}, status=400)
+        return web.json_response(
+            {"error": "only format=md is supported; use /raw for pdf"},
+            status=400,
+        )
     try:
         content = await _api(request).get_document_markdown_content(doc_id)
     except FileNotFoundError as exc:
@@ -289,13 +302,14 @@ async def handle_document_notes_post(request: web.Request) -> web.Response:
     content = str(body.get("content") or body.get("body") or "").strip()
     if not content:
         return web.json_response({"error": "content required"}, status=400)
+    chat_message_id = body.get("chat_message_id")
     note = await _api(request).create_document_note(
         doc_id,
         content,
         linked=bool(body.get("linked") or False),
         source=str(body.get("source") or "manual"),
         chat_conversation_id=str(body.get("chat_conversation_id") or ""),
-        chat_message_id=body.get("chat_message_id") if isinstance(body.get("chat_message_id"), int) else None,
+        chat_message_id=chat_message_id if isinstance(chat_message_id, int) else None,
     )
     if note is None:
         return web.json_response({"error": "document not found"}, status=404)
@@ -333,13 +347,14 @@ async def handle_collection_notes_post(request: web.Request) -> web.Response:
     content = str(body.get("content") or body.get("body") or "").strip()
     if not content:
         return web.json_response({"error": "content required"}, status=400)
+    chat_message_id = body.get("chat_message_id")
     note = await _api(request).create_collection_note(
         name,
         content,
         linked=bool(body.get("linked") or False),
         source=str(body.get("source") or "manual"),
         chat_conversation_id=str(body.get("chat_conversation_id") or ""),
-        chat_message_id=body.get("chat_message_id") if isinstance(body.get("chat_message_id"), int) else None,
+        chat_message_id=chat_message_id if isinstance(chat_message_id, int) else None,
     )
     if note is None:
         return web.json_response({"error": "collection not found"}, status=404)
@@ -957,7 +972,7 @@ async def handle_dependency_recheck(request: web.Request) -> web.Response:
 
 async def handle_log_event(request: web.Request) -> web.Response:
     """POST /api/logs/events — 接收前端 toast 等非 logging 运行事件。"""
-    handler: MemoryLogHandler | None = request.app.get("log_handler")
+    handler = cast("MemoryLogHandler | None", request.app.get(_LOG_HANDLER_KEY))
     body = await request.json() if request.can_read_body else {}
     if not isinstance(body, dict):
         return web.json_response({"status": "error", "message": "Invalid JSON body"}, status=400)
@@ -982,7 +997,7 @@ async def handle_log_event(request: web.Request) -> web.Response:
 
 async def handle_logs(request: web.Request) -> web.Response:
     """GET /api/logs?after=<float>&limit=<int> — 返回内存日志缓冲区中的最新日志行。"""
-    handler: MemoryLogHandler | None = request.app.get("log_handler")
+    handler = cast("MemoryLogHandler | None", request.app.get(_LOG_HANDLER_KEY))
     if handler is None:
         return web.json_response({"lines": [], "server_ts": time.time()})
     try:
@@ -1197,12 +1212,12 @@ def build_app(
         )
 
     app = web.Application(middlewares=[_error_middleware, _auth_middleware])
-    app["api"] = api
-    app["upload_dir"] = upload_dir
-    app["auth_required"] = auth_required
-    app["username"] = username
-    app["password"] = password
-    app["sessions"] = set()
+    app[_API_KEY] = api
+    app[_UPLOAD_DIR_KEY] = upload_dir
+    app[_AUTH_REQUIRED_KEY] = auth_required
+    app[_USERNAME_KEY] = username
+    app[_PASSWORD_KEY] = password
+    app[_SESSIONS_KEY] = set()
 
     app.router.add_get("/api/auth", handle_auth)
     app.router.add_post("/api/login", handle_login)
@@ -1291,7 +1306,7 @@ def build_app(
     # 安装内存日志 handler（幂等，重复调用安全）
     from core.log_capture import install as _install_log_handler
 
-    app["log_handler"] = _install_log_handler(maxlen=500)
+    app[_LOG_HANDLER_KEY] = _install_log_handler(maxlen=500)
 
     # 静态文件服务：兼容 Next.js export 产物（pages/ 下存在子目录 index.html）
     # 和旧的单文件 HTML 产物。

@@ -361,8 +361,13 @@ class IngestManager(BaseIngestManager):
                 "Please delete and re-upload the document."
             )
 
-        if doc.content_type not in ("application/pdf", "") and not str(source_pdf).lower().endswith(".pdf"):
-            raise ValueError(f"reextract_document only supports PDF files, got content_type={doc.content_type!r}")
+        if doc.content_type not in ("application/pdf", "") and not str(source_pdf).lower().endswith(
+            ".pdf"
+        ):
+            raise ValueError(
+                "reextract_document only supports PDF files, "
+                f"got content_type={doc.content_type!r}"
+            )
 
         # 重新提取（使用当前已修复的 ignore_alpha=True 代码）。
         artifact = self._extract_artifact(source_pdf, doc.content_type or "application/pdf")

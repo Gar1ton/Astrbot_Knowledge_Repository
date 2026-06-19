@@ -690,7 +690,9 @@ async def test_embedding_change_marks_docs_pending_and_rebuilds_incompatible_mil
     assert compatibility.is_milvus_compatible("fp")
 
 
-async def test_rerank_config_update_hot_swaps_deep_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_rerank_config_update_hot_swaps_deep_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from core.config import Config
     from core.repository.reranker.noop import NoopReranker
 
@@ -1074,7 +1076,10 @@ async def test_capabilities_degraded_while_milvus_building(tmp_path: Path) -> No
     assert "清洗数据" in vs["detail"]["reason"]
 
 
-async def test_start_milvus_rebuild_partial_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_start_milvus_rebuild_partial_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import core.api as api_module
     from core.config import Config
     from core.index_compatibility import IndexCompatibilityStore

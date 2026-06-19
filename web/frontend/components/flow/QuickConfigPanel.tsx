@@ -490,19 +490,34 @@ export function computeUpdates(
   return { updates, hasInvalidNumber };
 }
 
-// 字段集 → 草稿态。字段签名变化时重置草稿，并即时计算 updates。
+function buildDraftFromFields(fields: QuickConfigField[]): QuickConfigValues {
+  const next: QuickConfigValues = {};
+  for (const field of fields) next[field.id] = fieldInitialValue(field);
+  return next;
+}
+
+// 字段集 → 草稿态。字段签名变化时以派生初始值重置草稿，并即时计算 updates。
 export function useQuickConfigDraft(fields: QuickConfigField[]) {
   const fieldSignature = useMemo(
     () => fields.map((f) => `${f.id}:${String(fieldInitialValue(f))}`).join("|"),
     [fields],
   );
-  const [draft, setDraft] = useState<QuickConfigValues>({});
-
-  useEffect(() => {
-    const next: QuickConfigValues = {};
-    for (const f of fields) next[f.id] = fieldInitialValue(f);
-    setDraft(next);
-  }, [fieldSignature, fields]);
+  const initialDraft = useMemo(() => buildDraftFromFields(fields), [fields]);
+  const [draftState, setDraftState] = useState(() => ({
+    signature: fieldSignature,
+    values: initialDraft,
+  }));
+  const draft = draftState.signature === fieldSignature ? draftState.values : initialDraft;
+  const setDraft = useCallback<React.Dispatch<React.SetStateAction<QuickConfigValues>>>(
+    (updater) => {
+      setDraftState((current) => {
+        const base = current.signature === fieldSignature ? current.values : initialDraft;
+        const values = typeof updater === "function" ? updater(base) : updater;
+        return { signature: fieldSignature, values };
+      });
+    },
+    [fieldSignature, initialDraft],
+  );
 
   const { updates, hasInvalidNumber } = useMemo(() => computeUpdates(fields, draft), [draft, fields]);
   return { draft, setDraft, updates, hasInvalidNumber };

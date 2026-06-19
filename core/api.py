@@ -96,8 +96,10 @@ def _deep_warning_prefix(outcome: Any, answer_language: str, question: str) -> s
             )
         reason_part = f" Reason: {reason}." if reason else ""
         return (
-            "**Note: Deep Thinking found insufficient evidence and fell back to baseline evidence.**"
-            f"{reason_part} The answer below is limited to the currently retrieved passages and may be incomplete.\n\n"
+            "**Note: Deep Thinking found insufficient evidence and fell back to baseline "
+            "evidence.**"
+            f"{reason_part} The answer below is limited to the currently retrieved "
+            "passages and may be incomplete.\n\n"
         )
     missing = [
         str(item).strip()
@@ -1056,7 +1058,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             if self._index_compatibility and self._embedding_fingerprint:
                 self._index_compatibility.mark_milvus_compatible(self._embedding_fingerprint)
             logger.error(
-                "Milvus rebuild partial failure: %d doc(s) failed, marking compatible for incremental retry",
+                "Milvus rebuild partial failure: %d doc(s) failed, marking compatible "
+                "for incremental retry",
                 len(errors),
             )
             return {
@@ -1295,7 +1298,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         scope = _build_scope(scope_type, scope_key, scope_library_id)
         if retrieval_mode not in {"default", "high_precision", "graph_only", "deep_thinking"}:
             raise ValueError(
-                "retrieval_mode must be 'default', 'high_precision', 'graph_only', or 'deep_thinking'"
+                "retrieval_mode must be 'default', 'high_precision', 'graph_only', "
+                "or 'deep_thinking'"
             )
         if retrieval_mode in {"high_precision", "graph_only", "deep_thinking"} and not collection:
             raise ValueError(f"{retrieval_mode} retrieval requires a collection")
@@ -2084,7 +2088,6 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         row = await self._source_store.get_latest_resumable_build_job()
         if row is None:
             return
-        from core.lightrag_core import BuildJob
 
         job = self._build_job_from_snapshot(row, paused=True)
         self._graph_build_jobs[job.job_id] = job
@@ -2922,7 +2925,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
     async def get_zotero_config(self) -> dict[str, Any]:
         """返回 Zotero 同步配置 + 连接/数据目录/linked 探针状态（供设置与 sync 页）。"""
-        from core.adapters.zotero import local_api, paths as zpaths
+        from core.adapters.zotero import local_api
+        from core.adapters.zotero import paths as zpaths
         from core.config import ZOTERO_ACCESS_SERVER, ZOTERO_STORAGE_LINKED
 
         if self._config is None:

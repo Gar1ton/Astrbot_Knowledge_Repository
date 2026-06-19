@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Eyebrow } from "@/components/ds/Eyebrow";
 import { Icon } from "@/components/ds/Icon";
 import { Tag } from "@/components/ds/Tag";
@@ -41,12 +41,10 @@ export function TagEditor({
   const [draft, setDraft] = useState<string[]>(tags);
   const [input, setInput] = useState("");
 
-  useEffect(() => {
-    if (!editing) {
-      setDraft(tags);
-      setInput("");
-    }
-  }, [editing, tags]);
+  function resetDraft() {
+    setDraft(tags);
+    setInput("");
+  }
 
   function addInputTags() {
     const additions = input.split(",").map((s) => s.trim()).filter(Boolean);
@@ -86,7 +84,10 @@ export function TagEditor({
       ) : !editing ? (
         <button
           type="button"
-          onClick={onEdit}
+          onClick={() => {
+            resetDraft();
+            onEdit();
+          }}
           style={{
             border: "1px solid var(--border)",
             background: "var(--surface)",
@@ -177,7 +178,10 @@ export function TagEditor({
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
           <button
             type="button"
-            onClick={onCancel}
+            onClick={() => {
+              resetDraft();
+              onCancel();
+            }}
             disabled={saving}
             style={{
               fontSize: 11, padding: "4px 10px", borderRadius: "var(--radius-pill)",

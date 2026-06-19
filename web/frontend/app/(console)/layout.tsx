@@ -315,7 +315,7 @@ function ConsoleCanvas({ onLogout }: { onLogout: () => void }) {
 
 // ─── Console Shell (auth gate) ────────────────────────────────
 
-function ConsoleShell({ children: _children }: { children: React.ReactNode }) {
+function ConsoleShell() {
   const [authChecked, setAuthChecked] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
 
@@ -368,10 +368,11 @@ function ConsoleShell({ children: _children }: { children: React.ReactNode }) {
 // ─── Layout Export ────────────────────────────────────────────
 
 export default function ConsoleLayout({ children }: { children: React.ReactNode }) {
+  void children;
   return (
     <ToastProvider>
       <I18nProvider>
-        <ConsoleShell>{children}</ConsoleShell>
+        <ConsoleShell />
       </I18nProvider>
     </ToastProvider>
   );

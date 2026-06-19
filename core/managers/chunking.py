@@ -203,7 +203,9 @@ def build_subsection_spans(
         )
         if section is not None:
             next_start = min(next_start, section.end)
-        spans.append(SubsectionSpan(_normalize_subsection_label(block.label), block.start, next_start))
+        spans.append(
+            SubsectionSpan(_normalize_subsection_label(block.label), block.start, next_start)
+        )
     return spans
 
 

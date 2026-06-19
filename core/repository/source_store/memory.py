@@ -174,7 +174,9 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
 
     async def list_scoped_notes(self, scope_type: str, scope_key: str) -> list[ScopedNote]:
         notes = [
-            n for n in self._notes.values() if n.scope_type == scope_type and n.scope_key == scope_key
+            n
+            for n in self._notes.values()
+            if n.scope_type == scope_type and n.scope_key == scope_key
         ]
         ordered = sorted(
             notes,

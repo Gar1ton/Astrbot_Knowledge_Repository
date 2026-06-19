@@ -12,26 +12,44 @@ interface DirPickerDialogProps {
 }
 
 export function DirPickerDialog({ initialPath, t, onSelect, onClose }: DirPickerDialogProps) {
+  const [path, setPath] = useState(initialPath || undefined);
   const [result, setResult] = useState<FsBrowseResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const navigate = useCallback(async (path?: string) => {
+  const navigate = useCallback((nextPath?: string) => {
     setLoading(true);
     setError(null);
-    try {
-      const data = await browseDir(path);
-      setResult(data);
-    } catch {
-      setError(t("dir_picker_error"));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
+    setPath(nextPath);
+  }, []);
 
   useEffect(() => {
-    navigate(initialPath || undefined);
-  }, []);
+    let cancelled = false;
+    async function loadPath() {
+      try {
+        const data = await browseDir(path);
+        if (cancelled) return;
+        setResult(data);
+        setError(null);
+      } catch {
+        if (!cancelled) setError(t("dir_picker_error"));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void loadPath();
+    return () => {
+      cancelled = true;
+    };
+  }, [path, t]);
+
+  const selectDir = useCallback((nextPath?: string) => {
+    navigate(nextPath);
+  }, [navigate]);
+
+  const selectChild = useCallback((basePath: string, name: string) => {
+    navigate(`${basePath}/${name}`);
+  }, [navigate]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -74,7 +92,7 @@ export function DirPickerDialog({ initialPath, t, onSelect, onClose }: DirPicker
                 <button
                   type="button"
                   className="dir-picker-item dir-picker-item--up"
-                  onClick={() => navigate(result.parent!)}
+                  onClick={() => selectDir(result.parent!)}
                 >
                   <FolderUpIcon />
                   <span>{t("dir_picker_up")}</span>
@@ -88,7 +106,7 @@ export function DirPickerDialog({ initialPath, t, onSelect, onClose }: DirPicker
                   key={name}
                   type="button"
                   className="dir-picker-item"
-                  onClick={() => navigate(`${result.path}/${name}`)}
+                  onClick={() => selectChild(result.path, name)}
                 >
                   <FolderIcon />
                   <span>{name}</span>

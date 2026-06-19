@@ -14,7 +14,7 @@ class FakeResponse:
         self.status = status
         self.headers = headers or {}
 
-    def __enter__(self) -> "FakeResponse":
+    def __enter__(self) -> FakeResponse:
         return self
 
     def __exit__(self, *args: object) -> None:

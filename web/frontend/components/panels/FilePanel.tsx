@@ -176,80 +176,6 @@ function SectionHead({ icon, label, actions }: SectionHeadProps) {
 
 // ─── Build progress card ───────────────────────────────────────
 
-interface BuildCardProps {
-  job: GraphBuildJob;
-}
-
-function BuildCard({ job }: BuildCardProps) {
-  const { t } = useI18n();
-  const pct =
-    job.total_chunks && job.total_chunks > 0
-      ? Math.round(((job.processed_chunks ?? 0) / job.total_chunks) * 100)
-      : 0;
-  const stage =
-    job.status === "running" ? (pct < 45 ? t("file_build_stage_entity") : pct < 80 ? t("file_build_stage_relation") : t("file_build_stage_embedding")) : job.status;
-
-  return (
-    <div
-      style={{
-        margin: "3px 6px 8px 24px",
-        padding: "8px 10px",
-        background: "var(--accent-soft)",
-        border: "1px solid var(--accent-border)",
-        borderRadius: "var(--radius-md)",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
-        <span
-          style={{
-            width: 9,
-            height: 9,
-            borderRadius: "50%",
-            border: "2px solid var(--accent)",
-            borderTopColor: "transparent",
-            animation: "spin .7s linear infinite",
-            flexShrink: 0,
-          }}
-        />
-        <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)", flex: 1 }}>
-          {t("file_build_running")} · {stage}
-        </span>
-        <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--accent)" }}>
-          {pct}%
-        </span>
-      </div>
-      <div
-        style={{
-          height: 5,
-          borderRadius: 999,
-          background: "color-mix(in srgb, var(--accent) 18%, transparent)",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            width: `${pct}%`,
-            height: "100%",
-            borderRadius: 999,
-            background: "linear-gradient(90deg, var(--accent), var(--accent-strong))",
-            transition: "width .4s",
-          }}
-        />
-      </div>
-      <div
-        style={{
-          fontSize: 10,
-          color: "var(--fg-muted)",
-          marginTop: 6,
-          fontFamily: "var(--font-mono)",
-        }}
-      >
-        {job.processed_chunks ?? 0}/{job.total_chunks ?? "?"} {t("unit_chunks")} · {t("file_build_isolated")}
-      </div>
-    </div>
-  );
-}
-
 // ─── Milvus 向量库构建进度卡片（file 页面底部，无暂停）──────────
 
 function MilvusBuildCard({ job, onRetry }: { job: MilvusBuildJob; onRetry: () => void }) {
@@ -1022,7 +948,7 @@ export function FilePanel() {
       } catch { /* ignore */ }
       if (!cancelled) setTimeout(poll, job ? 2000 : 5000);
     }
-    let job = buildJob;
+    const job = buildJob;
     poll();
     return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

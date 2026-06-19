@@ -8,7 +8,6 @@ import {
   type ZoteroProbeResult,
   type ZoteroSyncResult,
 } from "@/lib/api";
-import type { I18nKey } from "@/lib/i18n";
 import { DirPickerDialog } from "./DirPickerDialog";
 import {
   AdvancedSection,

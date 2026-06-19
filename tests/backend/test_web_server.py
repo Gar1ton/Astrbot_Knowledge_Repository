@@ -10,6 +10,7 @@ import fitz  # type: ignore[import-untyped]
 import pytest
 from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
+from yarl import URL
 
 from core.api import KnowledgeRepositoryApi
 from core.config import Config
@@ -277,7 +278,7 @@ async def test_auth_required_blocks_then_login(tmp_path: Path) -> None:
 
         ok = await client.post("/api/login", json={"username": "admin", "password": "pw"})
         assert ok.status == 200
-        assert SESSION_COOKIE in client.session.cookie_jar.filter_cookies("http://127.0.0.1")
+        assert SESSION_COOKIE in client.session.cookie_jar.filter_cookies(URL("http://127.0.0.1"))
 
         # 登录后放行
         assert (await client.get("/api/collections")).status == 200

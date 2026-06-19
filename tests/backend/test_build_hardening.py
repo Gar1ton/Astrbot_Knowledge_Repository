@@ -9,7 +9,6 @@ import pytest
 
 from core.lightrag_core import BuildJob
 
-
 # ─── Concurrent build guard ────────────────────────────────────
 
 
@@ -27,7 +26,6 @@ class _FakeSourceStore:
 def _make_api():
     """Build a minimal KnowledgeRepositoryApi instance for testing build_graph()."""
     from core.api import KnowledgeRepositoryApi
-    from core.domain.models import SourceDocument
 
     source_store = _FakeSourceStore()
     api = object.__new__(KnowledgeRepositoryApi)
@@ -102,8 +100,6 @@ async def test_concurrent_build_guard_allows_build_after_success() -> None:
 async def test_cancelled_build_job_sets_status_interrupted() -> None:
     """If the build task is cancelled, job.status becomes 'interrupted'."""
     api = _make_api()
-
-    interrupted_captured: list[str] = []
 
     async def _fake_build(job_id: str) -> None:
         job = api._graph_build_jobs[job_id]

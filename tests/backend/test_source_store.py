@@ -5,7 +5,13 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.domain.models import Collection, ConsoleScopeState, DocumentChunk, ScopedNote, SourceDocument
+from core.domain.models import (
+    Collection,
+    ConsoleScopeState,
+    DocumentChunk,
+    ScopedNote,
+    SourceDocument,
+)
 from core.repository.source_store.memory import InMemorySourceDocumentStore
 
 

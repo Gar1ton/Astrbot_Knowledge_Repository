@@ -130,6 +130,7 @@ function Swatch({ h, active, onClick }: { h: number; active: boolean; onClick: (
 // ─── Accent state helpers ─────────────────────────────────────
 
 function getAccentFromDOM() {
+  if (typeof document === "undefined") return { h: 225, s: 72, l: 56 };
   const el = document.documentElement;
   const h = parseFloat(el.style.getPropertyValue("--accent-h") || "") || 225;
   const s = parseFloat(el.style.getPropertyValue("--accent-s") || "") || 72;
@@ -152,11 +153,7 @@ function applyAccent(h: number, s: number, l: number) {
 function AppearanceTab({ onLogout }: { onLogout: () => void }) {
   const { theme, setTheme } = useTheme();
   const { lang, setLang, t } = useI18n();
-  const [accent, setAccent] = useState({ h: 225, s: 72, l: 56 });
-
-  useEffect(() => {
-    setAccent(getAccentFromDOM());
-  }, []);
+  const [accent, setAccent] = useState(() => getAccentFromDOM());
 
   function updateAccent(patch: Partial<typeof accent>) {
     const next = { ...accent, ...patch };

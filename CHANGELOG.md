@@ -21,7 +21,7 @@
 
 ---
 
-## [Unreleased]
+## [v0.26.0] — 2026-06-19
 
 ### 新增功能 (Added)
 
@@ -73,6 +73,7 @@
 
 ### 修复 (Fixed)
 
+- **质量门禁闭环**：修复 Python `ruff check .` 中的长行、import 排序、未使用变量与类型写法问题；修复 `FlowNode` 条件调用 React hooks 的风险；将 aiohttp app 运行态对象改为 `web.AppKey`，并修复 cookie 测试的 URL deprecation warning（`core/api.py`、`core/managers/chunking.py`、`core/managers/ingest_manager.py`、`core/milvus_build.py`、`core/pipelines/deep_thinking_prompts.py`、`core/repository/source_store/memory.py`、`web/server.py`、`web/frontend/components/flow/FlowNode.tsx`、`tests/backend/test_web_server.py`）。
 - **Deep Thinking 缺口率文案修正**：将证据不足降级判定中的「缺口率」从 `len(gaps) / len(checklist)` 改为未满足 checklist 项占比，并且仅在 SEA 明确给出 gap 时应用该降级条件；用户可见原因从「证据缺口率 175%」这类无意义百分比改为「未满足检查项 X/Y（Y% ≥ 阈值 Z%）」；补充多 gap 少 checklist 的回归测试，确保不会再出现超过 100% 的缺口率文案（`core/pipelines/deep_thinking_orchestrator.py`、`tests/backend/test_deep_thinking_orchestrator.py`）。
 - **Deep Thinking 证据不足回答警告**：`DeepThinkingOrchestrator.run()` 新增 `answer_question`，检索/PLAN/SEA/REFINE 继续使用 retrieval query，最终合成与 VERIFY 使用用户原始问题，避免开启英语召回后答案围绕翻译 query 生成；deep thinking 降级或未验证时，`api.ask()` 会在最终答案正文开头追加证据不足/未验证警告，并展示降级原因或 `verify_missing`；VERIFY JSON 解析失败不再视为通过，改为保留 draft 但标记 `verified=False`；普通与 deep 合成 prompt 均补充“证据不足必须说明、不用外部知识补齐”的约束（`core/pipelines/deep_thinking_orchestrator.py`、`core/pipelines/answer_synthesis.py`、`core/api.py`、`tests/backend/test_deep_thinking_orchestrator.py`、`tests/backend/test_api.py`）。
 - **JSTOR 等 PDF 提取失败与全局深度思考静默退化修复**：(1) 在 `pymupdf4llm.to_markdown()` 中传入 `ignore_alpha=True`，以支持提取带有透明遮罩/水印（如 JSTOR PDF）的学术论文正文，使得 Massumi (1995) 等文档的文本抽取量从 5.5k 字符恢复到正常的 66k 完整文本（`core/managers/markdown_extractor.py`）；(2) 前端 `ChatPanel` 的检索模式下拉框在未选择集合时禁用“深度思考”模式，并增加 `useEffect` 副作用监听，在切换取消集合选择时自动将 `retrievalMode` 重置为 `"default"`，避免向后端发起不带集合参数的深度思考/高精度请求而触发 `ValueError` 报错（`web/frontend/components/panels/ChatPanel.tsx`）。
@@ -88,6 +89,7 @@
 
 ### 架构健康 (Refactor)
 
+- **前端 lint 零噪声整理**：忽略 build 生成的 `public/pdfjs/**` vendor 资源，避免 ESLint 扫描 generated WASM fallback；清理未使用 import/变量与废弃 `BuildCard`，并把可安全派生的前端状态从 effect 内同步 `setState` 改为 lazy state、keyed state 或事件驱动更新（`web/frontend/eslint.config.mjs`、`web/frontend/components/flow/DirPickerDialog.tsx`、`QuickConfigPanel.tsx`、`web/frontend/components/modals/SettingModal.tsx`、`web/frontend/components/panels/DocumentsPanel.tsx`、`PdfViewer.tsx`、`TagEditor.tsx`、`FilePanel.tsx`、`ChatPanel.tsx`）。
 - **深度思考编排器瘦身（回到 600 行红线内）**：从 `deep_thinking_orchestrator.py` 剥离两个无状态模块——`deep_thinking_evidence.py`（`rank_candidates`/`select_final_evidence`：证据打分与最终选取）与 `deep_thinking_view.py`（`live_detail`/`serialize_outcome`：思考过程序列化，供 orchestrator 实时进度与 `api._serialize_deep_thinking` 共用，杜绝两处各写一份导致的漂移）；orchestrator 由 687 行降至 600 行、只剩控制流（`core/pipelines/deep_thinking_orchestrator.py`、`core/pipelines/deep_thinking_evidence.py`、`core/pipelines/deep_thinking_view.py`、`core/api.py`）。
 - **QuickConfigPanel 拆分**：`QuickConfigPanel` 退化为按阶段分发的 dispatcher，Zotero 阶段交给独立的 `ZoteroQuickConfig`；共享字段原语（`FieldControl`、字段构造器、读取辅助）从 `QuickConfigPanel` 导出复用，主文件由 600 行降至约 525 行，回到文件大小红线内（`web/frontend/components/flow/QuickConfigPanel.tsx`、`web/frontend/components/flow/ZoteroQuickConfig.tsx`）。
 
@@ -99,6 +101,7 @@
 
 ### 测试 (Tests)
 
+- **v0.26.0 质量门禁验证**：Docker 环境中 `ruff check .`、`python -m mypy`、`python -m pytest -q`（398 passed）、`npm run lint`、`node node_modules/typescript/bin/tsc --noEmit --incremental false`、`npm run build` 与 `python tools/sync_frontend.py --check` 均通过；`python tools/sync_frontend.py` 同步 360 个前端静态产物到 `pages/`。
 - **Deep Thinking 可靠性回归覆盖**：`test_deep_thinking_orchestrator.py` 新增 prompt 契约、critical 未满足不误收敛、SEA 无 gaps 时从 checklist 反推 REFINE、doc-aware final evidence、structural anchor 优先级、`VERIFY_OK` 被 soft missing 否决等用例；补跑 `test_api.py`、跨文档来源标注、retrieval/reranker 回归和 compileall（`tests/backend/test_deep_thinking_orchestrator.py`）。
 - **PDF 清洗与分块回归覆盖**：新增页眉/页码/断词/伪段落清洗、paragraph-aware chunk 边界、section metadata、legacy chunk 重建、文档面板预览自动重建、通用论文数字标题误判防线、Appendix、Figure/Table/Equation anchor list、T 编号标题锚点召回、citation-aware sentence split、编号章节、父章节短标题合并、图表 caption 和 subsection anchor fast-path 测试；验证命令包括 `python -m pytest tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py -q`、`python -m pytest tests\backend\test_api.py -q` 与 `python -m compileall ...`。私有 PDF 仅做本地手工评估，不在变更记录中保存标题、正文或 chunk 预览（`tests/backend/test_ingest_manager.py`、`tests/backend/test_retrieval_orchestrator.py`、`tests/backend/test_api.py`）。
 - **LightRAG 暂停恢复回归覆盖**：补充 SQLite migration 默认值、启动清理保留 paused job、LLM 中 pause_requested 持久化、pause gate 入库 paused、同进程恢复累计 `paused_seconds`、重启后复用原 `job_id` 处理未 `indexed` 文档、finalize 前进度小于 100% 等用例；验证命令包括 `python -m pytest tests\backend\test_build_hardening.py tests\backend\test_sqlite_source_store.py tests\backend\test_api.py tests\backend\test_web_server.py -q`、`node node_modules/typescript/bin/tsc --noEmit`、`node node_modules/next/dist/bin/next build --webpack`、`python tools\sync_frontend.py` 与 `python tools\sync_frontend.py --check`（`tests/backend/test_build_hardening.py`、`tests/backend/test_sqlite_source_store.py`）。
@@ -155,7 +158,7 @@
 
 - 新增 `tests/backend/test_build_hardening.py`（5 个测试）：并发构建守卫（同集合 → RuntimeError，跨集合 → 成功，已完成任务 → 可重建）、CancelledError → status=interrupted、`cancel_build_tasks()` 清理句柄。
 
-## [Unreleased]
+## [v0.24.4] — 2026-06-11
 
 ### 修复 (Fixed)
 

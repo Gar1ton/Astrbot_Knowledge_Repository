@@ -20,6 +20,24 @@ import { PdfViewer } from "@/components/panels/PdfViewer";
 import { useI18n } from "@/lib/i18n";
 import { parseChunkText, ChunkTextPart } from "@/lib/chunkText";
 
+type ReadingDataState = {
+  docId: string;
+  chunks: ChunkItem[];
+  annotations: ZoteroAnnotation[];
+  loading: boolean;
+};
+
+type DocumentListState = {
+  colName?: string;
+  docs: KrDocument[];
+  loading: boolean;
+};
+
+type ReadingModeState = {
+  docId: string;
+  mode: "md" | "pdf";
+};
+
 // ─── Doc type badge ───────────────────────────────────────────
 
 function ExtBadge({ ext }: { ext?: string }) {
@@ -276,20 +294,25 @@ function ChunkText({ text }: { text: string }) {
 function ReadingView({
   doc,
   mode,
-  setMode,
 }: {
   doc: KrDocument;
   mode: "md" | "pdf";
-  setMode: (m: "md" | "pdf") => void;
 }) {
   const { highlightedChunk, setHighlightedChunk } = useConsole();
   const { t } = useI18n();
   const { toast } = useToast();
   const chunkRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  const [chunks, setChunks] = useState<ChunkItem[]>([]);
-  const [annotations, setAnnotations] = useState<ZoteroAnnotation[]>([]);
-  const [chunkLoading, setChunkLoading] = useState(false);
+  const [readingData, setReadingData] = useState<ReadingDataState>(() => ({
+    docId: doc.doc_id,
+    chunks: [],
+    annotations: [],
+    loading: true,
+  }));
   const [reextracting, setReextracting] = useState(false);
+  const isReadingDataCurrent = readingData.docId === doc.doc_id;
+  const chunks = isReadingDataCurrent ? readingData.chunks : [];
+  const annotations = isReadingDataCurrent ? readingData.annotations : [];
+  const chunkLoading = isReadingDataCurrent ? readingData.loading : true;
   const meta = doc.zotero_meta;
 
   async function handleReextract() {
@@ -306,18 +329,17 @@ function ReadingView({
 
   useEffect(() => {
     let cancelled = false;
-    setChunks([]);
-    setAnnotations([]);
-    setChunkLoading(true);
     Promise.allSettled([
       listDocumentChunks(doc.doc_id),
       getDocumentAnnotations(doc.doc_id),
     ]).then(([chunkResult, annotationResult]) => {
       if (cancelled) return;
-      if (chunkResult.status === "fulfilled") setChunks(chunkResult.value);
-      if (annotationResult.status === "fulfilled") setAnnotations(annotationResult.value);
-    }).finally(() => {
-      if (!cancelled) setChunkLoading(false);
+      setReadingData({
+        docId: doc.doc_id,
+        chunks: chunkResult.status === "fulfilled" ? chunkResult.value : [],
+        annotations: annotationResult.status === "fulfilled" ? annotationResult.value : [],
+        loading: false,
+      });
     });
     return () => {
       cancelled = true;
@@ -480,59 +502,66 @@ export function DocumentsPanel() {
     selectedDocId,
     setSelectedDocId,
     highlightedChunk,
+    setHighlightedChunk,
     setNoteDocId,
   } = useConsole();
-
-  const [docs, setDocs] = useState<KrDocument[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [activeDoc, setActiveDoc] = useState<KrDocument | null>(null);
-  const [mode, setMode] = useState<"md" | "pdf">("md");
 
   // Derive collection name from key (strip prefix)
   const colName = selectedCollection
     ? selectedCollection.replace(/^(z:|l:|lr:)/, "")
     : undefined;
+  const [documentList, setDocumentList] = useState<DocumentListState>(() => ({
+    colName,
+    docs: [],
+    loading: Boolean(colName),
+  }));
+  const [modeState, setModeState] = useState<ReadingModeState>(() => ({
+    docId: "",
+    mode: "md",
+  }));
+  const docs = documentList.colName === colName ? documentList.docs : [];
+  const loading = colName ? (documentList.colName === colName ? documentList.loading : true) : false;
+  const selectedDoc = selectedDocId ? docs.find((d) => d.doc_id === selectedDocId) : null;
+  const highlightedDoc = highlightedChunk ? docs.find((d) => d.doc_id === highlightedChunk.docId) : null;
+  const activeDoc = highlightedDoc ?? selectedDoc ?? null;
+  const activeDocId = activeDoc?.doc_id ?? "";
+  const mode = modeState.docId === activeDocId ? modeState.mode : "md";
 
   // Load documents when collection changes
   useEffect(() => {
-    if (!colName) { setDocs([]); return; }
-    setLoading(true);
+    if (!colName) return;
+    let cancelled = false;
     listDocuments({ collection: colName })
-      .then(setDocs)
-      .catch(() => setDocs([]))
-      .finally(() => setLoading(false));
+      .then((nextDocs) => {
+        if (!cancelled) setDocumentList({ colName, docs: nextDocs, loading: false });
+      })
+      .catch(() => {
+        if (!cancelled) setDocumentList({ colName, docs: [], loading: false });
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [colName]);
 
-  // Open doc when selectedDocId changes externally (e.g. from citation click)
   useEffect(() => {
-    if (!selectedDocId) { setActiveDoc(null); return; }
-    const found = docs.find((d) => d.doc_id === selectedDocId);
-    if (found) {
-      setActiveDoc(found);
-      setMode("md");
-    }
-  }, [selectedDocId, docs]);
-
-  // When highlightedChunk fires for a doc not yet open, open it
-  useEffect(() => {
-    if (!highlightedChunk) return;
-    const found = docs.find((d) => d.doc_id === highlightedChunk.docId);
-    if (found && activeDoc?.doc_id !== found.doc_id) {
-      setActiveDoc(found);
-      setSelectedDocId(found.doc_id);
-      setMode("md");
-    }
-  }, [highlightedChunk]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!highlightedDoc || selectedDocId === highlightedDoc.doc_id) return;
+    const timer = window.setTimeout(() => setSelectedDocId(highlightedDoc.doc_id), 0);
+    return () => window.clearTimeout(timer);
+  }, [highlightedDoc, selectedDocId, setSelectedDocId]);
 
   function openDoc(doc: KrDocument) {
-    setActiveDoc(doc);
     setSelectedDocId(doc.doc_id);
-    setMode("md");
+    setModeState({ docId: doc.doc_id, mode: "md" });
   }
 
   function backToList() {
-    setActiveDoc(null);
     setSelectedDocId(null);
+    setHighlightedChunk(null);
+  }
+
+  function setReadingMode(nextMode: "md" | "pdf") {
+    if (!activeDocId) return;
+    setModeState({ docId: activeDocId, mode: nextMode });
   }
 
   const isReading = !!activeDoc;
@@ -559,7 +588,7 @@ export function DocumentsPanel() {
       {(["md", "pdf"] as const).map((m) => (
         <button
           key={m}
-          onClick={() => setMode(m)}
+          onClick={() => setReadingMode(m)}
           style={{
             fontSize: 11,
             fontWeight: 600,
@@ -597,7 +626,7 @@ export function DocumentsPanel() {
       }
     >
       {isReading ? (
-        <ReadingView doc={activeDoc!} mode={mode} setMode={setMode} />
+        <ReadingView doc={activeDoc!} mode={mode} />
       ) : (
         <ListView
           docs={docs}

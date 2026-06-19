@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -33,7 +32,9 @@ def parse_samples(samples: list[str]) -> list[list[dict[str, str]]]:
         const exports = module.exports;
         eval(output);
         const samples = JSON.parse(process.argv[1]);
-        process.stdout.write(JSON.stringify(samples.map((text) => module.exports.parseChunkText(text))));
+        process.stdout.write(
+            JSON.stringify(samples.map((text) => module.exports.parseChunkText(text)))
+        );
         """
     )
 

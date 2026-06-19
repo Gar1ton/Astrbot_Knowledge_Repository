@@ -178,6 +178,26 @@ export function FlowNode({
   onRebuildIndex: () => void;
   onClose?: () => void;
 }) {
+  // 头部徽章承担唯一保存入口：草稿态由 QuickConfigPanel 经 onDirtyChange 上报，save 经 ref 触发。
+  const panelRef = useRef<QuickConfigHandle>(null);
+  const [dirty, setDirty] = useState<QuickConfigDirty>({ count: 0, canSave: false });
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // 高级折叠通过 Portal 渲到节点最底部的槽位（按钮在底、浮层紧贴节点底，不挤动其他节点）。
+  const [advancedSlot, setAdvancedSlot] = useState<HTMLElement | null>(null);
+  const handleDirtyChange = useCallback((state: QuickConfigDirty) => {
+    setDirty((prev) => (prev.count === state.count && prev.canSave === state.canSave ? prev : state));
+  }, []);
+  const handleToggleAdvanced = useCallback(() => setAdvancedOpen((v) => !v), []);
+  const isDirty = dirty.count > 0;
+  const showRestartPending = !isDirty && restartPending;
+  const stageId = stage.id;
+
+  // 向上报告本节点是否处于编辑（dirty）态，供页面暂停自动刷新；卸载时报告 false。
+  useEffect(() => {
+    onEditingChange?.(stageId, isDirty);
+  }, [isDirty, stageId, onEditingChange]);
+  useEffect(() => () => onEditingChange?.(stageId, false), [stageId, onEditingChange]);
+
   if (!isFlowStageId(stage.id)) return null;
 
   const id = stage.id as FlowStageId;
@@ -200,26 +220,6 @@ export function FlowNode({
     typeof stage.detail.reason === "string" && stage.detail.reason
       ? stage.detail.reason
       : "";
-
-  // 头部徽章承担唯一保存入口：草稿态由 QuickConfigPanel 经 onDirtyChange 上报，save 经 ref 触发。
-  const panelRef = useRef<QuickConfigHandle>(null);
-  const [dirty, setDirty] = useState<QuickConfigDirty>({ count: 0, canSave: false });
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  // 高级折叠通过 Portal 渲到节点最底部的槽位（按钮在底、浮层紧贴节点底，不挤动其他节点）。
-  const [advancedSlot, setAdvancedSlot] = useState<HTMLElement | null>(null);
-  const handleDirtyChange = useCallback((state: QuickConfigDirty) => {
-    setDirty((prev) => (prev.count === state.count && prev.canSave === state.canSave ? prev : state));
-  }, []);
-  const handleToggleAdvanced = useCallback(() => setAdvancedOpen((v) => !v), []);
-  const isDirty = dirty.count > 0;
-  const showRestartPending = !isDirty && restartPending;
-
-  // 向上报告本节点是否处于编辑（dirty）态，供页面暂停自动刷新；卸载时报告 false。
-  const stageId = stage.id;
-  useEffect(() => {
-    onEditingChange?.(stageId, isDirty);
-  }, [isDirty, stageId, onEditingChange]);
-  useEffect(() => () => onEditingChange?.(stageId, false), [stageId, onEditingChange]);
 
   return (
     <div

@@ -95,9 +95,7 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
 
   // Derived values from config
   const embCfg = config?.embedding ?? {};
-  const vecCfg = config?.vector_db ?? {};
   const graphCfg = config?.graph ?? {};
-  const askCfg = config?.ask ?? {};
 
   const [graphOn, setGraphOn] = useState(true);
   const [autoIdx, setAutoIdx] = useState(true);

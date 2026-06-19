@@ -177,7 +177,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
     } finally {
       setInstallingKey(null);
     }
-  }, [t, toast]);
+  }, [refreshFlow, t, toast]);
 
   const handleRebuildIndex = useCallback(async () => {
     // 后台触发即返回：详细进度/成败由 FilePanel 底部的 MilvusBuildCard 展示，

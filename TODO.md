@@ -44,6 +44,31 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.26.0 质量门禁与构建同步闭环 (completed)
+
+### User constraints / 约束
+
+- 执行已批准的质量修复：`ruff`、前端 lint、React hooks 风险、generated vendor lint、版本/CHANGELOG 对齐、aiohttp warnings、`pages/` 同步。
+- 暂不执行大型文件拆分：`core/api.py`、`web/frontend/lib/api.ts`、`web/frontend/lib/i18n.ts`、`web/frontend/styles/tokens.css` 仅保留为后续重构建议。
+- 使用 Docker 环境验证；`pages/` 只能通过 `tools/sync_frontend.py` 生成，不手工编辑。
+
+### Technical implementation path
+
+- [x] **Phase 1 - Python 质量门禁**：修复 `ruff check .` 报出的长行、import 排序、未使用 import/变量和现代类型写法问题；同时处理 aiohttp `AppKey` 与测试 deprecation warning。
+- [x] **Phase 2 - 前端 lint 与 hooks 稳定性**：修复 `FlowNode.tsx` 条件 hooks 调用；忽略 generated `public/pdfjs/**`；清理无用 import/变量；仅对明显派生状态改造 effect 内同步 `setState`。
+- [x] **Phase 3 - 文档版本与产物同步**：统一 `metadata.yaml`、`TODO.md`、`CHANGELOG.md` 版本状态；build 后运行 `tools/sync_frontend.py`，确保 `pages/` 与 `web/frontend/out/` 一致。
+
+### Verification
+
+- [x] `ruff check .` → passed
+- [x] `python -m mypy` → passed (`Success: no issues found in 3 source files`)
+- [x] `python -m pytest -q` → 398 passed
+- [x] `npm run lint` → passed
+- [x] `node node_modules/typescript/bin/tsc --noEmit --incremental false` → passed
+- [x] `npm run build` → passed（13 static routes）
+- [x] `python tools/sync_frontend.py` → synced 360 files to `pages/`
+- [x] `python tools/sync_frontend.py --check` → passed
+
 ## v0.25.16 数据流节点界面美术与配置统一重构 (completed)
 
 ### User constraints / 约束

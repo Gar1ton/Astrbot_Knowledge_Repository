@@ -14,7 +14,7 @@ import { useI18n, type I18nKey } from "@/lib/i18n";
 import {
   AskResult, AskSource, ApiError, GraphBuildEstimate, ThinkingTrace,
   ChatMessage, ask, buildGraph, estimateGraphBuild,
-  listCollections, getChatHistory, clearChatHistory, lockChatAnswer,
+  getChatHistory, clearChatHistory, lockChatAnswer,
   createDocumentNote, createCollectionNote,
   getAskProgress, type LiveProgressDetail,
 } from "@/lib/api";
@@ -645,7 +645,6 @@ export function ChatPanel({ width }: { width?: number }) {
     ? selectedCollection.replace(/^(z:|l:|lr:)/, "")
     : null;
 
-  const [localCollections, setLocalCollections] = useState<string[]>([]);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -654,14 +653,11 @@ export function ChatPanel({ width }: { width?: number }) {
   const [liveProgress, setLiveProgress] = useState<LiveProgressDetail | null>(null);
   const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("default");
-  const [personaEnabled, setPersonaEnabled] = useState(false);
+  const personaEnabled = false;
   const [useEnglishRetrieval, setUseEnglishRetrieval] = useState(true);
   const [answerLanguage, setAnswerLanguage] = useState<"auto" | "zh" | "en">("auto");
   const [showSettings, setShowSettings] = useState(false);
   const [precisionDialog, setPrecisionDialog] = useState<PrecisionDialogState | null>(null);
-
-  const graphModeReady = Boolean(collectionName && localCollections.includes(collectionName));
-
   // 卸载时兜底清除轮询定时器，避免组件被销毁后仍在轮询。
   useEffect(
     () => () => {
@@ -671,9 +667,6 @@ export function ChatPanel({ width }: { width?: number }) {
   );
 
   useEffect(() => {
-    listCollections()
-      .then((cols) => setLocalCollections(cols.map((c) => c.name)))
-      .catch(() => {});
     const cid = getOrCreateConvId();
     setConversationId(cid);
   }, []);

@@ -43,7 +43,8 @@ class MilvusBuildJob:
 
     契约：
     - `mode`：`"pending"`（增量，仅 needs_reindex 文档）或 `"full"`（全量）。
-    - `status`：`running` → 终态 `success` / `partial_failure`（有 failed_docs）/ `error`（整体异常）。
+    - `status`：`running` → 终态 `success` / `partial_failure`
+      （有 failed_docs）/ `error`（整体异常）。
     - 旧进度字段保持兼容：`processed_docs` 表示已成功索引的文档数，`total_docs` 表示目标文档数。
     - 新进度以阶段文档为单位：cleaning 与 indexing 分开计数，`progress_percent` 使用二者合并值。
     - 同一时间全局只允许一个活动任务（由 api 层守卫，不在本对象内强制）。

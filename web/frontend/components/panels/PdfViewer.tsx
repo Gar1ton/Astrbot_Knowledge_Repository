@@ -39,17 +39,25 @@ type PdfJsModule = {
   getDocument: (source: PdfDocumentSource) => { promise: Promise<PdfDocument>; destroy?: () => void };
 };
 
+type PdfLoadState = {
+  pdfUrl: string;
+  pdf: PdfDocument | null;
+  pageCount: number;
+  loading: boolean;
+  error: string;
+};
+
+type PageState = {
+  pdfUrl: string;
+  page: number;
+};
+
 const MIN_SCALE = 0.5;
 const MAX_SCALE = 2.4;
 const SCALE_STEP = 0.15;
 
 export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
-  const [pdf, setPdf] = useState<PdfDocument | null>(null);
-  const [pageCount, setPageCount] = useState(0);
-  const [currentPage, setCurrentPage] = useState(1);
   const [scale, setScale] = useState(1);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
   const pagesRef = useRef<Record<number, HTMLDivElement | null>>({});
   const viewportRef = useRef<HTMLDivElement | null>(null);
 
@@ -57,15 +65,34 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
     () => `/api/documents/${encodeURIComponent(docId)}/raw?disposition=inline`,
     [docId],
   );
+  const [loadState, setLoadState] = useState<PdfLoadState>(() => ({
+    pdfUrl,
+    pdf: null,
+    pageCount: 0,
+    loading: true,
+    error: "",
+  }));
+  const [pageState, setPageState] = useState<PageState>(() => ({ pdfUrl, page: 1 }));
+  const isCurrentPdf = loadState.pdfUrl === pdfUrl;
+  const pdf = isCurrentPdf ? loadState.pdf : null;
+  const pageCount = isCurrentPdf ? loadState.pageCount : 0;
+  const loading = isCurrentPdf ? loadState.loading : true;
+  const error = isCurrentPdf ? loadState.error : "";
+  const currentPage = pageState.pdfUrl === pdfUrl ? pageState.page : 1;
+  const setCurrentPage = useCallback<React.Dispatch<React.SetStateAction<number>>>(
+    (updater) => {
+      setPageState((current) => {
+        const base = current.pdfUrl === pdfUrl ? current.page : 1;
+        const page = typeof updater === "function" ? updater(base) : updater;
+        return { pdfUrl, page };
+      });
+    },
+    [pdfUrl],
+  );
 
   useEffect(() => {
     let cancelled = false;
     let loadingTask: { promise: Promise<PdfDocument>; destroy?: () => void } | null = null;
-    setPdf(null);
-    setPageCount(0);
-    setCurrentPage(1);
-    setLoading(true);
-    setError("");
 
     async function loadPdf() {
       try {
@@ -86,12 +113,17 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
           await doc.destroy?.();
           return;
         }
-        setPdf(doc);
-        setPageCount(doc.numPages);
+        setLoadState({ pdfUrl, pdf: doc, pageCount: doc.numPages, loading: false, error: "" });
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "PDF load failed");
-      } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoadState({
+            pdfUrl,
+            pdf: null,
+            pageCount: 0,
+            loading: false,
+            error: err instanceof Error ? err.message : "PDF load failed",
+          });
+        }
       }
     }
 
@@ -106,7 +138,7 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
     const clamped = Math.max(1, Math.min(pageCount || page, page));
     setCurrentPage(clamped);
     pagesRef.current[clamped]?.scrollIntoView({ block: "start", behavior: "smooth" });
-  }, [pageCount]);
+  }, [pageCount, setCurrentPage]);
 
   const fitWidth = useCallback(() => {
     const viewport = viewportRef.current;

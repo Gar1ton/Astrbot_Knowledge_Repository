@@ -7,7 +7,7 @@ PyMuPDF>=1.24,<2.0         # PDF 原件处理；pymupdf4llm 的运行时依赖
 pymupdf4llm>=0.0.17,<0.1.0 # PDF → 干净 Markdown 清洗内核（pinned）
 aiohttp                    # 独立 Web 控制台、外部 Embedding HTTP 客户端
 pymilvus[milvus_lite]>=2.5,<3.0  # Milvus Lite 向量库，默认且必装
-cryptography>=42,<47       # 本地 secret 加密存储（Zotero Web API key）
+# cryptography is managed by AstrBot core; do not constrain it here.
 
 # 默认配置优先使用 Milvus；后端仍保留 AstrBot/SQLite 检索兜底。
 # Notion 同步经 AstrBot 已配置的 notion MCP server，无需 notion-sdk。

@@ -47,7 +47,9 @@ class CategoryManager(BaseCategoryManager):
             return False
 
         if collection is not None:
+            # 手动重分类语义为单集合归属：清空旧多归属，让 membership 跟随新 primary 重置。
             doc.collection = collection
+            doc.collection_keys = []
         if tags is not None:
             doc.tags = tags
 

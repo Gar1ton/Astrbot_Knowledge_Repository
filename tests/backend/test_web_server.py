@@ -105,9 +105,49 @@ async def test_list_and_create_collection(tmp_path: Path) -> None:
 
         resp = await client.post("/api/collections", json={"name": "manuals", "description": "m"})
         assert resp.status == 200
-        assert await resp.json() == {"name": "manuals", "description": "m"}
+        created = await resp.json()
+        assert created["name"] == "manuals"
+        assert created["description"] == "m"
+        assert created["coll_key"].startswith("L")
+        assert created["parent_key"] == ""
         names = [c["name"] for c in await (await client.get("/api/collections")).json()]
         assert set(names) == {"papers", "manuals"}
+    finally:
+        await client.close()
+
+
+async def test_subcollection_tree_crud(tmp_path: Path) -> None:
+    client = await _client(tmp_path)
+    try:
+        root = await (await client.post("/api/collections", json={"name": "root"})).json()
+        child = await (
+            await client.post(
+                "/api/collections", json={"name": "child", "parent_key": root["coll_key"]}
+            )
+        ).json()
+        assert child["parent_key"] == root["coll_key"]
+
+        # 重命名
+        r = await client.patch(
+            f"/api/collections/by-key/{child['coll_key']}", json={"name": "child2"}
+        )
+        assert r.status == 200
+        cols = {c["coll_key"]: c for c in await (await client.get("/api/collections")).json()}
+        assert cols[child["coll_key"]]["name"] == "child2"
+
+        # 防环：把 root 移到其后代 child 下应失败
+        r = await client.patch(
+            f"/api/collections/by-key/{root['coll_key']}",
+            json={"parent_key": child["coll_key"]},
+        )
+        assert r.status == 400
+
+        # 删除 root：child 提升为顶层
+        r = await client.delete(f"/api/collections/by-key/{root['coll_key']}")
+        assert r.status == 200
+        cols = {c["coll_key"]: c for c in await (await client.get("/api/collections")).json()}
+        assert root["coll_key"] not in cols
+        assert cols[child["coll_key"]]["parent_key"] == ""
     finally:
         await client.close()
 

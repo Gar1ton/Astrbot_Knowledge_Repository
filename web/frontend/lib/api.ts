@@ -13,6 +13,9 @@ export interface Collection {
   origin?: "local" | "zotero";
   read_only?: boolean;
   zotero_collection_key?: string;
+  coll_key?: string;
+  parent_key?: string;
+  library_id?: string;
 }
 
 export interface ZoteroMeta {
@@ -613,23 +616,49 @@ export async function listCollections(): Promise<Collection[]> {
 
 export async function createCollection(
   name: string,
-  description?: string
+  description?: string,
+  parentKey?: string
 ): Promise<Collection> {
   if (isMock()) {
-    const c: Collection = { name, description };
+    const c: Collection = { name, description, parent_key: parentKey, coll_key: `L${name}` };
     MOCK_COLLECTIONS.push(c);
     return c;
   }
   return apiFetch<Collection>("/api/collections", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, description }),
+    body: JSON.stringify({ name, description, parent_key: parentKey ?? "" }),
   });
 }
 
 export async function deleteCollection(name: string): Promise<void> {
   if (isMock()) return;
   await apiFetch<{ status: string }>(`/api/collections/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function renameCollection(collKey: string, name: string): Promise<void> {
+  if (isMock()) return;
+  await apiFetch<{ ok: boolean }>(`/api/collections/by-key/${encodeURIComponent(collKey)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function moveCollection(collKey: string, parentKey: string): Promise<void> {
+  if (isMock()) return;
+  await apiFetch<{ ok: boolean }>(`/api/collections/by-key/${encodeURIComponent(collKey)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parent_key: parentKey }),
+  });
+}
+
+export async function deleteCollectionByKey(collKey: string): Promise<void> {
+  if (isMock()) return;
+  await apiFetch<{ ok: boolean }>(`/api/collections/by-key/${encodeURIComponent(collKey)}`, {
     method: "DELETE",
   });
 }

@@ -59,6 +59,16 @@ logger = logging.getLogger("astrbot_plugin_knowledge_repository")
 # 同步来源默认归属集合（item 未挂任何 Zotero 集合时的 KB home）。
 DEFAULT_ZOTERO_COLLECTION = "Zotero"
 
+
+def _zotero_coll_key(library_id: str, collection_key: str) -> str:
+    """统一 collections 树中 Zotero 集合的稳定 coll_key（跨 library 唯一）。"""
+    return f"{library_id}:{collection_key}"
+
+
+def _unfiled_coll_key(library_id: str) -> str:
+    """某 library 下「未归入任何 Zotero 集合」条目的合成 home 集合 coll_key。"""
+    return f"{library_id}:__unfiled__"
+
 # 可选副作用回调类型（组合根注入；单测可不注入）。
 IndexCb = Callable[[str, str], Awaitable[None]]
 RemoveIndexCb = Callable[[str], Awaitable[None]]
@@ -331,6 +341,8 @@ class ZoteroSyncPipeline:
         await self._store.upsert_zotero_library(snapshot.library)
         for coll in snapshot.collections:
             await self._store.upsert_zotero_collection(coll)
+        # 把 Zotero 集合树派生进统一 collections（树形 + 只读），供 UI/ask/lightrag 共用。
+        await self._sync_zotero_tree_into_collections(snapshot)
         for item in snapshot.items:
             await self._store.upsert_zotero_item(item)
         for att in snapshot.attachments:
@@ -362,11 +374,14 @@ class ZoteroSyncPipeline:
     ) -> None:
         lib = snapshot.library.library_id
         item_by_key = {i.item_key: i for i in snapshot.items}
-        # item_key → 主集合名（首个），用于 KB 单值 collection 归属。
         coll_name_by_key = {c.collection_key: c.name for c in snapshot.collections}
+        # item_key → 首个集合名（KB 单值 primary，用于 R2 key/Notion/milvus tag 兜底）。
         primary_coll: dict[str, str] = {}
+        # item_key → 全部所属集合的统一 coll_key 列表（多归属真相源）。
+        item_coll_keys: dict[str, list[str]] = {}
         for coll_key, item_key in snapshot.collection_items:
             primary_coll.setdefault(item_key, coll_name_by_key.get(coll_key, ""))
+            item_coll_keys.setdefault(item_key, []).append(_zotero_coll_key(lib, coll_key))
 
         link_only = cfg.storage_mode == ZOTERO_STORAGE_LINKED
         link_root_override = (
@@ -385,6 +400,11 @@ class ZoteroSyncPipeline:
             version = item.version if item else 0
             document_id = make_document_id(lib, item_key, att.attachment_key)
 
+            # 多归属真相源：item 的全部所属集合 coll_key；未挂集合则归入合成 unfiled home。
+            coll_keys = list(dict.fromkeys(item_coll_keys.get(item_key, [])))
+            if not coll_keys:
+                coll_keys = [_unfiled_coll_key(lib)]
+
             existing = await self._store.get_document(document_id)
             was_detached = (
                 existing is not None
@@ -396,13 +416,15 @@ class ZoteroSyncPipeline:
                 and existing.zotero_version == version
             )
             if incremental and unchanged:
+                # 即便跳过清洗，也刷新多归属（覆盖迁移期临时归属，保证树形归属正确）。
+                await self._store.set_document_collections(document_id, coll_keys)
                 result.skipped_unchanged += 1
                 if progress is not None:
                     progress.skipped_unchanged += 1
                 continue
 
             collection = primary_coll.get(item_key) or DEFAULT_ZOTERO_COLLECTION
-            await self._ensure_kb_collection(collection)
+            await self._ensure_unfiled_home(lib, collection, coll_keys)
             tags = [t.tag for t in snapshot.item_tags.get(item_key, [])]
             title = (item.title if item and item.title else att.filename) or document_id
 
@@ -430,6 +452,9 @@ class ZoteroSyncPipeline:
                     progress.note_error(f"{document_id}: {exc}")
                 logger.error("Zotero ingest failed for %s: %s", document_id, exc, exc_info=True)
                 continue
+
+            # 覆盖为 Zotero 真实多归属（process_attachment 仅按 primary 写了单归属）。
+            await self._store.set_document_collections(document_id, coll_keys)
 
             if was_detached:
                 result.reattached_document_ids.append(document_id)
@@ -524,11 +549,54 @@ class ZoteroSyncPipeline:
 
     # ── 助手 ──────────────────────────────────────────────────
 
-    async def _ensure_kb_collection(self, name: str) -> None:
-        existing = {c.name for c in await self._store.list_collections()}
-        if name not in existing:
+    async def _sync_zotero_tree_into_collections(self, snapshot: ZoteroSnapshot) -> None:
+        """把 Zotero 集合树派生进统一 collections 表（树形 + 只读）。
+
+        统一表是 zotero_collections 镜像表的「投影」：coll_key=lib:zkey、parent_key=lib:父zkey，
+        origin=ZOTERO/read_only=1。同步后清理本 library 中不在快照内的 zotero 集合
+        （含 Zotero 侧删除的集合，以及 018 迁移产生的无命名空间临时行），保持树形与上游一致。
+        """
+        lib = snapshot.library.library_id
+        snapshot_keys: set[str] = set()
+        for coll in snapshot.collections:
+            ck = _zotero_coll_key(lib, coll.collection_key)
+            parent = (
+                _zotero_coll_key(lib, coll.parent_collection_key)
+                if coll.parent_collection_key
+                else ""
+            )
             await self._store.upsert_collection(
-                Collection(name=name, origin=DocumentOrigin.ZOTERO, read_only=True)
+                Collection(
+                    name=coll.name,
+                    coll_key=ck,
+                    parent_key=parent,
+                    origin=DocumentOrigin.ZOTERO,
+                    read_only=True,
+                    zotero_collection_key=coll.collection_key,
+                    library_id=lib,
+                )
+            )
+            snapshot_keys.add(ck)
+        # 清理陈旧 zotero 集合：本库内不在快照的 + 无命名空间的迁移临时行（coll_key 无冒号）。
+        for c in await self._store.list_collections():
+            if c.origin != DocumentOrigin.ZOTERO or c.coll_key in snapshot_keys:
+                continue
+            if c.library_id == lib or ":" not in c.coll_key:
+                await self._store.delete_collection_by_key(c.coll_key)
+
+    async def _ensure_unfiled_home(
+        self, library_id: str, name: str, coll_keys: list[str]
+    ) -> None:
+        """确保 item 归属的集合在统一表中存在；未挂任何 Zotero 集合时建合成 unfiled home。"""
+        if coll_keys == [_unfiled_coll_key(library_id)]:
+            await self._store.upsert_collection(
+                Collection(
+                    name=name or DEFAULT_ZOTERO_COLLECTION,
+                    coll_key=_unfiled_coll_key(library_id),
+                    origin=DocumentOrigin.ZOTERO,
+                    read_only=True,
+                    library_id=library_id,
+                )
             )
 
 

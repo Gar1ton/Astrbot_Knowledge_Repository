@@ -505,6 +505,134 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             return await self._category_manager.delete_collection(name)
         return await self._source_store.delete_collection(name)
 
+    # ── 本地集合树编辑（仅 LOCAL 可改；Zotero 只读）─────────────
+
+    async def _assert_name_unique_under_parent(
+        self, name: str, parent_key: str, *, exclude_key: str = ""
+    ) -> None:
+        for c in await self._source_store.list_collections():
+            if (
+                c.parent_key == parent_key
+                and c.name == name
+                and c.coll_key != exclude_key
+            ):
+                raise ValueError(f"同级已存在同名集合：{name}")
+
+    async def _assert_local_editable(self, coll_key: str) -> Collection:
+        col = await self._source_store.get_collection(coll_key)
+        if col is None:
+            raise ValueError(f"集合不存在：{coll_key}")
+        if col.origin is DocumentOrigin.ZOTERO:
+            raise ReadOnlyError(f"集合 '{col.name}' 来自 Zotero 同步，只读，不能编辑。")
+        if col.name == SYSTEM_COLLECTION_UNCATEGORIZED:
+            raise ValueError(f"系统集合 '{SYSTEM_COLLECTION_UNCATEGORIZED}' 不可编辑。")
+        return col
+
+    async def create_subcollection(
+        self, name: str, parent_key: str = "", description: str = ""
+    ) -> str:
+        """新建本地集合（parent_key 为空=顶层）。返回新集合的 coll_key。"""
+        name = name.strip()
+        if not name:
+            raise ValueError("集合名不能为空。")
+        if parent_key:
+            parent = await self._source_store.get_collection(parent_key)
+            if parent is None:
+                raise ValueError(f"父集合不存在：{parent_key}")
+            if parent.origin is DocumentOrigin.ZOTERO:
+                raise ReadOnlyError("不能在 Zotero 只读集合下创建子集合。")
+        await self._assert_name_unique_under_parent(name, parent_key)
+        col = Collection(
+            name=name,
+            description=description,
+            parent_key=parent_key,
+            created_at=_now(),
+            origin=DocumentOrigin.LOCAL,
+        )
+        await self._source_store.upsert_collection(col)
+        return col.coll_key
+
+    async def rename_collection(self, coll_key: str, new_name: str) -> None:
+        """重命名本地集合（同 parent 下唯一）。"""
+        new_name = new_name.strip()
+        if not new_name:
+            raise ValueError("集合名不能为空。")
+        col = await self._assert_local_editable(coll_key)
+        await self._assert_name_unique_under_parent(
+            new_name, col.parent_key, exclude_key=coll_key
+        )
+        col.name = new_name
+        await self._source_store.upsert_collection(col)
+
+    async def move_collection(self, coll_key: str, new_parent_key: str = "") -> None:
+        """移动本地集合到新父级（new_parent_key 为空=提升为顶层）。防环 + 只读校验。"""
+        col = await self._assert_local_editable(coll_key)
+        if new_parent_key:
+            if new_parent_key == coll_key:
+                raise ValueError("不能把集合移动到自身下。")
+            parent = await self._source_store.get_collection(new_parent_key)
+            if parent is None:
+                raise ValueError(f"目标父集合不存在：{new_parent_key}")
+            if parent.origin is DocumentOrigin.ZOTERO:
+                raise ReadOnlyError("不能移动到 Zotero 只读集合下。")
+            descendants = await self._source_store.get_local_collection_descendants(coll_key)
+            if new_parent_key in descendants:
+                raise ValueError("不能把集合移动到其自身的后代下（会形成环）。")
+        await self._assert_name_unique_under_parent(
+            col.name, new_parent_key, exclude_key=coll_key
+        )
+        col.parent_key = new_parent_key
+        await self._source_store.upsert_collection(col)
+
+    async def delete_collection_by_key(self, coll_key: str) -> bool:
+        """按 coll_key 删除本地集合：子集合提升到其父级，本级文档归属迁入 _uncategorized。
+
+        只读保护：Zotero 来源集合禁止删除。返回 False 表示 coll_key 不存在。
+        """
+        col = await self._source_store.get_collection(coll_key)
+        if col is None:
+            return False
+        await self._assert_local_editable(coll_key)
+
+        await self._ensure_system_collections()
+        uncategorized = await self._source_store.get_collection_by_name(
+            SYSTEM_COLLECTION_UNCATEGORIZED
+        )
+        assert uncategorized is not None
+
+        # 1) 子集合提升到被删节点的父级。
+        for child in await self._source_store.list_collections():
+            if child.parent_key == coll_key:
+                child.parent_key = col.parent_key
+                await self._source_store.upsert_collection(child)
+
+        # 2) 本级文档：移除该归属；若文档因此无归属则落入 _uncategorized。
+        members = await self._source_store.list_documents_by_collection_key(
+            coll_key, descendants=False
+        )
+        for doc in members:
+            keys = [k for k in (doc.collection_keys or []) if k != coll_key]
+            if not keys:
+                keys = [uncategorized.coll_key]
+                if doc.collection == col.name:
+                    doc.collection = SYSTEM_COLLECTION_UNCATEGORIZED
+                    await self._source_store.update_document(doc)
+                    await self._mark_lightrag_pending(
+                        doc.doc_id, SYSTEM_COLLECTION_UNCATEGORIZED
+                    )
+            await self._source_store.set_document_collections(doc.doc_id, keys)
+
+        # 3) 清理该集合 name 关联的 LightRAG workspace（与既有按 name 清理一致）。
+        if self._lightrag_registry is not None and self._lightrag_registry.has_workspace(col.name):
+            try:
+                await self._lightrag_registry.reset_workspace(col.name)
+            except Exception as exc:
+                logger.error("Failed to remove LightRAG workspace %s: %s", col.name, exc)
+        if self._index_compatibility is not None:
+            self._index_compatibility.remove_lightrag_collection(col.name)
+
+        return await self._source_store.delete_collection_by_key(coll_key)
+
     # ── 文档（管理）────────────────────────────────────────────
 
     async def list_documents(
@@ -512,6 +640,14 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     ) -> list[SourceDocument]:
         """列出文档，可按集合与单标签过滤（AND）。"""
         return await self._source_store.list_documents(collection=collection, tag=tag)
+
+    async def list_documents_by_collection_key(
+        self, coll_key: str, *, descendants: bool = False
+    ) -> list[SourceDocument]:
+        """按 coll_key 列出归属文档（descendants=False 仅本级，供 DocumentsPanel）。"""
+        return await self._source_store.list_documents_by_collection_key(
+            coll_key, descendants=descendants
+        )
 
     async def get_document(self, doc_id: str) -> SourceDocument | None:
         """取单个文档；不存在返回 None。"""
@@ -1347,6 +1483,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     ) -> dict:
         """Retrieve evidence and generate one final answer."""
         scope = _build_scope(scope_type, scope_key, scope_library_id)
+        # 未显式传 scope 但选了集合：默认按「选中集合 + 所有子目录」检索（含后代），
+        # 由 coll_key 派生 collection scope，覆盖统一树的整棵子树。
+        if scope is None and collection:
+            _sel = await self._source_store.get_collection_by_name(collection)
+            if _sel is not None:
+                scope = RetrievalScope(
+                    scope_type="collection",
+                    scope_key=_sel.coll_key,
+                    library_id=_sel.library_id,
+                )
         if retrieval_mode not in {"default", "high_precision", "graph_only", "deep_thinking"}:
             raise ValueError(
                 "retrieval_mode must be 'default', 'high_precision', 'graph_only', "
@@ -1498,7 +1644,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             _progress("vector_search", 20)
             t_vs = time.monotonic()
             seen_ids: set[str] = set()
-            for col in await self._resolve_ask_collections(collection):
+            for col in await self._resolve_ask_collections(collection, scope):
                 try:
                     if self._retrieval_orchestrator is not None:
                         outcome = await self._retrieval_orchestrator.retrieve_with_outcome(
@@ -1706,7 +1852,21 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "thinking_trace": _serialize_deep_thinking(deep_outcome) if deep_outcome else None,
         }
 
-    async def _resolve_ask_collections(self, collection: str | None) -> list[str]:
+    async def _resolve_ask_collections(
+        self, collection: str | None, scope: RetrievalScope | None = None
+    ) -> list[str]:
+        # collection scope（含后代）：把检索集合扩展为「选中集合 + 全部后代」的 name 列表，
+        # 各引擎按 primary collection_tag 覆盖子树；scope 的 allowed_document_ids 再精确过滤。
+        if scope is not None and scope.scope_type == "collection" and scope.scope_key:
+            keys = await self._source_store.get_local_collection_descendants(scope.scope_key)
+            names: list[str] = []
+            for ck in keys:
+                col = await self._source_store.get_collection(ck)
+                if col:
+                    names.append(col.name)
+            names = list(dict.fromkeys(names))
+            if names:
+                return names
         if collection:
             return [collection]
         collections = [item.name for item in await self.list_collections()]
@@ -1727,7 +1887,14 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 "reason": "LightRAG Core is not enabled or configured.",
                 "build_available": False,
             }
-        docs = await self._source_store.list_documents(collection=collection)
+        # 含后代：父集合的就绪度按「父 + 全部后代」的文档集判定（与 build 合并 workspace 一致）。
+        col = await self._source_store.get_collection_by_name(collection)
+        if col is not None:
+            docs = await self._source_store.list_documents_by_collection_key(
+                col.coll_key, descendants=True
+            )
+        else:
+            docs = await self._source_store.list_documents(collection=collection)
         if not docs:
             return {
                 "ready": False,
@@ -2465,7 +2632,14 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         return "\n\n".join(chunk.text for chunk in chunks if chunk.text.strip())
 
     async def _lightrag_docs_for_build(self, collection: str) -> list[SourceDocument]:
-        docs = await self._source_store.list_documents(collection=collection)
+        # 合并单 workspace：以选中集合为根，纳入「父 + 全部后代」的文档（多归属去重）。
+        col = await self._source_store.get_collection_by_name(collection)
+        if col is not None:
+            docs = await self._source_store.list_documents_by_collection_key(
+                col.coll_key, descendants=True
+            )
+        else:
+            docs = await self._source_store.list_documents(collection=collection)
         if (
             self._lightrag_registry is None
             or not self._lightrag_registry.has_workspace(collection)

@@ -6,10 +6,16 @@
 from __future__ import annotations
 
 import copy
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from core.repository.source_store.base import SourceDocumentStore
+
+
+def _new_local_coll_key() -> str:
+    """为本地集合生成稳定唯一 coll_key（与 sqlite 实现一致）。"""
+    return "L" + uuid.uuid4().hex
 
 if TYPE_CHECKING:
     from core.domain.models import (
@@ -34,7 +40,8 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
     """纯内存的 SourceDocumentStore，确定性、无网络/磁盘。"""
 
     def __init__(self) -> None:
-        self._collections: dict[str, Collection] = {}
+        self._collections: dict[str, Collection] = {}  # keyed by coll_key
+        self._doc_collections: dict[str, list[str]] = {}  # doc_id → coll_keys
         self._documents: dict[str, SourceDocument] = {}
         self._chunks: dict[str, list[DocumentChunk]] = {}
         self._sync_records: dict[tuple[str, SyncTargetKind], SyncRecord] = {}
@@ -54,24 +61,115 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._chat_id_seq = 1
         self._console_scope_states: dict[tuple[str, str], ConsoleScopeState] = {}
 
-    # ── 集合 ────────────────────────────────────────────────────
+    # ── 集合（树形 + 多归属）────────────────────────────────────
 
     async def upsert_collection(self, collection: Collection) -> None:
-        self._collections[collection.name] = copy.deepcopy(collection)
+        coll_key = collection.coll_key
+        if not coll_key:
+            # 兼容旧调用：按 (name, parent_key) 复用现有 key，否则发放新 local key。
+            match = next(
+                (
+                    c.coll_key
+                    for c in self._collections.values()
+                    if c.name == collection.name and c.parent_key == collection.parent_key
+                ),
+                None,
+            )
+            coll_key = match or _new_local_coll_key()
+            collection.coll_key = coll_key
+        self._collections[coll_key] = copy.deepcopy(collection)
+
+    async def get_collection(self, coll_key: str) -> Collection | None:
+        c = self._collections.get(coll_key)
+        return copy.deepcopy(c) if c is not None else None
+
+    async def get_collection_by_name(self, name: str) -> Collection | None:
+        matches = sorted(
+            (c for c in self._collections.values() if c.name == name),
+            key=lambda c: c.coll_key,
+        )
+        return copy.deepcopy(matches[0]) if matches else None
 
     async def list_collections(self) -> list[Collection]:
         return [copy.deepcopy(c) for c in sorted(self._collections.values(), key=lambda c: c.name)]
 
+    async def get_local_collection_descendants(self, coll_key: str) -> list[str]:
+        if coll_key not in self._collections:
+            return []
+        result = [coll_key]
+        frontier = [coll_key]
+        while frontier:
+            current = frontier.pop()
+            for c in self._collections.values():
+                if c.parent_key == current and c.coll_key not in result:
+                    result.append(c.coll_key)
+                    frontier.append(c.coll_key)
+        return result
+
     async def delete_collection(self, name: str) -> bool:
-        return self._collections.pop(name, None) is not None
+        match = next((k for k, c in self._collections.items() if c.name == name), None)
+        if match is None:
+            return False
+        del self._collections[match]
+        return True
+
+    async def delete_collection_by_key(self, coll_key: str) -> bool:
+        return self._collections.pop(coll_key, None) is not None
 
     async def move_documents_to_collection(self, from_name: str, to_name: str) -> int:
+        from_coll = await self.get_collection_by_name(from_name)
+        to_coll = await self.get_collection_by_name(to_name)
         count = 0
         for doc in self._documents.values():
             if doc.collection == from_name:
                 doc.collection = to_name
                 count += 1
+        if from_coll and to_coll:
+            for doc_id, keys in self._doc_collections.items():
+                self._doc_collections[doc_id] = list(
+                    dict.fromkeys(
+                        to_coll.coll_key if k == from_coll.coll_key else k for k in keys
+                    )
+                )
         return count
+
+    # ── 文档多归属 ──────────────────────────────────────────────
+
+    async def set_document_collections(self, doc_id: str, coll_keys: list[str]) -> None:
+        self._doc_collections[doc_id] = list(dict.fromkeys(coll_keys))
+
+    async def list_document_collection_keys(self, doc_id: str) -> list[str]:
+        return list(self._doc_collections.get(doc_id, []))
+
+    async def list_documents_by_collection_key(
+        self, coll_key: str, *, descendants: bool = False
+    ) -> list[SourceDocument]:
+        keys = (
+            set(await self.get_local_collection_descendants(coll_key))
+            if descendants
+            else {coll_key}
+        )
+        matched = [
+            d
+            for d in self._documents.values()
+            if keys & set(self._doc_collections.get(d.doc_id, []))
+        ]
+        ordered = sorted(matched, key=lambda d: (d.created_at is None, d.created_at, d.doc_id))
+        return [self._with_keys(d) for d in ordered]
+
+    def _with_keys(self, doc: SourceDocument) -> SourceDocument:
+        """返回带多归属 collection_keys 回填的深拷贝。"""
+        out = copy.deepcopy(doc)
+        out.collection_keys = list(self._doc_collections.get(doc.doc_id, []))
+        return out
+
+    async def _sync_doc_memberships(self, document: SourceDocument) -> None:
+        keys = list(dict.fromkeys(document.collection_keys))
+        if not keys and document.collection:
+            primary = await self.get_collection_by_name(document.collection)
+            if primary:
+                keys = [primary.coll_key]
+        self._doc_collections[document.doc_id] = keys
 
     async def list_pending_reindex_documents(self) -> list[SourceDocument]:
         import copy
@@ -88,10 +186,11 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         if document.doc_id in self._documents:
             raise ValueError(f"duplicate doc_id: {document.doc_id}")
         self._documents[document.doc_id] = copy.deepcopy(document)
+        await self._sync_doc_memberships(document)
 
     async def get_document(self, doc_id: str) -> SourceDocument | None:
         doc = self._documents.get(doc_id)
-        return copy.deepcopy(doc) if doc is not None else None
+        return self._with_keys(doc) if doc is not None else None
 
     async def list_documents(
         self, collection: str | None = None, tag: str | None = None
@@ -102,18 +201,20 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         if tag is not None:
             docs = [d for d in docs if tag in d.tags]
         ordered = sorted(docs, key=lambda d: (d.created_at is None, d.created_at, d.doc_id))
-        return [copy.deepcopy(d) for d in ordered]
+        return [self._with_keys(d) for d in ordered]
 
     async def update_document(self, document: SourceDocument) -> bool:
         if document.doc_id not in self._documents:
             return False
         self._documents[document.doc_id] = copy.deepcopy(document)
+        await self._sync_doc_memberships(document)
         return True
 
     async def delete_document(self, doc_id: str) -> bool:
         if doc_id not in self._documents:
             return False
         self._chunks.pop(doc_id, None)  # 先删分块
+        self._doc_collections.pop(doc_id, None)
         self._page_chunks.pop(doc_id, None)
         self._notes = {
             note_id: note

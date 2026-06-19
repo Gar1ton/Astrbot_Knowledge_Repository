@@ -162,3 +162,87 @@ async def test_scoped_notes_chat_lock_and_console_state(
     assert state is not None
     assert state.selected_doc_id == "d1"
     assert state.payload == {"right": "notes"}
+
+
+# ── 统一多归属集合树（v0.26.3）────────────────────────────────────
+
+
+async def _build_tree(store: InMemorySourceDocumentStore) -> dict[str, str]:
+    """建一棵 root → child → grand 的本地集合树，返回 name→coll_key。"""
+    keys: dict[str, str] = {}
+    parent = ""
+    for name in ("root", "child", "grand"):
+        c = Collection(name=name, parent_key=parent)
+        await store.upsert_collection(c)
+        keys[name] = c.coll_key  # upsert 回填 coll_key
+        parent = c.coll_key
+    return keys
+
+
+async def test_upsert_collection_backfills_coll_key(store: InMemorySourceDocumentStore) -> None:
+    c = Collection(name="solo")
+    await store.upsert_collection(c)
+    assert c.coll_key.startswith("L")
+    fetched = await store.get_collection(c.coll_key)
+    assert fetched is not None and fetched.name == "solo"
+    assert (await store.get_collection_by_name("solo")).coll_key == c.coll_key
+
+
+async def test_same_name_under_different_parents(store: InMemorySourceDocumentStore) -> None:
+    a = Collection(name="A")
+    await store.upsert_collection(a)
+    b = Collection(name="B")
+    await store.upsert_collection(b)
+    # 两个不同父下的同名子集合
+    s1 = Collection(name="Methods", parent_key=a.coll_key)
+    s2 = Collection(name="Methods", parent_key=b.coll_key)
+    await store.upsert_collection(s1)
+    await store.upsert_collection(s2)
+    assert s1.coll_key != s2.coll_key
+    assert len([c for c in await store.list_collections() if c.name == "Methods"]) == 2
+
+
+async def test_local_collection_descendants(store: InMemorySourceDocumentStore) -> None:
+    keys = await _build_tree(store)
+    assert set(await store.get_local_collection_descendants(keys["root"])) == set(keys.values())
+    assert set(await store.get_local_collection_descendants(keys["child"])) == {
+        keys["child"],
+        keys["grand"],
+    }
+    assert await store.get_local_collection_descendants("missing") == []
+
+
+async def test_multi_membership_and_scoped_listing(store: InMemorySourceDocumentStore) -> None:
+    keys = await _build_tree(store)
+    extra = Collection(name="extra")
+    await store.upsert_collection(extra)
+
+    # d1 在 child；d2 在 grand；d3 多归属 child + extra
+    d1 = _doc("d1")
+    d1.collection_keys = [keys["child"]]
+    await store.add_document(d1)
+    d2 = _doc("d2")
+    d2.collection_keys = [keys["grand"]]
+    await store.add_document(d2)
+    d3 = _doc("d3")
+    d3.collection_keys = [keys["child"], extra.coll_key]
+    await store.add_document(d3)
+
+    # 本级：child 只含 d1, d3
+    assert {d.doc_id for d in await store.list_documents_by_collection_key(keys["child"])} == {
+        "d1",
+        "d3",
+    }
+    # 含后代：root 含 child+grand 的全部 = d1, d2, d3
+    assert {
+        d.doc_id
+        for d in await store.list_documents_by_collection_key(keys["root"], descendants=True)
+    } == {"d1", "d2", "d3"}
+    # 多归属真相源回填
+    assert set((await store.get_document("d3")).collection_keys) == {keys["child"], extra.coll_key}
+    assert set(await store.list_document_collection_keys("d3")) == {keys["child"], extra.coll_key}
+
+    # 整体替换归属
+    await store.set_document_collections("d3", [extra.coll_key])
+    assert await store.list_document_collection_keys("d3") == [extra.coll_key]
+    assert {d.doc_id for d in await store.list_documents_by_collection_key(keys["child"])} == {"d1"}

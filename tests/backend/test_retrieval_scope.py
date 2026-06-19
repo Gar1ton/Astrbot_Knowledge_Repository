@@ -75,8 +75,20 @@ async def _store_with_mirror() -> InMemorySourceDocumentStore:
     await store.set_item_collections(LIB, "ITEMB", ["child"])
     await store.replace_item_tags(LIB, "ITEMC", [ZoteroTag("ITEMC", "shared", 0)])
     await store.replace_item_tags(LIB, "ITEMA", [ZoteroTag("ITEMA", "shared", 0)])
+    # 统一 collections 树（coll_key 复用 root/child）+ 多归属（collection scope 走此路径）。
+    await store.upsert_collection(
+        Collection(name="Root", coll_key="root", origin=DocumentOrigin.ZOTERO, library_id=LIB)
+    )
+    await store.upsert_collection(
+        Collection(
+            name="Child", coll_key="child", parent_key="root",
+            origin=DocumentOrigin.ZOTERO, library_id=LIB,
+        )
+    )
     for doc_id, item in [("dA", "ITEMA"), ("dB", "ITEMB"), ("dC", "ITEMC")]:
         await store.add_document(_doc(doc_id, item))
+    await store.set_document_collections("dA", ["root"])
+    await store.set_document_collections("dB", ["child"])
     return store
 
 

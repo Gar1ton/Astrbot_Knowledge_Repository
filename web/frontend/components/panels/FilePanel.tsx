@@ -6,7 +6,7 @@ import { Panel } from "@/components/ds/Panel";
 import { IconButton } from "@/components/ds/IconButton";
 import { Icon } from "@/components/ds/Icon";
 import { useConsole } from "@/lib/ConsoleContext";
-import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, createCollection, uploadDocument, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
+import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, deleteCollectionByKey, renameCollection, createCollection, uploadDocument, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 
@@ -530,9 +530,11 @@ function DeleteCollectionDialog({ collectionName, onConfirm, onCancel, deleting 
 interface NewCollectionDialogProps {
   onClose: () => void;
   onCreated: () => void;
+  parentKey?: string;
+  parentName?: string;
 }
 
-function NewCollectionDialog({ onClose, onCreated }: NewCollectionDialogProps) {
+function NewCollectionDialog({ onClose, onCreated, parentKey, parentName }: NewCollectionDialogProps) {
   const { t } = useI18n();
   const { toast } = useToast();
   const [name, setName] = useState("");
@@ -543,7 +545,7 @@ function NewCollectionDialog({ onClose, onCreated }: NewCollectionDialogProps) {
     if (!name.trim()) return;
     setCreating(true);
     try {
-      await createCollection(name.trim(), desc.trim() || undefined);
+      await createCollection(name.trim(), desc.trim() || undefined, parentKey);
       toast(t("file_new_collection_success").replace("{name}", name.trim()), "ok");
       onCreated();
       onClose();
@@ -584,6 +586,11 @@ function NewCollectionDialog({ onClose, onCreated }: NewCollectionDialogProps) {
         <div style={{ fontSize: 14, fontWeight: 700, color: "var(--heading)" }}>
           {t("file_new_collection_title")}
         </div>
+        {parentName && (
+          <div style={{ fontSize: 11.5, color: "var(--fg-subtle)" }}>
+            ↳ {parentName}
+          </div>
+        )}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <input
             value={name}
@@ -637,6 +644,88 @@ function NewCollectionDialog({ onClose, onCreated }: NewCollectionDialogProps) {
                 {t("file_new_collection_creating")}
               </>
             ) : t("file_new_collection_create")}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ─── Rename Collection Dialog ──────────────────────────────────
+
+interface RenameCollectionDialogProps {
+  collection: Collection;
+  onClose: () => void;
+  onRenamed: () => void;
+}
+
+function RenameCollectionDialog({ collection, onClose, onRenamed }: RenameCollectionDialogProps) {
+  const { t } = useI18n();
+  const { toast } = useToast();
+  const [name, setName] = useState(collection.name);
+  const [saving, setSaving] = useState(false);
+
+  async function handleSave() {
+    const next = name.trim();
+    if (!next || next === collection.name) { onClose(); return; }
+    setSaving(true);
+    try {
+      await renameCollection(collection.coll_key || "", next);
+      onRenamed();
+      onClose();
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : String(err), "error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, zIndex: Z.dialog, background: "rgba(22,23,26,.46)",
+        display: "flex", alignItems: "center", justifyContent: "center", animation: "overlayIn .15s ease",
+      }}
+    >
+      <div style={{
+        background: "var(--surface)", border: "1px solid var(--border)",
+        borderRadius: "var(--radius-2xl)", boxShadow: "var(--shadow-pop)",
+        width: 360, maxWidth: "calc(100vw - 32px)", padding: "22px 22px 18px",
+        display: "flex", flexDirection: "column", gap: 14,
+      }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--heading)" }}>
+          {t("file_rename_collection_title")}
+        </div>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") onClose();
+            if (e.key === "Enter" && !saving) handleSave();
+          }}
+          autoFocus
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button type="button" onClick={onClose} disabled={saving} style={{
+            background: "var(--bg-inset)", border: "1px solid var(--border-strong)",
+            color: "var(--fg-muted)", borderRadius: "var(--radius-xl)",
+            padding: "7px 16px", fontSize: 12.5, fontWeight: 500, cursor: "pointer", fontFamily: "inherit",
+          }}>
+            {t("btn_cancel")}
+          </button>
+          <button type="button" onClick={handleSave} disabled={!name.trim() || saving} style={{
+            background: name.trim() && !saving ? "var(--accent)" : "var(--bg-inset)",
+            border: "1px solid transparent",
+            color: name.trim() && !saving ? "var(--accent-fg, #fff)" : "var(--fg-subtle)",
+            borderRadius: "var(--radius-xl)", padding: "7px 16px", fontSize: 12.5, fontWeight: 600,
+            cursor: name.trim() && !saving ? "pointer" : "not-allowed", fontFamily: "inherit",
+          }}>
+            {t("file_rename_collection_save")}
           </button>
         </div>
       </div>
@@ -816,10 +905,12 @@ export function FilePanel() {
   const [buildJob, setBuildJob] = useState<GraphBuildJob | null>(null);
   const [buildHistory, setBuildHistory] = useState<BuildJobRecord[]>([]);
   const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
-  const [deletingCollection, setDeletingCollection] = useState<string | null>(null);
+  const [deletingCollection, setDeletingCollection] = useState<Collection | null>(null);
   const [deleteInProgress, setDeleteInProgress] = useState(false);
   const [progressOpen, setProgressOpen] = useState(true);
   const [showNewCollection, setShowNewCollection] = useState(false);
+  const [newCollectionParent, setNewCollectionParent] = useState<Collection | null>(null);
+  const [renamingCollection, setRenamingCollection] = useState<Collection | null>(null);
   const [showUpload, setShowUpload] = useState(false);
 
   useEffect(() => {
@@ -868,6 +959,23 @@ export function FilePanel() {
   // LightRAG collections: all non-system collections (user can build graph on any)
   const lightragCollections = collections.filter((c) => !c.is_system);
 
+  // 树形结构：按 parent_key 聚合子集合（coll_key 为节点标识）。
+  const childrenByParent = React.useMemo(() => {
+    const m: Record<string, Collection[]> = {};
+    for (const c of collections) {
+      const p = c.parent_key || "";
+      (m[p] ||= []).push(c);
+    }
+    for (const k of Object.keys(m)) m[k].sort((a, b) => a.name.localeCompare(b.name));
+    return m;
+  }, [collections]);
+
+  // 顶层节点（parent 为空，或父节点不在本来源集合内）。
+  function roots(list: Collection[]): Collection[] {
+    const keys = new Set(list.map((c) => c.coll_key || ""));
+    return list.filter((c) => !c.parent_key || !keys.has(c.parent_key));
+  }
+
   const latestHistoryRecord = buildHistory
     .slice()
     .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
@@ -884,6 +992,69 @@ export function FilePanel() {
   function selectCollection(key: string) {
     setSelectedCollection(key);
     setSelectedDocId(null);
+  }
+
+  const branchSpacer = <span style={{ width: 13, display: "inline-block", flexShrink: 0 }} />;
+  const badgeBtnStyle = {
+    width: 22, height: 22, color: "var(--select-fg)", background: "transparent", flexShrink: 0,
+  } as const;
+
+  function renderZoteroNode(c: Collection, depth: number): React.ReactNode {
+    const kKey = c.coll_key || `z:${c.name}`;
+    const open = openKeys[kKey] ?? false;
+    const kids = childrenByParent[c.coll_key || ""] ?? [];
+    return (
+      <div key={kKey}>
+        <Row
+          depth={depth}
+          icon={kids.length ? <Caret open={open} /> : branchSpacer}
+          label={c.name}
+          active={isSel("z:", c.name)}
+          onClick={() => { if (kids.length) toggleKey(kKey); selectCollection(`z:${c.name}`); }}
+        />
+        {open && kids.map((ch) => renderZoteroNode(ch, depth + 1))}
+      </div>
+    );
+  }
+
+  function renderLocalNode(c: Collection, depth: number): React.ReactNode {
+    const kKey = c.coll_key || `l:${c.name}`;
+    const open = openKeys[kKey] ?? false;
+    const kids = childrenByParent[c.coll_key || ""] ?? [];
+    const isActive = isSel("l:", c.name);
+    return (
+      <div key={kKey} style={{ position: "relative" }}>
+        <Row
+          depth={depth}
+          icon={kids.length ? <Caret open={open} /> : branchSpacer}
+          label={c.name}
+          active={isActive}
+          onClick={() => { if (kids.length) toggleKey(kKey); selectCollection(`l:${c.name}`); }}
+          badge={
+            isActive && !c.is_system ? (
+              <span style={{ display: "inline-flex", gap: 2, flexShrink: 0 }}>
+                <IconButton
+                  name="plus" label={t("file_action_add_subcollection")} size={13} side="left"
+                  style={badgeBtnStyle}
+                  onClick={(e) => { e.stopPropagation(); setNewCollectionParent(c); setShowNewCollection(true); }}
+                />
+                <IconButton
+                  name="edit" label={t("file_action_rename_collection")} size={13} side="left"
+                  style={badgeBtnStyle}
+                  onClick={(e) => { e.stopPropagation(); setRenamingCollection(c); }}
+                />
+                <IconButton
+                  name="trash" label={t("file_action_delete_collection")} size={13} side="left"
+                  style={badgeBtnStyle}
+                  onClick={(e) => { e.stopPropagation(); setDeletingCollection(c); }}
+                />
+              </span>
+            ) : null
+          }
+        />
+        {open && kids.map((ch) => renderLocalNode(ch, depth + 1))}
+      </div>
+    );
   }
 
   async function refreshBuildState() {
@@ -1014,21 +1185,7 @@ export function FilePanel() {
             </>
           }
         />
-        {zoteroCollections.map((c) => {
-          const k = `z:${c.name}`;
-          const isOpen = openKeys[k] ?? false;
-          return (
-            <div key={k}>
-              <Row
-                depth={0}
-                icon={<Caret open={isOpen} />}
-                label={c.name}
-                active={isSel("z:", c.name)}
-                onClick={() => { toggleKey(k); selectCollection(k); }}
-              />
-            </div>
-          );
-        })}
+        {roots(zoteroCollections).map((c) => renderZoteroNode(c, 0))}
         {zoteroCollections.length === 0 && (
           <div style={{ padding: "4px 10px 4px 26px", fontSize: 11, color: "var(--fg-subtle)" }}>
             {t("file_no_zotero")}
@@ -1044,47 +1201,11 @@ export function FilePanel() {
           actions={
             <>
               <IconButton name="upload" label={t("file_action_upload_document")} size={14} onClick={() => setShowUpload(true)} />
-              <IconButton name="plus" label={t("file_action_new_collection")} size={14} onClick={() => setShowNewCollection(true)} />
+              <IconButton name="plus" label={t("file_action_new_collection")} size={14} onClick={() => { setNewCollectionParent(null); setShowNewCollection(true); }} />
             </>
           }
         />
-        {localCollections.map((c) => {
-          const k = `l:${c.name}`;
-          const isOpen = openKeys[k] ?? false;
-          const isActive = isSel("l:", c.name);
-          return (
-            <div key={k} style={{ position: "relative" }}>
-              <Row
-                depth={0}
-                icon={<Caret open={isOpen} />}
-                label={c.name}
-                active={isActive}
-                onClick={() => { toggleKey(k); selectCollection(k); }}
-                badge={
-                  isActive ? (
-                    <IconButton
-                      name="trash"
-                      label={t("file_action_delete_collection")}
-                      size={13}
-                      side="left"
-                      style={{
-                        width: 22,
-                        height: 22,
-                        color: "var(--select-fg)",
-                        background: "transparent",
-                        flexShrink: 0,
-                      }}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDeletingCollection(c.name);
-                      }}
-                    />
-                  ) : null
-                }
-              />
-            </div>
-          );
-        })}
+        {roots(localCollections).map((c) => renderLocalNode(c, 0))}
 
         <div style={{ height: 1, background: "var(--border)", margin: "10px 6px" }} />
 
@@ -1134,15 +1255,20 @@ export function FilePanel() {
     {/* Delete confirmation dialog */}
     {deletingCollection && (
       <DeleteCollectionDialog
-        collectionName={deletingCollection}
+        collectionName={deletingCollection.name}
         deleting={deleteInProgress}
         onCancel={() => setDeletingCollection(null)}
         onConfirm={async () => {
+          const target = deletingCollection;
           setDeleteInProgress(true);
           try {
-            await deleteCollection(deletingCollection);
-            toast(t("file_deleted_toast", { name: deletingCollection }), "ok");
-            if (selectedCollection === `l:${deletingCollection}`) {
+            if (target.coll_key) {
+              await deleteCollectionByKey(target.coll_key);
+            } else {
+              await deleteCollection(target.name);
+            }
+            toast(t("file_deleted_toast", { name: target.name }), "ok");
+            if (selectedCollection === `l:${target.name}`) {
               setSelectedCollection(null);
               setSelectedDocId(null);
             }
@@ -1159,8 +1285,18 @@ export function FilePanel() {
 
     {showNewCollection && (
       <NewCollectionDialog
-        onClose={() => setShowNewCollection(false)}
+        parentKey={newCollectionParent?.coll_key}
+        parentName={newCollectionParent?.name}
+        onClose={() => { setShowNewCollection(false); setNewCollectionParent(null); }}
         onCreated={() => listCollections().then(setCollections).catch(() => {})}
+      />
+    )}
+
+    {renamingCollection && (
+      <RenameCollectionDialog
+        collection={renamingCollection}
+        onClose={() => setRenamingCollection(null)}
+        onRenamed={() => listCollections().then(setCollections).catch(() => {})}
       />
     )}
 

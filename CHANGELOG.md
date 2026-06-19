@@ -21,6 +21,27 @@
 
 ---
 
+## [v0.26.3] — 2026-06-20
+
+### 新增功能 (Added)
+
+- **统一多归属集合树**：新增 `migrations/018_unified_collection_tree.sql`，把 `collections` 升级为 `coll_key` 稳定逻辑主键 + `parent_key` 树结构 + `library_id` 命名空间，并新增 `document_collections(doc_id, coll_key)` 多对多归属表；`Collection` 与 `SourceDocument` 同步补齐树形与多归属字段，保留 `documents.collection` 作为 primary 冗余标签（`migrations/018_unified_collection_tree.sql`、`core/domain/models.py`）。
+- **本地集合树编辑 API**：新增按 `coll_key` 的本地集合新建子集合、重命名、移动、防环校验和删除能力；Zotero 来源集合保持只读，删除本地集合时子集合提升、无归属文档迁入 `_uncategorized`（`core/api.py`、`web/server.py`、`web/frontend/lib/api.ts`）。
+- **前端文件面板真树形展示**：`FilePanel` 改为递归渲染本地集合与 Zotero 集合树，支持本地集合展开、建子集合、重命名和按 key 删除；Zotero 集合仅展示，不提供写操作（`web/frontend/components/panels/FilePanel.tsx`、`web/frontend/lib/i18n.ts`）。
+
+### 架构健康 (Refactor)
+
+- **SourceStore 契约改为 coll_key 优先**：在仓储抽象与 sqlite/memory 双实现中新增 `get_collection`、`get_collection_by_name`、`get_local_collection_descendants`、`delete_collection_by_key`、`set_document_collections`、`list_document_collection_keys`、`list_documents_by_collection_key(descendants)` 等契约；`add_document`/`update_document` 自动维护多归属表并回填 `collection_keys`（`core/repository/source_store/base.py`、`core/repository/source_store/sqlite.py`、`core/repository/source_store/memory.py`）。
+- **Zotero 同步不再压扁集合树**：Zotero pull 将 collection snapshot 派生进统一 `collections`，`coll_key=library_id:zotero_collection_key`、`parent_key=library_id:parent_key`，并为 item 写入全部所属集合；陈旧 Zotero 集合和迁移临时行由同步流程清理（`core/pipelines/zotero_sync_pipeline.py`）。
+- **问答与 LightRAG 范围统一为含后代**：collection scope 通过统一树解析为选中集合及全部后代文档，ask 默认在选中集合时派生含后代 scope；LightRAG readiness/build 也按父集合 + 后代合并为单一 workspace，DocumentsPanel 的 `collection_key` 查询仍只列本级文档（`core/api.py`、`core/pipelines/retrieval_orchestrator.py`、`web/server.py`）。
+- **分类与系统集合兼容多归属**：分类管理继续保留 primary collection 语义，同时通过仓储层同步多归属，避免 R2/Notion/Milvus 既有 collection tag 行为被破坏（`core/managers/category_manager.py`、`core/repository/source_store/sqlite.py`）。
+
+### 测试 (Tests)
+
+- 新增 migration 018 回填与迁移测试，覆盖旧库集合 key 回填、`document_collections` 派生、同名树形集合和外键重建约束（`tests/backend/test_migration_018.py`）。
+- 扩展 source store、sqlite store、retrieval scope、web server 与 Zotero 同步测试，覆盖多归属文档、按 `coll_key` 本级/含后代查询、本地集合编辑 REST、Zotero 树同步和 ask scope 含后代行为（`tests/backend/test_source_store.py`、`tests/backend/test_sqlite_source_store.py`、`tests/backend/test_retrieval_scope.py`、`tests/backend/test_web_server.py`、`tests/backend/test_zotero_sync.py`）。
+- 已记录验证：`python -m pytest tests/backend/` → 414 passed；`ruff check .` → passed；`mypy` → passed（`TODO.md`）。
+
 ## [v0.26.2] — 2026-06-19
 
 ### 修复 (Fixed)

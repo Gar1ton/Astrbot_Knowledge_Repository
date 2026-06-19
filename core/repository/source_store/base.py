@@ -31,30 +31,98 @@ if TYPE_CHECKING:
 class SourceDocumentStore(ABC):
     """原件 + 集合 + 分块的仓储。
 
-    标识约定：外部用稳定 doc_id（UUID）；同一 (collection) 下 name 唯一由调用方语义保证。
+    标识约定：
+        - 文档外部用稳定 doc_id（UUID/哈希）。
+        - 集合自 v0.26.3 起为**树形 + 多归属**：稳定逻辑主键是 coll_key（唯一），name 仅同 parent 下
+          唯一的展示名。文档归属真相源为 document_collections 多对多（按 coll_key）；
+          documents.collection（name）保留为冗余 primary（默认展示 + 单标签子系统兜底）。
     同步顺序约定写在涉及多表的方法 docstring 中。
     """
 
-    # ── 集合 ────────────────────────────────────────────────────
+    # ── 集合（树形 + 多归属）────────────────────────────────────
 
     @abstractmethod
     async def upsert_collection(self, collection: Collection) -> None:
-        """新建或更新集合（按 name 主键 upsert）。"""
+        """新建或更新集合（按 coll_key upsert）。
+
+        契约：coll_key 为空时由实现为 local 集合生成稳定 key（'L'+随机 hex）并回填到入参对象；
+        非空则按 coll_key 冲突更新（含 name/parent_key/library_id/origin/read_only）。
+        """
+        ...
+
+    @abstractmethod
+    async def get_collection(self, coll_key: str) -> Collection | None:
+        """按 coll_key 取一个集合；不存在返回 None。"""
+        ...
+
+    @abstractmethod
+    async def get_collection_by_name(self, name: str) -> Collection | None:
+        """按展示 name 取第一个匹配集合（name 不再全局唯一时取任意一个）；不存在返回 None。
+
+        供仍以 name 定位的旧调用方过渡使用；新代码应优先用 coll_key。
+        """
         ...
 
     @abstractmethod
     async def list_collections(self) -> list[Collection]:
-        """列出全部集合，按 name 升序。"""
+        """列出全部集合（含树形字段 coll_key/parent_key/library_id），按 name 升序。"""
+        ...
+
+    @abstractmethod
+    async def get_local_collection_descendants(self, coll_key: str) -> list[str]:
+        """返回**统一 collections 树**中某集合及其所有后代的 coll_key（含自身）。
+
+        区别于 get_collection_descendants（查 zotero 镜像表）：本方法查统一 collections 表，
+        供本地树编辑、ask/lightrag 含后代范围、防环校验使用。coll_key 不存在返回空列表。
+        """
         ...
 
     @abstractmethod
     async def delete_collection(self, name: str) -> bool:
-        """删除集合本身（不级联删其文档）。返回 False 表示 name 不存在。"""
+        """删除集合本身（不级联删其文档）。返回 False 表示 name 不存在。
+
+        注意：按 name 删除（过渡用）。删集合的归属/索引级联由 service 层负责。
+        """
+        ...
+
+    @abstractmethod
+    async def delete_collection_by_key(self, coll_key: str) -> bool:
+        """按 coll_key 删除集合本身（不级联删文档/不删 document_collections 归属）。
+
+        返回 False 表示 coll_key 不存在。归属清理与子树处理由 service 层负责。
+        """
         ...
 
     @abstractmethod
     async def move_documents_to_collection(self, from_name: str, to_name: str) -> int:
-        """将所有属于 from_name 的文档批量迁移到 to_name。返回迁移文档数量。"""
+        """把 from_name 的文档批量迁移到 to_name（同步更新 primary 与多归属）。返回迁移数。"""
+        ...
+
+    # ── 文档多归属 ──────────────────────────────────────────────
+
+    @abstractmethod
+    async def set_document_collections(self, doc_id: str, coll_keys: list[str]) -> None:
+        """整体替换某文档的集合归属（先删该 doc 旧归属 → 再插入新 coll_key 列表）。
+
+        对齐 set_item_collections 的「整体替换」语义。空列表表示清空归属（文档无集合）。
+        """
+        ...
+
+    @abstractmethod
+    async def list_document_collection_keys(self, doc_id: str) -> list[str]:
+        """返回某文档的全部归属 coll_key（去重）。文档无归属返回空列表。"""
+        ...
+
+    @abstractmethod
+    async def list_documents_by_collection_key(
+        self, coll_key: str, *, descendants: bool = False
+    ) -> list[SourceDocument]:
+        """按 coll_key 列出归属文档。
+
+        descendants=False 仅本级（document_collections WHERE coll_key=?）——用于 DocumentsPanel；
+        descendants=True 含后代（先 get_local_collection_descendants 再并集）——用于 ask/lightrag。
+        按 created_at 升序、去重。
+        """
         ...
 
     @abstractmethod

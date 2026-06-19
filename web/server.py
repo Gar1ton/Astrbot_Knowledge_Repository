@@ -117,13 +117,25 @@ async def handle_list_collections(request: web.Request) -> web.Response:
 
 
 async def handle_create_collection(request: web.Request) -> web.Response:
+    from core.api import ReadOnlyError
+
     body = await request.json()
     name = (body.get("name") or "").strip()
     if not name:
         return web.json_response({"error": "name required"}, status=400)
     description = body.get("description", "")
-    await _api(request).create_collection(name, description)
-    return web.json_response({"name": name, "description": description})
+    parent_key = (body.get("parent_key") or "").strip()
+    try:
+        coll_key = await _api(request).create_subcollection(
+            name, parent_key=parent_key, description=description
+        )
+    except ReadOnlyError as exc:
+        return web.json_response({"status": "read_only", "message": str(exc)}, status=403)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    return web.json_response(
+        {"name": name, "description": description, "parent_key": parent_key, "coll_key": coll_key}
+    )
 
 
 async def handle_delete_collection(request: web.Request) -> web.Response:
@@ -138,11 +150,50 @@ async def handle_delete_collection(request: web.Request) -> web.Response:
     return web.json_response({"ok": ok}, status=200 if ok else 404)
 
 
+async def handle_patch_collection(request: web.Request) -> web.Response:
+    """按 coll_key 重命名 / 移动本地集合。body: {name?, parent_key?}。"""
+    from core.api import ReadOnlyError
+
+    coll_key = request.match_info["coll_key"]
+    body = await request.json()
+    api = _api(request)
+    try:
+        if "name" in body and body["name"] is not None:
+            await api.rename_collection(coll_key, str(body["name"]))
+        if "parent_key" in body:
+            await api.move_collection(coll_key, str(body.get("parent_key") or ""))
+    except ReadOnlyError as exc:
+        return web.json_response({"status": "read_only", "message": str(exc)}, status=403)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    return web.json_response({"ok": True})
+
+
+async def handle_delete_collection_by_key(request: web.Request) -> web.Response:
+    from core.api import ReadOnlyError
+
+    try:
+        ok = await _api(request).delete_collection_by_key(request.match_info["coll_key"])
+    except ReadOnlyError as exc:
+        return web.json_response({"status": "read_only", "message": str(exc)}, status=403)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    return web.json_response({"ok": ok}, status=200 if ok else 404)
+
+
 async def handle_list_documents(request: web.Request) -> web.Response:
     collection = request.query.get("collection") or None
+    collection_key = request.query.get("collection_key") or None
     tag = request.query.get("tag") or None
-    docs = await _api(request).list_documents(collection=collection, tag=tag)
-    return web.json_response([await _document_dict(_api(request), d) for d in docs])
+    api = _api(request)
+    if collection_key is not None:
+        # DocumentsPanel 选中集合：仅本级文档（不递归后代）。
+        docs = await api.list_documents_by_collection_key(collection_key, descendants=False)
+        if tag is not None:
+            docs = [d for d in docs if tag in d.tags]
+    else:
+        docs = await api.list_documents(collection=collection, tag=tag)
+    return web.json_response([await _document_dict(api, d) for d in docs])
 
 
 async def handle_upload_document(request: web.Request) -> web.Response:
@@ -1090,6 +1141,9 @@ def _collection_dict(c: object) -> dict:
         "origin": origin_val,
         "read_only": bool(getattr(c, "read_only", False)) or origin_val == "zotero",
         "zotero_collection_key": getattr(c, "zotero_collection_key", ""),
+        "coll_key": getattr(c, "coll_key", ""),
+        "parent_key": getattr(c, "parent_key", ""),
+        "library_id": getattr(c, "library_id", "LOCAL"),
     }
 
 
@@ -1234,6 +1288,10 @@ def build_app(
     app.router.add_post("/api/logout", handle_logout)
     app.router.add_get("/api/collections", handle_list_collections)
     app.router.add_post("/api/collections", handle_create_collection)
+    app.router.add_patch("/api/collections/by-key/{coll_key}", handle_patch_collection)
+    app.router.add_delete(
+        "/api/collections/by-key/{coll_key}", handle_delete_collection_by_key
+    )
     app.router.add_delete("/api/collections/{name}", handle_delete_collection)
     app.router.add_get("/api/collections/{name}/notes", handle_collection_notes_get)
     app.router.add_post("/api/collections/{name}/notes", handle_collection_notes_post)

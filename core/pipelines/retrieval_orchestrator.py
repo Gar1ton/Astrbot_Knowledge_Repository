@@ -143,11 +143,16 @@ class RetrievalOrchestrator:
                 for d in docs
                 if d.library_id == lib and d.lifecycle_state == DocumentLifecycle.ACTIVE
             }
+        if scope.scope_type == SCOPE_COLLECTION:
+            # 统一 collections 树：含后代的全部归属文档（doc 级，天然支持 local + zotero 多归属）。
+            docs = await store.list_documents_by_collection_key(
+                scope.scope_key, descendants=True
+            )
+            return {
+                d.doc_id for d in docs if d.lifecycle_state == DocumentLifecycle.ACTIVE
+            }
         if scope.scope_type == SCOPE_ITEM:
             item_keys: set[str] = {scope.scope_key}
-        elif scope.scope_type == SCOPE_COLLECTION:
-            descendants = await store.get_collection_descendants(lib, scope.scope_key)
-            item_keys = set(await store.get_items_in_collections(lib, descendants))
         elif scope.scope_type == SCOPE_TAG:
             item_keys = set(await store.get_items_with_tag(lib, scope.scope_key))
         else:

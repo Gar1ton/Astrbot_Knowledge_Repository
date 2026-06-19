@@ -328,3 +328,53 @@ async def test_console_scope_state_upsert(sqlite_store: SQLiteSourceDocumentStor
     assert state is not None
     assert state.selected_doc_id == "d1"
     assert state.payload == {"right": "notes"}
+
+
+# ── 统一多归属集合树（v0.26.3）SQL 实现契约 ──────────────────────
+
+
+async def test_tree_and_multi_membership_sqlite(sqlite_store: SQLiteSourceDocumentStore) -> None:
+    # 建 root → child → grand
+    keys = {}
+    parent = ""
+    for name in ("root", "child", "grand"):
+        c = Collection(name=name, parent_key=parent)
+        await sqlite_store.upsert_collection(c)
+        keys[name] = c.coll_key
+        parent = c.coll_key
+    extra = Collection(name="extra")
+    await sqlite_store.upsert_collection(extra)
+
+    assert set(await sqlite_store.get_local_collection_descendants(keys["root"])) == set(
+        keys.values()
+    )
+
+    d1 = _doc("d1")
+    d1.collection_keys = [keys["child"]]
+    await sqlite_store.add_document(d1)
+    d2 = _doc("d2")
+    d2.collection_keys = [keys["grand"], extra.coll_key]
+    await sqlite_store.add_document(d2)
+
+    child_docs = await sqlite_store.list_documents_by_collection_key(keys["child"])
+    assert {d.doc_id for d in child_docs} == {"d1"}
+    assert {
+        d.doc_id
+        for d in await sqlite_store.list_documents_by_collection_key(keys["root"], descendants=True)
+    } == {"d1", "d2"}
+    assert set((await sqlite_store.get_document("d2")).collection_keys) == {
+        keys["grand"],
+        extra.coll_key,
+    }
+
+
+async def test_same_name_subcollections_sqlite(sqlite_store: SQLiteSourceDocumentStore) -> None:
+    a = Collection(name="A")
+    await sqlite_store.upsert_collection(a)
+    s1 = Collection(name="Dup", parent_key=a.coll_key)
+    s2 = Collection(name="Dup", parent_key="")
+    await sqlite_store.upsert_collection(s1)
+    await sqlite_store.upsert_collection(s2)
+    assert s1.coll_key != s2.coll_key
+    names = [c.name for c in await sqlite_store.list_collections() if c.name == "Dup"]
+    assert len(names) == 2

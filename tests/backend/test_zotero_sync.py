@@ -195,6 +195,29 @@ async def test_pull_conservative_creates_artifact_bundle(tmp_path: Path) -> None
     assert result2.new_document_ids == []
 
 
+async def test_pull_derives_unified_tree_and_membership(tmp_path: Path) -> None:
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    _build_zotero_db(data_dir)
+    store, pipeline, _, _ = _pipeline(tmp_path, data_dir, "conservative")
+
+    await pipeline.pull()
+
+    # Zotero 集合派生进统一 collections（树形 + 只读），coll_key=lib:zkey
+    cols = {c.coll_key: c for c in await store.list_collections()}
+    assert "1:COLLAAAA" in cols
+    zc = cols["1:COLLAAAA"]
+    assert zc.origin is DocumentOrigin.ZOTERO and zc.read_only is True
+    assert zc.name == "Value Ecology"
+
+    # 文档多归属真相源指向统一 coll_key
+    doc = await store.get_document(DOC_ID)
+    assert doc.collection_keys == ["1:COLLAAAA"]
+    # 含后代范围检索能命中该文档
+    listed = await store.list_documents_by_collection_key("1:COLLAAAA", descendants=True)
+    assert [d.doc_id for d in listed] == [DOC_ID]
+
+
 async def test_pull_conservative_deletes_removed(tmp_path: Path) -> None:
     data_dir = tmp_path / "Zotero"
     data_dir.mkdir()

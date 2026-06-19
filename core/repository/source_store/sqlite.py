@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -53,6 +54,11 @@ def _format_dt(dt: datetime | None) -> str | None:
     if dt is None:
         return None
     return dt.isoformat()
+
+
+def _new_local_coll_key() -> str:
+    """为本地集合生成稳定唯一 coll_key（与 zotero 的 'library:key' 命名空间隔离）。"""
+    return "L" + uuid.uuid4().hex
 
 
 def _loads_list(val: str | None) -> list:
@@ -194,63 +200,217 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
 
-    # ── 集合 ────────────────────────────────────────────────────
+    # ── 集合（树形 + 多归属）────────────────────────────────────
+
+    _COLL_COLUMNS = (
+        "coll_key, name, description, created_at, origin, zotero_collection_key, "
+        "read_only, parent_key, library_id"
+    )
+
+    @staticmethod
+    def _row_to_collection(row: tuple) -> Collection:
+        return Collection(
+            coll_key=row[0],
+            name=row[1],
+            description=row[2],
+            created_at=_parse_dt(row[3]),
+            origin=DocumentOrigin(row[4]),
+            zotero_collection_key=row[5],
+            read_only=bool(row[6]),
+            parent_key=row[7],
+            library_id=row[8],
+        )
 
     async def upsert_collection(self, collection: Collection) -> None:
         created_at_str = _format_dt(collection.created_at or datetime.now(timezone.utc))
+        coll_key = collection.coll_key
+        if not coll_key:
+            # 兼容旧调用（只给 name）：按 (name, parent_key) 复用现有 key，否则发放新 local key。
+            async with self._db.execute(
+                "SELECT coll_key FROM collections WHERE name = ? AND parent_key = ?",
+                (collection.name, collection.parent_key),
+            ) as cursor:
+                existing = await cursor.fetchone()
+            coll_key = existing[0] if existing else _new_local_coll_key()
+            collection.coll_key = coll_key
         await self._db.execute(
             """
             INSERT INTO collections
-                (name, description, created_at, origin, zotero_collection_key, read_only)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
+                (coll_key, name, description, created_at, origin, zotero_collection_key,
+                 read_only, parent_key, library_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(coll_key) DO UPDATE SET
+                name = excluded.name,
                 description = excluded.description,
                 origin = excluded.origin,
                 zotero_collection_key = excluded.zotero_collection_key,
-                read_only = excluded.read_only
+                read_only = excluded.read_only,
+                parent_key = excluded.parent_key,
+                library_id = excluded.library_id
             """,
             (
+                coll_key,
                 collection.name,
                 collection.description,
                 created_at_str,
                 collection.origin.value,
                 collection.zotero_collection_key,
                 int(collection.read_only),
+                collection.parent_key,
+                collection.library_id,
             ),
         )
         await self._db.commit()
 
+    async def get_collection(self, coll_key: str) -> Collection | None:
+        async with self._db.execute(
+            f"SELECT {self._COLL_COLUMNS} FROM collections WHERE coll_key = ?", (coll_key,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return self._row_to_collection(row) if row is not None else None
+
+    async def get_collection_by_name(self, name: str) -> Collection | None:
+        async with self._db.execute(
+            f"SELECT {self._COLL_COLUMNS} FROM collections WHERE name = ? "
+            "ORDER BY coll_key LIMIT 1",
+            (name,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return self._row_to_collection(row) if row is not None else None
+
     async def list_collections(self) -> list[Collection]:
         async with self._db.execute(
-            "SELECT name, description, created_at, origin, zotero_collection_key, read_only "
-            "FROM collections ORDER BY name ASC"
+            f"SELECT {self._COLL_COLUMNS} FROM collections ORDER BY name ASC"
         ) as cursor:
             rows = await cursor.fetchall()
-            return [
-                Collection(
-                    name=row[0],
-                    description=row[1],
-                    created_at=_parse_dt(row[2]),
-                    origin=DocumentOrigin(row[3]),
-                    zotero_collection_key=row[4],
-                    read_only=bool(row[5]),
-                )
-                for row in rows
-            ]
+            return [self._row_to_collection(row) for row in rows]
+
+    async def get_local_collection_descendants(self, coll_key: str) -> list[str]:
+        # 递归 CTE 遍历统一 collections 树，含自身。
+        async with self._db.execute(
+            """
+            WITH RECURSIVE descendants(ck) AS (
+                SELECT coll_key FROM collections WHERE coll_key = ?
+                UNION
+                SELECT c.coll_key FROM collections c
+                  JOIN descendants d ON c.parent_key = d.ck
+            )
+            SELECT ck FROM descendants
+            """,
+            (coll_key,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
 
     async def delete_collection(self, name: str) -> bool:
         async with self._db.execute("DELETE FROM collections WHERE name = ?", (name,)) as cursor:
             await self._db.commit()
             return cursor.rowcount > 0
 
+    async def delete_collection_by_key(self, coll_key: str) -> bool:
+        async with self._db.execute(
+            "DELETE FROM collections WHERE coll_key = ?", (coll_key,)
+        ) as cursor:
+            await self._db.commit()
+            return cursor.rowcount > 0
+
     async def move_documents_to_collection(self, from_name: str, to_name: str) -> int:
         now_str = _format_dt(datetime.now(timezone.utc))
+        # 同步迁移多归属：把指向 from_name 对应 coll_key 的归属改为 to_name 的 coll_key。
+        from_coll = await self.get_collection_by_name(from_name)
+        to_coll = await self.get_collection_by_name(to_name)
         async with self._db.execute(
             "UPDATE documents SET collection = ?, updated_at = ? WHERE collection = ?",
             (to_name, now_str, from_name),
         ) as cursor:
-            await self._db.commit()
-            return cursor.rowcount
+            moved = cursor.rowcount
+        if from_coll and to_coll:
+            await self._db.execute(
+                "UPDATE OR IGNORE document_collections SET coll_key = ? WHERE coll_key = ?",
+                (to_coll.coll_key, from_coll.coll_key),
+            )
+            # UPDATE OR IGNORE 跳过会与已有 (doc,to_key) 冲突的行；冲突行删除其旧归属避免残留。
+            await self._db.execute(
+                "DELETE FROM document_collections WHERE coll_key = ?", (from_coll.coll_key,)
+            )
+        await self._db.commit()
+        return moved
+
+    # ── 文档多归属 ──────────────────────────────────────────────
+
+    async def set_document_collections(self, doc_id: str, coll_keys: list[str]) -> None:
+        await self._db.execute(
+            "DELETE FROM document_collections WHERE doc_id = ?", (doc_id,)
+        )
+        for ck in dict.fromkeys(coll_keys):  # 去重并保序
+            await self._db.execute(
+                "INSERT OR IGNORE INTO document_collections (doc_id, coll_key) VALUES (?, ?)",
+                (doc_id, ck),
+            )
+        await self._db.commit()
+
+    async def list_document_collection_keys(self, doc_id: str) -> list[str]:
+        async with self._db.execute(
+            "SELECT coll_key FROM document_collections WHERE doc_id = ? ORDER BY coll_key",
+            (doc_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [r[0] for r in rows]
+
+    async def list_documents_by_collection_key(
+        self, coll_key: str, *, descendants: bool = False
+    ) -> list[SourceDocument]:
+        keys = (
+            await self.get_local_collection_descendants(coll_key)
+            if descendants
+            else [coll_key]
+        )
+        if not keys:
+            return []
+        placeholders = ",".join("?" for _ in keys)
+        cols = ", ".join("d." + col.strip() for col in _DOC_COLUMNS.split(","))
+        async with self._db.execute(
+            f"SELECT DISTINCT {cols} FROM documents d "
+            f"JOIN document_collections dc ON dc.doc_id = d.doc_id "
+            f"WHERE dc.coll_key IN ({placeholders}) "
+            f"ORDER BY d.created_at ASC, d.doc_id ASC",
+            tuple(keys),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        docs = [_row_to_document(row) for row in rows]
+        await self._fill_collection_keys(docs)
+        return docs
+
+    async def _fill_collection_keys(self, docs: list[SourceDocument]) -> None:
+        """批量回填文档的多归属 coll_keys（一次查询，避免 N+1）。"""
+        if not docs:
+            return
+        ids = [d.doc_id for d in docs]
+        placeholders = ",".join("?" for _ in ids)
+        async with self._db.execute(
+            f"SELECT doc_id, coll_key FROM document_collections "
+            f"WHERE doc_id IN ({placeholders}) ORDER BY doc_id, coll_key",
+            tuple(ids),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        by_doc: dict[str, list[str]] = {}
+        for doc_id, ck in rows:
+            by_doc.setdefault(doc_id, []).append(ck)
+        for doc in docs:
+            doc.collection_keys = by_doc.get(doc.doc_id, [])
+
+    async def _sync_doc_memberships(self, document: SourceDocument) -> None:
+        """根据文档对象同步 document_collections。
+
+        优先用 collection_keys（多归属真相源）；为空时回退到 primary collection name 对应的 coll_key
+        （兼容只设 primary 的旧调用方）。primary 集合不存在时不写归属（由 service 层先建集合）。
+        """
+        keys = list(dict.fromkeys(document.collection_keys))
+        if not keys and document.collection:
+            primary = await self.get_collection_by_name(document.collection)
+            if primary:
+                keys = [primary.coll_key]
+        await self.set_document_collections(document.doc_id, keys)
 
     # ── 文档 ────────────────────────────────────────────────────
 
@@ -297,6 +457,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             if "UNIQUE constraint failed: documents.doc_id" in str(e):
                 raise ValueError(f"duplicate doc_id: {document.doc_id}") from e
             raise
+        await self._sync_doc_memberships(document)
 
     async def get_document(self, doc_id: str) -> SourceDocument | None:
         async with self._db.execute(
@@ -304,7 +465,11 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             (doc_id,),
         ) as cursor:
             row = await cursor.fetchone()
-            return _row_to_document(row) if row is not None else None
+        if row is None:
+            return None
+        doc = _row_to_document(row)
+        await self._fill_collection_keys([doc])
+        return doc
 
     async def list_documents(
         self, collection: str | None = None, tag: str | None = None
@@ -330,7 +495,9 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
         async with self._db.execute(query, tuple(params)) as cursor:
             rows = await cursor.fetchall()
-            return [_row_to_document(row) for row in rows]
+        docs = [_row_to_document(row) for row in rows]
+        await self._fill_collection_keys(docs)
+        return docs
 
     async def list_pending_reindex_documents(self) -> list[SourceDocument]:
         """列出所有标记为待重建索引的文档。"""
@@ -339,7 +506,9 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             "ORDER BY created_at ASC, doc_id ASC"
         ) as cursor:
             rows = await cursor.fetchall()
-            return [_row_to_document(row) for row in rows]
+        docs = [_row_to_document(row) for row in rows]
+        await self._fill_collection_keys(docs)
+        return docs
 
     async def update_document(self, document: SourceDocument) -> bool:
         updated_at_str = _format_dt(document.updated_at or datetime.now(timezone.utc))
@@ -383,7 +552,10 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             ),
         ) as cursor:
             await self._db.commit()
-            return cursor.rowcount > 0
+            updated = cursor.rowcount > 0
+        if updated:
+            await self._sync_doc_memberships(document)
+        return updated
 
     async def delete_document(self, doc_id: str) -> bool:
         # SQLite 配了外键级联删除 (ON DELETE CASCADE) 关联的 chunks 会由外键级联自动删除

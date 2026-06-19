@@ -75,13 +75,18 @@ class DocumentLifecycle(str, Enum):
 
 @dataclass
 class Collection:
-    """集合：一组文档的逻辑分类，对应 AstrBot 的一个知识库（collection）。
+    """集合：一组文档的逻辑分类，组织成树形（对应 Zotero 的 collection 树）。
 
-    name 是集合的稳定标识（同时用作 R2 key 前缀与 AstrBot collection 名），全局唯一。
+    标识契约（v0.26.3 统一多归属树起）：
+        - coll_key 是**稳定逻辑主键**（持久化按 coll_key 定位、唯一）：local 集合为 'L'+随机 hex，
+          zotero 集合为 library_id+':'+zotero_collection_key。
+        - name 降级为**展示名**，仅要求「同一 parent_key 下唯一」，不再全局唯一。
+        - parent_key 为空表示顶层；据此构成树形层级。
+        - library_id 区分来源库（本地集合用 'LOCAL'）。
 
     来源契约：
-        - origin=LOCAL 为用户手动创建，可改可删；origin=ZOTERO 由同步镜像而来，**只读**
-          （不可手动删除/改名），zotero_collection_key 回链 Zotero 原集合 key。
+        - origin=LOCAL 为用户手动创建，可改名/移动/删除/建子集合；origin=ZOTERO 由同步镜像而来，
+          **只读**（不可编辑），zotero_collection_key 回链 Zotero 原集合 key。
         - read_only 是 origin 的派生便捷标志（origin=ZOTERO 时为 True），由 service 层强制。
     """
 
@@ -91,6 +96,9 @@ class Collection:
     origin: DocumentOrigin = DocumentOrigin.LOCAL
     zotero_collection_key: str = ""
     read_only: bool = False
+    coll_key: str = ""
+    parent_key: str = ""
+    library_id: str = "LOCAL"
 
 
 @dataclass
@@ -108,7 +116,9 @@ class SourceDocument:
         - origin=ZOTERO 时 read_only=True：文档系统只读，由 service 层强制；LOCAL 可编辑。
         - library_id / zotero_item_key / attachment_key 为 Zotero 标识体系
           （本地上传用 LOCAL 库 + 合成 key）。
-        - collection 指定所属集合名；tags 为自由标签集合（去重由调用方保证）。
+        - collection 为**冗余 primary 集合名**（默认展示 + 给需要单一标签的子系统兜底，如
+          R2 key 前缀 / Notion select / milvus collection_tag）；归属**真相源**是 collection_keys
+          （多归属，对应 collections.coll_key 列表）。tags 为自由标签集合（去重由调用方保证）。
     """
 
     doc_id: str
@@ -119,6 +129,7 @@ class SourceDocument:
     content_hash: str
     collection: str
     tags: list[str] = field(default_factory=list)
+    collection_keys: list[str] = field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
     needs_reindex: bool = False

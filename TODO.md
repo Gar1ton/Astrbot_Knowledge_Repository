@@ -44,6 +44,35 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.26.3 统一多归属集合树 (in progress)
+
+### User constraints / 约束
+
+- 把本地持久化重构成与 Zotero 一致的「树形 + 多归属」结构（统一 local 与 zotero）。
+- 仅本地集合可编辑（建子集合/重命名/移动/删除）；Zotero 集合只读、仅树形展示，不回写 Zotero。
+- ask 与 lightrag 的范围 = 选中集合 + 所有子目录（含后代）。
+- lightrag 选中父集合 build 时，父+所有后代文档合并为单一 workspace（以选中集合命名）。
+- DocumentsPanel 选中父集合时只显示本级文档（不递归），与 ask/lightrag 的含后代范围故意不同。
+- 版本只 bump patch（v0.26.2 → v0.26.3）。
+
+### Technical implementation path
+
+- [x] **Phase 1 - schema：migration 018 + domain**：`collections` 加 `coll_key`(稳定逻辑主键)/`parent_key`/`library_id`；新建 `document_collections(doc_id, coll_key)` 多对多表替代单值归属，保留 `documents.collection` 作冗余 primary；同 migration 内回填 + 数据迁移。domain `Collection`/`SourceDocument` 加对应字段。为支持 Zotero 同名子集合（name 非唯一），重建 collections（coll_key 主键）、documents/scoped_notes（去掉对 collections(name) 的外键）。
+- [x] **Phase 2 - repository base 接口先行 + sqlite/memory 双实现**：base.py 集合契约改按 coll_key，新增 `get_collection`/`get_collection_by_name`/`get_local_collection_descendants`/`delete_collection_by_key`/`set_document_collections`/`list_document_collection_keys`/`list_documents_by_collection_key(descendants)`；add/update_document 自动同步多归属、get/list 回填 collection_keys。
+- [x] **Phase 3 - `.collection` 单值→多对多 全触点改造**：归属真相由 store 层 `_sync_doc_memberships` 自动维护（add/update_document）；primary 标签（R2/Notion/milvus）保持不变；classify_document 重分类时清空旧多归属跟随新 primary。
+- [x] **Phase 4 - Zotero 同步去压扁 + 树派生进统一 collections**：`_sync_documents` 写 item 全部所属集合（多归属）+ unfiled home 兜底；`_sync_zotero_tree_into_collections` 把 zotero 树整体 upsert 进统一 collections（coll_key=lib:zkey、parent_key=lib:父zkey、只读）并清理陈旧/迁移临时行。
+- [x] **Phase 5 - ask 含后代 + lightrag 合并单 workspace**：`resolve_scope` 的 SCOPE_COLLECTION 改走统一树（`list_documents_by_collection_key(descendants=True)`）→ allowed_document_ids；`_resolve_ask_collections` 在 collection scope 下扩展为「父+后代」name 列表覆盖 milvus tag；`_lightrag_docs_for_build`/`get_lightrag_readiness` 按 name→coll_key→后代合并（workspace 仍按 name，同名集合为已知限制）。
+- [x] **Phase 6 - 本地集合编辑后端 API + REST + 前端真树形**：api 新增 create_subcollection/rename_collection/move_collection(防环)/delete_collection_by_key(子集合提升+文档迁 _uncategorized)，zotero 一律 ReadOnlyError；REST 加 `PATCH/DELETE /api/collections/by-key/{coll_key}`、create 支持 parent_key、`GET /api/documents?collection_key`（本级）；FilePanel 递归树渲染（真展开）+ 本地新建子集合/重命名/删除 UI；ask 默认含后代（由选中集合 coll_key 派生 scope）。
+- [ ] **Phase 7 - 端到端集成测试 + 全量回归**：pytest 414 通过 / ruff / mypy 通过；前端 npm build + sync_frontend 待确认。
+- [x] **Phase 8 - bump v0.26.3 + CHANGELOG/TODO 收尾**：`metadata.yaml` 已 bump 到 `v0.26.3`，`CHANGELOG.md` 已追加 v0.26.3 条目；等待 Phase 7 前端构建/同步确认后再整体标 completed。
+
+### Verification
+
+- `python -m pytest tests/backend/` → 414 passed。
+- `ruff check .` → All checks passed；`mypy` → Success。
+- `npm run build` + `python tools/sync_frontend.py` → 待确认。
+- `CHANGELOG.md` + `metadata.yaml` → v0.26.3 收尾完成。
+
 ## v0.26.2 调试端口迁移 (completed)
 
 ### User constraints / 约束

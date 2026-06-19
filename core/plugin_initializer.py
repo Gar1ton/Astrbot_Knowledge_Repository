@@ -465,6 +465,7 @@ class PluginInitializer:
             index_compatibility=self.index_compatibility,
             embedding_fingerprint=self.embedding_fingerprint,
             secret_store=self.secret_store,
+            reload_callback=self.reload,
         )
         await self.api.restore_paused_build_job()
 
@@ -661,6 +662,18 @@ class PluginInitializer:
         if self._exit_stack is not None:
             await self._exit_stack.aclose()
             self._exit_stack = None
+
+    async def reload(self) -> None:
+        """软重启：teardown 全部子系统后，重读持久化配置重建 Config 并重新 initialize。
+
+        供 Web 控制台「重启插件」按钮经 api.restart_plugin 触发；不杀 AstrBot 进程，
+        但会重建 Web 控制台（端口不变）。重启期间触发请求的连接会短暂断开，由前端轮询重连。
+        """
+        logger.info("PluginInitializer.reload() 触发插件软重启")
+        await self.teardown()
+        self._config = Config(self._runtime_config.merged_with(self._raw_config))
+        await self.initialize()
+        logger.info("PluginInitializer.reload() 软重启完成")
 
 
 __all__ = ["PluginInitializer"]

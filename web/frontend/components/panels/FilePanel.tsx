@@ -259,6 +259,23 @@ function MilvusBuildCard({ job, onRetry }: { job: MilvusBuildJob; onRetry: () =>
   const running = job.status === "running";
   const pct = Math.min(100, Math.max(0, job.progress_percent ?? 0));
   const accentColor = failed ? "var(--danger)" : "var(--accent)";
+  const stage = job.stage ?? "vector_indexing";
+  const stageTitle = failed
+    ? t("file_milvus_build_failed")
+    : stage === "data_cleaning"
+      ? t("file_milvus_build_stage_cleaning")
+      : stage === "finalizing"
+        ? t("file_milvus_build_stage_finalizing")
+        : t("file_milvus_build_stage_indexing");
+  const cleanTotal = job.total_clean_docs ?? 0;
+  const cleanDone = job.processed_clean_docs ?? 0;
+  const indexTotal = job.total_index_docs ?? job.total_docs ?? 0;
+  const indexDone = job.processed_index_docs ?? job.processed_docs ?? 0;
+  const detailParts = [
+    cleanTotal > 0 ? `${t("file_milvus_build_cleaned_unit")} ${cleanDone}/${cleanTotal}` : "",
+    `${t("file_milvus_build_indexed_unit")} ${indexDone}/${indexTotal || "?"}`,
+    (job.failed_docs ?? 0) > 0 ? `${job.failed_docs} ${t("file_milvus_build_failed_unit")}` : "",
+  ].filter(Boolean);
 
   return (
     <div
@@ -285,7 +302,7 @@ function MilvusBuildCard({ job, onRetry }: { job: MilvusBuildJob; onRetry: () =>
           />
         )}
         <span style={{ fontSize: 11, fontWeight: 600, color: accentColor, flex: 1 }}>
-          {failed ? t("file_milvus_build_failed") : t("file_milvus_build_running")}
+          {stageTitle}
         </span>
         <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: accentColor }}>{pct}%</span>
       </div>
@@ -311,8 +328,7 @@ function MilvusBuildCard({ job, onRetry }: { job: MilvusBuildJob; onRetry: () =>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
         <span style={{ fontSize: 10, color: "var(--fg-muted)", fontFamily: "var(--font-mono)", flex: 1 }}>
-          {job.processed_docs ?? 0}/{job.total_docs ?? "?"} {t("file_milvus_build_docs_unit")}
-          {(job.failed_docs ?? 0) > 0 ? ` · ${job.failed_docs} ${t("file_milvus_build_failed_unit")}` : ""}
+          {detailParts.join(" · ")}
         </span>
         {failed && (
           <button

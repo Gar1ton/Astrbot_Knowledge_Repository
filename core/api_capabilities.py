@@ -11,7 +11,12 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from core.capabilities import dependency_statuses, detect_capabilities, resolve_install_spec
-from core.milvus_build import MILVUS_BUILD_RUNNING
+from core.milvus_build import (
+    MILVUS_BUILD_RUNNING,
+    MILVUS_BUILD_STAGE_CLEANING,
+    MILVUS_BUILD_STAGE_FINALIZING,
+    MILVUS_BUILD_STAGE_INDEXING,
+)
 
 if TYPE_CHECKING:
     from core.config import Config
@@ -166,9 +171,25 @@ class CapabilitiesApiMixin:
         # 构建进行中强制保持 degraded（黄）：避免最后一个文档清除 needs_reindex 后过早变绿。
         build_job = getattr(self, "_milvus_build_job", None)
         building = bool(build_job is not None and build_job.status == MILVUS_BUILD_RUNNING)
+        build_stage = ""
+        build_progress_percent = 0
         if building and build_job is not None:
-            done = build_job.processed_docs + build_job.failed_docs
-            reason = f"正在构建向量库索引…（{done}/{build_job.total_docs}）"
+            snapshot = build_job.to_dict()
+            build_stage = str(snapshot.get("stage") or "")
+            build_progress_percent = int(snapshot.get("progress_percent") or 0)
+            if build_stage == MILVUS_BUILD_STAGE_CLEANING:
+                done = build_job.processed_clean_docs + build_job.failed_docs
+                total = build_job.total_clean_docs or build_job.total_docs
+                reason = f"正在清洗数据…（{done}/{total}，{build_progress_percent}%）"
+            elif build_stage == MILVUS_BUILD_STAGE_INDEXING:
+                done = build_job.processed_index_docs
+                total = build_job.total_index_docs or build_job.total_docs
+                reason = f"正在构建向量库索引…（{done}/{total}，{build_progress_percent}%）"
+            elif build_stage == MILVUS_BUILD_STAGE_FINALIZING:
+                reason = f"正在收尾向量库构建…（{build_progress_percent}%）"
+            else:
+                done = build_job.processed_docs + build_job.failed_docs
+                reason = f"正在构建向量库索引…（{done}/{build_job.total_docs}）"
 
         return {
             "compatible": compatible,
@@ -178,6 +199,8 @@ class CapabilitiesApiMixin:
             "chunk_count": chunk_count,
             "reason": reason,
             "building": building,
+            "build_stage": build_stage,
+            "build_progress_percent": build_progress_percent,
         }
 
     async def install_dependency(self, package: str) -> dict[str, Any]:

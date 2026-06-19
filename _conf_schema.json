@@ -1,20 +1,36 @@
 {
-  "source_store": {
-    "description": "文档库",
+  "web_console": {
+    "description": "Web 控制台",
     "type": "object",
-    "hint": "管理上传的原始文档（PDF 等），使用 PyMuPDF4LLM 本地抽取文本，无 LLM 成本",
+    "hint": "独立端口的管理界面，支持文档上传、分类、同步、图谱和配额查看，内置登录鉴权",
     "items": {
-      "default_collection": {
-        "description": "默认集合",
-        "type": "string",
-        "default": "default",
-        "hint": "文档上传时未指定集合时归入的默认分组名"
-      },
-      "ocr_enabled": {
-        "description": "对扫描版 PDF 启用 OCR",
+      "enabled": {
+        "description": "启用 Web 控制台",
         "type": "bool",
-        "default": false,
-        "hint": "⚠️ 开启后对纯图像 PDF 额外调用 OCR/LLM，产生额外费用；默认使用本地 PyMuPDF 无成本抽取"
+        "default": false
+      },
+      "host": {
+        "description": "监听地址",
+        "type": "string",
+        "default": "0.0.0.0",
+        "hint": "0.0.0.0 监听所有网络接口；如需仅本机访问可改为 127.0.0.1"
+      },
+      "port": {
+        "description": "监听端口",
+        "type": "int",
+        "default": 6520,
+        "hint": "默认 6520，避开 AstrBot 控制台（6185/6186）。如有端口冲突在此修改"
+      },
+      "username": {
+        "description": "登录用户名",
+        "type": "string",
+        "default": "admin"
+      },
+      "password": {
+        "description": "登录密码",
+        "type": "string",
+        "default": "",
+        "hint": "机密字段。建议通过环境变量 KR_WEB_PASSWORD 注入。留空时控制台将拒绝启动"
       }
     }
   },
@@ -99,143 +115,6 @@
       }
     }
   },
-  "web_console": {
-    "description": "Web 控制台",
-    "type": "object",
-    "hint": "独立端口的管理界面，支持文档上传、分类、同步、图谱和配额查看，内置登录鉴权",
-    "items": {
-      "enabled": {
-        "description": "启用 Web 控制台",
-        "type": "bool",
-        "default": false
-      },
-      "host": {
-        "description": "监听地址",
-        "type": "string",
-        "default": "0.0.0.0",
-        "hint": "0.0.0.0 监听所有网络接口；如需仅本机访问可改为 127.0.0.1"
-      },
-      "port": {
-        "description": "监听端口",
-        "type": "int",
-        "default": 6520,
-        "hint": "默认 6520，避开 AstrBot 控制台（6185/6186）。如有端口冲突在此修改"
-      },
-      "username": {
-        "description": "登录用户名",
-        "type": "string",
-        "default": "admin"
-      },
-      "password": {
-        "description": "登录密码",
-        "type": "string",
-        "default": "",
-        "hint": "机密字段。建议通过环境变量 KR_WEB_PASSWORD 注入。留空时控制台将拒绝启动"
-      }
-    }
-  },
-  "graph": {
-    "description": "知识图谱（LightRAG）",
-    "type": "object",
-    "hint": "可选高精度检索模式。启用后对文档构建实体关系图谱，支持更复杂的语义查询。需先安装可选依赖：requirements-additional.txt",
-    "items": {
-      "enabled": {
-        "description": "启用知识图谱",
-        "type": "bool",
-        "default": false
-      },
-      "query_mode": {
-        "description": "图谱查询模式",
-        "type": "string",
-        "default": "mix",
-        "options": [
-          "mix",
-          "local",
-          "global",
-          "hybrid",
-          "naive",
-          "bypass"
-        ],
-        "hint": "mix（推荐）融合局部和全局图谱；local 仅用相邻实体；global 仅用社区摘要；bypass 跳过图谱仅用向量"
-      },
-      "llm_max_async": {
-        "description": "LLM 并发数",
-        "type": "int",
-        "default": 1,
-        "hint": "本地模型（LM Studio / Ollama）只能串行推理，保持 1；云端 API 可按速率限制适当调高"
-      },
-      "max_doc_chars": {
-        "description": "每篇文档最大抽取字符数",
-        "type": "int",
-        "default": 30000,
-        "hint": "直接决定图谱构建的 LLM 调用次数和费用。30000 字符 ≈ 15 次 LLM 调用/篇；设为 0 不限制"
-      },
-      "lightrag_llm_provider": {
-        "description": "图谱构建使用的 LLM",
-        "type": "string",
-        "default": "main",
-        "options": [
-          "main",
-          "local",
-          "api"
-        ],
-        "hint": "main：复用 AstrBot 当前主 LLM，无需额外配置；local/api：使用下方单独指定的 OpenAI 兼容端点（适合用本地模型专跑图谱构建）"
-      },
-      "lightrag_llm_base_url": {
-        "description": "图谱专用 LLM 端点",
-        "type": "string",
-        "default": "",
-        "hint": "仅 provider=local 或 api 时生效。示例：LM Studio → http://host.docker.internal:1234/v1"
-      },
-      "lightrag_llm_model": {
-        "description": "图谱专用 LLM 模型名",
-        "type": "string",
-        "default": "",
-        "hint": "仅 provider=local 或 api 时生效。填写端点上对应的模型标识符"
-      },
-      "lightrag_llm_timeout_seconds": {
-        "description": "LLM 单次调用超时（秒）",
-        "type": "int",
-        "default": 900,
-        "hint": "本地模型推理较慢，建议保持 900 秒以上；云端 API 可适当降低"
-      },
-      "working_dir": {
-        "description": "图谱数据目录",
-        "type": "string",
-        "default": "lightrag_workspaces",
-        "hint": "存放图谱索引文件的目录，相对路径基于插件数据目录。修改后原有图谱数据不会自动迁移"
-      },
-      "embedding_max_async": {
-        "description": "Embedding 并发数",
-        "type": "int",
-        "default": 8,
-        "hint": "图谱构建时 embedding 请求的并发上限。本地模型建议降低，外部 API 可按速率限制调整"
-      }
-    }
-  },
-  "vector_db": {
-    "description": "向量检索",
-    "type": "object",
-    "hint": "文档向量化与相似度检索后端。默认使用 Milvus Lite 本地向量库，需安装可选依赖；未安装时自动回退到 AstrBot 内置检索",
-    "items": {
-      "backend": {
-        "description": "检索后端",
-        "type": "string",
-        "default": "milvus",
-        "options": [
-          "astr",
-          "milvus"
-        ],
-        "hint": "milvus（默认）：插件自管理的本地向量库，支持更精确的相似度检索；astr：仅使用 AstrBot 内置知识库检索"
-      },
-      "auto_index_enabled": {
-        "description": "上传后自动建立向量索引",
-        "type": "bool",
-        "default": true,
-        "hint": "开启时文档上传后立即生成 embedding 并写入向量库；关闭时跳过 embedding 步骤（适合批量上传后统一建索引）"
-      }
-    }
-  },
   "embedding": {
     "description": "Embedding 模型",
     "type": "object",
@@ -279,163 +158,6 @@
           "query_agent"
         ],
         "hint": "inject：将检索到的片段作为背景上下文注入 system prompt，由主 LLM 自然融入回答（推荐，保留对话风格）；query_agent：由独立 Ask Agent 闭环生成严谨的学术风格答案，强制覆盖主 LLM 人格"
-      }
-    }
-  },
-  "zotero_sync": {
-    "description": "Zotero 同步",
-    "type": "object",
-    "hint": "可选功能。读取本地 Zotero 数据库（只读，不修改 Zotero 数据），将文献及 PDF 附件自动同步到知识库",
-    "items": {
-      "enabled": {
-        "description": "启用 Zotero 同步",
-        "type": "bool",
-        "default": false
-      },
-      "access_mode": {
-        "description": "Zotero 连接模式",
-        "type": "string",
-        "default": "local",
-        "options": [
-          "local",
-          "server"
-        ],
-        "hint": "local：读取本机 Zotero，本地 API 端口默认 23119；server：使用 Zotero Web API key，只同步个人库。API key 通过 Web 控制台加密保存，不写入公开配置。"
-      },
-      "zotero_data_dir": {
-        "description": "Zotero 数据目录",
-        "type": "string",
-        "default": "",
-        "hint": "留空时自动探测默认路径（~/Zotero）。如果你自定义过 Zotero 数据目录，在此填写完整路径"
-      },
-      "storage_mode": {
-        "description": "PDF 存储方式",
-        "type": "string",
-        "default": "managed_copy",
-        "options": [
-          "managed_copy",
-          "linked"
-        ],
-        "hint": "managed_copy（推荐）：将 PDF 复制进插件数据目录，与 Zotero 存储独立；linked：PDF 保留在 Zotero 原位，插件只存 Markdown 和索引（需配置 linked_root）"
-      },
-      "linked_root": {
-        "description": "Zotero storage 根目录（linked 模式必填）",
-        "type": "string",
-        "default": "",
-        "hint": "仅 storage_mode=linked 时需要填写。填写 Zotero storage 文件夹的完整路径，插件会在其中查找 PDF 附件"
-      },
-      "sync_mode": {
-        "description": "同步策略",
-        "type": "string",
-        "default": "conservative",
-        "options": [
-          "strict_mirror",
-          "conservative",
-          "archive"
-        ],
-        "hint": "conservative（默认）：删除 Zotero 中已移除的文档，但保留集合结构和图谱；strict_mirror：严格镜像，强制与 Zotero 一致，会触发索引重建；archive：只增不删，保留所有已同步文档"
-      },
-      "auto_sync_enabled": {
-        "description": "自动同步",
-        "type": "bool",
-        "default": false,
-        "hint": "开启后在插件启动时和按设定间隔自动同步 Zotero 变更"
-      },
-      "auto_sync_interval_sec": {
-        "description": "自动同步间隔（秒）",
-        "type": "int",
-        "default": 3600,
-        "hint": "仅 auto_sync_enabled=true 时生效。默认 3600 秒 = 每小时检查一次"
-      },
-      "api_port": {
-        "description": "Zotero 本地 API 端口",
-        "type": "int",
-        "default": 23119,
-        "hint": "用于检测 Zotero 是否正在运行。通常无需修改，除非你在 Zotero 设置中更改了默认端口"
-      }
-    }
-  },
-  "deep_thinking": {
-    "description": "深度思考检索（FAIR-RAG 迭代）",
-    "type": "object",
-    "hint": "手动 retrieval_mode=deep_thinking 时启用：把综述/多跳问题分解为子查询，多轮检索+重排+充分性审计后再回答。精度优先，消耗高于普通问答。",
-    "items": {
-      "max_rounds": {
-        "description": "最大迭代轮数",
-        "type": "int",
-        "default": 4,
-        "hint": "含开放式发现的追踪轮次；轮数越多越全也越慢越贵"
-      },
-      "max_sub_queries": {
-        "description": "每轮最大子查询数",
-        "type": "int",
-        "default": 4
-      },
-      "wide_top_k": {
-        "description": "每个子查询的检索宽度",
-        "type": "int",
-        "default": 24,
-        "hint": "重排/排序前的候选召回量。精度优先可调大"
-      },
-      "rerank_weight": {
-        "description": "重排器权重（0~1）",
-        "type": "float",
-        "default": 0.2,
-        "hint": "深挖排序以每个子查询的检索分(rrf)为主信号。无真实本地 cross-encoder 时会自动退回纯 rrf；有模型时默认用少量重排分参与混合排序"
-      },
-      "verify_enabled": {
-        "description": "启用答案级校验闭环",
-        "type": "bool",
-        "default": true,
-        "hint": "合成答案后校验是否被证据完全支撑、是否完整；不合格则把缺失点当作补充检索方向再检一轮。提升精度但增加 LLM 调用"
-      },
-      "max_verify_rounds": {
-        "description": "校验不合格后的最大补检轮数",
-        "type": "int",
-        "default": 1,
-        "hint": "答案校验不通过时最多再补充检索几轮。0 表示只校验不补检"
-      },
-      "llm_base_url": {
-        "description": "深度思考专用 LLM 端点",
-        "type": "string",
-        "default": "",
-        "hint": "OpenAI-compatible endpoint。填写后深度思考使用此 endpoint 而非 AstrBot 主 LLM，解决主 LLM 不可用时的静默降级问题。示例：https://api.openai.com/v1"
-      },
-      "llm_model": {
-        "description": "深度思考专用 LLM 模型",
-        "type": "string",
-        "default": "",
-        "hint": "填写对应端点上的模型名称，例如 gpt-4o、claude-3-5-sonnet-20241022、gemini-2.0-flash 等"
-      },
-      "llm_api_key": {
-        "description": "深度思考专用 LLM API Key",
-        "type": "string",
-        "default": "",
-        "hint": "机密字段。建议通过环境变量 KR_DEEP_THINKING_LLM_API_KEY 注入，不要直接填写在此处"
-      }
-    }
-  },
-  "rerank": {
-    "description": "Cross-encoder 重排器",
-    "type": "object",
-    "hint": "对召回候选按 query 语义相关度二次打分。需安装可选依赖 sentence-transformers（见 requirements-additional.txt）；缺依赖时自动降级为不重排，不影响普通问答。",
-    "items": {
-      "provider": {
-        "description": "重排器后端",
-        "type": "string",
-        "default": "auto",
-        "options": [
-          "auto",
-          "noop",
-          "cross_encoder"
-        ],
-        "hint": "auto：未显式配置时安装 sentence-transformers 即启用本地 cross-encoder，否则 noop；noop：显式关闭；cross_encoder：本地 cross-encoder，首次 Deep Thinking 使用时下载/加载模型"
-      },
-      "model": {
-        "description": "本地 cross-encoder 模型",
-        "type": "string",
-        "default": "Alibaba-NLP/gte-reranker-modernbert-base",
-        "hint": "首次 Deep Thinking 使用时下载模型。AB test 可改为 BAAI/bge-reranker-v2-m3"
       }
     }
   }

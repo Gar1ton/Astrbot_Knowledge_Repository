@@ -5,6 +5,7 @@ auto 模式下被重复收集的已知问题。
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -870,6 +871,25 @@ async def test_rebuild_index_pending_retries_transient_embedding_failure(tmp_pat
 
 # ── Milvus 后台重建进度条 ────────────────────────────────────────────
 
+def test_milvus_build_job_progress_counts_cleaning_and_indexing() -> None:
+    from core.milvus_build import MilvusBuildJob
+
+    job = MilvusBuildJob(
+        total_docs=2,
+        total_clean_docs=1,
+        processed_clean_docs=1,
+        total_index_docs=2,
+        processed_index_docs=1,
+    )
+
+    snapshot = job.to_dict()
+
+    assert snapshot["progress_percent"] == 67
+    assert snapshot["stage"] == "data_cleaning"
+    assert snapshot["processed_clean_docs"] == 1
+    assert snapshot["processed_index_docs"] == 1
+
+
 async def test_start_milvus_rebuild_progresses_to_success(tmp_path: Path) -> None:
     from core.config import Config
     from core.index_compatibility import IndexCompatibilityStore
@@ -905,6 +925,88 @@ async def test_start_milvus_rebuild_progresses_to_success(tmp_path: Path) -> Non
     assert api._milvus_build_job.status == "success"
     assert api._milvus_build_job.processed_docs == 1
     assert api._milvus_build_job.total_docs == 1
+    assert await store.list_pending_reindex_documents() == []
+
+
+async def test_start_milvus_rebuild_cleans_legacy_chunks_before_indexing(
+    tmp_path: Path,
+) -> None:
+    from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "papers")
+    doc.needs_reindex = True
+    await store.add_document(doc)
+    await store.replace_chunks("d1", [DocumentChunk("legacy-1", "d1", 0, "legacy", "old")])
+
+    class FakeIngestManager:
+        calls = 0
+
+        @staticmethod
+        def chunk_needs_rebuild(
+            document_id: str,
+            chunks: list[DocumentChunk],
+            local_meta: dict | None = None,
+        ) -> bool:
+            del document_id, local_meta
+            return any(chunk.chunk_id == "legacy-1" for chunk in chunks)
+
+        async def rebuild_document_chunks_from_artifact(self, document_id: str) -> int:
+            self.calls += 1
+            await store.replace_chunks(
+                document_id,
+                [
+                    DocumentChunk(
+                        f"{document_id}_c0000",
+                        document_id,
+                        0,
+                        "current structural chunk",
+                        "new",
+                        metadata={
+                            "chunk_schema": "clean_md_structural_v3",
+                            "start_char": 0,
+                            "end_char": 24,
+                        },
+                    )
+                ],
+            )
+            current = await store.get_document(document_id)
+            assert current is not None
+            current.needs_reindex = True
+            await store.update_document(current)
+            return 1
+
+    ingest = FakeIngestManager()
+    vector_store = InMemoryVectorStore()
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=vector_store,
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+        ingest_manager=ingest,  # type: ignore[arg-type]
+    )
+
+    await api.start_milvus_rebuild()
+    assert api._milvus_build_task is not None
+    await api._milvus_build_task
+
+    assert ingest.calls == 1
+    assert api._milvus_build_job is not None
+    assert api._milvus_build_job.status == "success"
+    assert api._milvus_build_job.total_clean_docs == 1
+    assert api._milvus_build_job.processed_clean_docs == 1
+    assert api._milvus_build_job.total_index_docs == 1
+    assert api._milvus_build_job.processed_index_docs == 1
+    assert "d1_c0000" in vector_store._data
+    assert "legacy-1" not in vector_store._data
     assert await store.list_pending_reindex_documents() == []
 
 
@@ -968,6 +1070,8 @@ async def test_capabilities_degraded_while_milvus_building(tmp_path: Path) -> No
     assert vs["status"] == "degraded"
     assert vs["detail"]["building"] is True
     assert vs["detail"]["rebuild_required"] is True
+    assert vs["detail"]["build_stage"] == "data_cleaning"
+    assert "清洗数据" in vs["detail"]["reason"]
 
 
 async def test_start_milvus_rebuild_partial_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1013,6 +1117,66 @@ async def test_start_milvus_rebuild_partial_failure(tmp_path: Path, monkeypatch:
     assert active["status"] == "partial_failure"
     assert active["failed_docs"] == 1
     assert active["processed_docs"] == 0
+
+
+async def test_start_milvus_rebuild_cleaning_failure_skips_index(
+    tmp_path: Path,
+) -> None:
+    from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "papers")
+    doc.needs_reindex = True
+    await store.add_document(doc)
+    await store.replace_chunks("d1", [DocumentChunk("legacy-1", "d1", 0, "legacy", "old")])
+
+    class FailingIngestManager:
+        @staticmethod
+        def chunk_needs_rebuild(
+            document_id: str,
+            chunks: list[DocumentChunk],
+            local_meta: dict | None = None,
+        ) -> bool:
+            del document_id, chunks, local_meta
+            return True
+
+        async def rebuild_document_chunks_from_artifact(self, document_id: str) -> int:
+            raise FileNotFoundError(f"Markdown artifact not found for {document_id}")
+
+    vector_store = InMemoryVectorStore()
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=vector_store,
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+        ingest_manager=FailingIngestManager(),  # type: ignore[arg-type]
+    )
+
+    await api.start_milvus_rebuild()
+    assert api._milvus_build_task is not None
+    await api._milvus_build_task
+
+    active = api.get_active_milvus_build_job()
+    pending = await store.list_pending_reindex_documents()
+
+    assert active is not None
+    assert active["status"] == "partial_failure"
+    assert active["failed_docs"] == 1
+    assert active["total_clean_docs"] == 1
+    assert active["processed_clean_docs"] == 0
+    assert active["total_index_docs"] == 0
+    assert active["processed_docs"] == 0
+    assert active["errors"][0]["stage"] == "data_cleaning"
+    assert vector_store._data == {}
+    assert [doc.doc_id for doc in pending] == ["d1"]
 
 
 # ── LightRAG API 层覆盖补充 ──────────────────────────────────────────
@@ -1544,3 +1708,27 @@ async def test_deep_thinking_unverified_missing_gets_warning_prefix() -> None:
     assert result["thinking_trace"]["degraded"] is False
     # 完整明细仍经 thinking_trace.verify_missing 暴露（前端折叠渲染）。
     assert result["thinking_trace"]["verify_missing"] == ["缺少定义", "缺少对比"]
+
+
+async def test_restart_plugin_unsupported_without_callback() -> None:
+    """未注入 reload_callback（如无法程序化重启的环境）时返回 unsupported，不报错。"""
+    api = await _make_api()
+    result = await api.restart_plugin()
+    assert result["status"] == "unsupported"
+
+
+async def test_restart_plugin_schedules_reload() -> None:
+    """注入 reload_callback 时立即返回 restarting，并在后台延迟触发软重启回调。"""
+    reloaded = asyncio.Event()
+
+    async def _reload() -> None:
+        reloaded.set()
+
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        reload_callback=_reload,
+    )
+    result = await api.restart_plugin()
+    assert result["status"] == "restarting"
+    await asyncio.wait_for(reloaded.wait(), timeout=3.0)

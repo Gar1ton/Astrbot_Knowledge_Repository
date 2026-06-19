@@ -280,6 +280,9 @@
   --flow-st-warn: #cc8a2e;
   --flow-st-off: #b4b4ad;
   --flow-st-info: #6c79c4;
+  --flow-st-optional: #7a5cd0;
+  --flow-st-dirty: #2f76d6;
+  --flow-st-restart: #c76b2c;
   --flow-ring: color-mix(in srgb, var(--flow-ink) 16%, transparent);
   --flow-shadow-node: 0 1px 2px rgba(28, 24, 16, 0.04), 0 4px 16px rgba(28, 24, 16, 0.06);
   --flow-shadow-pop: 0 10px 34px rgba(28, 24, 16, 0.14);
@@ -302,6 +305,9 @@
   --flow-st-warn: #e0a23b;
   --flow-st-off: #686862;
   --flow-st-info: #8c98ee;
+  --flow-st-optional: #a78bfa;
+  --flow-st-dirty: #5b9bf0;
+  --flow-st-restart: #e0913f;
   --flow-ring: color-mix(in srgb, var(--flow-ink) 18%, transparent);
   --flow-shadow-node: 0 1px 2px rgba(0, 0, 0, 0.38), 0 8px 24px rgba(0, 0, 0, 0.32);
   --flow-shadow-pop: 0 14px 40px rgba(0, 0, 0, 0.55);
@@ -405,6 +411,54 @@
 .flow-recheck-button:disabled {
   cursor: wait;
   color: var(--flow-muted);
+}
+
+/* 顶部全局「重启插件」按钮；有节点待重启时高亮（is-pending）并显示计数徽标。 */
+.flow-restart-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 14px;
+  border-radius: 9px;
+  border: 1px solid var(--flow-node-bd-strong);
+  background: var(--flow-node);
+  color: var(--flow-ink);
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+.flow-restart-btn:hover:not(:disabled) {
+  background: var(--flow-inset);
+}
+
+.flow-restart-btn:disabled {
+  cursor: wait;
+  color: var(--flow-muted);
+}
+
+.flow-restart-btn.is-pending {
+  border-color: color-mix(in srgb, var(--flow-st-restart) 55%, var(--flow-node-bd));
+  color: color-mix(in srgb, var(--flow-st-restart) 78%, var(--flow-ink));
+  background: color-mix(in srgb, var(--flow-st-restart) 12%, var(--flow-node));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--flow-st-restart) 16%, transparent);
+}
+
+.flow-restart-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--flow-st-restart);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  font-family: var(--font-geist-mono);
 }
 
 .flow-spin {
@@ -557,7 +611,7 @@
   display: grid;
   grid-template-columns: 480px 330px 360px 360px 380px 420px;
   grid-auto-rows: minmax(300px, auto);
-  column-gap: 52px;
+  column-gap: 68px;
   row-gap: 16px;
   align-items: stretch;
   padding: 18px 24px;
@@ -637,38 +691,57 @@
 .flow-conn-group.off { --flow-conn-status: var(--flow-st-off); }
 .flow-conn-group.info { --flow-conn-status: var(--flow-st-info); }
 
+/* 发光实心曲线：鲜亮状态色 + 双层 drop-shadow 光晕（静态路径，光晕只栅格化一次）。 */
 .flow-conn-base {
   fill: none;
-  stroke-width: 2;
+  stroke-width: 2.2;
   stroke-linecap: round;
-  stroke: color-mix(in srgb, var(--flow-conn-status) 52%, var(--flow-conn));
+  stroke: var(--flow-conn-status);
+  filter:
+    drop-shadow(0 0 3px color-mix(in srgb, var(--flow-conn-status) 60%, transparent))
+    drop-shadow(0 0 7px color-mix(in srgb, var(--flow-conn-status) 32%, transparent));
+}
+
+/* off 边为灰色，发光无意义且发灰，关掉光晕。 */
+.flow-conn-group.off .flow-conn-base {
+  filter: none;
+  stroke: color-mix(in srgb, var(--flow-conn-status) 60%, var(--flow-conn));
 }
 
 .flow-conn-group.is-dashed .flow-conn-base {
-  stroke: var(--flow-conn);
   stroke-dasharray: 2 7;
   opacity: 0.85;
 }
 
-.flow-conn-live {
-  fill: none;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke: var(--flow-conn-status);
-  stroke-dasharray: 5 12;
+/* 可选/旁路来源边：靛紫描边（与端点菱形同色），区别于 off 灰边。 */
+.flow-conn-group.is-optional .flow-conn-base {
+  stroke: color-mix(in srgb, var(--flow-st-optional) 52%, var(--flow-conn));
   opacity: 0.9;
-  animation: connFlow 1.05s linear infinite;
 }
 
+/* 极轻流动高光：一段提亮的短亮段沿整条曲线缓慢流过（取代密集蚂蚁线行进）。 */
+.flow-conn-live {
+  fill: none;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  stroke: color-mix(in srgb, #fff 40%, var(--flow-conn-status));
+  stroke-dasharray: 14 600;
+  opacity: 0.85;
+  animation: connFlow 3.2s linear infinite;
+}
+
+/* 连接点 = 空心发光圆环：骑在节点边框上，深色圆心读作镂空，亮色描边 + 外发光。
+   z-index 高于展开高级时抬到 30 的 cell，确保连接点端口永不被高级浮层压住。 */
 .flow-handle {
   position: absolute;
-  z-index: 3;
-  width: 11px;
-  height: 11px;
+  z-index: 40;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   background: var(--flow-node);
   border: 2px solid var(--flow-conn);
   transform: translate(-50%, -50%);
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .flow-handle.ready { --flow-handle-status: var(--flow-st-ready); }
@@ -677,9 +750,23 @@
 .flow-handle.info { --flow-handle-status: var(--flow-st-info); }
 
 .flow-handle.is-active {
-  border-color: color-mix(in srgb, var(--flow-handle-status) 60%, var(--flow-conn));
-  background: color-mix(in srgb, var(--flow-handle-status) 20%, var(--flow-node));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--flow-handle-status) 13%, transparent);
+  border-color: var(--flow-handle-status);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--flow-handle-status) 12%, transparent),
+    0 0 12px color-mix(in srgb, var(--flow-handle-status) 60%, transparent);
+}
+
+/* 可选/旁路来源端点：靛紫菱形（rotate 45°），取代原「可选来源」文字气泡。 */
+.flow-handle--optional {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  border-color: color-mix(in srgb, var(--flow-st-optional) 70%, var(--flow-conn));
+  background: color-mix(in srgb, var(--flow-st-optional) 26%, var(--flow-node));
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--flow-st-optional) 16%, transparent),
+    0 0 10px color-mix(in srgb, var(--flow-st-optional) 50%, transparent);
 }
 
 .flow-edge-label {
@@ -704,15 +791,20 @@
   border-style: dashed;
 }
 
+/* 整圈发光薄边框：1px 边随 --flow-st（状态/dirty/restart）着色，box-shadow 在边框外形成
+   一圈光晕把整个 node 包住（不受 overflow:hidden 裁剪）。 */
 .flow-node {
   --flow-st: var(--flow-st-off);
   position: relative;
   overflow: hidden;
   background: var(--flow-node);
-  border: 1px solid var(--flow-node-bd);
+  border: 1px solid color-mix(in srgb, var(--flow-st) 42%, var(--flow-node-bd));
   border-radius: 14px;
-  box-shadow: var(--flow-shadow-node);
-  padding: 13px 15px 14px 19px;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--flow-st) 16%, transparent),
+    0 0 12px color-mix(in srgb, var(--flow-st) 26%, transparent),
+    var(--flow-shadow-node);
+  padding: 13px 15px 14px 15px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -725,27 +817,55 @@
 .flow-node.is-off-status { --flow-st: var(--flow-st-off); }
 .flow-node.is-info { --flow-st: var(--flow-st-info); }
 
+/* 编辑未保存：整圈边框+光晕变 dirty 蓝（仅设 --flow-st 即自动贯通，并略加强光晕）。 */
+.flow-node.is-dirty {
+  --flow-st: var(--flow-st-dirty);
+  box-shadow:
+    0 0 0 1.5px color-mix(in srgb, var(--flow-st-dirty) 30%, transparent),
+    0 0 16px color-mix(in srgb, var(--flow-st-dirty) 38%, transparent),
+    var(--flow-shadow-pop);
+}
+
+/* 已保存待重启：整圈变 restart 琥珀。 */
+.flow-node.is-restart-pending {
+  --flow-st: var(--flow-st-restart);
+  box-shadow:
+    0 0 0 1.5px color-mix(in srgb, var(--flow-st-restart) 28%, transparent),
+    0 0 15px color-mix(in srgb, var(--flow-st-restart) 34%, transparent),
+    var(--flow-shadow-pop);
+}
+
+/* 高级折叠展开时放开裁剪，让绝对定位的高级浮层得以溢出节点下沿（不改变节点测量高度）。 */
+.flow-node.is-advanced-open { overflow: visible; }
+.flow-node-cell:has(.flow-node.is-advanced-open) { z-index: 30; }
+
 .flow-node:hover {
-  border-color: var(--flow-node-bd-strong);
-  box-shadow: var(--flow-shadow-pop);
+  border-color: color-mix(in srgb, var(--flow-st) 60%, var(--flow-node-bd));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--flow-st) 24%, transparent),
+    0 0 16px color-mix(in srgb, var(--flow-st) 36%, transparent),
+    var(--flow-shadow-pop);
 }
 
 .flow-node.is-selected {
-  border-color: color-mix(in srgb, var(--flow-ink) 30%, var(--flow-node-bd));
-  box-shadow: 0 0 0 2px var(--flow-ring), var(--flow-shadow-pop);
+  border-color: color-mix(in srgb, var(--flow-st) 72%, var(--flow-node-bd));
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--flow-st) 34%, transparent),
+    0 0 18px color-mix(in srgb, var(--flow-st) 42%, transparent),
+    var(--flow-shadow-pop);
 }
 
+/* off：不发彩光（灰光无意义），保留虚线 + 降透明。 */
 .flow-node.is-off {
   opacity: 0.72;
   border-style: dashed;
+  box-shadow: var(--flow-shadow-node);
 }
 
+/* 终点节点：稍粗边宽 + 更大圆角以区分；发光边/光晕沿用 .flow-node 基底（随 --flow-st）。 */
 .flow-node--dest {
   border-width: 1.5px;
-  border-color: color-mix(in srgb, var(--flow-ink) 15%, var(--flow-node-bd));
   border-radius: 16px;
-  box-shadow: var(--flow-shadow-dest);
-  padding-left: 20px;
 }
 
 .flow-node--dest.is-off {
@@ -764,19 +884,6 @@
 
 .dark .flow-node--dest::before {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-}
-
-.flow-node-stripe {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 4px;
-  background: linear-gradient(var(--flow-st), color-mix(in srgb, var(--flow-st) 45%, transparent));
-}
-
-.flow-node--dest .flow-node-stripe {
-  width: 5px;
 }
 
 .flow-node-head {
@@ -866,8 +973,8 @@
   flex-shrink: 0;
   font-size: 11px;
   font-weight: 600;
-  padding: 3px 9px;
-  border-radius: 999px;
+  padding: 4px 9px;
+  border-radius: 9px;
   border: 1px solid color-mix(in srgb, var(--flow-st) 30%, transparent);
   color: var(--flow-st);
   background: color-mix(in srgb, var(--flow-st) 9%, transparent);
@@ -877,6 +984,19 @@
 .flow-status-chip.is-degraded { --flow-st: var(--flow-st-warn); }
 .flow-status-chip.is-off-status { --flow-st: var(--flow-st-off); }
 .flow-status-chip.is-info { --flow-st: var(--flow-st-info); }
+
+/* 徽章充当唯一保存入口：dirty 态是可点按钮，pending-restart 态是提示。--flow-st 由节点级类提供。 */
+.flow-status-chip--dirty {
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 0.14s;
+}
+.flow-status-chip--dirty:hover:not(:disabled) {
+  filter: brightness(1.06);
+  background: color-mix(in srgb, var(--flow-st) 16%, transparent);
+}
+.flow-status-chip--dirty:disabled { cursor: default; opacity: 0.55; }
+.flow-status-chip--pending-restart .flow-status-dot { animation: stPulse 1.7s ease-in-out infinite; }
 
 .flow-status-dot {
   width: 7px;
@@ -1187,6 +1307,29 @@
 .flow-quick-advanced-caret.is-open {
   transform: rotate(90deg);
 }
+
+/* 展开的高级内容：分离式浮层卡片（带间隙、四角全圆的独立卡片），绝对定位、不计入节点
+   测量高度 → 展开/收起不影响边对齐。 */
+.flow-quick-advanced-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px;
+  background: var(--flow-node);
+  border: 1px solid var(--flow-node-bd-strong);
+  border-radius: 12px;
+  box-shadow: var(--flow-shadow-pop);
+  animation: fadeUp 0.14s ease;
+}
+
+/* 节点底部高级折叠槽位：无高级字段的节点不渲染内容 → 隐藏以免 flex gap 留白。
+   注意不要 position:relative，否则浮层会锚到槽位而非节点（需锚到 .flow-node 才能紧贴节点底）。 */
+.flow-node-advanced-slot:empty { display: none; }
 
 /* ── Zotero: 同步动作条 ── */
 .flow-quick-syncbar {
@@ -1837,7 +1980,7 @@
 }
 
 @keyframes connFlow {
-  to { stroke-dashoffset: -17; }
+  to { stroke-dashoffset: -614; }
 }
 
 @keyframes stPulse {

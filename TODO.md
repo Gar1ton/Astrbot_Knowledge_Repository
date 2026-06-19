@@ -44,6 +44,84 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.25.16 数据流节点界面美术与配置统一重构 (completed)
+
+### User constraints / 约束
+
+- 美术参考用户截图：node 左侧 mark 改辉光（数据流质感、非转圈），保留显色；边末端连接点对齐辉光上沿；icon 与状态徽章圆角统一；节点横向间距加大。
+- 「可选来源」文字气泡改用非圆圈端点表达，换色（不用绿黄）→ 选定靛紫菱形。
+- 配置统一为「模块切换 + 必要配置 + 高级折叠」三段式，高级区可调该节点全部设置；高级窗口可展开/收起且**不影响节点对齐**。
+- 节点状态徽章合并为唯一保存入口：未保存→变色变「保存」；保存后「待重启」；顶部新增全局「重启插件」按钮（用户确认每节点「待重启」+ 顶部统一重启）。
+- 版本只 patch；`pages/` 为产物经 build+sync 生成，不手改。
+
+### Technical implementation path
+
+- [x] **Phase 1 美术**：`tokens.css` 新增 `--flow-st-optional/-dirty/-restart`；`.flow-node-stripe` 改辉光带 + `stripeFlow` 高亮；`.flow-handle--optional` 靛紫菱形 + `.flow-conn-group.is-optional` 描边；icon/状态徽章统一 R9；`column-gap` 68px；`FlowDiagram.tsx` 为 dashed 边 from 端打 optional 标记并停渲文字气泡（`model.ts` 边定义不变）。
+- [x] **Phase 2 配置三段式 + 全量可写键**：`QuickConfigPanel.tsx` 抽出 `computeUpdates`/`useQuickConfigDraft`/`QuickConfigFieldGrid`/`AdvancedSection`，`buildQuickConfig` 拆 required/advanced 并补 graph LightRAG LLM 三项、`source_store.default_collection`、Ask 节点 `deep_thinking` 全部调参（`number` 字段支持 `min`/`step`，rerank_weight 允许 0/小数）；`ZoteroQuickConfig.tsx` 复用共享 hook 与 `AdvancedSection`；高级浮层绝对定位（`.flow-quick-advanced-panel` + `.flow-node.is-advanced-open{overflow:visible}` + `:has` 抬升 cell z-index），不计入测量高度。后端无需改（`api_writable_keys()`/`to_public_dict()` 已含全部字段）。
+- [x] **Phase 3.1 徽章三态 + 单一保存入口**：`QuickConfigPanel`/`ZoteroQuickConfig` 改 `forwardRef` 暴露 `save()`、经 `onDirtyChange` 上报草稿态、移除面板内独立 Save；`FlowNode.tsx` 头部徽章 dirty 时变「保存」按钮（点击经 ref 提交）、`restartPending` 时显示「待重启」，节点加 `is-dirty/is-restart-pending/is-advanced-open` 类；`FlowPageContent.tsx` 维护 `restartPendingIds` 并经 `FlowDiagram` 下发。
+- [x] **Phase 3.2 全局重启**：`FlowPageContent` 顶部新增「重启插件」按钮（待重启计数）；`lib/api.ts` 新增 `restartPlugin()`；后端 `web/server.py` 新增 `POST /api/plugin/restart` → `core/api.py::restart_plugin()`（注入 `reload_callback`，后台延迟触发，避免拆掉当前响应连接）→ `core/plugin_initializer.py::reload()`（teardown→重读持久化配置重建 Config→initialize），进程内软重启不杀 AstrBot。
+- [x] **i18n**：`lib/i18n.ts` 中英补 `flow_quick_advanced`、`flow_quick_default_collection`、`flow_quick_graph_working_dir(_help)`、`flow_quick_dt_*`、`flow_status_pending_restart`、`flow_restart_*`。
+- [x] **Round 2 修正（用户看效果后反馈）**：① 高级折叠移到节点最底部——`FlowNode` body 末尾加 `.flow-node-advanced-slot`，`AdvancedSection` 经 `createPortal` 渲到该槽位（slot 空回退内联），浮层 `top:100%` 紧贴节点底、只圆下两角、去上边框，仍 absolute 不挤动其他节点（`.flow-node-advanced-slot:empty{display:none}`）。② 边美术按参考图改发光风格——`.flow-handle` 11px 实心点→14px 空心发光圆环；`.flow-conn-base` 灰 mix→鲜亮状态色 + 双层 `drop-shadow`（off 关光晕）；`.flow-conn-live` 蚂蚁线→`14 600`/3.2s 长间隙短亮段缓慢流过（`connFlow` 终值 -614）；保留可选来源靛紫菱形。
+- [x] **Round 3 修正（用户看 R2 后反馈）**：① 高级弹窗改回「分离式」浮层——`.flow-quick-advanced-panel` 回退为 `top:calc(100%+8px)`、四角全圆 `border-radius:12px`、四边边框（仍 absolute Portal 在底部槽位、不挤动）。② 左侧单条辉光竖条 → 整圈发光薄边框——删 `.flow-node-stripe`（含 `<span>`/`::after`/`@keyframes stripeFlow`），`.flow-node` 改 `1px` 随 `--flow-st` 着色薄边 + `box-shadow` 整圈光晕（包住整个 node、比原 3px 更薄）；hover/选中/dirty/restart/off/dest 各态光晕整合；节点边框静态发光，流动感保留在边线。
+- [x] **Round 4 修正（用户反馈）**：① 编辑配置时 5s 自动刷新冲掉输入——`FlowNode` 经 `onEditingChange` 上报 dirty 态，`FlowPageContent` 用 `editingRef` 跟踪，有节点 dirty 时暂停自动刷新（`FlowDiagram` 透传）。② 高级浮层展开压住相邻节点连接点——`.flow-handle` `z-index` 3→40，端口始终在浮层之上。
+
+### Verification
+
+- `python -m pytest -q` → 398 passed（含新增 `test_restart_plugin_*`）。
+- `npx tsc --noEmit` → passed；`npm run build` → passed（13 路由全静态生成）；`python tools/sync_frontend.py` → 同步 360 文件到 `pages/`。
+- 人工核对（开发态 `/flow`）：辉光 mark + 端点对齐、靛紫菱形可选来源、圆角统一、间距变宽；改配置→徽章变「保存」→「待重启」；展开/收起高级浮层不位移其他节点与边；graph LLM / default_collection / deep_thinking 均可调；顶部「重启插件」软重启后状态复检回就绪。
+- Round 2 复验：`npx tsc --noEmit` → passed；`npm run build` → passed；`python tools/sync_frontend.py` → 同步 360 文件到 `pages/`。人工核对：高级折叠按钮在节点最底部、展开浮层紧贴节点底且其他节点/边不位移；边为发光圆环 + 发光曲线、ready 边有缓慢流动亮点无蚂蚁线、可选来源仍靛紫菱形。
+- Round 3 复验：`npx tsc --noEmit` → passed；`npm run build` → passed；`python tools/sync_frontend.py` → 同步 360 文件到 `pages/`。人工核对：展开高级 → 分离式浮层卡片（带间隙四角圆）；节点整圈薄边框发光包住整个 node、随状态/未保存/待重启变色、无左侧单条竖条。
+- Round 4 复验：`npx tsc --noEmit` → passed；`npm run build` → passed；`python tools/sync_frontend.py` → 同步 360 文件到 `pages/`。人工核对：编辑某节点（蓝色）时输入不再被 5s 刷新冲掉、保存后恢复刷新；展开高级浮层时相邻节点连接点圆环不被压住。
+
+## v0.25.15 AstrBot 配置收窄与 WebUI 设置迁移 (completed)
+
+### User constraints / 约束
+
+- AstrBot 插件配置面板只保留 5 组，并按固定顺序：`web_console`、`r2_sync`、`notion_sync`、`embedding`、`ask`。
+- 从 AstrBot schema 移除其他配置组；不影响 WebUI 内部继续展示或编辑更多高级配置。
+- 被移除且未在其他 WebUI 窗口暴露的设置，先迁移到 WebUI 设置弹窗；本轮不重设计设置页结构。
+
+### Technical implementation path
+
+- [x] **Phase 1 - AstrBot schema 收窄**：`_conf_schema.json` 只保留指定 5 组并按用户指定顺序排列。技术理由：把 AstrBot 原生配置面板收敛为启动/外部集成核心项，降低主面板噪声。
+- [x] **Phase 2 - 后端配置公开与写入策略补齐**：`Config.to_public_dict()` 暴露 WebUI 迁移所需字段，`CONFIG_KEY_POLICY` 开放非机密、非结构字段的运行时写入。技术理由：WebUI 设置弹窗不能只读展示，必须通过既有安全写接口持久化。
+- [x] **Phase 3 - WebUI 设置迁移入口**：在 `SettingModal` 后端配置区域加入临时高级配置编辑区，补齐未在其他窗口暴露的迁移项，并保持机密字段 env-only。技术理由：不改变数据流页现有入口，只兜住从 AstrBot schema 移除后的配置可达性。
+- [x] **Phase 4 - 测试与治理收口**：补 schema 顺序、有效配置公开、配置写入测试；运行后端聚焦测试、前端类型检查和 Next build；更新 `metadata.yaml` 与 `CHANGELOG.md`。技术理由：确保配置入口迁移后可保存、可验证、可追溯。
+
+### Verification
+
+- `python -m pytest tests/backend/test_config.py tests/backend/test_web_server.py -q` → 74 passed。
+- `node node_modules/typescript/bin/tsc --noEmit --incremental false`（`web/frontend`）→ passed。
+- `node node_modules/next/dist/bin/next build --webpack`（`web/frontend`）→ passed，13 static routes。未运行 `tools/sync_frontend.py`，因为 `pages/` 为构建产物禁手改区且工作树已有既有产物改动。
+
+---
+
+## v0.25.14 Milvus/Data Cleaning 统一进度闭环 (completed)
+
+### User constraints / 约束
+
+- 检查并闭环 v0.25.3 Milvus 构建进度条：确认已有后台任务、轮询接口和 FilePanel 卡片。
+- 在同一条 Milvus 进度条中加入 data cleaning 阶段，不新增分散卡片。
+- data cleaning 默认只基于现有 `clean.md/pages.json` 重新清洗并重建 structural chunks，不强制批量 PDF re-extract。
+- 修复项目完成度记录：TODO、metadata、CHANGELOG 必须与当前实现对齐。
+
+### Technical implementation path
+
+- [x] **Phase 1 - Job 模型扩展**：`MilvusBuildJob` 新增 `stage`、`stage_label`、`total_clean_docs/processed_clean_docs`、`total_index_docs/processed_index_docs`，`progress_percent` 改为 cleaning + indexing 合并进度，同时保留旧 `total_docs/processed_docs` 字段兼容。技术理由：前端可在同一进度条展示阶段细分，不破坏既有 API。
+- [x] **Phase 2 - 后端清洗阶段接入**：`rebuild_vector_store()` / `rebuild_index_pending()` 在索引前预扫描 legacy chunks，调用 `IngestManager.rebuild_document_chunks_from_artifact()`；清洗失败文档计入 `failed_docs` 并跳过 upsert，保留 `needs_reindex=True`。技术理由：避免旧 chunks 进入 Milvus，并让失败可重试。
+- [x] **Phase 3 - 能力状态与前端展示**：`core/api_capabilities.py` 在构建中暴露 `build_stage/build_progress_percent`，reason 区分数据清洗、向量索引和收尾；`MilvusBuildCard` 使用同一进度条展示 stage 与 `cleaned/indexed/failed` 明细。技术理由：数据流黄态与文件页进度保持同一事实源。
+- [x] **Phase 4 - 测试与治理收口**：补 Milvus job 进度、cleaning 成功、cleaning 失败跳过索引、capabilities stage 断言；更新 v0.25.3 历史段落、`metadata.yaml` 与 `CHANGELOG.md`。技术理由：证明功能不是“记录已写但实现未闭环”。
+
+### Verification
+
+- `python -m pytest tests/backend/test_api.py -q -k "milvus"` → 9 passed / 47 deselected。
+- `python -m pytest tests/backend/test_api.py -q` → 56 passed。
+- `node node_modules/typescript/bin/tsc --noEmit --incremental false`（`web/frontend`）→ passed。
+- `node node_modules/next/dist/bin/next build --webpack`（`web/frontend`）→ passed，13 static routes。未运行 `tools/sync_frontend.py`，因为本轮明确不改 `pages/`。
+
+---
+
 ## v0.25.13 Deep Thinking 召回整合 + 实时进度 + 并行提速 + 瘦身 (completed)
 
 ### User constraints / 约束
@@ -306,7 +384,7 @@
 
 ---
 
-## v0.25.3 Milvus 向量库构建进度条 (in progress)
+## v0.25.3 Milvus 向量库 + data cleaning 统一进度条 (completed)
 
 ### User constraints / 约束
 
@@ -315,21 +393,24 @@
 - **无暂停功能**（必须构建成功，与 LightRAG 不同）。
 - **失败处理**：构建结束若有 `failed_docs>0`，进度条转红色 + 「重试」按钮；向量库节点保持黄色不可用直到全部成功。
 - 构建未成功前，数据流呈 pending 色、向量库节点黄色，示意功能暂不可用。
+- 在同一条 Milvus 进度条中加入 data cleaning 阶段：先基于现有 `clean.md/pages.json` 重新清洗并重建 structural chunks，再进入向量索引；不在该流程中强制批量 PDF re-extract。
 - 版本号为 **patch v0.25.3**，未经允许不 bump minor/major。
 
 ### Technical implementation path
 
-- [ ] 🚧 **Phase 1 - 后端任务对象 + 后台执行**：新增 `core/milvus_build.py`（`MilvusBuildJob` dataclass + `to_dict()` 含 `progress_percent`）；`core/api.py` 加 `self._milvus_build_job/_task` 状态、`start_milvus_rebuild()`（后台 `create_task`、立即返回、防并发）、`_run_milvus_rebuild()`、`get_active_milvus_build_job()`；给 `rebuild_vector_store/rebuild_index_pending` 加可选 `job` 进度钩子（保持原签名/返回兼容）。技术理由：复用现有逐文档循环作进度源，最小侵入。
-- [ ] **Phase 2 - 构建中保持黄色**：`core/api_capabilities.py:_milvus_runtime_health()` 在存在 running 的 `_milvus_build_job` 时强制 `rebuild_required=True` + `building=True`。技术理由：避免最后一个文档清除 `needs_reindex` 后过早变绿。
-- [ ] **Phase 3 - HTTP 路由**：`web/server.py` 改 `handle_rebuild_index_pending` 为后台触发即返回 `{status:"started", job}`；新增 `GET /api/documents/rebuild-index/active`。技术理由：前端需轮询进度。
-- [ ] **Phase 4 - 前端 API + 进度卡片**：`api.ts` 加 `MilvusBuildJob` 类型 + `getActiveMilvusBuildJob()`；`FilePanel.tsx` 加轮询 + 底部 `MilvusBuildCard`（复用 `BuildCard` 视觉、无暂停、失败转红 + 重试）；`FlowPageContent.tsx:handleRebuildIndex` 改触发即返回；`i18n.ts` 补 `file_milvus_build_*` 中英文案。技术理由：UI 与 LightRAG 体验一致。
-- [ ] **Phase 5 - 测试与验证**：补后端单测（进度推进、构建中保持黄、partial_failure）；保持现有 rebuild 测试绿；前端 build + sync。
+- [x] **Phase 1 - 后端任务对象 + 后台执行**：新增/扩展 `core/milvus_build.py`（`MilvusBuildJob` dataclass + `to_dict()` 含 `progress_percent`、`stage`、cleaning/indexing counters）；`core/api.py` 加 `self._milvus_build_job/_task` 状态、`start_milvus_rebuild()`（后台 `create_task`、立即返回、防并发）、`_run_milvus_rebuild()`、`get_active_milvus_build_job()`；给 `rebuild_vector_store/rebuild_index_pending` 加可选 `job` 进度钩子（保持原签名/返回兼容）。技术理由：复用现有逐文档循环作进度源，最小侵入。
+- [x] **Phase 2 - data cleaning 阶段接入**：Milvus rebuild 先预扫描需要 legacy chunk 修复的文档，调用 `IngestManager.rebuild_document_chunks_from_artifact()` 清洗并重建 chunks；清洗失败的文档计入 `failed_docs` 并跳过索引。技术理由：避免旧 chunks 被写入 Milvus，并让同一进度条覆盖清洗阶段。
+- [x] **Phase 3 - 构建中保持黄色**：`core/api_capabilities.py:_milvus_runtime_health()` 在存在 running 的 `_milvus_build_job` 时强制 `rebuild_required=True` + `building=True`，reason 包含当前 stage。技术理由：避免最后一个文档清除 `needs_reindex` 后过早变绿。
+- [x] **Phase 4 - HTTP 路由**：`web/server.py` 改 `handle_rebuild_index_pending` 为后台触发即返回 `{status:"started", job}`；新增 `GET /api/documents/rebuild-index/active`。技术理由：前端需轮询进度。
+- [x] **Phase 5 - 前端 API + 进度卡片**：`api.ts` 加 `MilvusBuildJob` 类型 + `getActiveMilvusBuildJob()`；`FilePanel.tsx` 加轮询 + 底部 `MilvusBuildCard`（复用 `BuildCard` 视觉、同一进度条显示 data cleaning / vector indexing stage、无暂停、失败转红 + 重试）；`FlowPageContent.tsx:handleRebuildIndex` 改触发即返回；`i18n.ts` 补 `file_milvus_build_*` 中英文案。技术理由：UI 与 LightRAG 体验一致。
+- [x] **Phase 6 - 测试与验证**：补后端单测（进度推进、data cleaning counters、构建中保持黄、partial_failure）；保持现有 rebuild 测试绿；前端 typecheck/build 通过。技术理由：用自动化验证完成进度条闭环。
 
 ### Verification
 
-- `python -m pytest tests/backend/test_api.py -q` → 待执行
-- `python -m pytest -q` / `ruff check . && mypy` → 待执行
-- `cd web/frontend && npm run build` + `python tools/sync_frontend.py` → 待执行
+- `python -m pytest tests/backend/test_api.py -q -k "milvus"` → 9 passed / 47 deselected。
+- `python -m pytest tests/backend/test_api.py -q` → 56 passed。
+- `node node_modules/typescript/bin/tsc --noEmit --incremental false`（`web/frontend`）→ passed。
+- `node node_modules/next/dist/bin/next build --webpack`（`web/frontend`）→ passed，13 static routes。未运行 `tools/sync_frontend.py`，因为本轮明确不改 `pages/`。
 
 ---
 

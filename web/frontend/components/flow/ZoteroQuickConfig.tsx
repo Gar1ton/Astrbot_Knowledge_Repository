@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
 import {
   deleteZoteroServerKey,
   getZoteroSyncStatus,
@@ -11,6 +11,7 @@ import {
 import type { I18nKey } from "@/lib/i18n";
 import { DirPickerDialog } from "./DirPickerDialog";
 import {
+  AdvancedSection,
   FieldControl,
   ZOTERO_STORAGE_MODES,
   ZOTERO_SYNC_MODES,
@@ -22,10 +23,10 @@ import {
   readString,
   selectField,
   textField,
+  useQuickConfigDraft,
   type QuickConfigField,
+  type QuickConfigHandle,
   type QuickConfigPanelProps,
-  type QuickConfigUpdate,
-  type QuickConfigValues,
 } from "./QuickConfigPanel";
 
 type AccessMode = "local" | "server";
@@ -53,59 +54,39 @@ function editableFields(config: QuickConfigPanelProps["config"], tab: AccessMode
 
 const ADVANCED_KEYS = new Set(["sync_mode", "storage_mode", "linked_root", "auto_sync_enabled", "auto_sync_interval_sec"]);
 
-export function ZoteroQuickConfig({ config, lang, t, saving, onSave, onRefresh }: QuickConfigPanelProps) {
+export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelProps>(function ZoteroQuickConfig(
+  { config, lang, t, saving, onSave, onRefresh, onDirtyChange, advancedOpen, onToggleAdvanced, advancedSlot },
+  ref,
+) {
   const tab = (readString(config, "zotero_sync", "access_mode", "local") === "server" ? "server" : "local") as AccessMode;
 
   const fields = useMemo(() => editableFields(config, tab), [config, tab]);
-  const fieldSignature = useMemo(
-    () => fields.map((f) => `${f.id}:${String(fieldInitialValue(f))}`).join("|"),
-    [fields],
-  );
-
-  const [draft, setDraft] = useState<QuickConfigValues>({});
+  const { draft, setDraft, updates, hasInvalidNumber } = useQuickConfigDraft(fields);
   const [dirPickerFieldId, setDirPickerFieldId] = useState<string | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-
-  useEffect(() => {
-    const next: QuickConfigValues = {};
-    for (const f of fields) next[f.id] = fieldInitialValue(f);
-    setDraft(next);
-  }, [fieldSignature, fields]);
-
-  const { updates, hasInvalidNumber } = useMemo(() => {
-    const nextUpdates: QuickConfigUpdate[] = [];
-    let invalid = false;
-    for (const field of fields) {
-      const current = draft[field.id] ?? fieldInitialValue(field);
-      const initial = fieldInitialValue(field);
-      if (field.kind === "readonly") continue;
-      if (field.kind === "boolean") {
-        const value = Boolean(current);
-        if (value !== field.value) nextUpdates.push({ section: field.section, key: field.key, value });
-        continue;
-      }
-      const raw = String(current);
-      if (raw === String(initial)) continue;
-      if (field.kind === "number") {
-        if (raw.trim() === "") continue;
-        const parsed = Number(raw);
-        if (!Number.isFinite(parsed) || parsed <= 0) { invalid = true; continue; }
-        nextUpdates.push({ section: field.section, key: field.key, value: parsed });
-        continue;
-      }
-      nextUpdates.push({ section: field.section, key: field.key, value: raw });
-    }
-    return { updates: nextUpdates, hasInvalidNumber: invalid };
-  }, [draft, fields]);
 
   const dirPickerField = dirPickerFieldId ? (fields.find((f) => f.id === dirPickerFieldId) ?? null) : null;
   const handleDirSelect = useCallback((path: string) => {
     if (!dirPickerFieldId) return;
     setDraft((cur) => ({ ...cur, [dirPickerFieldId]: path }));
     setDirPickerFieldId(null);
-  }, [dirPickerFieldId]);
+  }, [dirPickerFieldId, setDraft]);
 
   const canSave = updates.length > 0 && !hasInvalidNumber && !saving;
+
+  // 头部徽章充当唯一保存入口：上报草稿态 + 暴露 save。access_mode 标签切换/服务器 Key/立即同步仍各自保留按钮。
+  useImperativeHandle(
+    ref,
+    () => ({
+      save: () => {
+        if (updates.length > 0 && !hasInvalidNumber && !saving) onSave("zotero", updates);
+      },
+    }),
+    [updates, hasInvalidNumber, saving, onSave],
+  );
+
+  useEffect(() => {
+    onDirtyChange?.({ count: updates.length, canSave });
+  }, [updates.length, canSave, onDirtyChange]);
 
   // ── 标签切换：即时持久化 access_mode ───────────────────────────
   const switchTab = useCallback((mode: AccessMode) => {
@@ -235,13 +216,6 @@ export function ZoteroQuickConfig({ config, lang, t, saving, onSave, onRefresh }
         onClick={(event) => event.stopPropagation()}
         onPointerDown={(event) => event.stopPropagation()}
       >
-        <div className="flow-quick-config-head">
-          <span>{t("flow_quick_title")}</span>
-          <button type="button" className="flow-quick-save" disabled={!canSave} onClick={() => onSave("zotero", updates)}>
-            {saving ? t("flow_quick_saving") : t("flow_quick_save")}
-          </button>
-        </div>
-
         {/* 标签式连接模式切换（local / server） */}
         <div className="flow-quick-modetab" role="tablist">
           {(["local", "server"] as const).map((m) => (
@@ -334,14 +308,10 @@ export function ZoteroQuickConfig({ config, lang, t, saving, onSave, onRefresh }
           </>
         )}
 
-        {/* 高级（折叠） */}
-        <div className="flow-quick-advanced">
-          <button type="button" className="flow-quick-advanced-toggle" onClick={() => setAdvancedOpen((v) => !v)}>
-            <span className={`flow-quick-advanced-caret ${advancedOpen ? "is-open" : ""}`}>▸</span>
-            {t("flow_quick_zotero_advanced")}
-          </button>
-          {advancedOpen && <div className="flow-quick-grid">{advancedFields.map(renderField)}</div>}
-        </div>
+        {/* 高级（折叠浮层；Portal 到节点底部槽位，不影响节点测量高度） */}
+        <AdvancedSection open={advancedOpen} onToggle={onToggleAdvanced} label={t("flow_quick_zotero_advanced")} slot={advancedSlot}>
+          <div className="flow-quick-grid">{advancedFields.map(renderField)}</div>
+        </AdvancedSection>
 
         {hasInvalidNumber && <div className="flow-quick-error">{t("flow_quick_number_invalid")}</div>}
 
@@ -366,4 +336,4 @@ export function ZoteroQuickConfig({ config, lang, t, saving, onSave, onRefresh }
       )}
     </>
   );
-}
+});

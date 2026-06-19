@@ -377,7 +377,17 @@ class Config:
                 "keep": rerank.keep,
             },
             "deep_thinking": {
+                "max_rounds": deep_thinking.max_rounds,
+                "max_sub_queries": deep_thinking.max_sub_queries,
+                "wide_top_k": deep_thinking.wide_top_k,
                 "rerank_weight": deep_thinking.rerank_weight,
+                "verify_enabled": deep_thinking.verify_enabled,
+                "max_verify_rounds": deep_thinking.max_verify_rounds,
+                "llm_base_url": deep_thinking.llm_base_url,
+                "llm_model": deep_thinking.llm_model,
+                "llm_api_key": _mask(
+                    _secret(deep_thinking.llm_api_key, ENV_DEEP_THINKING_LLM_API_KEY)
+                ),
             },
             "zotero_sync": {
                 "enabled": zotero.enabled,
@@ -775,6 +785,7 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
     },
     "source_store": {
+        "default_collection": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "ocr_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
     },
     "zotero_sync": {
@@ -793,6 +804,8 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "max_sub_queries": ConfigKeyPolicy(True, True),
         "wide_top_k": ConfigKeyPolicy(True, True),
         "rerank_weight": ConfigKeyPolicy(True, True),
+        "verify_enabled": ConfigKeyPolicy(True, True),
+        "max_verify_rounds": ConfigKeyPolicy(True, True),
         "llm_base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "llm_model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
     },

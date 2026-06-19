@@ -40,6 +40,9 @@ from core.milvus_build import (
     MILVUS_BUILD_ERROR,
     MILVUS_BUILD_PARTIAL,
     MILVUS_BUILD_RUNNING,
+    MILVUS_BUILD_STAGE_CLEANING,
+    MILVUS_BUILD_STAGE_FINALIZING,
+    MILVUS_BUILD_STAGE_INDEXING,
     MILVUS_BUILD_SUCCESS,
     MilvusBuildJob,
 )
@@ -366,6 +369,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         index_compatibility: IndexCompatibilityStore | None = None,
         embedding_fingerprint: str | None = None,
         secret_store: EncryptedSecretStore | None = None,
+        reload_callback: Callable[[], Any] | None = None,
     ) -> None:
         self._source_store = source_store
         self._kb_reader = kb_reader
@@ -394,6 +398,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._index_compatibility = index_compatibility
         self._embedding_fingerprint = embedding_fingerprint
         self._secret_store = secret_store
+        # 软重启回调（组合根注入 PluginInitializer.reload；为空表示当前环境不支持程序化重启）。
+        self._reload_callback = reload_callback
         # Zotero 同步管线（组合根在 api 构造后注入，避免回调循环依赖）。
         self._zotero_pipeline: Any | None = None
         self._last_zotero_sync: dict[str, Any] = {}
@@ -978,8 +984,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     async def rebuild_vector_store(self, job: MilvusBuildJob | None = None) -> dict[str, Any]:
         """清除并从 SQLite 事实源全量 rebuild 本地向量数据库。
 
-        可选 `job`：传入则在逐文档循环中更新 `processed_docs/failed_docs/total_chunks`
-        供进度条轮询；不传则行为与旧版完全一致（返回值/签名兼容）。
+        可选 `job`：传入则在 data cleaning 与 indexing 两个阶段更新进度供轮询；
+        不传则返回值/签名兼容，但仍会在索引前修复 legacy chunks。
         """
         if not self._config or not self._vector_store or not self._embedding_provider:
             raise RuntimeError("VectorStore or EmbeddingProvider is not configured.")
@@ -992,12 +998,19 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         # 2. 从 SQLite 中读取所有的文档
         docs = await self._source_store.list_documents()
         if job is not None:
+            job.mode = "full"
             job.total_docs = len(docs)
+        failed_doc_ids, errors = await self._run_milvus_data_cleaning(
+            docs, job, context="full rebuild"
+        )
+        index_docs = [doc for doc in docs if doc.doc_id not in failed_doc_ids]
+        if job is not None:
+            job.stage = MILVUS_BUILD_STAGE_INDEXING
+            job.total_index_docs = len(index_docs)
         total_chunks = 0
-        errors: list[dict[str, str]] = []
 
         # 3. 逐个文档批量进行 Embedding 计算与 upsert
-        for doc in docs:
+        for doc in index_docs:
             try:
                 chunks = await self._index_document_chunks_with_retry(
                     doc.doc_id, doc.collection, context="full rebuild"
@@ -1005,6 +1018,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 total_chunks += chunks
                 if job is not None:
                     job.processed_docs += 1
+                    job.processed_index_docs += 1
                     job.total_chunks += chunks
             except Exception as exc:
                 logger.error(
@@ -1013,10 +1027,26 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     exc,
                 )
                 await self._mark_document_needs_reindex(doc.doc_id)
-                errors.append({"doc_id": doc.doc_id, "error": str(exc)})
+                failed_doc_ids.add(doc.doc_id)
+                errors.append(
+                    {
+                        "doc_id": doc.doc_id,
+                        "stage": MILVUS_BUILD_STAGE_INDEXING,
+                        "error": str(exc),
+                    }
+                )
                 if job is not None:
                     job.failed_docs += 1
-                    job.errors.append({"doc_id": doc.doc_id, "error": str(exc)})
+                    job.errors.append(
+                        {
+                            "doc_id": doc.doc_id,
+                            "stage": MILVUS_BUILD_STAGE_INDEXING,
+                            "error": str(exc),
+                        }
+                    )
+
+        if job is not None:
+            job.stage = MILVUS_BUILD_STAGE_FINALIZING
 
         if errors:
             failed_ids = {e["doc_id"] for e in errors}
@@ -1045,7 +1075,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     async def rebuild_index_pending(self, job: MilvusBuildJob | None = None) -> dict[str, Any]:
         """仅对 needs_reindex=True 的文档进行增量索引重建，完成后清除标记。
 
-        可选 `job`：传入则在逐文档循环中更新进度供进度条轮询；不兼容触发的全量
+        可选 `job`：传入则在 data cleaning 与 indexing 两个阶段更新进度供轮询；不兼容触发的全量
         rebuild 分支会把同一 `job` 透传给 `rebuild_vector_store`。
         """
         if not self._vector_store or not self._embedding_provider:
@@ -1068,13 +1098,20 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         docs = await self._source_store.list_pending_reindex_documents()
         if job is not None:
+            job.mode = "pending"
             job.total_docs = len(docs)
+        failed_doc_ids, errors = await self._run_milvus_data_cleaning(
+            docs, job, context="pending rebuild"
+        )
+        index_docs = [doc for doc in docs if doc.doc_id not in failed_doc_ids]
+        if job is not None:
+            job.stage = MILVUS_BUILD_STAGE_INDEXING
+            job.total_index_docs = len(index_docs)
         total_chunks = 0
         rebuilt_docs = 0
-        errors: list[dict[str, str]] = []
         logger.info("rebuild_index_pending: %d 个文档待重建", len(docs))
 
-        for doc in docs:
+        for doc in index_docs:
             try:
                 chunks = await self._index_document_chunks_with_retry(
                     doc.doc_id, doc.collection, context="pending rebuild"
@@ -1084,6 +1121,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 rebuilt_docs += 1
                 if job is not None:
                     job.processed_docs += 1
+                    job.processed_index_docs += 1
                     job.total_chunks += chunks
             except Exception as exc:
                 logger.error(
@@ -1092,10 +1130,26 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     exc,
                 )
                 await self._mark_document_needs_reindex(doc.doc_id)
-                errors.append({"doc_id": doc.doc_id, "error": str(exc)})
+                failed_doc_ids.add(doc.doc_id)
+                errors.append(
+                    {
+                        "doc_id": doc.doc_id,
+                        "stage": MILVUS_BUILD_STAGE_INDEXING,
+                        "error": str(exc),
+                    }
+                )
                 if job is not None:
                     job.failed_docs += 1
-                    job.errors.append({"doc_id": doc.doc_id, "error": str(exc)})
+                    job.errors.append(
+                        {
+                            "doc_id": doc.doc_id,
+                            "stage": MILVUS_BUILD_STAGE_INDEXING,
+                            "error": str(exc),
+                        }
+                    )
+
+        if job is not None:
+            job.stage = MILVUS_BUILD_STAGE_FINALIZING
 
         logger.info(
             "rebuild_index_pending 完成: %d docs, %d chunks, %d failed",
@@ -1132,7 +1186,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         if current is not None and current.status == MILVUS_BUILD_RUNNING:
             return current.to_dict()
 
-        job = MilvusBuildJob(mode="pending", started_at_iso=_now_iso())
+        job = MilvusBuildJob(
+            mode="pending",
+            stage=MILVUS_BUILD_STAGE_CLEANING,
+            started_at_iso=_now_iso(),
+        )
         self._milvus_build_job = job
         self._milvus_build_task = asyncio.create_task(self._run_milvus_rebuild(job))
         return job.to_dict()
@@ -1802,6 +1860,29 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 )
             ),
         }
+
+    async def restart_plugin(self) -> dict[str, Any]:
+        """软重启插件运行时：teardown 后重新 initialize（重读持久化配置）。
+
+        重启会拆掉并重建 Web 控制台连接，故先立即返回，再以后台任务延迟执行重启，
+        让本响应得以发送给前端；前端随后轮询探活并刷新状态、清空「待重启」标记。
+        """
+        if self._reload_callback is None:
+            return {
+                "status": "unsupported",
+                "message": "当前环境不支持程序化重启，请手动重启插件。",
+            }
+
+        async def _deferred_reload() -> None:
+            await asyncio.sleep(0.4)
+            try:
+                await self._reload_callback()
+            except Exception as exc:  # noqa: BLE001 - 后台任务需吞掉异常并记录
+                logger.error("plugin soft restart failed: %s", exc, exc_info=True)
+
+        asyncio.create_task(_deferred_reload())
+        logger.info("plugin soft restart scheduled")
+        return {"status": "restarting", "message": "插件正在重启，稍后将自动重连。"}
 
     async def test_embedding_connection(self, base_url: str, model_name: str) -> dict:
         """临时创建一个 ExternalEmbeddingProvider 并发送测试请求，验证云端 API 可连通性。"""
@@ -2646,6 +2727,79 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         if doc.needs_reindex:
             doc.needs_reindex = False
             await self._source_store.update_document(doc)
+
+    async def _run_milvus_data_cleaning(
+        self,
+        docs: list[SourceDocument],
+        job: MilvusBuildJob | None,
+        *,
+        context: str,
+    ) -> tuple[set[str], list[dict[str, str]]]:
+        """在 Milvus 索引前显式执行 legacy chunk data cleaning。
+
+        cleaning 只基于现有 `clean.md/pages.json` 重建 structural chunks；失败文档保留
+        `needs_reindex=True` 并跳过后续向量 upsert，避免旧 chunks 进入 Milvus。
+        """
+        failed_doc_ids: set[str] = set()
+        errors: list[dict[str, str]] = []
+        if job is not None:
+            job.stage = MILVUS_BUILD_STAGE_CLEANING
+            job.total_clean_docs = 0
+
+        rebuilder = getattr(self._ingest_manager, "rebuild_document_chunks_from_artifact", None)
+        needs_rebuild = getattr(self._ingest_manager, "chunk_needs_rebuild", None)
+        if not docs or not (callable(rebuilder) and callable(needs_rebuild)):
+            return failed_doc_ids, errors
+
+        cleaning_docs: list[SourceDocument] = []
+        scan_failures: list[tuple[SourceDocument, Exception]] = []
+        for doc in docs:
+            try:
+                chunks = await self._source_store.list_chunks(doc.doc_id)
+                needs = needs_rebuild(doc.doc_id, chunks, doc.local_meta)
+                if inspect.isawaitable(needs):
+                    needs = await needs
+                if needs:
+                    cleaning_docs.append(doc)
+            except Exception as exc:  # noqa: BLE001 - 单文档失败不应打断整批 rebuild
+                scan_failures.append((doc, exc))
+
+        if job is not None:
+            job.total_clean_docs = len(cleaning_docs) + len(scan_failures)
+
+        async def record_failure(doc: SourceDocument, exc: Exception) -> None:
+            logger.error(
+                "Milvus data cleaning failed for %s during %s: %s",
+                doc.doc_id,
+                context,
+                exc,
+            )
+            await self._mark_document_needs_reindex(doc.doc_id)
+            failed_doc_ids.add(doc.doc_id)
+            error = {
+                "doc_id": doc.doc_id,
+                "stage": MILVUS_BUILD_STAGE_CLEANING,
+                "error": str(exc),
+            }
+            errors.append(error)
+            if job is not None:
+                job.failed_docs += 1
+                job.errors.append(error)
+
+        for doc, exc in scan_failures:
+            await record_failure(doc, exc)
+
+        for doc in cleaning_docs:
+            try:
+                rebuilt = rebuilder(doc.doc_id)
+                if inspect.isawaitable(rebuilt):
+                    await rebuilt
+                if job is not None:
+                    job.processed_clean_docs += 1
+            except Exception as exc:  # noqa: BLE001 - 单文档失败转 partial_failure
+                await record_failure(doc, exc)
+
+        return failed_doc_ids, errors
 
     async def _ensure_document_chunks_current(
         self, doc_id: str, chunks: list[DocumentChunk] | None = None

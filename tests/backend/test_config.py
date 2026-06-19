@@ -6,8 +6,27 @@ from pathlib import Path
 
 import pytest
 
-from core.config import ENV_EMBEDDING_API_KEY, ENV_R2_SECRET_ACCESS_KEY, ENV_WEB_PASSWORD, Config
+from core.config import (
+    ENV_DEEP_THINKING_LLM_API_KEY,
+    ENV_EMBEDDING_API_KEY,
+    ENV_R2_SECRET_ACCESS_KEY,
+    ENV_WEB_PASSWORD,
+    Config,
+)
 from core.runtime_config import RuntimeConfigStore
+
+
+def test_astrbot_conf_schema_only_keeps_core_sections() -> None:
+    schema_path = Path(__file__).resolve().parents[2] / "_conf_schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+    assert list(schema.keys()) == [
+        "web_console",
+        "r2_sync",
+        "notion_sync",
+        "embedding",
+        "ask",
+    ]
 
 
 def test_defaults_when_empty() -> None:
@@ -114,6 +133,51 @@ def test_public_config_masks_secrets() -> None:
     assert public["notion_sync"]["database_id"] == "db1"
 
 
+def test_public_config_exposes_webui_migrated_advanced_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ENV_DEEP_THINKING_LLM_API_KEY, "deep-secret")
+    cfg = Config(
+        {
+            "source_store": {"default_collection": "papers"},
+            "graph": {
+                "working_dir": "graphs",
+                "lightrag_llm_provider": "api",
+                "lightrag_llm_base_url": "https://llm.example/v1",
+                "lightrag_llm_model": "model-a",
+            },
+            "deep_thinking": {
+                "max_rounds": 5,
+                "max_sub_queries": 6,
+                "wide_top_k": 30,
+                "rerank_weight": 0.4,
+                "verify_enabled": False,
+                "max_verify_rounds": 2,
+                "llm_base_url": "https://deep.example/v1",
+                "llm_model": "deep-model",
+            },
+        }
+    )
+
+    public = cfg.to_public_dict()
+    assert public["source_store"]["default_collection"] == "papers"
+    assert public["graph"]["working_dir"] == "graphs"
+    assert public["graph"]["lightrag_llm_provider"] == "api"
+    assert public["graph"]["lightrag_llm_base_url"] == "https://llm.example/v1"
+    assert public["graph"]["lightrag_llm_model"] == "model-a"
+    assert public["deep_thinking"] == {
+        "max_rounds": 5,
+        "max_sub_queries": 6,
+        "wide_top_k": 30,
+        "rerank_weight": 0.4,
+        "verify_enabled": False,
+        "max_verify_rounds": 2,
+        "llm_base_url": "https://deep.example/v1",
+        "llm_model": "deep-model",
+        "llm_api_key": "de****et",
+    }
+
+
 def test_embedding_config_new_values_override_legacy_and_api_key_is_env_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -212,12 +276,18 @@ def test_runtime_config_store_permits_vector_db_and_ask_keys(tmp_path: Path) -> 
     store.set_value("embedding", "provider", "local")
     store.set_value("embedding", "model", "BAAI/bge-m3")
     store.set_value("ask", "conversation_enhancement_mode", "query_agent")
+    store.set_value("source_store", "default_collection", "papers")
+    store.set_value("deep_thinking", "verify_enabled", False)
+    store.set_value("deep_thinking", "max_verify_rounds", 2)
 
     data = store.load()
     assert data["vector_db"]["backend"] == "milvus"
     assert data["embedding"]["provider"] == "local"
     assert data["embedding"]["model"] == "BAAI/bge-m3"
     assert data["ask"]["conversation_enhancement_mode"] == "query_agent"
+    assert data["source_store"]["default_collection"] == "papers"
+    assert data["deep_thinking"]["verify_enabled"] is False
+    assert data["deep_thinking"]["max_verify_rounds"] == 2
 
 
 # ── Deep Thinking / Rerank config ───────────────────────────

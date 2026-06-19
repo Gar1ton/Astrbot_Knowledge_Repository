@@ -511,7 +511,17 @@ const MOCK_CONFIG: EffectiveConfig = {
   graph: { enabled: false, query_mode: "mix", llm_max_async: 4, embedding_max_async: 8, working_dir: "lightrag_workspaces", max_doc_chars: 30000, lightrag_llm_provider: "main", lightrag_llm_base_url: "", lightrag_llm_model: "", lightrag_llm_timeout_seconds: 900 },
   ask: { conversation_enhancement_mode: "inject" },
   rerank: { provider: "cross_encoder", model: "Alibaba-NLP/gte-reranker-modernbert-base", device: "auto", batch_size: 32, max_candidates: 30, keep: 12 },
-  deep_thinking: { rerank_weight: 0.2 },
+  deep_thinking: {
+    max_rounds: 4,
+    max_sub_queries: 4,
+    wide_top_k: 24,
+    rerank_weight: 0.2,
+    verify_enabled: true,
+    max_verify_rounds: 1,
+    llm_base_url: "",
+    llm_model: "",
+    llm_api_key: "",
+  },
   vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true },
   embedding: { provider: "local", model: "intfloat/multilingual-e5-small", base_url: "https://api.openai.com/v1", max_token_size: 512, actual_dimension: 384, api_key: "" },
   zotero_sync: { enabled: false, access_mode: "local", zotero_data_dir: "", resolved_data_dir: "", api_port: 23119, storage_mode: "managed_copy", linked_root: "", sync_mode: "conservative", auto_sync_enabled: false, auto_sync_interval_sec: 3600, server_key_present: false, server_key_masked: "" },
@@ -748,6 +758,7 @@ const MOCK_REBUILD_KEYS = new Set([
 const MOCK_RESTART_KEYS = new Set([
   "vector_db.backend",
   "vector_db.auto_index_enabled",
+  "source_store.default_collection",
   "graph.enabled",
   "graph.query_mode",
   "graph.llm_max_async",
@@ -756,6 +767,8 @@ const MOCK_RESTART_KEYS = new Set([
   "graph.lightrag_llm_base_url",
   "graph.lightrag_llm_model",
   "graph.lightrag_llm_timeout_seconds",
+  "deep_thinking.llm_base_url",
+  "deep_thinking.llm_model",
   "r2_sync.enabled",
   "notion_sync.enabled",
   "source_store.ocr_enabled",
@@ -886,6 +899,22 @@ export interface ConfigUpdateResult {
   message: string;
 }
 
+export interface PluginRestartResult {
+  status: string;
+  message: string;
+}
+
+/** 触发插件软重启（teardown + 重新 initialize，重读持久化配置）。重启瞬间 Web 控制台短暂断连后自动重连。 */
+export async function restartPlugin(): Promise<PluginRestartResult> {
+  if (isMock()) {
+    return { status: "restarting", message: "mock restart" };
+  }
+  return apiFetch<PluginRestartResult>("/api/plugin/restart", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 export interface RebuildIndexResult {
   status?: string;
   rebuilt_docs?: number;
@@ -902,16 +931,22 @@ export interface MilvusBuildJob {
   type?: string;
   mode?: string;
   status: string; // running | success | partial_failure | error
+  stage?: string; // data_cleaning | vector_indexing | finalizing
+  stage_label?: string;
   total_docs: number;
   processed_docs: number;
   failed_docs: number;
+  total_clean_docs?: number;
+  processed_clean_docs?: number;
+  total_index_docs?: number;
+  processed_index_docs?: number;
   total_chunks: number;
   progress_percent: number;
   elapsed_seconds?: number;
   started_at?: string;
   finished_at?: string | null;
   recent_error?: string;
-  errors?: Array<{ doc_id: string; error: string }>;
+  errors?: Array<{ doc_id: string; stage?: string; error: string }>;
 }
 
 // 触发后台重建：立即返回 { status: "started", job }，进度交给 getActiveMilvusBuildJob 轮询。

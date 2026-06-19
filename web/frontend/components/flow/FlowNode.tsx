@@ -1,7 +1,7 @@
-import React from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { DependencyStatus, PipelineStage } from "@/lib/api";
-import type { FlowConfigSnapshot, QuickConfigUpdate } from "./QuickConfigPanel";
+import type { FlowConfigSnapshot, QuickConfigDirty, QuickConfigHandle, QuickConfigUpdate } from "./QuickConfigPanel";
 import type { I18nKey, Lang } from "@/lib/i18n";
 import {
   backendLabel,
@@ -146,7 +146,9 @@ export function FlowNode({
   installing,
   justActivatedValue,
   rebuildingIndex,
+  restartPending,
   selected,
+  onEditingChange,
   onSelect,
   config,
   onSwitch,
@@ -164,8 +166,10 @@ export function FlowNode({
   installing: string | null;
   justActivatedValue: string | null;
   rebuildingIndex: boolean;
+  restartPending: boolean;
   selected: boolean;
   config: FlowConfigSnapshot;
+  onEditingChange?: (stageId: string, editing: boolean) => void;
   onSelect: () => void;
   onSwitch: (stage: PipelineStage, value: string) => void;
   onQuickConfigSave: (stageId: FlowStageId, updates: QuickConfigUpdate[]) => void;
@@ -197,12 +201,31 @@ export function FlowNode({
       ? stage.detail.reason
       : "";
 
+  // 头部徽章承担唯一保存入口：草稿态由 QuickConfigPanel 经 onDirtyChange 上报，save 经 ref 触发。
+  const panelRef = useRef<QuickConfigHandle>(null);
+  const [dirty, setDirty] = useState<QuickConfigDirty>({ count: 0, canSave: false });
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // 高级折叠通过 Portal 渲到节点最底部的槽位（按钮在底、浮层紧贴节点底，不挤动其他节点）。
+  const [advancedSlot, setAdvancedSlot] = useState<HTMLElement | null>(null);
+  const handleDirtyChange = useCallback((state: QuickConfigDirty) => {
+    setDirty((prev) => (prev.count === state.count && prev.canSave === state.canSave ? prev : state));
+  }, []);
+  const handleToggleAdvanced = useCallback(() => setAdvancedOpen((v) => !v), []);
+  const isDirty = dirty.count > 0;
+  const showRestartPending = !isDirty && restartPending;
+
+  // 向上报告本节点是否处于编辑（dirty）态，供页面暂停自动刷新；卸载时报告 false。
+  const stageId = stage.id;
+  useEffect(() => {
+    onEditingChange?.(stageId, isDirty);
+  }, [isDirty, stageId, onEditingChange]);
+  useEffect(() => () => onEditingChange?.(stageId, false), [stageId, onEditingChange]);
+
   return (
     <div
-      className={`flow-node ${isDest ? "flow-node--dest" : ""} ${selected ? "is-selected" : ""} ${isOff ? "is-off" : ""} ${STATUS_CLASS[stage.status]}`}
+      className={`flow-node ${isDest ? "flow-node--dest" : ""} ${selected ? "is-selected" : ""} ${isOff ? "is-off" : ""} ${STATUS_CLASS[stage.status]} ${isDirty ? "is-dirty" : ""} ${showRestartPending ? "is-restart-pending" : ""} ${advancedOpen ? "is-advanced-open" : ""}`}
       onClick={onSelect}
     >
-      <span className="flow-node-stripe" />
       <div className="flow-node-head">
         <span className="flow-node-icon">
           <StageIcon name={meta.icon} />
@@ -215,7 +238,24 @@ export function FlowNode({
           </div>
           <span className="flow-node-step">STAGE {String(meta.idx).padStart(2, "0")}</span>
         </div>
-        <StatusChip status={stage.status} t={t} />
+        {isDirty ? (
+          <button
+            type="button"
+            className="flow-status-chip flow-status-chip--dirty"
+            disabled={!dirty.canSave || saving}
+            onClick={(event) => { event.stopPropagation(); panelRef.current?.save(); }}
+          >
+            <span className="flow-status-dot" />
+            {saving ? t("flow_quick_saving") : t("flow_quick_save")}
+          </button>
+        ) : showRestartPending ? (
+          <span className="flow-status-chip flow-status-chip--pending-restart">
+            <span className="flow-status-dot" />
+            {t("flow_status_pending_restart")}
+          </span>
+        ) : (
+          <StatusChip status={stage.status} t={t} />
+        )}
       </div>
 
       <p className="flow-node-desc">{t(meta.descKey)}</p>
@@ -254,6 +294,7 @@ export function FlowNode({
         )}
 
         <QuickConfigPanel
+          ref={panelRef}
           stage={stage}
           config={config}
           lang={lang}
@@ -261,6 +302,10 @@ export function FlowNode({
           saving={saving}
           onSave={onQuickConfigSave}
           onRefresh={onRefresh}
+          onDirtyChange={handleDirtyChange}
+          advancedOpen={advancedOpen}
+          onToggleAdvanced={handleToggleAdvanced}
+          advancedSlot={advancedSlot}
         />
 
         {missingDeps.map((dep) => (
@@ -309,6 +354,9 @@ export function FlowNode({
             </Link>
           )
         )}
+
+        {/* 高级折叠槽位：始终是节点 body 最后一项 → 折叠按钮在节点最底部；浮层经 Portal 渲到此处。 */}
+        <div ref={setAdvancedSlot} className="flow-node-advanced-slot" />
       </div>
     </div>
   );

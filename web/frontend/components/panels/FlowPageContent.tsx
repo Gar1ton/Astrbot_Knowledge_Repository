@@ -13,6 +13,7 @@ import {
   installDependency,
   rebuildIndexPending,
   recheckDependencies,
+  restartPlugin,
   updateConfigValue,
   type CapabilitiesData,
   type DependencyStatus,
@@ -32,7 +33,24 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
   const [installingKey, setInstallingKey] = useState<string | null>(null);
   const [rebuildingIndex, setRebuildingIndex] = useState(false);
   const [banner, setBanner] = useState<Banner>(null);
+  const [restartPendingIds, setRestartPendingIds] = useState<Set<string>>(new Set());
+  const [restarting, setRestarting] = useState(false);
   const [justActivatedId, setJustActivatedId] = useState<string | null>(null);
+  // 正在编辑（有未保存改动 / 蓝色 dirty）的节点集合；非空时暂停 5s 自动刷新，避免冲掉输入。
+  const [editingIds, setEditingIds] = useState<Set<string>>(new Set());
+  const editingRef = useRef(false);
+  useEffect(() => {
+    editingRef.current = editingIds.size > 0;
+  }, [editingIds]);
+  const handleEditingChange = useCallback((stageId: string, editing: boolean) => {
+    setEditingIds((prev) => {
+      if (editing === prev.has(stageId)) return prev;
+      const next = new Set(prev);
+      if (editing) next.add(stageId);
+      else next.delete(stageId);
+      return next;
+    });
+  }, []);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(false);
   const refreshInFlight = useRef(false);
@@ -85,6 +103,8 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
         if (mountedRef.current) setLoading(false);
       });
     const timer = window.setInterval(() => {
+      // 编辑中（有节点处于未保存 dirty 态）暂停自动刷新，避免 config 更新冲掉正在输入的草稿。
+      if (editingRef.current) return;
       refreshFlow().catch(() => undefined);
     }, 5000);
     return () => {
@@ -104,6 +124,9 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
       if (result.rebuild_required) setBanner({ kind: "rebuild" });
       else if (result.restart_required) setBanner({ kind: "restart" });
       else toast(t("flow_saved"), "ok");
+      if (result.rebuild_required || result.restart_required) {
+        setRestartPendingIds((prev) => new Set(prev).add(stage.id));
+      }
       await refreshFlow();
       setJustActivatedId(`${stage.id}-${value}`);
       if (flashTimer.current) clearTimeout(flashTimer.current);
@@ -126,6 +149,9 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
       if (results.some((r) => r.rebuild_required)) setBanner({ kind: "rebuild" });
       else if (results.some((r) => r.restart_required)) setBanner({ kind: "restart" });
       else toast(t("flow_saved"), "ok");
+      if (results.some((r) => r.rebuild_required || r.restart_required)) {
+        setRestartPendingIds((prev) => new Set(prev).add(stageId));
+      }
       await refreshFlow();
     } catch (err: unknown) {
       toast(`${t("flow_save_failed")}: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -168,6 +194,37 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
     }
   }, [refreshFlow, t, toast]);
 
+  const handleRestartPlugin = useCallback(async () => {
+    setRestarting(true);
+    toast(t("flow_restart_running"), "info");
+    try {
+      await restartPlugin();
+    } catch {
+      // 软重启会拆掉当前 Web 控制台连接，请求往往以网络错误收尾——视为已触发，转入探活轮询。
+    }
+    const deadline = Date.now() + 60000;
+    const poll = () => {
+      window.setTimeout(async () => {
+        try {
+          await recheckDependencies();
+          if (!mountedRef.current) return;
+          await refreshFlow();
+          setRestartPendingIds(new Set());
+          setBanner(null);
+          setRestarting(false);
+          toast(t("flow_restart_done"), "ok");
+        } catch {
+          if (Date.now() < deadline) poll();
+          else if (mountedRef.current) {
+            setRestarting(false);
+            toast(t("flow_restart_failed"), "error");
+          }
+        }
+      }, 2500);
+    };
+    poll();
+  }, [refreshFlow, t, toast]);
+
   const bannerText =
     banner?.kind === "rebuild" ? t("flow_rebuild_banner") :
     banner?.kind === "install" ? (banner.msg || t("flow_deps_restart_hint")) :
@@ -185,6 +242,16 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
             <p className="flow-topo-subtitle">{t("flow_subtitle")}</p>
           </div>
           <div className="flow-topo-actions flow-topo-status-panel">
+            <button
+              type="button"
+              className={`flow-restart-btn ${restartPendingIds.size > 0 ? "is-pending" : ""}`}
+              disabled={restarting}
+              onClick={handleRestartPlugin}
+              title={t("flow_restart_plugin_hint")}
+            >
+              {restarting ? t("flow_restart_running") : t("flow_restart_plugin")}
+              {restartPendingIds.size > 0 && <span className="flow-restart-badge">{restartPendingIds.size}</span>}
+            </button>
             <div className="flow-topo-legend">
               <span className="flow-legend-item"><span className="flow-legend-dot ready" />{t("flow_legend_ready")}</span>
               <span className="flow-legend-item"><span className="flow-legend-dot degraded" />{t("flow_legend_degraded")}</span>
@@ -222,6 +289,8 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
           installingKey={installingKey}
           justActivatedId={justActivatedId}
           rebuildingIndex={rebuildingIndex}
+          restartPendingIds={restartPendingIds}
+          onEditingChange={handleEditingChange}
           onSwitch={handleSwitch}
           onQuickConfigSave={handleQuickConfigSave}
           onRefresh={refreshFlow}

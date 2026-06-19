@@ -631,13 +631,171 @@ function SyncTab() {
 // ─── Tab: Backend Config ──────────────────────────────────────
 
 function ConfigTab() {
+  const { toast } = useToast();
   const [config, setConfig] = useState<EffectiveConfig | null>(null);
+  const [saving, setSaving] = useState<string | null>(null);
 
   useEffect(() => {
     getEffectiveConfig().then(setConfig).catch(() => {});
   }, []);
 
   const SENSITIVE_KEYS = ["password", "api_key", "secret", "token", "key"];
+  const inputStyle: React.CSSProperties = {
+    height: 30,
+    padding: "0 10px",
+    border: "1px solid var(--border-strong)",
+    borderRadius: "var(--radius-md)",
+    background: "var(--surface)",
+    color: "var(--fg)",
+    fontSize: 12,
+    fontFamily: "var(--font-mono)",
+    outline: "none",
+    width: 220,
+  };
+
+  function section(name: keyof EffectiveConfig): Record<string, unknown> {
+    return (config?.[name] ?? {}) as Record<string, unknown>;
+  }
+
+  function valueOf(sectionName: keyof EffectiveConfig, key: string, fallback = ""): string {
+    const value = section(sectionName)[key];
+    if (value === null || value === undefined) return fallback;
+    return String(value);
+  }
+
+  function boolOf(sectionName: keyof EffectiveConfig, key: string, fallback = false): boolean {
+    const value = section(sectionName)[key];
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") return value.toLowerCase() === "true";
+    if (typeof value === "number") return value !== 0;
+    return fallback;
+  }
+
+  function setLocal(sectionName: keyof EffectiveConfig, key: string, value: unknown) {
+    setConfig((current) => {
+      if (!current) return current;
+      const currentSection = (current[sectionName] ?? {}) as Record<string, unknown>;
+      return {
+        ...current,
+        [sectionName]: {
+          ...currentSection,
+          [key]: value,
+        },
+      };
+    });
+  }
+
+  async function saveValue(sectionName: string, key: string, value: string | boolean | number) {
+    const id = `${sectionName}.${key}`;
+    setSaving(id);
+    try {
+      const result = await updateConfigValue(sectionName, key, value);
+      if (result.rebuild_required) toast("配置已保存，重启插件并重建索引后完全生效", "info");
+      else if (result.restart_required) toast("配置已保存，重启插件后生效", "info");
+      else toast("配置已保存", "ok");
+      const fresh = await getEffectiveConfig();
+      setConfig(fresh);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "保存失败", "error");
+      getEffectiveConfig().then(setConfig).catch(() => {});
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  function textConfigField(
+    sectionName: keyof EffectiveConfig,
+    key: string,
+    label: string,
+    hint?: string,
+    width = 220,
+  ) {
+    const id = `${sectionName}.${key}`;
+    const value = valueOf(sectionName, key);
+    return (
+      <Field label={label} hint={hint}>
+        <input
+          style={{ ...inputStyle, width }}
+          value={value}
+          disabled={saving === id}
+          onChange={(event) => setLocal(sectionName, key, event.target.value)}
+          onBlur={() => saveValue(sectionName, key, valueOf(sectionName, key))}
+        />
+      </Field>
+    );
+  }
+
+  function numberConfigField(
+    sectionName: keyof EffectiveConfig,
+    key: string,
+    label: string,
+    hint?: string,
+    parser: "int" | "float" = "int",
+  ) {
+    const id = `${sectionName}.${key}`;
+    const value = valueOf(sectionName, key);
+    return (
+      <Field label={label} hint={hint}>
+        <input
+          style={{ ...inputStyle, width: 92, textAlign: "center" }}
+          type="number"
+          step={parser === "float" ? "0.1" : "1"}
+          value={value}
+          disabled={saving === id}
+          onChange={(event) => setLocal(sectionName, key, event.target.value)}
+          onBlur={() => {
+            const raw = valueOf(sectionName, key);
+            const parsed = parser === "float" ? Number(raw) : parseInt(raw, 10);
+            if (!Number.isFinite(parsed)) {
+              toast("请输入有效数字", "error");
+              getEffectiveConfig().then(setConfig).catch(() => {});
+              return;
+            }
+            saveValue(sectionName, key, parsed);
+          }}
+        />
+      </Field>
+    );
+  }
+
+  function toggleConfigField(sectionName: keyof EffectiveConfig, key: string, label: string, hint?: string) {
+    const id = `${sectionName}.${key}`;
+    const checked = boolOf(sectionName, key);
+    return (
+      <Field label={label} hint={hint}>
+        <Toggle
+          checked={checked}
+          onChange={(value) => {
+            setLocal(sectionName, key, value);
+            saveValue(sectionName, key, value);
+          }}
+          disabled={saving === id}
+        />
+      </Field>
+    );
+  }
+
+  function readonlyConfigField(label: string, value: unknown, hint?: string) {
+    return (
+      <Field label={label} hint={hint}>
+        <span
+          style={{
+            display: "inline-block",
+            maxWidth: 240,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontSize: 12,
+            fontFamily: "var(--font-mono)",
+            color: "var(--fg-subtle)",
+          }}
+          title={value == null ? "" : String(value)}
+        >
+          {value == null || value === "" ? "env-only" : String(value)}
+        </span>
+      </Field>
+    );
+  }
 
   function renderSection(name: string, data?: Record<string, unknown>) {
     if (!data) return null;
@@ -680,12 +838,67 @@ function ConfigTab() {
           lineHeight: 1.55,
         }}
       >
-        只读核对后端有效配置（
+        临时迁移入口用于承接已从 AstrBot 配置面板移出的高级项；下方仍保留后端有效配置核对（
         <code style={{ fontFamily: "var(--font-mono)", color: "var(--accent)" }}>
           GET /api/config/effective
         </code>
         ），敏感字段已打码。
       </div>
+
+      <Card title="源文档库（迁移）" icon="db" badge={<Badge tone="neutral">WebUI</Badge>}>
+        {textConfigField(
+          "source_store",
+          "default_collection",
+          "默认集合",
+          "文档上传时未指定集合时归入的默认分组名",
+        )}
+      </Card>
+
+      <Card title="图谱专用 LLM（迁移）" icon="graph" badge={<Badge tone="warn">重启生效</Badge>}>
+        <Field label="图谱构建使用的 LLM" hint="main 复用 AstrBot 主 LLM；local/api 使用单独 OpenAI 兼容端点">
+          <Select
+            value={valueOf("graph", "lightrag_llm_provider", "main")}
+            onChange={(value) => {
+              setLocal("graph", "lightrag_llm_provider", value);
+              saveValue("graph", "lightrag_llm_provider", value);
+            }}
+            options={[
+              { value: "main", label: "main" },
+              { value: "local", label: "local" },
+              { value: "api", label: "api" },
+            ]}
+          />
+        </Field>
+        {textConfigField("graph", "lightrag_llm_base_url", "图谱专用 LLM 端点", "仅 provider=local 或 api 时生效", 260)}
+        {textConfigField("graph", "lightrag_llm_model", "图谱专用 LLM 模型名", "填写端点上对应的模型标识符", 220)}
+        {readonlyConfigField(
+          "图谱数据目录",
+          valueOf("graph", "working_dir", "lightrag_workspaces"),
+          "结构性参数，只读展示；修改目录需手动迁移索引并重启",
+        )}
+      </Card>
+
+      <Card title="Deep Thinking（迁移）" icon="sparkle" badge={<Badge tone="accent">即时 / 重启</Badge>}>
+        {numberConfigField("deep_thinking", "max_rounds", "最大迭代轮数", "轮数越多越全也越慢越贵")}
+        {numberConfigField("deep_thinking", "max_sub_queries", "每轮最大子查询数")}
+        {numberConfigField("deep_thinking", "wide_top_k", "每个子查询的检索宽度")}
+        {numberConfigField("deep_thinking", "rerank_weight", "重排器权重（0~1）", undefined, "float")}
+        {toggleConfigField(
+          "deep_thinking",
+          "verify_enabled",
+          "启用答案级校验闭环",
+          "合成答案后校验是否被证据完全支撑、是否完整",
+        )}
+        {numberConfigField("deep_thinking", "max_verify_rounds", "校验不合格后的最大补检轮数")}
+        {textConfigField("deep_thinking", "llm_base_url", "深度思考专用 LLM 端点", "填写后使用该 OpenAI-compatible endpoint", 260)}
+        {textConfigField("deep_thinking", "llm_model", "深度思考专用 LLM 模型", "填写对应端点上的模型名称", 220)}
+        {readonlyConfigField(
+          "深度思考专用 LLM API Key",
+          valueOf("deep_thinking", "llm_api_key"),
+          "机密字段。通过环境变量 KR_DEEP_THINKING_LLM_API_KEY 注入",
+        )}
+      </Card>
+
       {Object.entries(config)
         .filter(([k]) => k !== "diagnostics")
         .map(([k, v]) => renderSection(k, v as Record<string, unknown>))}

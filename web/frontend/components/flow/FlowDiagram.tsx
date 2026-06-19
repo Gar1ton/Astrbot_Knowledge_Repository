@@ -15,12 +15,13 @@ type Connector = {
   d: string;
   status: FlowStageStatus;
   dashed: boolean;
+  optional: boolean;
   live: boolean;
   label?: string;
   mid: { x: number; y: number };
 };
 
-type Handle = { x: number; y: number; status: FlowStageStatus };
+type Handle = { x: number; y: number; status: FlowStageStatus; optional?: boolean };
 
 function connectorStatus(from: PipelineStage, to: PipelineStage): FlowStageStatus {
   if (from.status === "off" || to.status === "off") return "off";
@@ -48,7 +49,7 @@ function Connectors({ conns, width, height }: { conns: Connector[]; width: numbe
   return (
     <svg className="flow-connectors" width={width} height={height} aria-hidden="true">
       {conns.map((conn, index) => (
-        <g key={`${conn.d}-${index}`} className={`flow-conn-group ${conn.status} ${conn.dashed ? "is-dashed" : ""}`}>
+        <g key={`${conn.d}-${index}`} className={`flow-conn-group ${conn.status} ${conn.dashed ? "is-dashed" : ""} ${conn.optional ? "is-optional" : ""}`}>
           <path d={conn.d} className="flow-conn-base" />
           {conn.live && <path d={conn.d} className="flow-conn-live" />}
         </g>
@@ -66,12 +67,14 @@ export function FlowDiagram({
   installingKey,
   justActivatedId,
   rebuildingIndex,
+  restartPendingIds,
   config,
   onSwitch,
   onQuickConfigSave,
   onRefresh,
   onInstall,
   onRebuildIndex,
+  onEditingChange,
   onClose,
 }: {
   stages: PipelineStage[];
@@ -82,7 +85,9 @@ export function FlowDiagram({
   installingKey: string | null;
   justActivatedId: string | null;
   rebuildingIndex: boolean;
+  restartPendingIds: Set<string>;
   config: FlowConfigSnapshot;
+  onEditingChange?: (stageId: string, editing: boolean) => void;
   onSwitch: (stage: PipelineStage, value: string) => void;
   onQuickConfigSave: (stageId: FlowStageId, updates: QuickConfigUpdate[]) => void;
   onRefresh?: () => Promise<void>;
@@ -218,6 +223,7 @@ export function FlowDiagram({
       if (!fromStage || !toStage || !fromRect || !toRect) continue;
 
       const status = connectorStatus(fromStage, toStage);
+      const optional = Boolean(edge.dashed);
       let d = "";
       let mid = { x: 0, y: 0 };
 
@@ -229,7 +235,7 @@ export function FlowDiagram({
         const dy = Math.min(70, Math.max(24, Math.abs(y1 - y2) * 0.5));
         d = `M ${x1} ${y1} C ${x1} ${y1 - dy}, ${x2} ${y2 + dy}, ${x2} ${y2}`;
         mid = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
-        handleMap[`${edge.from}:t`] = { x: x1, y: y1, status: fromStage.status };
+        handleMap[`${edge.from}:t`] = { x: x1, y: y1, status: fromStage.status, optional };
         handleMap[`${edge.to}:b`] = { x: x2, y: y2, status: toStage.status };
       } else {
         const x1 = fromRect.x + fromRect.w;
@@ -239,16 +245,18 @@ export function FlowDiagram({
         const dx = Math.min(90, Math.max(30, (x2 - x1) * 0.5));
         d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
         mid = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
-        handleMap[`${edge.from}:r`] = { x: x1, y: y1, status: fromStage.status };
+        handleMap[`${edge.from}:r`] = { x: x1, y: y1, status: fromStage.status, optional };
         handleMap[`${edge.to}:l`] = { x: x2, y: y2, status: toStage.status };
       }
 
       nextConns.push({
         d,
         status,
-        dashed: Boolean(edge.dashed) || status === "off",
+        dashed: optional || status === "off",
+        optional,
         live: status === "ready" && !edge.dashed,
-        label: edge.labelKey ? t(edge.labelKey) : undefined,
+        // 可选/旁路来源边不再渲染文字气泡，改由 from 端的靛紫菱形端点表达。
+        label: edge.labelKey && !optional ? t(edge.labelKey) : undefined,
         mid,
       });
     }
@@ -345,7 +353,7 @@ export function FlowDiagram({
           {handles.map(([key, handle]) => (
             <span
               key={key}
-              className={`flow-handle ${handle.status !== "off" ? "is-active" : ""} ${handle.status}`}
+              className={`flow-handle ${handle.status !== "off" ? "is-active" : ""} ${handle.status} ${handle.optional ? "flow-handle--optional" : ""}`}
               style={{ left: handle.x, top: handle.y }}
             />
           ))}
@@ -382,6 +390,8 @@ export function FlowDiagram({
                   installing={installingKey}
                   justActivatedValue={justActivatedValue}
                   rebuildingIndex={rebuildingIndex}
+                  restartPending={restartPendingIds.has(stage.id)}
+                  onEditingChange={onEditingChange}
                   selected={selectedId === stage.id}
                   config={config}
                   onSelect={() => setSelectedId(stage.id)}

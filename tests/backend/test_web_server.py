@@ -952,6 +952,22 @@ async def test_config_update_route(tmp_path: Path) -> None:
             "message": "Configuration saved. Restart and rebuild indexes.",
         }
 
+        resp_source = await client.post(
+            "/api/config/update",
+            json={"section": "source_store", "key": "default_collection", "value": "papers"},
+        )
+        assert resp_source.status == 200
+        assert (await resp_source.json())["restart_required"] is True
+
+        resp_deep = await client.post(
+            "/api/config/update",
+            json={"section": "deep_thinking", "key": "verify_enabled", "value": False},
+        )
+        assert resp_deep.status == 200
+        deep_data = await resp_deep.json()
+        assert deep_data["restart_required"] is False
+        assert deep_data["rebuild_required"] is False
+
         # 2. 拒绝尚未实现的 AstrBot Embedding 配置，避免保存后静默禁用召回。
         resp_invalid_provider = await client.post(
             "/api/config/update",
@@ -971,6 +987,15 @@ async def test_config_update_route(tmp_path: Path) -> None:
         secret_data = await resp_secret.json()
         assert secret_data["status"] == "error"
         assert "not allowed" in secret_data["message"]
+
+        resp_deep_secret = await client.post(
+            "/api/config/update",
+            json={"section": "deep_thinking", "key": "llm_api_key", "value": "hack"},
+        )
+        assert resp_deep_secret.status == 400
+        deep_secret_data = await resp_deep_secret.json()
+        assert deep_secret_data["status"] == "error"
+        assert "not allowed" in deep_secret_data["message"]
 
         # 3b. 完全只读的配置节仍整节拒绝（命中节白名单）。
         resp_blocked = await client.post(

@@ -53,6 +53,7 @@ tests/mocks/run_dev_realtime.py
 tests/mocks/reset_dev_realtime.py
 tests/mock_data/Config/config.py
 tests/mock_data/Test_Library/
+tests/mock_data/Brian Massumi/
 tests/mock_data/**/__pycache__/
 /.test_data/
 /tests/archive/

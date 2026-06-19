@@ -18,8 +18,8 @@
       "port": {
         "description": "监听端口",
         "type": "int",
-        "default": 6520,
-        "hint": "默认 6520，避开 AstrBot 控制台（6185/6186）。如有端口冲突在此修改"
+        "default": 26618,
+        "hint": "默认 26618，避开 AstrBot 控制台（6185/6186）。如有端口冲突在此修改"
       },
       "username": {
         "description": "登录用户名",

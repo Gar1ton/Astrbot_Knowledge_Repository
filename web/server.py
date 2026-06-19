@@ -541,6 +541,11 @@ async def handle_milvus_build_active(request: web.Request) -> web.Response:
     return web.json_response({"job": result})
 
 
+async def handle_ingest_active(request: web.Request) -> web.Response:
+    # 统一进度面板轮询：当前 running/error 的文档摄入任务（success/无任务 → null）。
+    return web.json_response({"job": _api(request).get_active_ingest_job()})
+
+
 async def handle_pending_reindex_count(request: web.Request) -> web.Response:
     count = await _api(request).get_pending_reindex_count()
     return web.json_response({"count": count})
@@ -602,6 +607,11 @@ async def handle_zotero_pull(request: web.Request) -> web.Response:
 
 async def handle_zotero_status(request: web.Request) -> web.Response:
     return web.json_response(await _api(request).get_zotero_sync_status())
+
+
+async def handle_zotero_active(request: web.Request) -> web.Response:
+    # 进度面板轮询：返回当前 running/partial/error 的同步任务快照（success/无任务 → null）。
+    return web.json_response({"job": _api(request).get_active_zotero_sync_job()})
 
 
 async def handle_backup(request: web.Request) -> web.Response:
@@ -1255,6 +1265,7 @@ def build_app(
     app.router.add_post("/api/config/test-embedding", handle_test_embedding)
     app.router.add_post("/api/documents/rebuild-index", handle_rebuild_index_pending)
     app.router.add_get("/api/documents/rebuild-index/active", handle_milvus_build_active)
+    app.router.add_get("/api/documents/ingest/active", handle_ingest_active)
     app.router.add_get("/api/documents/pending-reindex-count", handle_pending_reindex_count)
     # 预留端口（reserved，未实现回 501 + available_in）
     app.router.add_post("/api/sync/{target}", handle_sync)
@@ -1267,6 +1278,7 @@ def build_app(
     app.router.add_delete("/api/zotero/server-key", handle_zotero_server_key_delete)
     app.router.add_post("/api/sync/zotero/pull", handle_zotero_pull)
     app.router.add_get("/api/sync/zotero/status", handle_zotero_status)
+    app.router.add_get("/api/sync/zotero/active", handle_zotero_active)
     app.router.add_post("/api/backup", handle_backup)
     app.router.add_post("/api/restore", handle_restore)
     app.router.add_post("/api/graph/build/estimate", handle_graph_build_estimate)

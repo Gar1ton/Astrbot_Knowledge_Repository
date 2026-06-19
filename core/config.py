@@ -120,7 +120,7 @@ class WebConsoleConfig:
 
     enabled: bool = False
     host: str = "0.0.0.0"
-    port: int = 6520
+    port: int = 26618
     username: str = "admin"
     password: str = ""
 

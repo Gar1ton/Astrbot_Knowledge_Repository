@@ -36,6 +36,12 @@ from core.domain.models import (
     SourceDocument,
     SyncTargetKind,
 )
+from core.ingest_job import (
+    INGEST_ERROR,
+    INGEST_STAGE_INDEXING,
+    INGEST_SUCCESS,
+    IngestJob,
+)
 from core.milvus_build import (
     MILVUS_BUILD_ERROR,
     MILVUS_BUILD_PARTIAL,
@@ -47,6 +53,13 @@ from core.milvus_build import (
     MilvusBuildJob,
 )
 from core.pipelines.retrieval_orchestrator import RetrievalScope
+from core.zotero_sync_job import (
+    ZOTERO_SYNC_ERROR,
+    ZOTERO_SYNC_PARTIAL,
+    ZOTERO_SYNC_RUNNING,
+    ZOTERO_SYNC_SUCCESS,
+    ZoteroSyncJob,
+)
 
 logger = logging.getLogger("KnowledgeRepositoryApi")
 
@@ -405,6 +418,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         # Zotero 同步管线（组合根在 api 构造后注入，避免回调循环依赖）。
         self._zotero_pipeline: Any | None = None
         self._last_zotero_sync: dict[str, Any] = {}
+        # Zotero Pull：全局单任务的进度快照 + 后台任务句柄（与 Milvus 重建同构）。
+        self._zotero_sync_job: ZoteroSyncJob | None = None
+        self._zotero_sync_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        # 文档上传/摄入：最近一次摄入的进度快照（供统一进度面板，latest-wins）。
+        self._ingest_job: IngestJob | None = None
 
     def attach_zotero_pipeline(self, pipeline: Any) -> None:
         """组合根注入 ZoteroSyncPipeline（其回调引用本 api 的索引/LRAG 助手）。"""
@@ -754,14 +772,27 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             auto_index = self._config.get_vector_db_config().auto_index_enabled
 
         if self._ingest_manager:
-            doc_id = await self._ingest_manager.ingest(
-                title=title,
-                file_path=file_path,
-                content_type=content_type,
-                size_bytes=size_bytes,
-                collection=collection,
-                tags=tags,
-            )
+            # 上传/摄入进度（供统一进度面板）：parsing → indexing → done。
+            job = IngestJob(title=title)
+            job.start()
+            self._ingest_job = job
+            logger.info("Document ingest start: title=%r collection=%r", title, collection)
+            try:
+                doc_id = await self._ingest_manager.ingest(
+                    title=title,
+                    file_path=file_path,
+                    content_type=content_type,
+                    size_bytes=size_bytes,
+                    collection=collection,
+                    tags=tags,
+                )
+            except Exception as exc:
+                job.recent_error = str(exc)
+                job.finish(INGEST_ERROR)
+                logger.error("Document ingest failed for %r: %s", title, exc, exc_info=True)
+                raise
+            job.doc_id = doc_id
+            job.set_stage(INGEST_STAGE_INDEXING)
             # 同步写入 Milvus 向量库（仅在 auto_index_enabled=True 时执行）
             if auto_index and self._config and self._milvus_index_is_compatible():
                 vdb = self._config.get_vector_db_config()
@@ -776,6 +807,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                             "Milvus indexing failed after retries for %s: %s",
                             doc_id,
                             exc,
+                            exc_info=True,
                         )
                         await self._mark_document_needs_reindex(doc_id)
             elif not auto_index or (
@@ -785,6 +817,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             ):
                 await self._mark_document_needs_reindex(doc_id)
             await self._mark_lightrag_pending(doc_id, collection)
+            job.finish(INGEST_SUCCESS)
+            logger.info("Document ingest done: doc_id=%s title=%r", doc_id, title)
             return doc_id
 
         doc_id = uuid.uuid4().hex
@@ -953,10 +987,20 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         scope_library_id: str = "",
     ) -> list[DocumentChunk]:
         """在某 AstrBot 知识库集合内检索，可选 item/collection/tag/library 作用域硬过滤。"""
+        t0 = time.monotonic()
+        logger.info("search_kb: collection=%r top_k=%d query=%r", collection, top_k, query[:80])
         if self._retrieval_orchestrator is not None:
             scope = _build_scope(scope_type, scope_key, scope_library_id)
-            return await self._retrieval_orchestrator.retrieve(collection, query, top_k, scope)
-        return await self._kb_reader.search(collection, query, top_k)
+            result = await self._retrieval_orchestrator.retrieve(collection, query, top_k, scope)
+        else:
+            result = await self._kb_reader.search(collection, query, top_k)
+        logger.info(
+            "search_kb done: collection=%r hits=%d elapsed=%.0fms",
+            collection,
+            len(result),
+            (time.monotonic() - t0) * 1000,
+        )
+        return result
 
     async def get_chunk_context(
         self, doc_id: str, chunk_id: str, window: int = 2
@@ -1210,7 +1254,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             job.recent_error = "cancelled"
             raise
         except Exception as exc:  # noqa: BLE001 - 终态统一兜底，后台任务不应抛出
-            logger.error("Milvus 后台重建失败: %s", exc)
+            logger.error("Milvus 后台重建失败: %s", exc, exc_info=True)
             job.status = MILVUS_BUILD_ERROR
             job.recent_error = str(exc)
         finally:
@@ -1225,6 +1269,13 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         """
         job = self._milvus_build_job
         if job is None or job.status == MILVUS_BUILD_SUCCESS:
+            return None
+        return job.to_dict()
+
+    def get_active_ingest_job(self) -> dict[str, Any] | None:
+        """返回当前需展示的文档摄入任务快照（running/error 返回，success/无任务 → None）。"""
+        job = self._ingest_job
+        if job is None or job.status == INGEST_SUCCESS:
             return None
         return job.to_dict()
 
@@ -1308,6 +1359,13 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         cid = conversation_id or uuid.uuid4().hex
         ask_start = time.monotonic()
+        logger.info(
+            "ask: mode=%s collection=%r top_k=%d question=%r",
+            retrieval_mode,
+            collection,
+            top_k,
+            question[:80],
+        )
 
         def _progress(stage: str, pct: int, detail: dict | None = None) -> None:
             if self._progress_store is not None:
@@ -3013,22 +3071,74 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         return self._config.get_zotero_sync_config().cloud_api_key
 
     async def sync_zotero_pull(self, incremental: bool = True) -> dict[str, Any]:
-        """执行一次 Zotero Pull；strict 模式变化后触发 Milvus 全量重建。"""
+        """在后台启动一次 Zotero Pull 并立即返回任务快照（不再阻塞 HTTP 请求）。
+
+        修复「失灵」：原实现 `await pull()` 整段阻塞（几十篇下载/清洗/embedding 数分钟易超时），
+        且 `ZoteroSyncResult` 无 `status`、错误被静默吞掉。现改为全局单任务后台执行：已有 running
+        任务直接返回当前快照；进度由 `ZoteroSyncPipeline.pull(progress=job)` 逐阶段/逐文档更新，
+        前端经 `get_active_zotero_sync_job` 轮询；终态与错误由 `_run_zotero_pull` 写回。
+        """
         if self._zotero_pipeline is None:
             return {"status": "error", "message": "Zotero 同步未启用或未装配"}
-        result = await self._zotero_pipeline.pull(incremental=incremental)
-        payload = result.to_dict()
-        if result.needs_milvus_rebuild:
-            try:
-                payload["milvus_rebuild"] = await self.rebuild_vector_store()
-            except Exception as exc:
-                logger.warning("Zotero strict rebuild failed: %s", exc)
-                payload["milvus_rebuild_error"] = str(exc)
-        self._last_zotero_sync = payload
-        return payload
+        current = self._zotero_sync_job
+        if current is not None and current.status == ZOTERO_SYNC_RUNNING:
+            return current.to_dict()
+
+        job = ZoteroSyncJob(incremental=incremental)
+        job.start()
+        self._zotero_sync_job = job
+        self._zotero_sync_task = asyncio.create_task(self._run_zotero_pull(job, incremental))
+        return job.to_dict()
+
+    async def _run_zotero_pull(self, job: ZoteroSyncJob, incremental: bool) -> None:
+        """后台执行 pull，把终态与错误写回 job 及 `_last_zotero_sync`（后台任务不应抛出）。"""
+        try:
+            assert self._zotero_pipeline is not None
+            result = await self._zotero_pipeline.pull(incremental=incremental, progress=job)
+            if not result.errors:
+                status = ZOTERO_SYNC_SUCCESS
+            elif job.docs_processed > 0 or result.items_mirrored > 0:
+                status = ZOTERO_SYNC_PARTIAL  # 有产出但部分失败（如个别文档未入向量库）。
+            else:
+                status = ZOTERO_SYNC_ERROR  # 整体失败（如快照不可用 / API key 缺失）。
+            job.finish(status)
+            # `_last_zotero_sync` 保持 ZoteroSyncResult 形状（供 /status 与前端摘要），仅补 status。
+            payload = result.to_dict()
+            payload["status"] = status
+            if result.errors:
+                payload["message"] = result.errors[0]
+            if result.needs_milvus_rebuild:
+                try:
+                    payload["milvus_rebuild"] = await self.rebuild_vector_store()
+                except Exception as exc:
+                    logger.error("Zotero strict rebuild failed: %s", exc, exc_info=True)
+                    payload["milvus_rebuild_error"] = str(exc)
+            self._last_zotero_sync = payload
+            logger.info("Zotero sync job %s finished: status=%s", job.job_id, status)
+        except asyncio.CancelledError:
+            job.finish(ZOTERO_SYNC_ERROR)
+            job.note_error("cancelled")
+            self._last_zotero_sync = {"status": ZOTERO_SYNC_ERROR, "message": "cancelled"}
+            raise
+        except Exception as exc:  # noqa: BLE001 - 终态统一兜底，后台任务不应抛出
+            logger.error("Zotero sync job failed: %s", exc, exc_info=True)
+            job.finish(ZOTERO_SYNC_ERROR)
+            job.note_error(str(exc))
+            self._last_zotero_sync = {"status": ZOTERO_SYNC_ERROR, "message": str(exc)}
+
+    def get_active_zotero_sync_job(self) -> dict[str, Any] | None:
+        """返回当前需展示的 Zotero 同步任务快照（无则 None）。
+
+        running / partial_failure / error → 返回（后两者供前端显示原因与重试）；
+        success 或无任务 → 返回 None（前端隐藏进度条，与 `get_active_milvus_build_job` 一致）。
+        """
+        job = self._zotero_sync_job
+        if job is None or job.status == ZOTERO_SYNC_SUCCESS:
+            return None
+        return job.to_dict()
 
     async def get_zotero_sync_status(self) -> dict[str, Any]:
-        """返回上一次 Zotero Pull 的结果摘要（无则空）。"""
+        """返回上一次 Zotero Pull 的结果摘要（含 status；无则空）。"""
         return dict(self._last_zotero_sync)
 
     async def _sync_milvus_collection_move(self, doc_id: str, collection: str) -> None:

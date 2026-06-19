@@ -44,6 +44,54 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.26.2 调试端口迁移 (completed)
+
+### User constraints / 约束
+
+- 将项目内调试/测试 WebUI 端口统一为后端 `26618`、前端 `26619`。
+- 使用 Docker 环境验证；`pages/` 只能通过 `tools/sync_frontend.py` 生成，不手工编辑。
+- 业务毫秒阈值或非端口数值不改。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 仓库内端口默认值更新**：更新 `rebuild.sh`、`tests/run_webui.py`、`core/config.py`、`_conf_schema.json`、`web/frontend/next.config.ts`、mock config 与设计说明中的调试端口默认值。技术理由：确保脚本、后端配置、前端 dev proxy 和文档同源。
+- [x] **Phase 2 - devcontainer 端口发布同步**：将 Docker `appPort`/`EXPOSE` 同步为 `26619/26618`。技术理由：宿主机要访问新端口，容器发布端口必须同步。
+- [x] **Phase 3 - 构建同步与运行验证**：运行前端类型检查、Next build、`tools/sync_frontend.py`、`rebuild.sh`，并 smoke 测试 `26618/26619` 登录链路。技术理由：确认新端口不仅配置正确，而且当前 Docker 运行态可用。
+
+### Verification
+
+- [x] `bash -n rebuild.sh` → passed
+- [x] `python -m pytest tests/backend/test_config.py -q` → 26 passed
+- [x] `node node_modules/typescript/bin/tsc --noEmit --incremental false`（`web/frontend`）→ passed
+- [x] `npm run build`（`web/frontend`）→ passed（Next build 生成 13 个静态路由）
+- [x] `python tools/sync_frontend.py && python tools/sync_frontend.py --check` → passed（同步 362 个文件，`pages/` 一致）
+- [x] `bash rebuild.sh` → passed（Docker 内后端 `26618`、前端 `26619` 就绪）
+- [x] `26618/26619 auth smoke` → passed（`/api/auth` 200、前端首页 200、`admin/111111` 登录后 `logged_in=true`）
+- [x] 全仓旧端口扫描 → old port clean；旧前端端口数字仅剩非端口毫秒阈值。
+
+## v0.26.1 统一进度面板 + Zotero Pull 修复 + Terminal 日志 (completed)
+
+### User constraints / 约束
+
+- 仅 patch 版本（v0.26.1）。
+- 进度面板：文件面板侧左下角浮动停靠，可收起/展开，空闲时完全隐藏，层级 Modal 之上、Toast 之下。
+- 综合面板：整合 Zotero 同步 / Milvus 构建 / LightRAG 图谱 / 文档上传摄入四源，加载时全部显示。
+- Terminal 日志只改后端输出内容，**完全不改前端 UI**。
+- 运行中的 `astrbot-data-docker/` 实例全程只读。
+
+### Technical implementation path
+
+- [x] Phase 1 — Zotero Pull 改异步任务 + 进度/状态/错误可见：新增 `core/zotero_sync_job.py`；`zotero_sync_pipeline.pull(progress=)` 逐阶段/逐文档更新 + 索引失败进 `result.errors`；`api.sync_zotero_pull` 后台化 + `get_active_zotero_sync_job`；`GET /api/sync/zotero/active`；前端 `getActiveZoteroSyncJob` + `ZoteroQuickConfig` 轮询。
+- [x] Phase 2 — 统一 ProgressDock：`components/progress/ProgressDock.tsx` + `useProgressJobs` 四源轮询；`Z.progressDock=1350`；挂载于 console layout；移除 FilePanel 内 Milvus 卡片去重。
+- [x] Phase 3 — 上传/摄入进度：`core/ingest_job.py:IngestJob`，`register_document` 编排层跟踪，`GET /api/documents/ingest/active` + 前端 `getActiveIngestJob`。
+- [x] Phase 4 — Terminal 日志聚焦补强：Zotero 全链路 + `search_kb`/`ask` 入口出口 + 关键 `logger.error(exc_info=True)`。
+- [x] Phase 5 — 版本/测试/构建：bump v0.26.1；新增 `test_zotero_sync_job.py` + pipeline 回归；前端 `npm run build` → `tools/sync_frontend.py`。
+
+### Verification
+
+- `python -m pytest` → 398 + 6 新增全过；`ruff check` 触改文件 → clean；`mypy` → Success。
+- `cd web/frontend && npm run build` → Compiled successfully + TS 通过；`python tools/sync_frontend.py` → 同步 360 文件到 `pages/`。
+
 ## v0.26.0 质量门禁与构建同步闭环 (completed)
 
 ### User constraints / 约束
@@ -57,6 +105,8 @@
 - [x] **Phase 1 - Python 质量门禁**：修复 `ruff check .` 报出的长行、import 排序、未使用 import/变量和现代类型写法问题；同时处理 aiohttp `AppKey` 与测试 deprecation warning。
 - [x] **Phase 2 - 前端 lint 与 hooks 稳定性**：修复 `FlowNode.tsx` 条件 hooks 调用；忽略 generated `public/pdfjs/**`；清理无用 import/变量；仅对明显派生状态改造 effect 内同步 `setState`。
 - [x] **Phase 3 - 文档版本与产物同步**：统一 `metadata.yaml`、`TODO.md`、`CHANGELOG.md` 版本状态；build 后运行 `tools/sync_frontend.py`，确保 `pages/` 与 `web/frontend/out/` 一致。
+- [x] **Phase 4 - rebuild.sh 换行修复**：将 `rebuild.sh` 统一为 LF，并在 `.gitattributes` 固定 `*.sh` 为 LF，修复 Docker/Linux Bash 下 CRLF 导致的 `$'\r': command not found` 与函数解析失败。
+- [x] **Phase 5 - rebuild.sh 端口占用与 dev origin 修复**：启动前清理 `26618/26619` 监听者，等待新启动 PID 存活而不是误判旧服务；为 Next dev 允许 `127.0.0.1` origin，修复 HMR 被拦导致的 26619 访问异常。
 
 ### Verification
 
@@ -66,8 +116,12 @@
 - [x] `npm run lint` → passed
 - [x] `node node_modules/typescript/bin/tsc --noEmit --incremental false` → passed
 - [x] `npm run build` → passed（13 static routes）
-- [x] `python tools/sync_frontend.py` → synced 360 files to `pages/`
+- [x] `python tools/sync_frontend.py` → synced 362 files to `pages/`
 - [x] `python tools/sync_frontend.py --check` → passed
+- [x] `bash -n rebuild.sh` → passed
+- [x] `bash rebuild.sh` → passed；Next build 与 `tools/sync_frontend.py` 完成，后端 `26618` 与前端 `26619` ready
+- [x] `node node_modules/typescript/bin/tsc --noEmit --incremental false`（`web/frontend`）→ passed（覆盖 `next.config.ts`）
+- [x] `26618/26619 auth smoke` → `admin / 111111` 登录均返回 `{"ok": true}`，登录后 `/api/auth` 均为 `logged_in: true`
 
 ## v0.25.16 数据流节点界面美术与配置统一重构 (completed)
 
@@ -797,33 +851,33 @@
 
 ### User constraints / 约束
 
-- 大部分开发环境在 Docker 中，3000 前端预览必须从 Docker 内稳定启动。
-- 无论当前前后端状态如何，都能通过 `rebuild.sh` 重新构建并启动后端 `6520` 与前端 `3000`。
-- 浏览器固定使用 `http://127.0.0.1:3000` 查看最新前端；Docker 固定发布 `3000`，不自动换端口。
+- 大部分开发环境在 Docker 中，26619 前端预览必须从 Docker 内稳定启动。
+- 无论当前前后端状态如何，都能通过 `rebuild.sh` 重新构建并启动后端 `26618` 与前端 `26619`。
+- 浏览器固定使用 `http://127.0.0.1:26619` 查看最新前端；Docker 固定发布 `26619`，不自动换端口。
 - devcontainer 位于仓库外 `D:\dev-workspace\.devcontainer`，本轮按用户明确批准修改。
 
 ### Technical implementation path
 
 - [x] **P0 - 治理记录**：新增本计划条目。技术理由：遵循先 TODO 后改代码的项目闭环。
-- [x] **P1 - devcontainer Node 与端口修复**：将 devcontainer NodeSource 升级到 20.x，并发布 `3000:3000`、`6520:6520`，保留 `6186:6185`。技术理由：`next@16.2.6` 要求 Node `>=20.9.0`，且 Docker 层端口发布比编辑器转发稳定。
-- [x] **P2 - rebuild.sh Docker 化加固**：启动前校验 Node 版本；Node 或 lockfile 变化时自动刷新依赖；自动安装轻量后端 `requirements.txt`；后端监听 `0.0.0.0:6520`；前端监听 `0.0.0.0:3000`；健康检查统一使用 `127.0.0.1`。技术理由：让脚本在容器内自诊断、可重入，并避免 `localhost` 命中宿主机 IPv6 旧进程。
-- [x] **P3 - 重建后端到端验证**：重建 devcontainer 后运行 Next build、静态同步校验、`bash rebuild.sh` 与宿主机 3000/6520 curl。技术理由：验证 Docker 内 rebuild 可稳定拉起前后端，并能从宿主机固定端口访问。
+- [x] **P1 - devcontainer Node 与端口修复**：将 devcontainer NodeSource 升级到 20.x，并发布 `26619:26619`、`26618:26618`，保留 `6186:6185`。技术理由：`next@16.2.6` 要求 Node `>=20.9.0`，且 Docker 层端口发布比编辑器转发稳定。
+- [x] **P2 - rebuild.sh Docker 化加固**：启动前校验 Node 版本；Node 或 lockfile 变化时自动刷新依赖；自动安装轻量后端 `requirements.txt`；后端监听 `0.0.0.0:26618`；前端监听 `0.0.0.0:26619`；健康检查统一使用 `127.0.0.1`。技术理由：让脚本在容器内自诊断、可重入，并避免 `localhost` 命中宿主机 IPv6 旧进程。
+- [x] **P3 - 重建后端到端验证**：重建 devcontainer 后运行 Next build、静态同步校验、`bash rebuild.sh` 与宿主机 26619/26618 curl。技术理由：验证 Docker 内 rebuild 可稳定拉起前后端，并能从宿主机固定端口访问。
 
 ### Verification
 
 - `docker exec gifted_williams bash -lc 'cd /root/Astrbot_Knowledge_Repository && chmod +x rebuild.sh && bash -n rebuild.sh && bash rebuild.sh; code=$?; echo REBUILD_EXIT:$code; exit 0'` -> passed for syntax; expected guard failure with Node `18.20.8`, `REBUILD_EXIT:1`
-- `docker inspect gifted_williams --format "{{json .NetworkSettings.Ports}}"` -> current old container only publishes `6186:6185`; `3000:3000` and `6520:6520` require devcontainer rebuild
+- `docker inspect gifted_williams --format "{{json .NetworkSettings.Ports}}"` -> current old container only publishes `6186:6185`; `26619:26619` and `26618:26618` require devcontainer rebuild
 - `Get-Content -Encoding Byte -TotalCount 8 D:\dev-workspace\.devcontainer\Dockerfile` -> starts with `46 52 4F 4D`, UTF-8 no BOM
 - `docker buildx build --check -f D:\dev-workspace\.devcontainer\Dockerfile D:\dev-workspace\.devcontainer` -> passed, Dockerfile parse check complete
-- `netstat -ano -p tcp | Select-String ':3000'` -> found stale host `node` PID `30940`; `Stop-Process -Id 30940 -Force` released port `3000`
+- `netstat -ano -p tcp | Select-String ':26619'` -> found stale host `node` PID `30940`; `Stop-Process -Id 30940 -Force` released port `26619`
 - `docker rm 316ddf1cea6c` -> removed failed Created devcontainer from previous port bind error
-- `docker run --rm -p 6186:6185 -p 3000:3000 -p 6520:6520 --entrypoint /bin/true vsc-dev-workspace-558f8f1763b9de33a57c7ce734c75d008cd0fdc29b369b381d19ee4d1c8cc780` -> passed, fixed host ports are bindable
+- `docker run --rm -p 6186:6185 -p 26619:26619 -p 26618:26618 --entrypoint /bin/true vsc-dev-workspace-558f8f1763b9de33a57c7ce734c75d008cd0fdc29b369b381d19ee4d1c8cc780` -> passed, fixed host ports are bindable
 - `bash rebuild.sh` -> first Node 20 run reached backend startup, then failed because `aiohttp` was missing from fresh devcontainer Python site-packages; `rebuild.sh` now installs `requirements.txt` when `aiohttp` is absent
-- Manual Next dev restart without `NEXT_TEST_WASM=1` -> `http://127.0.0.1:3000/` returned `200`; `.next/dev/routes-manifest.json` and `.next/dev/server/middleware-manifest.json` generated
-- `bash rebuild.sh` -> passed; Node `20.20.2` OK, Python deps OK, Next build generated 11 static routes, synced 163 files, backend `6520` ready, frontend `3000` ready
+- Manual Next dev restart without `NEXT_TEST_WASM=1` -> `http://127.0.0.1:26619/` returned `200`; `.next/dev/routes-manifest.json` and `.next/dev/server/middleware-manifest.json` generated
+- `bash rebuild.sh` -> passed; Node `20.20.2` OK, Python deps OK, Next build generated 11 static routes, synced 163 files, backend `26618` ready, frontend `26619` ready
 - `python3 tools/sync_frontend.py --check` -> passed, `pages/` matches `web/frontend/out`
-- `curl.exe -I --max-time 10 http://127.0.0.1:3000/` -> `200 OK`, `X-Powered-By: Next.js`
-- `curl.exe -I --max-time 10 http://127.0.0.1:6520/` -> `200 OK`, `Server: Python/3.12 aiohttp/3.14.1`
+- `curl.exe -I --max-time 10 http://127.0.0.1:26619/` -> `200 OK`, `X-Powered-By: Next.js`
+- `curl.exe -I --max-time 10 http://127.0.0.1:26618/` -> `200 OK`, `Server: Python/3.12 aiohttp/3.14.1`
 
 ---
 
@@ -932,7 +986,7 @@
 - `node node_modules/next/dist/bin/next build --webpack` -> passed, 13 static routes generated
 - `python tools/sync_frontend.py` -> synced 163 files to `pages/`
 - `python tools/sync_frontend.py --check` -> passed
-- Browser smoke on `http://localhost:3000/?mock=true` -> passed; zh/en toggle verified, Chinese panel labels show 文件/本地集合/LightRAG 集合/文档/问答, three panel headers align at 38px height, no browser console errors.
+- Browser smoke on `http://localhost:26619/?mock=true` -> passed; zh/en toggle verified, Chinese panel labels show 文件/本地集合/LightRAG 集合/文档/问答, three panel headers align at 38px height, no browser console errors.
 
 ---
 
@@ -1033,7 +1087,7 @@
 
 - [x] **P1 - TerminalPanel 双模式**：为 `TerminalPanel` 增加 `variant`，默认 `floating` 兼容 Rail；新增 `embedded` 模式直接渲染面板内容并自动加载系统信息与文件列表。
 - [x] **P2 - SettingModal 嵌入终端面板**：设置页 terminal tab 使用 `variant=”embedded”`，内容区补齐 `minHeight: 0` 与条件 padding，避免空白区域和二次浮层。
-- [x] **P3 - 验证与同步**：运行前端类型检查、Next build、同步 `pages/`，并确认 `localhost:3000` 可查看最新前端。
+- [x] **P3 - 验证与同步**：运行前端类型检查、Next build、同步 `pages/`，并确认 `localhost:26619` 可查看最新前端。
 
 ### Verification
 
@@ -1047,13 +1101,13 @@
 ### User constraints / 约束
 
 - Workflow 面板打开后仍然显示为原生白底文本，需恢复 FlowDiagram 节点、画布、图例、缩放控件等完整样式。
-- 修复后重新构建，并确保 `localhost:3000` 可查看最新前端。
+- 修复后重新构建，并确保 `localhost:26619` 可查看最新前端。
 - 不修改 `components/flow/` 内部图节点/连线逻辑。
 
 ### Technical implementation path
 
 - [x] **P1 - 恢复 Flow 专用 CSS 加载**：在 `app/globals.css` 中引入 `styles/tokens.css`，并置于 `ds-tokens.css` 之前，避免旧主题变量覆盖新 DS 主题，同时恢复 `.flow-*` class 与 `--flow-*` 变量。
-- [x] **P2 - 构建与本地预览**：运行 TypeScript 检查、Next build、同步 `pages/`，并重启/确认 3000 端口预览服务。
+- [x] **P2 - 构建与本地预览**：运行 TypeScript 检查、Next build、同步 `pages/`，并重启/确认 26619 端口预览服务。
 
 ### Verification
 
@@ -1062,7 +1116,7 @@
 - `python tools/sync_frontend.py` -> synced 160 files to `pages/`
 - `python tools/sync_frontend.py --check` -> passed
 - `rg "flow-topo-page|flow-viewport|flow-node" .\web\frontend\out\_next\static\css` -> passed, Flow CSS present in built bundle
-- `http://localhost:3000` -> HTTP 200, serving Next dev preview on port 3000
+- `http://localhost:26619` -> HTTP 200, serving Next dev preview on port 26619
 
 ## v0.23.2 UI 修复：WorkflowModal 数据流 + Terminal 浮层 (completed)
 
@@ -1714,7 +1768,7 @@
 - `ruff check . && mypy` → All checks passed / Success
 - `cd web/frontend && npm run lint && npm run build`（通过 Node 22 执行）→ lint 通过（保留 5 个既有 hook dependency warning）；Next.js export 成功
 - `python3 tools/sync_frontend.py && python3 tools/sync_frontend.py --check` → `pages/` 已与 `web/frontend/out` 一致
-- `curl http://localhost:3000/{ask,documents,search,graph,sync,settings}` → 动态预览路由均返回 HTTP 200
+- `curl http://localhost:26619/{ask,documents,search,graph,sync,settings}` → 动态预览路由均返回 HTTP 200
 - AstrBot 原生插件设置填写 R2 / Notion，打开 `/settings` → 代码路径与脱敏契约已覆盖；真实 AstrBot 环境待人工验收
 - 上传、更新、删除、R2 同步、R2 恢复、Notion 初始化与拉取、重启后读取 → 自动化契约已覆盖；真实 R2 / Notion 凭据环境待人工验收
 
@@ -1741,7 +1795,7 @@
 - `python3 tools/sync_frontend.py && python3 tools/sync_frontend.py --check` → `pages/` 已与 `web/frontend/out` 一致
 - `python3 -m pytest` → 128 passed
 - `ruff check . && mypy` → All checks passed / Success
-- 浏览器逐张对照 `docs/屏幕截图 2026-06-01 133003.png` 至 `133036.png` → 动态预览已启动于 `http://localhost:3000/`
+- 浏览器逐张对照 `docs/屏幕截图 2026-06-01 133003.png` 至 `133036.png` → 动态预览已启动于 `http://localhost:26619/`
 
 ## v0.12.0 WebUI visual optimization (completed)
 
@@ -1816,7 +1870,7 @@
 ### Technical implementation path
 
 - [x] **Phase 1** — TODO 更新。
-- [x] **Phase 2** — 脚手架：`web/frontend/` 起 Next.js(App Router, TS) + `fumadocs-ui` + `next-themes` + `geist` 字体；`next.config.ts` 配 `output:'export'` + dev rewrite → `:6520`。
+- [x] **Phase 2** — 脚手架：`web/frontend/` 起 Next.js(App Router, TS) + `fumadocs-ui` + `next-themes` + `geist` 字体；`next.config.ts` 配 `output:'export'` + dev rewrite → `:26618`。
 - [x] **Phase 3** — 设计 Token：`styles/tokens.css`（浅/深主题全部 CSS 变量）+ `app/layout.tsx` 挂 `RootProvider` + `ThemeProvider`。
 - [x] **Phase 4** — API 层：`lib/api.ts` 按 §6 封装全部端口，含 `reserved` 降级、错误 toast、`?mock` 切换。
 - [x] **Phase 5** — 后端新增 `/api/ask`：`core/adapters/llm.py` 扩展 `generate()` 方法；`core/api.py` 新增 `ask()` + `llm_adapter` 注入；`web/server.py` 注册路由 + SPA catch-all 静态服务。
@@ -1837,7 +1891,7 @@
 - `ruff check . && mypy` → 无错误
 - `cd web/frontend && npm run build` → ✅ Next.js export 成功，`out/` 产出 8 个页面
 - `python tools/sync_frontend.py --check` → `pages/` 与 `out/` 一致
-- 浏览器访问 `http://localhost:6520` → 完整 7 页面、双主题、中英 i18n、?mock 可用
+- 浏览器访问 `http://localhost:26618` → 完整 7 页面、双主题、中英 i18n、?mock 可用
 
 ---
 

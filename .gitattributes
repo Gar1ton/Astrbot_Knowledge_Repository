@@ -11,3 +11,4 @@ docs/           export-ignore
 
 # 规范化文本行尾
 * text=auto
+*.sh text eol=lf

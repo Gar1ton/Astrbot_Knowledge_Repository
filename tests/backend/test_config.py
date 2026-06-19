@@ -34,7 +34,7 @@ def test_defaults_when_empty() -> None:
     assert cfg.get_source_store_config().db_filename == "knowledge_repository.db"
     assert cfg.get_r2_sync_config().free_tier_gb == 10
     assert cfg.get_notion_sync_config().mcp_server_name == "notion"
-    assert cfg.get_web_console_config().port == 6520
+    assert cfg.get_web_console_config().port == 26618
     assert cfg.get_graph_config().query_mode == "mix"
     assert cfg.get_graph_config().lightrag_llm_provider == "main"
     assert cfg.get_vector_db_config().backend == "milvus"

@@ -364,7 +364,7 @@
               source_store: { db_filename:"knowledge_repository.db", default_collection:"default", ocr_enabled:false },
               r2_sync: { enabled:true, bucket:"kr-demo", account_id:"ac****nt", access_key_id:"ak****id", secret_access_key:"****", free_tier_gb:10, warn_threshold:0.8, backup_interval_sec:86400 },
               notion_sync: { enabled:true, mcp_server_name:"notion", database_id:"demo-db", parent_page_id:"demo-parent", database_title:"Knowledge Repository", max_upload_mib:5, link_large_to_r2:true, rate_limit_rps:3 },
-              web_console: { enabled:true, host:"0.0.0.0", port:6520, username:"admin", password:"****" },
+              web_console: { enabled:true, host:"0.0.0.0", port:26618, username:"admin", password:"****" },
               graph: { enabled:true, llm_extraction:true, incremental:true, reuse_kb_embedding:true, merge_similarity_threshold:0.9, rrf_k:60, query_top_k:5, entity_types:["Method/Algorithm","Dataset"] }
             });
           } else if (pathname === "/api/graph") {

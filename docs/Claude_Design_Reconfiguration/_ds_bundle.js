@@ -2980,7 +2980,7 @@ try { (() => {
       v: "0.0.0.0"
     }), /*#__PURE__*/React.createElement(ConfigKV, {
       k: "port",
-      v: "6520"
+      v: "26618"
     }), /*#__PURE__*/React.createElement(ConfigKV, {
       k: "password",
       v: "****",
@@ -3005,7 +3005,7 @@ try { (() => {
       style: {
         color: "#6abf75"
       }
-    }, "INFO"), " aiohttp server on 0.0.0.0:6520"), /*#__PURE__*/React.createElement("div", null, "[12:04:11] ", /*#__PURE__*/React.createElement("span", {
+    }, "INFO"), " aiohttp server on 0.0.0.0:26618"), /*#__PURE__*/React.createElement("div", null, "[12:04:11] ", /*#__PURE__*/React.createElement("span", {
       style: {
         color: "#6abf75"
       }

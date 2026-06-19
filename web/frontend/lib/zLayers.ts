@@ -17,6 +17,7 @@ export const Z = {
   panel: 1100,    // 浮动开发面板：PerfPanel、TerminalPanel
   dropdown: 1200, // Select 下拉 / popover / 菜单（高于 dialog 以支持 modal 内嵌套）
   tooltip: 1300,  // Tooltip
+  progressDock: 1350, // 统一进度面板（左下角浮动停靠）：Modal 之上、Toast 之下
   toast: 1400,    // 全局通知，永远最顶
 } as const;
 

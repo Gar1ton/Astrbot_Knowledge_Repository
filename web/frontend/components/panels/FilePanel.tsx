@@ -6,7 +6,7 @@ import { Panel } from "@/components/ds/Panel";
 import { IconButton } from "@/components/ds/IconButton";
 import { Icon } from "@/components/ds/Icon";
 import { useConsole } from "@/lib/ConsoleContext";
-import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, createCollection, uploadDocument, getActiveMilvusBuildJob, rebuildIndexPending, Collection, GraphBuildJob, BuildJobRecord, MilvusBuildJob } from "@/lib/api";
+import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, createCollection, uploadDocument, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 
@@ -176,109 +176,7 @@ function SectionHead({ icon, label, actions }: SectionHeadProps) {
 
 // ─── Build progress card ───────────────────────────────────────
 
-// ─── Milvus 向量库构建进度卡片（file 页面底部，无暂停）──────────
-
-function MilvusBuildCard({ job, onRetry }: { job: MilvusBuildJob; onRetry: () => void }) {
-  const { t } = useI18n();
-  const failed =
-    job.status === "error" || job.status === "partial_failure" || (job.failed_docs ?? 0) > 0;
-  const running = job.status === "running";
-  const pct = Math.min(100, Math.max(0, job.progress_percent ?? 0));
-  const accentColor = failed ? "var(--danger)" : "var(--accent)";
-  const stage = job.stage ?? "vector_indexing";
-  const stageTitle = failed
-    ? t("file_milvus_build_failed")
-    : stage === "data_cleaning"
-      ? t("file_milvus_build_stage_cleaning")
-      : stage === "finalizing"
-        ? t("file_milvus_build_stage_finalizing")
-        : t("file_milvus_build_stage_indexing");
-  const cleanTotal = job.total_clean_docs ?? 0;
-  const cleanDone = job.processed_clean_docs ?? 0;
-  const indexTotal = job.total_index_docs ?? job.total_docs ?? 0;
-  const indexDone = job.processed_index_docs ?? job.processed_docs ?? 0;
-  const detailParts = [
-    cleanTotal > 0 ? `${t("file_milvus_build_cleaned_unit")} ${cleanDone}/${cleanTotal}` : "",
-    `${t("file_milvus_build_indexed_unit")} ${indexDone}/${indexTotal || "?"}`,
-    (job.failed_docs ?? 0) > 0 ? `${job.failed_docs} ${t("file_milvus_build_failed_unit")}` : "",
-  ].filter(Boolean);
-
-  return (
-    <div
-      style={{
-        margin: "8px 6px 2px",
-        padding: "8px 10px",
-        background: failed ? "color-mix(in srgb, var(--danger) 9%, var(--surface))" : "var(--accent-soft)",
-        border: `1px solid ${failed ? "var(--danger)" : "var(--accent-border)"}`,
-        borderRadius: "var(--radius-md)",
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
-        {running && (
-          <span
-            style={{
-              width: 9,
-              height: 9,
-              borderRadius: "50%",
-              border: "2px solid var(--accent)",
-              borderTopColor: "transparent",
-              animation: "spin .7s linear infinite",
-              flexShrink: 0,
-            }}
-          />
-        )}
-        <span style={{ fontSize: 11, fontWeight: 600, color: accentColor, flex: 1 }}>
-          {stageTitle}
-        </span>
-        <span style={{ fontSize: 10, fontFamily: "var(--font-mono)", color: accentColor }}>{pct}%</span>
-      </div>
-      <div
-        style={{
-          height: 5,
-          borderRadius: 999,
-          background: failed
-            ? "color-mix(in srgb, var(--danger) 18%, transparent)"
-            : "color-mix(in srgb, var(--accent) 18%, transparent)",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          style={{
-            width: `${pct}%`,
-            height: "100%",
-            borderRadius: 999,
-            background: failed ? "var(--danger)" : "linear-gradient(90deg, var(--accent), var(--accent-strong))",
-            transition: "width .4s",
-          }}
-        />
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
-        <span style={{ fontSize: 10, color: "var(--fg-muted)", fontFamily: "var(--font-mono)", flex: 1 }}>
-          {detailParts.join(" · ")}
-        </span>
-        {failed && (
-          <button
-            type="button"
-            onClick={onRetry}
-            style={{
-              fontSize: 10,
-              fontWeight: 600,
-              padding: "3px 9px",
-              borderRadius: 999,
-              border: "1px solid var(--danger)",
-              background: "transparent",
-              color: "var(--danger)",
-              cursor: "pointer",
-              flexShrink: 0,
-            }}
-          >
-            {t("file_milvus_build_retry")}
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
+// Milvus 向量构建进度卡片已迁入统一进度面板：components/progress/ProgressDock.tsx。
 
 // ─── Active build status card (section-level, above all collections) ──────────
 
@@ -917,7 +815,6 @@ export function FilePanel() {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [buildJob, setBuildJob] = useState<GraphBuildJob | null>(null);
   const [buildHistory, setBuildHistory] = useState<BuildJobRecord[]>([]);
-  const [milvusJob, setMilvusJob] = useState<MilvusBuildJob | null>(null);
   const [openKeys, setOpenKeys] = useState<Record<string, boolean>>({});
   const [deletingCollection, setDeletingCollection] = useState<string | null>(null);
   const [deleteInProgress, setDeleteInProgress] = useState(false);
@@ -953,35 +850,7 @@ export function FilePanel() {
     return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Milvus 向量库后台构建轮询（running 时加快、空闲减速；无任务/成功 → null 隐藏）。
-  useEffect(() => {
-    let cancelled = false;
-    async function poll() {
-      if (cancelled) return;
-      let active = false;
-      try {
-        const job = await getActiveMilvusBuildJob();
-        if (!cancelled) {
-          active = !!job && job.status === "running";
-          setMilvusJob(job);
-        }
-      } catch { /* ignore */ }
-      if (!cancelled) setTimeout(poll, active ? 1500 : 5000);
-    }
-    poll();
-    return () => { cancelled = true; };
-  }, []);
-
-  async function retryMilvusBuild() {
-    try {
-      await rebuildIndexPending();
-      const job = await getActiveMilvusBuildJob();
-      setMilvusJob(job);
-      toast(t("file_milvus_build_started"), "ok");
-    } catch {
-      toast(t("file_milvus_build_error"), "error");
-    }
-  }
+  // Milvus 向量构建进度轮询已迁入统一进度面板 ProgressDock（见 components/progress/ProgressDock.tsx）。
 
   function getCollectionGraphStatus(collectionName: string): "not_built" | "building" | "success" {
     if (buildJob && buildJob.collection === collectionName && isActiveBuildStatus(buildJob.status)) {
@@ -1258,21 +1127,7 @@ export function FilePanel() {
           );
         })}
 
-        {/* Milvus 向量库构建进度（贴 file 页面底部，无任务/成功时不显示）*/}
-        {milvusJob && (
-          <div
-            style={{
-              position: "sticky",
-              bottom: 0,
-              marginTop: 10,
-              paddingBottom: 2,
-              background: "var(--surface)",
-              borderTop: "1px solid var(--border)",
-            }}
-          >
-            <MilvusBuildCard job={milvusJob} onRetry={retryMilvusBuild} />
-          </div>
-        )}
+        {/* Milvus 向量构建进度已迁入统一进度面板 ProgressDock（左下角浮动停靠）。*/}
       </div>
     </Panel>
 

@@ -89,7 +89,7 @@ npm i fumadocs-ui fumadocs-core next-themes
 
 ```js
 const isDev = process.env.NODE_ENV !== 'production';
-const API_PORT = process.env.KR_API_PORT || 6520;        // = config.web_console.port
+const API_PORT = process.env.KR_API_PORT || 26618;       // = config.web_console.port
 const API_HOST = process.env.KR_API_HOST || '127.0.0.1';  // dev 代理目标
 export default {
   reactStrictMode: true,
@@ -103,7 +103,7 @@ export default {
 };
 ```
 
-> ⚠ `output:'export'` 与 `rewrites` **不能同时生效**：导出无服务端。所以**开发**(`next dev`)走 rewrite 代理到 `:6520`，**生产**走静态导出 + aiohttp 同源（前端和 `/api` 同源，直接相对路径即可）。
+> ⚠ `output:'export'` 与 `rewrites` **不能同时生效**：导出无服务端。所以**开发**(`next dev`)走 rewrite 代理到 `:26618`，**生产**走静态导出 + aiohttp 同源（前端和 `/api` 同源，直接相对路径即可）。
 
 **`app/layout.tsx`** —— 挂 Fumadocs `RootProvider` + `next-themes` + 全站 token：
 
@@ -128,7 +128,7 @@ export default function RootLayout({ children }) {
 ```
 （`npm i geist` 取 Geist 字体；色系切换另用 `data-palette` 属性，见 §3.5。）
 
-**开发流程**：① 起后端 `python -m <plugin> --serve`（监听 `web_console.host:port`）；② `cd web/frontend && npm run dev`（默认 3000，`/api/*` 经 rewrite 打到后端）。
+**开发流程**：① 起后端 `python -m <plugin> --serve`（监听 `web_console.host:port`）；② `cd web/frontend && npm run dev`（默认 26619，`/api/*` 经 rewrite 打到后端）。
 **生产构建**：`npm run build`（导出到 `web/frontend/out/`）→ `python tools/sync_frontend.py`（`out/` → `pages/`）→ 后端单进程托管，浏览器访问 `web_console.host:port`。
 
 ### 2.2 把 `config/effective` 接进 UI 行为（不要写死）
@@ -266,7 +266,7 @@ export default function RootLayout({ children }) {
 ## 6. 端口契约（API Reference）★ 唯一事实来源
 
 **通则**
-- Base：同源，前缀 `/api`。开发期 Next dev server 用 rewrite/proxy 转发到 `aiohttp`（默认 `0.0.0.0:6520`）。
+- Base：同源，前缀 `/api`。开发期 Next dev server 用 rewrite/proxy 转发到 `aiohttp`（默认 `0.0.0.0:26618`）。
 - 认证：基于会话（登录后置 cookie）。每次进入控制台先 `GET /api/auth` 判断登录态。
 - 约定响应：成功多为资源对象或 `{status:"ok"}`；**预留功能**返回 `{reserved:true, available_inः"vX.Y.Z"}` 形态（注意：前端必须识别 `reserved` 并降级展示）。
 - 错误：非 2xx 时 body 可能含 `{error|detail}`，前端统一在 `lib/api.ts` 抛出并 toast。
@@ -327,7 +327,7 @@ export default function RootLayout({ children }) {
                      "secret_access_key":"****", "free_tier_gb":10, "warn_threshold":0.8, "backup_interval_sec":86400 },
   "notion_sync":   { "enabled":true, "mcp_server_name":"notion", "database_id":"...", "parent_page_id":"...",
                      "database_title":"Knowledge Repository", "max_upload_mib":5, "link_large_to_r2":true, "rate_limit_rps":3 },
-  "web_console":   { "enabled":true, "host":"0.0.0.0", "port":6520, "username":"admin", "password":"****" },
+  "web_console":   { "enabled":true, "host":"0.0.0.0", "port":26618, "username":"admin", "password":"****" },
   "graph":         { "enabled":true, "llm_extraction":true, "incremental":true, "reuse_kb_embedding":true,
                      "merge_similarity_threshold":0.9, "rrf_k":60, "query_top_k":5, "entity_types":["Method/Algorithm","Dataset"] }
 }
@@ -479,7 +479,7 @@ function DotField(){
 
 ## 9. 落地步骤（建议给本地 Agent 的执行顺序）
 
-1. **脚手架**：`web/frontend/` 起 Next.js(App Router, TS) + `fumadocs-ui` + `next-themes`；`next.config.mjs` 设 `output:'export'`；dev 期配 `/api` rewrite → `http://127.0.0.1:6520`。
+1. **脚手架**：`web/frontend/` 起 Next.js(App Router, TS) + `fumadocs-ui` + `next-themes`；`next.config.mjs` 设 `output:'export'`；dev 期配 `/api` rewrite → `http://127.0.0.1:26618`。
 2. **token**：落 `styles/tokens.css`（§3），接 `next/font` 的 Geist / Geist Mono。
 3. **api 层**：`lib/api.ts` 按 §6 封装全部端口（含 `reserved` 降级、错误 toast）。组件禁止裸 fetch。
 4. **外壳**：`RootProvider` + 主题/色系/i18n + 左栏 `rail`（§4）+ 路由骨架。

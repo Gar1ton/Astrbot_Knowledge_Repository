@@ -142,6 +142,34 @@ export interface ZoteroSyncResult {
   message?: string;
 }
 
+// Zotero Pull 后台同步任务快照（与 MilvusBuildJob 同构，供统一进度面板轮询）。
+export interface ZoteroSyncJob {
+  job_id: string;
+  type?: string; // "zotero_sync"
+  status: string; // running | success | partial_failure | error
+  stage?: string;
+  stage_label?: string;
+  incremental?: boolean;
+  sync_mode?: string;
+  storage_mode?: string;
+  access_mode?: string;
+  items_total?: number;
+  docs_total: number;
+  docs_processed: number;
+  docs_failed: number;
+  skipped_unchanged?: number;
+  new?: number;
+  changed?: number;
+  removed?: number;
+  detached?: number;
+  progress_percent: number;
+  elapsed_seconds?: number;
+  started_at?: string;
+  finished_at?: string | null;
+  recent_error?: string;
+  errors?: string[];
+}
+
 export interface ZoteroProbeResult {
   connection: { connected: boolean; port?: number; detail?: string };
   read: {
@@ -507,7 +535,7 @@ const MOCK_CONFIG: EffectiveConfig = {
   source_store: { db_filename: "knowledge_repository.db", default_collection: "default", ocr_enabled: false },
   r2_sync: { enabled: true, bucket: "kr-bucket", account_id: "ac****nt", access_key_id: "ak****id", secret_access_key: "****", free_tier_gb: 10, warn_threshold: 0.8 },
   notion_sync: { enabled: true, database_id: "db-****", max_upload_mib: 5 },
-  web_console: { enabled: true, host: "0.0.0.0", port: 6520, username: "admin", password: "****" },
+  web_console: { enabled: true, host: "0.0.0.0", port: 26618, username: "admin", password: "****" },
   graph: { enabled: false, query_mode: "mix", llm_max_async: 4, embedding_max_async: 8, working_dir: "lightrag_workspaces", max_doc_chars: 30000, lightrag_llm_provider: "main", lightrag_llm_base_url: "", lightrag_llm_model: "", lightrag_llm_timeout_seconds: 900 },
   ask: { conversation_enhancement_mode: "inject" },
   rerank: { provider: "cross_encoder", model: "Alibaba-NLP/gte-reranker-modernbert-base", device: "auto", batch_size: 32, max_candidates: 30, keep: 12 },
@@ -961,6 +989,28 @@ export async function getActiveMilvusBuildJob(): Promise<MilvusBuildJob | null> 
   return res.job;
 }
 
+// 文档上传/摄入任务快照（供统一进度面板，parsing → indexing）。
+export interface IngestJob {
+  job_id: string;
+  type?: string; // "ingest"
+  status: string; // running | success | error
+  stage?: string;
+  stage_label?: string;
+  title?: string;
+  doc_id?: string;
+  progress_percent: number;
+  elapsed_seconds?: number;
+  started_at?: string;
+  finished_at?: string | null;
+  recent_error?: string;
+}
+
+export async function getActiveIngestJob(): Promise<IngestJob | null> {
+  if (isMock()) return null;
+  const res = await apiFetch<{ job: IngestJob | null }>("/api/documents/ingest/active");
+  return res.job;
+}
+
 export async function getPendingReindexCount(): Promise<{ count: number }> {
   if (isMock()) return { count: 0 };
   return apiFetch("/api/documents/pending-reindex-count");
@@ -1236,6 +1286,13 @@ export async function syncZoteroPull(incremental = true): Promise<ZoteroSyncResu
 export async function getZoteroSyncStatus(): Promise<ZoteroSyncResult> {
   if (isMock()) return {};
   return apiFetch<ZoteroSyncResult>("/api/sync/zotero/status");
+}
+
+// 统一进度面板轮询：当前 running/partial/error 的同步任务（success/无任务 → null）。
+export async function getActiveZoteroSyncJob(): Promise<ZoteroSyncJob | null> {
+  if (isMock()) return null;
+  const res = await apiFetch<{ job: ZoteroSyncJob | null }>("/api/sync/zotero/active");
+  return res.job;
 }
 
 // 本地离线探针：连接测试 + zotero.sqlite 干读计数（不写库、不同步）。

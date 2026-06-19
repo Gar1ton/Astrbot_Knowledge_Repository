@@ -19,6 +19,7 @@ from core.domain.models import DocumentLifecycle, DocumentOrigin
 from core.managers.ingest_manager import IngestManager
 from core.pipelines.zotero_sync_pipeline import ZoteroSyncPipeline
 from core.repository.source_store.memory import InMemorySourceDocumentStore
+from core.zotero_sync_job import ZoteroSyncJob
 
 _pdf_available = importlib.util.find_spec("pymupdf4llm") is not None
 pytestmark = pytest.mark.skipif(not _pdf_available, reason="pymupdf4llm not installed")
@@ -295,6 +296,64 @@ def test_probe_local_read_counts_without_mirroring(tmp_path: Path) -> None:
     assert probe["pdf_attachment_count"] == 1
     # 干读：不写入 source_store
     assert store._documents == {}  # type: ignore[attr-defined]
+
+
+# ── pipeline: 进度任务 + 错误可见性 ───────────────────────────────
+
+
+async def test_pull_updates_progress_job(tmp_path: Path) -> None:
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    _build_zotero_db(data_dir)
+    _, pipeline, _, _ = _pipeline(tmp_path, data_dir, "conservative")
+
+    job = ZoteroSyncJob(incremental=False)
+    job.start()
+    result = await pipeline.pull(incremental=False, progress=job)
+
+    assert not result.errors
+    assert job.docs_total == 1
+    assert job.docs_processed == 1
+    assert job.docs_failed == 0
+    assert job.new_count == 1
+    assert job.to_dict()["stage"] == "finalizing"  # 走完全部阶段
+
+
+async def test_index_side_effect_failure_surfaces_in_errors(tmp_path: Path) -> None:
+    """回归：索引副作用失败（如 VectorStore 未配置）必须进 result.errors，不可静默吞掉。"""
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    _build_zotero_db(data_dir)
+
+    store = InMemorySourceDocumentStore()
+    ingest = IngestManager(
+        source_store=store, config=SourceStoreConfig(), data_dir=tmp_path / "plugin"
+    )
+    cfg = Config({
+        "zotero_sync": {
+            "enabled": True,
+            "zotero_data_dir": str(data_dir),
+            "sync_mode": "conservative",
+        }
+    })
+
+    async def failing_index(doc_id: str, collection: str) -> None:
+        raise RuntimeError("VectorStore 未配置")
+
+    pipeline = ZoteroSyncPipeline(
+        source_store=store,
+        ingest_manager=ingest,
+        config=cfg,
+        index_document=failing_index,
+    )
+
+    job = ZoteroSyncJob()
+    result = await pipeline.pull(progress=job)
+
+    # 文档仍被镜像/摄入（制品包存在），但索引失败被上报（不再静默）
+    assert await store.get_document(DOC_ID) is not None
+    assert any("index_document failed" in e for e in result.errors)
+    assert job.recent_error
 
 
 def test_probe_local_read_missing_data_dir(tmp_path: Path) -> None:

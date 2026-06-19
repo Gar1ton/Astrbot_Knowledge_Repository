@@ -21,6 +21,45 @@
 
 ---
 
+## [v0.26.2] — 2026-06-19
+
+### 修复 (Fixed)
+
+- **调试 WebUI 端口迁移到避让区间**：将项目内测试/调试后端端口统一改为 `26618`，前端开发端口统一改为 `26619`，覆盖 `rebuild.sh`、`tests/run_webui.py`、`core/config.py`、`_conf_schema.json`、`web/frontend/next.config.ts`、前端 mock config、文档与设计说明，避免继续碰到旧端口占用或转发密码异常（`rebuild.sh`、`tests/run_webui.py`、`core/config.py`、`_conf_schema.json`、`web/frontend/lib/api.ts`）。
+- **旧端口残留清理**：全仓清理端口语义的旧后端/旧前端端口引用；保留 `PerfPanel`、`ProgressDock` 中作为毫秒阈值/轮询间隔的旧前端端口同值数字，不改变业务行为（`web/frontend/components/ui/PerfPanel.tsx`、`web/frontend/components/progress/ProgressDock.tsx`）。
+
+### 构建与工程 (Build/CI)
+
+- **Docker/devcontainer 端口发布同步**：将 devcontainer `appPort` 与 Dockerfile `EXPOSE` 同步为 `26619/26618`，并让 `rebuild.sh` 输出的新访问地址指向 `http://127.0.0.1:26618` 与 `http://127.0.0.1:26619`（`.devcontainer/devcontainer.json`、`.devcontainer/Dockerfile`、`rebuild.sh`）。
+
+### 测试 (Tests)
+
+- Docker 环境验证：`bash -n rebuild.sh` → passed；`python -m pytest tests/backend/test_config.py -q` → 26 passed；`node node_modules/typescript/bin/tsc --noEmit --incremental false`（`web/frontend`）→ passed；`npm run build`（`web/frontend`）→ passed；`python tools/sync_frontend.py && python tools/sync_frontend.py --check` → passed（同步 362 个文件，`pages/` 一致）；`bash rebuild.sh` → passed；`26618/26619 auth smoke` → passed（`/api/auth` 200、前端首页 200、`admin/111111` 登录后 `logged_in=true`）。
+
+## [v0.26.1] — 2026-06-19
+
+### 新增功能 (Added)
+
+- **统一进度面板 ProgressDock（左下角浮动停靠）**：新增 `web/frontend/components/progress/ProgressDock.tsx`，泛化自原未挂载的 `BuildWidget`，用一个内置 `useProgressJobs` hook 并行轮询四类后台任务的 `/active` 端点（Zotero 同步 / Milvus 向量构建 / LightRAG 图谱构建 / 文档上传摄入），归一化为统一进度行渲染：可收起/展开、终态/错误显式提示、LightRAG 行保留暂停/继续/查看图谱动作、全部空闲时返回 `null` 完全隐藏；层级 `Z.progressDock=1350`（Modal 之上、Toast 之下）。在 `app/(console)/layout.tsx` 的 `ConsoleProvider` 内挂载；新增 i18n `progress_dock_*` 键（`web/frontend/components/progress/ProgressDock.tsx`、`web/frontend/lib/zLayers.ts`、`web/frontend/app/(console)/layout.tsx`、`web/frontend/lib/i18n.ts`）。
+- **Zotero Pull 异步任务 + 进度模型**：新增 `core/zotero_sync_job.py:ZoteroSyncJob`（纯内存进度快照，`to_dict()` 带 `type=zotero_sync`、`status`、阶段 `reading_snapshot→mirroring→syncing_documents→applying_removals→finalizing`、文档计数与 `progress_percent`），照搬 `MilvusBuildJob` 范式；`ZoteroSyncPipeline.pull(progress=...)` 在各阶段/逐文档更新 job；新增后端 `GET /api/sync/zotero/active` 与前端 `getActiveZoteroSyncJob()`/`ZoteroSyncJob` 类型（`core/zotero_sync_job.py`、`core/pipelines/zotero_sync_pipeline.py`、`core/api.py`、`web/server.py`、`web/frontend/lib/api.ts`）。
+- **文档上传/摄入进度**：新增 `core/ingest_job.py:IngestJob`（parsing→indexing 两阶段），`KnowledgeRepositoryApi.register_document` 在编排边界跟踪并经新端点 `GET /api/documents/ingest/active` 暴露，纳入统一进度面板（`core/ingest_job.py`、`core/api.py`、`web/server.py`、`web/frontend/lib/api.ts`）。
+
+### 修复 (Fixed)
+
+- **Zotero Pull「失灵」根因修复**：① `sync_zotero_pull` 由「`await pull()` 整段同步阻塞」（几十篇 PDF 下载/清洗/embedding 数分钟、单 HTTP 请求易超时）改为**后台任务 + 立即返回任务快照**，全局单任务守卫，前端轮询 `/active` 看进度；② `ZoteroSyncResult` 历史上**缺 `status` 字段**，前端 `ZoteroQuickConfig` 全靠 `syncStatus.status==="error"` 判断 → 永远判不出成功/失败，现 `_run_zotero_pull` 据 `result.errors` 推导 `success/partial_failure/error` 并注入 `_last_zotero_sync`；③ **停止静默吞错**：`_index_and_mark` 的索引副作用失败（如 `VectorStore 未配置`）原仅 `logger.warning`，现追加进 `result.errors` 并 `logger.error(exc_info=True)`，使「同步出文档却未入向量库」可见；④ `ZoteroQuickConfig.handleSyncNow` 改为轮询任务至终态再刷新摘要（`core/api.py`、`core/pipelines/zotero_sync_pipeline.py`、`web/frontend/components/flow/ZoteroQuickConfig.tsx`）。
+
+### 架构健康 (Refactor)
+
+- **进度指示去重**：移除 `FilePanel` 内的 Milvus 进度卡片 `MilvusBuildCard` 及其状态/轮询/重试链（迁入统一进度面板），保留 `buildJob` 状态供构建按钮逻辑（`web/frontend/components/panels/FilePanel.tsx`）。
+
+### 性能/可观测性 (Performance)
+
+- **Terminal 日志补强（聚焦本次改动，不改前端）**：补 Zotero 同步全链路 `logger.info`（开始/各阶段/完成摘要）、`search_kb` 入口出口 + 命中数 + 耗时、`ask` 入口；被吞错误统一 `exc_info=True`（Zotero 索引失败、Milvus 后台重建失败、上传索引失败）（`core/pipelines/zotero_sync_pipeline.py`、`core/api.py`）。
+
+### 测试 (Tests)
+
+- 新增 `tests/backend/test_zotero_sync_job.py`（`ZoteroSyncJob` 的 `progress_percent`/`status`/`to_dict` 契约）；`tests/backend/test_zotero_sync.py` 增「pull 注入 progress 计数正确」与「索引副作用失败进 `result.errors`」回归。
+
 ## [v0.26.0] — 2026-06-19
 
 ### 新增功能 (Added)
@@ -74,6 +113,8 @@
 ### 修复 (Fixed)
 
 - **质量门禁闭环**：修复 Python `ruff check .` 中的长行、import 排序、未使用变量与类型写法问题；修复 `FlowNode` 条件调用 React hooks 的风险；将 aiohttp app 运行态对象改为 `web.AppKey`，并修复 cookie 测试的 URL deprecation warning（`core/api.py`、`core/managers/chunking.py`、`core/managers/ingest_manager.py`、`core/milvus_build.py`、`core/pipelines/deep_thinking_prompts.py`、`core/repository/source_store/memory.py`、`web/server.py`、`web/frontend/components/flow/FlowNode.tsx`、`tests/backend/test_web_server.py`）。
+- **`rebuild.sh` Docker 执行修复**：将 `rebuild.sh` 统一为 LF 换行，并通过 `.gitattributes` 固定 `*.sh text eol=lf`，修复 Linux Bash 下 CRLF 导致的 `$'\r': command not found` 与函数定义解析失败；`bash -n rebuild.sh` 与完整 `bash rebuild.sh` 均已通过，后端 `26618` 与前端 `26619` ready（`rebuild.sh`、`.gitattributes`）。
+- **`rebuild.sh` 端口占用误判修复**：启动前按 `26618/26619` 清理监听进程，避免旧的 `astrbot run` 占用 `26618` 时被健康检查误判为新调试后端；等待阶段改为同时检查新启动 PID 存活，后端绑定失败会直接输出日志并失败；前端 dev server 显式注入 `KR_API_PORT` 并允许 `127.0.0.1` dev origin，修复 26619 代理到旧后端导致密码不一致与 HMR 被拦的问题（`rebuild.sh`、`web/frontend/next.config.ts`）。
 - **Deep Thinking 缺口率文案修正**：将证据不足降级判定中的「缺口率」从 `len(gaps) / len(checklist)` 改为未满足 checklist 项占比，并且仅在 SEA 明确给出 gap 时应用该降级条件；用户可见原因从「证据缺口率 175%」这类无意义百分比改为「未满足检查项 X/Y（Y% ≥ 阈值 Z%）」；补充多 gap 少 checklist 的回归测试，确保不会再出现超过 100% 的缺口率文案（`core/pipelines/deep_thinking_orchestrator.py`、`tests/backend/test_deep_thinking_orchestrator.py`）。
 - **Deep Thinking 证据不足回答警告**：`DeepThinkingOrchestrator.run()` 新增 `answer_question`，检索/PLAN/SEA/REFINE 继续使用 retrieval query，最终合成与 VERIFY 使用用户原始问题，避免开启英语召回后答案围绕翻译 query 生成；deep thinking 降级或未验证时，`api.ask()` 会在最终答案正文开头追加证据不足/未验证警告，并展示降级原因或 `verify_missing`；VERIFY JSON 解析失败不再视为通过，改为保留 draft 但标记 `verified=False`；普通与 deep 合成 prompt 均补充“证据不足必须说明、不用外部知识补齐”的约束（`core/pipelines/deep_thinking_orchestrator.py`、`core/pipelines/answer_synthesis.py`、`core/api.py`、`tests/backend/test_deep_thinking_orchestrator.py`、`tests/backend/test_api.py`）。
 - **JSTOR 等 PDF 提取失败与全局深度思考静默退化修复**：(1) 在 `pymupdf4llm.to_markdown()` 中传入 `ignore_alpha=True`，以支持提取带有透明遮罩/水印（如 JSTOR PDF）的学术论文正文，使得 Massumi (1995) 等文档的文本抽取量从 5.5k 字符恢复到正常的 66k 完整文本（`core/managers/markdown_extractor.py`）；(2) 前端 `ChatPanel` 的检索模式下拉框在未选择集合时禁用“深度思考”模式，并增加 `useEffect` 副作用监听，在切换取消集合选择时自动将 `retrievalMode` 重置为 `"default"`，避免向后端发起不带集合参数的深度思考/高精度请求而触发 `ValueError` 报错（`web/frontend/components/panels/ChatPanel.tsx`）。
@@ -101,7 +142,7 @@
 
 ### 测试 (Tests)
 
-- **v0.26.0 质量门禁验证**：Docker 环境中 `ruff check .`、`python -m mypy`、`python -m pytest -q`（398 passed）、`npm run lint`、`node node_modules/typescript/bin/tsc --noEmit --incremental false`、`npm run build` 与 `python tools/sync_frontend.py --check` 均通过；`python tools/sync_frontend.py` 同步 360 个前端静态产物到 `pages/`。
+- **v0.26.0 质量门禁验证**：Docker 环境中 `ruff check .`、`python -m mypy`、`python -m pytest -q`（398 passed）、`npm run lint`、`node node_modules/typescript/bin/tsc --noEmit --incremental false`、`npm run build`、`python tools/sync_frontend.py --check`、`bash -n rebuild.sh` 与 `bash rebuild.sh` 均通过；`python tools/sync_frontend.py` 同步 362 个前端静态产物到 `pages/`；复验 `26618/26619` 登录链路，`admin / 111111` 登录后 `/api/auth` 均返回 `logged_in: true`。
 - **Deep Thinking 可靠性回归覆盖**：`test_deep_thinking_orchestrator.py` 新增 prompt 契约、critical 未满足不误收敛、SEA 无 gaps 时从 checklist 反推 REFINE、doc-aware final evidence、structural anchor 优先级、`VERIFY_OK` 被 soft missing 否决等用例；补跑 `test_api.py`、跨文档来源标注、retrieval/reranker 回归和 compileall（`tests/backend/test_deep_thinking_orchestrator.py`）。
 - **PDF 清洗与分块回归覆盖**：新增页眉/页码/断词/伪段落清洗、paragraph-aware chunk 边界、section metadata、legacy chunk 重建、文档面板预览自动重建、通用论文数字标题误判防线、Appendix、Figure/Table/Equation anchor list、T 编号标题锚点召回、citation-aware sentence split、编号章节、父章节短标题合并、图表 caption 和 subsection anchor fast-path 测试；验证命令包括 `python -m pytest tests\backend\test_ingest_manager.py tests\backend\test_retrieval_orchestrator.py -q`、`python -m pytest tests\backend\test_api.py -q` 与 `python -m compileall ...`。私有 PDF 仅做本地手工评估，不在变更记录中保存标题、正文或 chunk 预览（`tests/backend/test_ingest_manager.py`、`tests/backend/test_retrieval_orchestrator.py`、`tests/backend/test_api.py`）。
 - **LightRAG 暂停恢复回归覆盖**：补充 SQLite migration 默认值、启动清理保留 paused job、LLM 中 pause_requested 持久化、pause gate 入库 paused、同进程恢复累计 `paused_seconds`、重启后复用原 `job_id` 处理未 `indexed` 文档、finalize 前进度小于 100% 等用例；验证命令包括 `python -m pytest tests\backend\test_build_hardening.py tests\backend\test_sqlite_source_store.py tests\backend\test_api.py tests\backend\test_web_server.py -q`、`node node_modules/typescript/bin/tsc --noEmit`、`node node_modules/next/dist/bin/next build --webpack`、`python tools\sync_frontend.py` 与 `python tools\sync_frontend.py --check`（`tests/backend/test_build_hardening.py`、`tests/backend/test_sqlite_source_store.py`）。
@@ -162,24 +203,24 @@
 
 ### 修复 (Fixed)
 
-- **Docker 内 3000 前端预览启动链路加固**：devcontainer 镜像定义从 NodeSource `setup_18.x` 升级到 `setup_20.x`，并在 Docker 层发布 `3000:3000` 与 `6520:6520`，避免 `next@16.2.6` 在 Node 18 中直接失败，以及 3000/6520 依赖编辑器端口转发导致的不稳定（`D:\dev-workspace\.devcontainer\Dockerfile`, `D:\dev-workspace\.devcontainer\devcontainer.json`）。
+- **Docker 内 26619 前端预览启动链路加固**：devcontainer 镜像定义从 NodeSource `setup_18.x` 升级到 `setup_20.x`，并在 Docker 层发布 `26619:26619` 与 `26618:26618`，避免 `next@16.2.6` 在 Node 18 中直接失败，以及 26619/26618 依赖编辑器端口转发导致的不稳定（`D:\dev-workspace\.devcontainer\Dockerfile`, `D:\dev-workspace\.devcontainer\devcontainer.json`）。
 - **devcontainer Dockerfile 编码修复**：将 `D:\dev-workspace\.devcontainer\Dockerfile` 与 `devcontainer.json` 重写为 UTF-8 无 BOM，修复 Dev Containers 生成 `Dockerfile-with-features` 后在 `FROM` 前出现隐藏字符，导致 Docker 报 `unknown instruction: FROM` 的问题。
-- **`rebuild.sh` Docker 运行自检与固定监听地址**：脚本启动第 0 步校验 Node `>=20.9.0`，Node 或 lockfile 变化时自动刷新 `node_modules`，并在缺少 `aiohttp` 或 `requirements.txt` 更新时自动安装轻量后端依赖；后端以 `0.0.0.0:6520` 启动，前端 dev server 以 `0.0.0.0:3000` 启动，健康检查和输出统一使用 `http://127.0.0.1:*`，避免 `localhost` 命中宿主机 IPv6 旧进程（`rebuild.sh`）。
-- **Next dev manifest 500 修复**：生产 build 继续保留 `NEXT_TEST_WASM=1` 规避 Windows bind mount lock 问题，但 dev server 不再设置该变量；Node 20/Linux 容器下强制 WASM 会导致 `.next/dev/routes-manifest.json` 与 `middleware-manifest.json` 缺失并使 3000 返回 500（`rebuild.sh`）。
-- **`rebuild.sh` 一键重建失败、3000 端口无前端内容**：根因是 stale TS 增量缓存 `web/frontend/tsconfig.tsbuildinfo` 仍记录已删除的 `app/api/[...proxy]/route.ts`，生产构建读取该缓存时 `ENOENT` 失败；脚本 `set -e` 在第 3 步即中断，dev server 永远不启动。修复：
+- **`rebuild.sh` Docker 运行自检与固定监听地址**：脚本启动第 0 步校验 Node `>=20.9.0`，Node 或 lockfile 变化时自动刷新 `node_modules`，并在缺少 `aiohttp` 或 `requirements.txt` 更新时自动安装轻量后端依赖；后端以 `0.0.0.0:26618` 启动，前端 dev server 以 `0.0.0.0:26619` 启动，健康检查和输出统一使用 `http://127.0.0.1:*`，避免 `localhost` 命中宿主机 IPv6 旧进程（`rebuild.sh`）。
+- **Next dev manifest 500 修复**：生产 build 继续保留 `NEXT_TEST_WASM=1` 规避 Windows bind mount lock 问题，但 dev server 不再设置该变量；Node 20/Linux 容器下强制 WASM 会导致 `.next/dev/routes-manifest.json` 与 `middleware-manifest.json` 缺失并使 26619 返回 500（`rebuild.sh`）。
+- **`rebuild.sh` 一键重建失败、26619 端口无前端内容**：根因是 stale TS 增量缓存 `web/frontend/tsconfig.tsbuildinfo` 仍记录已删除的 `app/api/[...proxy]/route.ts`，生产构建读取该缓存时 `ENOENT` 失败；脚本 `set -e` 在第 3 步即中断，dev server 永远不启动。修复：
   - `web/frontend/package.json` 的 `dev` / `build` 脚本在编译前追加清理 `tsconfig.tsbuildinfo`（`rm -rf .next tsconfig.tsbuildinfo`），令二者自愈。
   - `rebuild.sh` 第 3 步构建前再显式 `rm -f tsconfig.tsbuildinfo`（防 `package.json` 被回退）。
-- **`rebuild.sh` 进程清理抓不到旧 dev server**：`next dev` 启动后进程名变为 `next-server`，原 `pkill -f "next dev"` 无法命中，旧进程残留占用 3000 端口与文件 watcher 致启动假死。改为一并清理 `next-server` / `next/dist/bin/next` / `npm run dev`（`rebuild.sh`）。
+- **`rebuild.sh` 进程清理抓不到旧 dev server**：`next dev` 启动后进程名变为 `next-server`，原 `pkill -f "next dev"` 无法命中，旧进程残留占用 26619 端口与文件 watcher 致启动假死。改为一并清理 `next-server` / `next/dist/bin/next` / `npm run dev`（`rebuild.sh`）。
 
 ### 构建与工程 (Build/CI)
 
-- devcontainer 必须重建后才会应用 Node 20 与 `3000/6520` Docker 端口发布；当前旧容器验证结果为 `bash -n rebuild.sh` 通过，`bash rebuild.sh` 在 Node `18.20.8` 下按预期输出版本不兼容并退出 `1`（`rebuild.sh`）。
+- devcontainer 必须重建后才会应用 Node 20 与 `26619/26618` Docker 端口发布；当前旧容器验证结果为 `bash -n rebuild.sh` 通过，`bash rebuild.sh` 在 Node `18.20.8` 下按预期输出版本不兼容并退出 `1`（`rebuild.sh`）。
 - `docker buildx build --check -f D:\dev-workspace\.devcontainer\Dockerfile D:\dev-workspace\.devcontainer` → passed，确认 Dockerfile 解析层已恢复。
-- 处理 devcontainer 启动时 `ports are not available: 0.0.0.0:3000`：确认宿主机旧 `node` PID `30940` 占用 3000，停止后删除失败遗留的 Created 容器 `316ddf1cea6c`；`docker run --rm -p 6186:6185 -p 3000:3000 -p 6520:6520 --entrypoint /bin/true ...` → passed。
+- 处理 devcontainer 启动时 `ports are not available: 0.0.0.0:26619`：确认宿主机旧 `node` PID `30940` 占用 26619，停止后删除失败遗留的 Created 容器 `316ddf1cea6c`；`docker run --rm -p 6186:6185 -p 26619:26619 -p 26618:26618 --entrypoint /bin/true ...` → passed。
 - devcontainer slim 镜像补装 `procps`，确保后续镜像中 `pkill` 可用；`rebuild.sh` 同时提供 `/proc` Python fallback 以兼容当前未重建的容器（`D:\dev-workspace\.devcontainer\Dockerfile`, `rebuild.sh`）。
-- `bash rebuild.sh` → passed，Node `20.20.2`，Next build 11 static routes，`python3 tools/sync_frontend.py --check` → passed；宿主机 `curl.exe -I http://127.0.0.1:3000/` 与 `curl.exe -I http://127.0.0.1:6520/` 均 `200 OK`。
+- `bash rebuild.sh` → passed，Node `20.20.2`，Next build 11 static routes，`python3 tools/sync_frontend.py --check` → passed；宿主机 `curl.exe -I http://127.0.0.1:26619/` 与 `curl.exe -I http://127.0.0.1:26618/` 均 `200 OK`。
 - `rebuild.sh` 保留生产 build 阶段的 `NEXT_TEST_WASM=1` 以规避 Windows bind mount lock 问题；dev 阶段改回原生 Next.js 启动以保证 `.next/dev` manifest 完整生成；前端就绪等待超时由 60s 放宽到 120s 以容忍首次冷编译（`rebuild.sh`）。
-- 端到端验证：`bash rebuild.sh` → exit 0，后端 6520 与前端 dev 3000 均 `200`，`/api/*` 经 `next.config.ts` rewrites 正常代理到后端（aiohttp 401 鉴权门）。
+- 端到端验证：`bash rebuild.sh` → exit 0，后端 26618 与前端 dev 26619 均 `200`，`/api/*` 经 `next.config.ts` rewrites 正常代理到后端（aiohttp 401 鉴权门）。
 
 ## [v0.24.1] - 2026-06-11
 
@@ -239,7 +280,7 @@
 - `node node_modules/typescript/bin/tsc --noEmit` -> passed。
 - `node node_modules/next/dist/bin/next build --webpack` -> passed，13 static routes generated。
 - `python tools/sync_frontend.py` -> synced 163 files to `pages/`；`python tools/sync_frontend.py --check` -> passed。
-- Browser smoke on `http://localhost:3000/?mock=true` -> passed，中文/英文切换与三栏 header 对齐检查通过，无浏览器 console error。
+- Browser smoke on `http://localhost:26619/?mock=true` -> passed，中文/英文切换与三栏 header 对齐检查通过，无浏览器 console error。
 
 ---
 
@@ -308,7 +349,7 @@
 - `node .\node_modules\next\dist\bin\next build --webpack` -> passed，13 static routes generated。
 - `python tools/sync_frontend.py` -> synced 160 files to `pages/`。
 - `python tools/sync_frontend.py --check` -> passed。
-- `http://localhost:3000` -> HTTP 200，当前由 Next dev preview 提供预览。
+- `http://localhost:26619` -> HTTP 200，当前由 Next dev preview 提供预览。
 
 ---
 
@@ -903,7 +944,7 @@
 ### 构建与工程 (Build/CI)
 
 - 新增 `web/frontend/package.json`（Next.js 16.2.6 + fumadocs-ui 16.9.3 + next-themes + geist）。
-- `web/frontend/next.config.ts`：`output: 'export'`（生产）/ dev rewrite → `:6520`（开发），`images.unoptimized: true`。
+- `web/frontend/next.config.ts`：`output: 'export'`（生产）/ dev rewrite → `:26618`（开发），`images.unoptimized: true`。
 - `metadata.yaml`：version 升至 `v0.10.0`。
 
 ## [v0.8.0] — 2026-05-30

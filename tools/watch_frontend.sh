@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # tools/watch_frontend.sh
-# 监听前端源码变动 → 自动 build → sync → 后端 6520 立即可用
+# 监听前端源码变动 → 自动 build → sync → 后端 26618 立即可用
 #
 # 用法（在仓库根目录执行）：
 #   bash tools/watch_frontend.sh
@@ -54,7 +54,7 @@ build_and_sync() {
   cd "$REPO_ROOT"
   python tools/sync_frontend.py 2>&1 | tail -1
 
-  ok "同步完成 → 刷新 http://localhost:6520 即可看到最新改动"
+  ok "同步完成 → 刷新 http://localhost:26618 即可看到最新改动"
   echo ""
 }
 

@@ -601,6 +601,11 @@ const zh = {
   build_widget_error: "构建失败",
   build_widget_interrupted: "上次构建被中断",
   build_widget_resume_hint: "新建构建将从断点续建",
+  progress_dock_title: "进度",
+  progress_dock_zotero: "Zotero 同步",
+  progress_dock_milvus: "Milvus 构建",
+  progress_dock_graph: "LightRAG 图谱",
+  progress_dock_ingest: "文档摄入",
 } as const;
 
 const en: Record<keyof typeof zh, string> = {
@@ -1180,6 +1185,11 @@ const en: Record<keyof typeof zh, string> = {
   build_widget_error: "Build Failed",
   build_widget_interrupted: "Last build was interrupted",
   build_widget_resume_hint: "New build will resume from checkpoint",
+  progress_dock_title: "Progress",
+  progress_dock_zotero: "Zotero sync",
+  progress_dock_milvus: "Milvus build",
+  progress_dock_graph: "LightRAG graph",
+  progress_dock_ingest: "Ingesting",
 };
 
 export type I18nKey = keyof typeof zh;

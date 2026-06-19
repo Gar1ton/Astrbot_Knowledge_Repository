@@ -116,13 +116,13 @@
               <React.Fragment>
                 <div style={{ fontSize: 12, color: "var(--fg-muted)", marginBottom: 14 }}>只读核对后端有效配置（<code style={{ fontFamily: "var(--font-mono)", color: "var(--accent)" }}>GET /api/config/effective</code>），敏感字段已打码。</div>
                 <Card title="源库 Source Store" icon="db"><ConfigKV k="db_filename" v="knowledge_repository.db" /><ConfigKV k="default_collection" v="default" /><ConfigKV k="ocr_enabled" v="false" /></Card>
-                <Card title="Web 控制台" icon="globe"><ConfigKV k="host" v="0.0.0.0" /><ConfigKV k="port" v="6520" /><ConfigKV k="password" v="****" masked /></Card>
+                <Card title="Web 控制台" icon="globe"><ConfigKV k="host" v="0.0.0.0" /><ConfigKV k="port" v="26618" /><ConfigKV k="password" v="****" masked /></Card>
               </React.Fragment>
             )}
 
             {tab === "terminal" && (
               <div style={{ background: "#16171a", border: "1px solid var(--border-strong)", borderRadius: "var(--radius-lg)", padding: 14, fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.7, color: "#cfd2c8", minHeight: 320 }}>
-                <div style={{ color: "#7c89b8" }}>[12:04:11] <span style={{ color: "#6abf75" }}>INFO</span> aiohttp server on 0.0.0.0:6520</div>
+                <div style={{ color: "#7c89b8" }}>[12:04:11] <span style={{ color: "#6abf75" }}>INFO</span> aiohttp server on 0.0.0.0:26618</div>
                 <div>[12:04:11] <span style={{ color: "#6abf75" }}>INFO</span> migrations 001–012 applied</div>
                 <div>[12:04:13] <span style={{ color: "#6abf75" }}>INFO</span> Milvus Lite index loaded · 6 docs / 188 chunks</div>
                 <div>[12:05:02] <span style={{ color: "#e0a23b" }}>WARN</span> LightRAG workspace "Foundations" not built</div>

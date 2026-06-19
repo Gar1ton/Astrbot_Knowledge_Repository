@@ -1,6 +1,7 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
 import {
   deleteZoteroServerKey,
+  getActiveZoteroSyncJob,
   getZoteroSyncStatus,
   probeZoteroLocal,
   saveZoteroServerKey,
@@ -167,8 +168,15 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
   const handleSyncNow = useCallback(async () => {
     setSyncing(true);
     try {
-      const r = await syncZoteroPull(true);
-      setSyncStatus(r);
+      // 后台启动（立即返回，不再阻塞整段同步）；轮询任务直至终态，再刷新摘要。
+      await syncZoteroPull(true);
+      let job = await getActiveZoteroSyncJob().catch(() => null);
+      while (job && job.status === "running") {
+        await new Promise((res) => setTimeout(res, 1500));
+        job = await getActiveZoteroSyncJob().catch(() => null);
+      }
+      const s = await getZoteroSyncStatus().catch(() => null);
+      if (s) setSyncStatus(s);
       await onRefresh?.();
     } catch (err: unknown) {
       setSyncStatus({ status: "error", message: err instanceof Error ? err.message : String(err) });

@@ -6,6 +6,7 @@ import { I18nContext, Lang, makeT } from "@/lib/i18n";
 import { initPalette } from "@/lib/theme";
 import { getAuth, login } from "@/lib/api";
 import { ConsoleProvider, useConsole } from "@/lib/ConsoleContext";
+import { ProgressDock } from "@/components/progress/ProgressDock";
 import { TopBar } from "@/components/layout/TopBar";
 import { Z } from "@/lib/zLayers";
 import { FilePanel } from "@/components/panels/FilePanel";
@@ -361,6 +362,7 @@ function ConsoleShell() {
   return (
     <ConsoleProvider>
       <ConsoleCanvas onLogout={handleLogout} />
+      <ProgressDock />
     </ConsoleProvider>
   );
 }

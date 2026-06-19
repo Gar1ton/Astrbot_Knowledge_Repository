@@ -9,9 +9,9 @@ set -e
 
 MIN_NODE_VERSION="20.9.0"
 BACKEND_HOST="0.0.0.0"
-BACKEND_PORT="6520"
+BACKEND_PORT="26618"
 FRONTEND_HOST="0.0.0.0"
-FRONTEND_PORT="3000"
+FRONTEND_PORT="26619"
 LOCAL_BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
 LOCAL_FRONTEND_URL="http://127.0.0.1:${FRONTEND_PORT}"
 PYTHON_REQUIREMENTS="requirements.txt"
@@ -84,6 +84,98 @@ for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
 PY
 }
 
+_kill_port_listeners() {
+  python3 - "$@" <<'PY'
+from pathlib import Path
+import os
+import signal
+import sys
+import time
+
+ports = {int(port) for port in sys.argv[1:]}
+current_pid = os.getpid()
+
+
+def _listening_inodes() -> dict[int, set[str]]:
+    inodes: dict[int, set[str]] = {port: set() for port in ports}
+    for proc_net in ("/proc/net/tcp", "/proc/net/tcp6"):
+        path = Path(proc_net)
+        if not path.exists():
+            continue
+        for line in path.read_text().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 10 or parts[3] != "0A":
+                continue
+            _, port_hex = parts[1].rsplit(":", 1)
+            port = int(port_hex, 16)
+            if port in inodes:
+                inodes[port].add(parts[9])
+    return inodes
+
+
+def _owners() -> list[tuple[int, int, str]]:
+    by_inode = _listening_inodes()
+    wanted = {inode: port for port, inodes in by_inode.items() for inode in inodes}
+    owners: list[tuple[int, int, str]] = []
+    if not wanted:
+        return owners
+    for proc_dir in Path("/proc").glob("[0-9]*"):
+        try:
+            pid = int(proc_dir.name)
+        except ValueError:
+            continue
+        if pid in (1, current_pid):
+            continue
+        fd_dir = proc_dir / "fd"
+        try:
+            fds = list(fd_dir.iterdir())
+        except OSError:
+            continue
+        matched_ports: set[int] = set()
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target.endswith("]"):
+                inode = target[len("socket:["):-1]
+                if inode in wanted:
+                    matched_ports.add(wanted[inode])
+        if not matched_ports:
+            continue
+        try:
+            command = (proc_dir / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", "replace"
+            ).strip()
+        except OSError:
+            command = "<unknown>"
+        for port in matched_ports:
+            owners.append((port, pid, command))
+    return sorted(owners)
+
+
+def _stop(sig: signal.Signals) -> None:
+    for port, pid, command in _owners():
+        print(f"[INFO] stopping listener on port {port}: pid={pid} {command}", flush=True)
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+_stop(signal.SIGTERM)
+time.sleep(1)
+if _owners():
+    _stop(signal.SIGKILL)
+    time.sleep(1)
+remaining = _owners()
+if remaining:
+    for port, pid, command in remaining:
+        print(f"[ERROR] port {port} is still occupied by pid={pid} {command}", flush=True)
+    sys.exit(1)
+PY
+}
+
 info "0. 检查 Docker 内 Node.js 版本..."
 if ! command -v node >/dev/null 2>&1; then
   error "未找到 node。请先重建 devcontainer 镜像。"
@@ -127,6 +219,7 @@ touch "$PYTHON_DEPS_STAMP"
 info "1. 停止旧的开发服务器进程..."
 # `next dev` 启动后进程名会变为 `next-server`；同时兼容 slim 镜像缺少 pkill 的情况。
 _kill_matching_processes
+_kill_port_listeners "$BACKEND_PORT" "$FRONTEND_PORT"
 sleep 1
 
 # ── 2. 检查依赖是否需要更新 ──────────────────────────────────────────────────
@@ -158,7 +251,7 @@ printf "%s\n" "$NODE_VERSION" > "$NODE_STAMP"
 info "3. 编译前端（生产构建 → pages/）..."
 # 清理 stale TS 增量缓存：tsconfig.tsbuildinfo 会记录已删除的源文件（如旧的
 # app/api/[...proxy]/route.ts），构建时 TS 读取该缓存会 ENOENT 而整体失败，
-# 由于 set -e 直接中断脚本，dev server 永远起不来、3000 端口无内容。
+# 由于 set -e 直接中断脚本，dev server 永远起不来、前端端口无内容。
 # （npm 脚本已内置同样清理，这里再做一次以防 package.json 被回退。）
 rm -f tsconfig.tsbuildinfo
 # NEXT_TEST_WASM=1：强制 WASM bindings，避免下载 native SWC 后导致 lockfile Permission denied 崩溃
@@ -172,6 +265,7 @@ python3 tools/sync_frontend.py
 # ── 5. 后台启动后端 ──────────────────────────────────────────────────────────
 info "5. 后台拉起后端开发服务 (tests/run_webui.py on ${BACKEND_HOST}:${BACKEND_PORT})..."
 PYTHONUNBUFFERED=1 nohup python3 tests/run_webui.py --host "$BACKEND_HOST" --port "$BACKEND_PORT" > "$ROOT_DIR/dev_backend.log" 2>&1 &
+BACKEND_PID=$!
 info "   后端日志: dev_backend.log"
 
 # ── 6. 后台启动前端 dev server ───────────────────────────────────────────────
@@ -179,15 +273,22 @@ info "6. 后台拉起前端开发服务器 (npm run dev on ${FRONTEND_HOST}:${FR
 cd "$ROOT_DIR/web/frontend"
 # dev server 不强制 NEXT_TEST_WASM：Node 20/Linux 容器下该变量会导致 .next/dev manifest 缺失并返回 500。
 # （npm run dev 自带 `rm -rf .next tsconfig.tsbuildinfo`，无需再手动清缓存。）
-NEXT_TELEMETRY_DISABLED=1 nohup npm run dev -- --hostname "$FRONTEND_HOST" --port "$FRONTEND_PORT" > "$ROOT_DIR/dev_frontend.log" 2>&1 &
+KR_API_HOST=127.0.0.1 KR_API_PORT="$BACKEND_PORT" NEXT_TELEMETRY_DISABLED=1 nohup npm run dev -- --hostname "$FRONTEND_HOST" --port "$FRONTEND_PORT" > "$ROOT_DIR/dev_frontend.log" 2>&1 &
+FRONTEND_PID=$!
 info "   前端日志: dev_frontend.log"
 
 # ── 7. 等待服务就绪 ──────────────────────────────────────────────────────────
 info "7. 等待服务就绪..."
 _wait_for() {
-  local name="$1" url="$2" timeout="${3:-60}" elapsed=0
+  local name="$1" url="$2" pid="$3" log_file="$4" timeout="${5:-60}" elapsed=0
   printf "   等待 %s 就绪 " "$name"
   while ! curl -sf "$url" > /dev/null 2>&1; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo
+      error "$name 进程已退出，请检查 ${log_file}"
+      tail -n 80 "$log_file" 2>/dev/null || true
+      exit 1
+    fi
     printf "."
     sleep 1
     elapsed=$((elapsed + 1))
@@ -200,9 +301,9 @@ _wait_for() {
   echo " 就绪"
 }
 
-_wait_for "后端 (${BACKEND_PORT})" "${LOCAL_BACKEND_URL}/"
+_wait_for "后端 (${BACKEND_PORT})" "${LOCAL_BACKEND_URL}/" "$BACKEND_PID" "$ROOT_DIR/dev_backend.log"
 # 前端首次冷编译（webpack + WASM）较慢，放宽到 120s 避免误报超时
-_wait_for "前端 dev (${FRONTEND_PORT})" "${LOCAL_FRONTEND_URL}/" 120
+_wait_for "前端 dev (${FRONTEND_PORT})" "${LOCAL_FRONTEND_URL}/" "$FRONTEND_PID" "$ROOT_DIR/dev_frontend.log" 120
 
 success "一键重建并重启完成！"
 echo "=========================================="

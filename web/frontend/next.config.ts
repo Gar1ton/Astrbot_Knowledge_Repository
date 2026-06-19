@@ -11,9 +11,10 @@ const nextConfig: NextConfig = {
   // 开发模式下将 /api/* 反向代理到后端（production static export 会忽略此配置）
   ...(isDev
     ? {
+        allowedDevOrigins: ["127.0.0.1", "localhost"],
         async rewrites() {
           const host = process.env.KR_API_HOST ?? "127.0.0.1";
-          const port = process.env.KR_API_PORT ?? "6520";
+          const port = process.env.KR_API_PORT ?? "26618";
           return [
             {
               source: "/api/:path*",

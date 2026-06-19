@@ -6,7 +6,7 @@
 真实后端（v0.3.0/v0.4.0）就绪后，组合根换注入即可，前端与本脚本逻辑不变。
 
 用法：
-    python tests/run_webui.py                 # 端口 6520，需登录（默认 admin / 111111）
+    python tests/run_webui.py                 # 端口 26618，需登录（默认 admin / 111111）
     python tests/run_webui.py --no-auth       # 跳过登录，直接进入（仅本地调试）
     python tests/run_webui.py --port 8000     # 指定端口
     python tests/run_webui.py --empty         # 不播种示例数据
@@ -187,7 +187,7 @@ async def _make_app(args: argparse.Namespace) -> web.Application:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="启动 Knowledge Repository Web 控制台（调试用）")
-    parser.add_argument("--port", type=int, default=6520)
+    parser.add_argument("--port", type=int, default=26618)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--no-auth", action="store_true", help="跳过登录（仅本地调试）")
     parser.add_argument("--empty", action="store_true", help="不播种示例数据")

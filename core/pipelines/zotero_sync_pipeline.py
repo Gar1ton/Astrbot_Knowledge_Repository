@@ -40,11 +40,19 @@ from core.domain.models import (
     DocumentOrigin,
 )
 from core.managers.ingest_manager import make_document_id
+from core.zotero_sync_job import (
+    ZOTERO_STAGE_APPLYING_REMOVALS,
+    ZOTERO_STAGE_FINALIZING,
+    ZOTERO_STAGE_MIRRORING,
+    ZOTERO_STAGE_READING,
+    ZOTERO_STAGE_SYNCING_DOCS,
+)
 
 if TYPE_CHECKING:
     from core.config import Config, ZoteroSyncConfig
     from core.managers.ingest_manager import IngestManager
     from core.repository.source_store.base import SourceDocumentStore
+    from core.zotero_sync_job import ZoteroSyncJob
 
 logger = logging.getLogger("astrbot_plugin_knowledge_repository")
 
@@ -201,24 +209,69 @@ class ZoteroSyncPipeline:
             "pdf_attachment_count": pdf_count,
         }
 
-    async def pull(self, *, incremental: bool = True) -> ZoteroSyncResult:
-        """执行一次整库 Pull。incremental=True 时仅处理新增/变更附件。"""
+    async def pull(
+        self, *, incremental: bool = True, progress: ZoteroSyncJob | None = None
+    ) -> ZoteroSyncResult:
+        """执行一次整库 Pull。incremental=True 时仅处理新增/变更附件。
+
+        `progress` 为可选的进度任务对象（`ZoteroSyncJob`）：传入时在各阶段/逐文档循环里更新，
+        供前端轮询进度条；不传则纯执行（保持现有单测不受影响）。
+        """
         cfg = self._config.get_zotero_sync_config()
         result = ZoteroSyncResult(
             sync_mode=cfg.sync_mode,
             storage_mode=cfg.storage_mode,
             started_at=datetime.now(timezone.utc),
         )
+        if progress is not None:
+            progress.incremental = incremental
+            progress.sync_mode = cfg.sync_mode
+            progress.storage_mode = cfg.storage_mode
+            progress.access_mode = cfg.access_mode
+            progress.set_stage(ZOTERO_STAGE_READING)
+        logger.info(
+            "Zotero pull start: access=%s sync_mode=%s storage=%s incremental=%s",
+            cfg.access_mode,
+            cfg.sync_mode,
+            cfg.storage_mode,
+            incremental,
+        )
+
         snapshot = self._read_snapshot(cfg, result)
         if snapshot is None:
+            if progress is not None:
+                for err in result.errors:
+                    progress.note_error(err)
             result.finished_at = datetime.now(timezone.utc)
+            logger.error("Zotero pull aborted (snapshot unavailable): %s", result.errors)
             return result
+
+        if progress is not None:
+            progress.items_total = len(snapshot.items)
+            progress.set_stage(ZOTERO_STAGE_MIRRORING)
         await self._mirror_tables(snapshot)
         result.items_mirrored = len(snapshot.items)
         result.collections_mirrored = len(snapshot.collections)
 
-        await self._sync_documents(cfg, snapshot, incremental=incremental, result=result)
+        if progress is not None:
+            progress.docs_total = sum(
+                1 for att in snapshot.attachments if _is_pdf(att.content_type, att.filename)
+            )
+            progress.set_stage(ZOTERO_STAGE_SYNCING_DOCS)
+        await self._sync_documents(
+            cfg, snapshot, incremental=incremental, result=result, progress=progress
+        )
+
+        if progress is not None:
+            progress.set_stage(ZOTERO_STAGE_APPLYING_REMOVALS)
         await self._apply_removals(cfg, snapshot, result=result)
+
+        if progress is not None:
+            progress.set_stage(ZOTERO_STAGE_FINALIZING)
+            progress.new_count = len(result.new_document_ids)
+            progress.changed_count = len(result.changed_document_ids)
+            progress.removed_count = len(result.removed_document_ids)
+            progress.detached_count = len(result.detached_document_ids)
 
         if cfg.sync_mode == ZOTERO_SYNC_STRICT and (
             result.new_document_ids or result.changed_document_ids or result.detached_document_ids
@@ -226,7 +279,15 @@ class ZoteroSyncPipeline:
             result.needs_milvus_rebuild = True
 
         result.finished_at = datetime.now(timezone.utc)
-        logger.info("Zotero pull done: %s", result.to_dict())
+        logger.info(
+            "Zotero pull done: new=%d changed=%d skipped=%d removed=%d detached=%d errors=%d",
+            len(result.new_document_ids),
+            len(result.changed_document_ids),
+            result.skipped_unchanged,
+            len(result.removed_document_ids),
+            len(result.detached_document_ids),
+            len(result.errors),
+        )
         return result
 
     def _read_snapshot(
@@ -297,6 +358,7 @@ class ZoteroSyncPipeline:
         *,
         incremental: bool,
         result: ZoteroSyncResult,
+        progress: ZoteroSyncJob | None = None,
     ) -> None:
         lib = snapshot.library.library_id
         item_by_key = {i.item_key: i for i in snapshot.items}
@@ -335,6 +397,8 @@ class ZoteroSyncPipeline:
             )
             if incremental and unchanged:
                 result.skipped_unchanged += 1
+                if progress is not None:
+                    progress.skipped_unchanged += 1
                 continue
 
             collection = primary_coll.get(item_key) or DEFAULT_ZOTERO_COLLECTION
@@ -361,6 +425,10 @@ class ZoteroSyncPipeline:
                 )
             except Exception as exc:  # 单文档失败不阻断整库。
                 result.errors.append(f"{document_id}: {exc}")
+                if progress is not None:
+                    progress.docs_failed += 1
+                    progress.note_error(f"{document_id}: {exc}")
+                logger.error("Zotero ingest failed for %s: %s", document_id, exc, exc_info=True)
                 continue
 
             if was_detached:
@@ -369,8 +437,12 @@ class ZoteroSyncPipeline:
                 result.new_document_ids.append(document_id)
             else:
                 result.changed_document_ids.append(document_id)
+            if progress is not None:
+                progress.docs_processed += 1
 
-            await self._index_and_mark(cfg, document_id, collection)
+            await self._index_and_mark(
+                cfg, document_id, collection, result=result, progress=progress
+            )
 
     def _resolve_source_path(self, att, link_root_override: Path | None) -> Path | None:
         if att.resolved_path:
@@ -382,13 +454,26 @@ class ZoteroSyncPipeline:
         return None
 
     async def _index_and_mark(
-        self, cfg: ZoteroSyncConfig, document_id: str, collection: str
+        self,
+        cfg: ZoteroSyncConfig,
+        document_id: str,
+        collection: str,
+        *,
+        result: ZoteroSyncResult | None = None,
+        progress: ZoteroSyncJob | None = None,
     ) -> None:
         if self._index_document is not None:
             try:
                 await self._index_document(document_id, collection)
             except Exception as exc:
-                logger.warning("index_document failed for %s: %s", document_id, exc)
+                # 索引副作用失败必须上报（如 VectorStore 未配置）：文档已镜像/摄入但未入向量库，
+                # 不可静默吞掉，否则用户侧表现为「同步了却检索不到 = 失灵」。
+                msg = f"index_document failed for {document_id}: {exc}"
+                logger.error(msg, exc_info=True)
+                if result is not None:
+                    result.errors.append(msg)
+                if progress is not None:
+                    progress.note_error(msg)
         # strict 模式禁用 LRAG；conservative/archive 标记 LRAG 待建。
         if cfg.sync_mode != ZOTERO_SYNC_STRICT and self._lightrag_mark_pending is not None:
             try:

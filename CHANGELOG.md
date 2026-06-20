@@ -27,6 +27,8 @@
 
 - **FilePanel 同步按钮失效**：面板头部与 Zotero 区块的两个"同步"图标按钮缺少 `onClick` 绑定，点击无任何响应；补齐两处 `onClick={() => handleZoteroSync(true)}` 并新增 `handleZoteroSync` 函数（触发 `POST /api/sync/zotero/pull` + 本地轮询至完成 + 刷新 `listCollections`）、新增 i18n 键 `zotero_sync_started`（`web/frontend/components/panels/FilePanel.tsx`、`web/frontend/lib/i18n.ts`）。
 - **同步期间刷新 WebUI 偶发白屏**：`sync_frontend.py` 先 `shutil.rmtree(pages/)` 再逐文件复制，中间窗口期 HTTP 请求会因找不到 `index.html` 而 404；改为先写临时目录 `pages.__tmp__`、完成后整体 `rename` 替换旧目录，消除窗口期（`tools/sync_frontend.py`）。
+- **Flow 页同步卡住整个界面**：`get_zotero_config()` 中调用 `local_api.probe_connection()` 时使用同步 `urllib.request.urlopen`（timeout=1s），每次执行都阻塞 aiohttp 事件循环，导致所有并发 HTTP 请求在轮询周期内最多卡顿 1 秒；改为 `await asyncio.to_thread(local_api.probe_connection, ...)` 让阻塞 I/O 在线程池中运行（`core/api.py`，`get_zotero_config` 与 `probe_zotero_local` 两处）。
+- **Flow 页同步按钮长期禁用**：`ZoteroQuickConfig.handleSyncNow` 把整段同步（可能持续数分钟）的轮询 while 循环内联在 onClick 回调中，期间按钮一直禁用且无法通过 ProgressDock 感知进度；改为 fire-and-forget——`handleSyncNow` 仅启动同步后立即置 `syncing=true` 并返回，进度轮询移至独立 `useEffect`，同步完成后更新状态摘要并回调 `onRefresh`（`web/frontend/components/flow/ZoteroQuickConfig.tsx`）。
 
 ## [v0.26.3] — 2026-06-20
 

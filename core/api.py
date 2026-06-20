@@ -3183,7 +3183,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "server_access": {},
         }
         if cfg.access_mode != ZOTERO_ACCESS_SERVER:
-            out["connection"] = local_api.probe_connection(cfg.api_port)
+            out["connection"] = await asyncio.to_thread(local_api.probe_connection, cfg.api_port)
         if self._zotero_pipeline is not None:
             availability = self._zotero_pipeline.is_available()
             out["availability"] = availability
@@ -3206,7 +3206,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 "read": {"available": False, "reason": "未初始化"},
             }
         cfg = self._config.get_zotero_sync_config()
-        connection = local_api.probe_connection(cfg.api_port)
+        connection = await asyncio.to_thread(local_api.probe_connection, cfg.api_port)
         if self._zotero_pipeline is None:
             read: dict[str, Any] = {"available": False, "reason": "Zotero 同步未启用或未装配"}
         else:

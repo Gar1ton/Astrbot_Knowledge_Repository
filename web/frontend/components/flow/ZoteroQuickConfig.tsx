@@ -166,24 +166,34 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
   }, []);
 
   const handleSyncNow = useCallback(async () => {
-    setSyncing(true);
     try {
-      // 后台启动（立即返回，不再阻塞整段同步）；轮询任务直至终态，再刷新摘要。
       await syncZoteroPull(true);
-      let job = await getActiveZoteroSyncJob().catch(() => null);
-      while (job && job.status === "running") {
-        await new Promise((res) => setTimeout(res, 1500));
-        job = await getActiveZoteroSyncJob().catch(() => null);
-      }
-      const s = await getZoteroSyncStatus().catch(() => null);
-      if (s) setSyncStatus(s);
-      await onRefresh?.();
+      setSyncing(true);
     } catch (err: unknown) {
       setSyncStatus({ status: "error", message: err instanceof Error ? err.message : String(err) });
-    } finally {
-      setSyncing(false);
     }
-  }, [onRefresh]);
+  }, []);
+
+  useEffect(() => {
+    if (!syncing) return;
+    let cancelled = false;
+    async function poll() {
+      const job = await getActiveZoteroSyncJob().catch(() => null);
+      if (cancelled) return;
+      if (!job || job.status !== "running") {
+        const s = await getZoteroSyncStatus().catch(() => null);
+        if (!cancelled) {
+          if (s) setSyncStatus(s);
+          setSyncing(false);
+          onRefresh?.().catch(() => {});
+        }
+      } else {
+        setTimeout(poll, 2000);
+      }
+    }
+    poll();
+    return () => { cancelled = true; };
+  }, [syncing, onRefresh]);
 
   const syncSummary = useMemo(() => {
     if (!syncStatus || (!syncStatus.finished_at && !syncStatus.status)) return t("flow_quick_zotero_never_synced");

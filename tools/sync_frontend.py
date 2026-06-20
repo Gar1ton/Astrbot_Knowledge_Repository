@@ -71,23 +71,31 @@ def _check() -> int:
 def _sync() -> int:
     src = _resolve_src()
     print(f"同步源：{src.relative_to(_ROOT)} → pages/")
-    preserved = {}
+    # 先写入临时目录，再整体原子替换，避免删除旧目录期间 HTTP 服务出现短暂 404 窗口。
+    tmp = _DST.parent / f"{_DST.name}.__tmp__"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    # 保留 pages/ 里不属于构建产物的文件（如 README.md）
     if _DST.exists():
         for name in _SKIP_NAMES:
             path = _DST / name
             if path.is_file():
-                preserved[name] = path.read_bytes()
-        shutil.rmtree(_DST)
-    _DST.mkdir(parents=True)
-    for name, content in preserved.items():
-        (_DST / name).write_bytes(content)
+                (tmp / name).write_bytes(path.read_bytes())
     count = 0
     for s in _iter_files(src):
-        d = _DST / s.relative_to(src)
+        d = tmp / s.relative_to(src)
         d.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(s, d)
         count += 1
         print("  copied", s.relative_to(_ROOT), "→", d.relative_to(_ROOT))
+    # 原子替换：重命名临时目录为正式目录
+    old = _DST.parent / f"{_DST.name}.__old__"
+    if _DST.exists():
+        _DST.rename(old)
+    tmp.rename(_DST)
+    if old.exists():
+        shutil.rmtree(old)
     print(f"完成：同步 {count} 个文件到 pages/。")
     return 0
 

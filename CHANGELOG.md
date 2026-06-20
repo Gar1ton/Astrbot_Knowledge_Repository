@@ -21,6 +21,13 @@
 
 ---
 
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **FilePanel 同步按钮失效**：面板头部与 Zotero 区块的两个"同步"图标按钮缺少 `onClick` 绑定，点击无任何响应；补齐两处 `onClick={() => handleZoteroSync(true)}` 并新增 `handleZoteroSync` 函数（触发 `POST /api/sync/zotero/pull` + 本地轮询至完成 + 刷新 `listCollections`）、新增 i18n 键 `zotero_sync_started`（`web/frontend/components/panels/FilePanel.tsx`、`web/frontend/lib/i18n.ts`）。
+- **同步期间刷新 WebUI 偶发白屏**：`sync_frontend.py` 先 `shutil.rmtree(pages/)` 再逐文件复制，中间窗口期 HTTP 请求会因找不到 `index.html` 而 404；改为先写临时目录 `pages.__tmp__`、完成后整体 `rename` 替换旧目录，消除窗口期（`tools/sync_frontend.py`）。
+
 ## [v0.26.3] — 2026-06-20
 
 ### 新增功能 (Added)

@@ -6,7 +6,7 @@ import { Panel } from "@/components/ds/Panel";
 import { IconButton } from "@/components/ds/IconButton";
 import { Icon } from "@/components/ds/Icon";
 import { useConsole } from "@/lib/ConsoleContext";
-import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, deleteCollectionByKey, renameCollection, createCollection, uploadDocument, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
+import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, deleteCollectionByKey, renameCollection, createCollection, uploadDocument, syncZoteroPull, getActiveZoteroSyncJob, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 
@@ -912,11 +912,36 @@ export function FilePanel() {
   const [newCollectionParent, setNewCollectionParent] = useState<Collection | null>(null);
   const [renamingCollection, setRenamingCollection] = useState<Collection | null>(null);
   const [showUpload, setShowUpload] = useState(false);
+  const [zoteroSyncing, setZoteroSyncing] = useState(false);
 
   useEffect(() => {
     listCollections().then(setCollections).catch(() => {});
     getBuildJobHistory().then(setBuildHistory).catch(() => {});
   }, []);
+
+  // 轮询 Zotero 同步进度；完成后刷新 collections 列表。
+  useEffect(() => {
+    if (!zoteroSyncing) return;
+    let cancelled = false;
+    async function poll() {
+      if (cancelled) return;
+      try {
+        const job = await getActiveZoteroSyncJob();
+        if (!cancelled) {
+          if (!job || job.status !== "running") {
+            setZoteroSyncing(false);
+            listCollections().then(setCollections).catch(() => {});
+          } else {
+            setTimeout(poll, 2000);
+          }
+        }
+      } catch {
+        if (!cancelled) setTimeout(poll, 3000);
+      }
+    }
+    poll();
+    return () => { cancelled = true; };
+  }, [zoteroSyncing]);
 
   const prevBuildJobRef = React.useRef<GraphBuildJob | null>(null);
   useEffect(() => {
@@ -1057,6 +1082,16 @@ export function FilePanel() {
     );
   }
 
+  async function handleZoteroSync(incremental = true) {
+    try {
+      await syncZoteroPull(incremental);
+      toast(t("zotero_sync_started"), "ok");
+      setZoteroSyncing(true);
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : String(err), "error");
+    }
+  }
+
   async function refreshBuildState() {
     const [job, history] = await Promise.all([
       getActiveBuildJob().catch(() => null),
@@ -1169,7 +1204,7 @@ export function FilePanel() {
             }}
           />
           <IconButton name="cloud" label={t("file_action_r2_backup")} />
-          <IconButton name="sync" label={t("file_action_zotero_sync")} />
+          <IconButton name="sync" label={t("file_action_zotero_sync")} onClick={() => handleZoteroSync(true)} />
         </>
       }
     >
@@ -1180,7 +1215,7 @@ export function FilePanel() {
           label={t("file_zotero_sync")}
           actions={
             <>
-              <IconButton name="sync" label={t("file_action_zotero_sync")} size={14} />
+              <IconButton name="sync" label={t("file_action_zotero_sync")} size={14} onClick={() => handleZoteroSync(true)} />
               <IconButton name="plus" label={t("file_action_new_collection")} size={14} />
             </>
           }

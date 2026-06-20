@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any
 
 from core.repository.embedding.base import EmbeddingProvider
@@ -16,11 +17,19 @@ logger = logging.getLogger("LocalEmbeddingProvider")
 class LocalEmbeddingProvider(EmbeddingProvider):
     """基于本地加载 HuggingFace 模型的 Embedding 计算适配器。"""
 
-    def __init__(self, model_name: str = "intfloat/multilingual-e5-small") -> None:
+    def __init__(
+        self,
+        model_name: str = "intfloat/multilingual-e5-small",
+        idle_timeout: int = 420,
+    ) -> None:
         self._model_name = model_name
         self._model: Any = None
         self._dimension: int = 0
-        
+        # idle_timeout=0 表示永不自动卸载
+        self._idle_timeout = idle_timeout
+        self._lock = threading.Lock()
+        self._idle_timer: threading.Timer | None = None
+
         # 常见模型的维度映射字典，用于避免冷启动加载前获取维度的性能开销
         self._dimension_mapping = {
             "BAAI/bge-small-zh-v1.5": 512,
@@ -35,7 +44,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         self._dimension = self._dimension_mapping.get(self._model_name, 384)
 
     def _lazy_init(self) -> None:
-        """按需初始化，在此处导入大包并触发下载。"""
+        """按需初始化，在此处导入大包并触发下载。调用方须持有 self._lock。"""
         if self._model is not None:
             return
 
@@ -73,14 +82,36 @@ class LocalEmbeddingProvider(EmbeddingProvider):
             logger.error(f"Failed to load local model {self._model_name}: {e}")
             raise RuntimeError(f"加载本地向量模型 {self._model_name} 失败: {e}") from e
 
+    def _reset_idle_timer(self) -> None:
+        """每次 encode 结束后重置空闲卸载计时器。"""
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+        if self._idle_timeout > 0:
+            self._idle_timer = threading.Timer(self._idle_timeout, self._unload)
+            self._idle_timer.daemon = True
+            self._idle_timer.start()
+
+    def _unload(self) -> None:
+        """空闲超时后卸载模型以释放内存，下次调用时自动重新加载。"""
+        with self._lock:
+            if self._model is not None:
+                logger.info(
+                    f"Local model '{self._model_name}' idle for {self._idle_timeout}s, "
+                    "unloading to free memory."
+                )
+                self._model = None
+        self._idle_timer = None
+
     async def embed_query(self, text: str) -> list[float]:
         # 阻塞计算投递到线程池
         return await asyncio.to_thread(self._embed_query_sync, text)
 
     def _embed_query_sync(self, text: str) -> list[float]:
-        self._lazy_init()
-        # model.encode 会返回 numpy array，转换为 python float list
-        res = self._model.encode(self._prepare_query(text), normalize_embeddings=True)
+        # 持锁期间完成加载+encode，防止计时器在 encode 过程中卸载模型
+        with self._lock:
+            self._lazy_init()
+            res = self._model.encode(self._prepare_query(text), normalize_embeddings=True)
+        self._reset_idle_timer()
         return [float(x) for x in res]
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
@@ -89,8 +120,10 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         return await asyncio.to_thread(self._embed_documents_sync, texts)
 
     def _embed_documents_sync(self, texts: list[str]) -> list[list[float]]:
-        self._lazy_init()
-        res = self._model.encode(self._prepare_documents(texts), normalize_embeddings=True)
+        with self._lock:
+            self._lazy_init()
+            res = self._model.encode(self._prepare_documents(texts), normalize_embeddings=True)
+        self._reset_idle_timer()
         return [[float(x) for x in row] for row in res]
 
     def _prepare_query(self, text: str) -> str:

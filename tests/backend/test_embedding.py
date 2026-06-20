@@ -1,6 +1,7 @@
 """EmbeddingProvider 单元与契约测试。"""
 import os
 import shutil
+import time
 
 import pytest
 
@@ -123,3 +124,48 @@ async def test_external_provider_mock() -> None:
         model_name="text-embedding-3-small"
     )
     assert provider.get_dimension() == 1536
+
+
+def test_local_provider_idle_timeout_unloads_model() -> None:
+    """空闲超时后 _model 应被置 None，并可在下次调用时重新加载。"""
+    import unittest.mock as mock
+
+    provider = LocalEmbeddingProvider(
+        model_name="intfloat/multilingual-e5-small",
+        idle_timeout=1,  # 1 秒，仅用于测试
+    )
+
+    fake_model = mock.MagicMock()
+    fake_model.encode.return_value = [0.1] * 384
+
+    provider._model = fake_model
+
+    # 手动触发一次 encode + 计时器重置
+    provider._embed_query_sync("hello")
+
+    assert provider._model is not None
+    assert provider._idle_timer is not None
+
+    # 等待超时触发卸载
+    time.sleep(1.5)
+
+    assert provider._model is None
+
+
+def test_local_provider_idle_timeout_zero_never_unloads() -> None:
+    """idle_timeout=0 时不应创建计时器，模型永久驻留。"""
+    import unittest.mock as mock
+
+    provider = LocalEmbeddingProvider(
+        model_name="intfloat/multilingual-e5-small",
+        idle_timeout=0,
+    )
+
+    fake_model = mock.MagicMock()
+    fake_model.encode.return_value = [0.1] * 384
+    provider._model = fake_model
+
+    provider._embed_query_sync("hello")
+
+    assert provider._idle_timer is None
+    assert provider._model is not None

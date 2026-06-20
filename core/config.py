@@ -178,6 +178,8 @@ class EmbeddingConfig:
     model: str = "intfloat/multilingual-e5-small"
     base_url: str = "https://api.openai.com/v1"
     max_token_size: int = 512
+    # 本地模型空闲卸载超时（秒），0 = 永不自动卸载；仅对 provider=local 生效
+    local_idle_timeout_seconds: int = 420
 
 
 @dataclass
@@ -629,6 +631,12 @@ class Config:
                 current.get(
                     "max_token_size",
                     legacy_graph.get("max_token_size", EmbeddingConfig.max_token_size),
+                )
+            ),
+            local_idle_timeout_seconds=int(
+                current.get(
+                    "local_idle_timeout_seconds",
+                    EmbeddingConfig.local_idle_timeout_seconds,
                 )
             ),
         )

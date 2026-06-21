@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.error
 import urllib.parse
@@ -21,6 +22,8 @@ from core.domain.models import (
     ZoteroRelation,
     ZoteroTag,
 )
+
+logger = logging.getLogger("astrbot_plugin_knowledge_repository")
 
 API_BASE_URL = "https://api.zotero.org"
 API_VERSION = "3"
@@ -231,13 +234,8 @@ class ZoteroWebApiReader:
                 continue
             filename = _attachment_filename(data, key)
             content_type = str(data.get("contentType") or "")
-            resolved = ""
-            if self._download_dir and _is_pdf(content_type, filename):
-                target = self._download_dir / key / _safe_filename(filename or f"{key}.pdf")
-                try:
-                    resolved = str(self._client.download_user_file(self._user_id, key, target))
-                except ZoteroWebApiError:
-                    resolved = ""
+            # 不在此处下载：read_snapshot 只读元数据（快、可立即定出 docs_total），文件下载延迟
+            # 到 pipeline 的 syncing_documents 阶段、只对新增/变更件触发（见 fetch_attachment_file）
             result.append(
                 ZoteroAttachment(
                     attachment_key=key,
@@ -246,13 +244,30 @@ class ZoteroWebApiReader:
                     content_type=content_type,
                     filename=filename,
                     path=str(data.get("path") or ""),
-                    resolved_path=resolved,
+                    resolved_path="",
                     link_mode=str(data.get("linkMode") or ""),
                     md5=str(data.get("md5") or ""),
                     raw_zotero_json=data,
                 )
             )
         return result
+
+    def fetch_attachment_file(self, attachment_key: str, filename: str) -> Path | None:
+        """惰性下载单篇附件原件到 download_dir，返回本地路径（无 download_dir / 下载失败时 None）。
+
+        为什么拆出来：原实现把整库 PDF 下载塞进 read_snapshot 的 reading 阶段，串行 + 每篇 15s
+        超时，进度条会假死在 reading 底值（3%）直到全库下完，且每次同步都重下未变更件。改为按需
+        单篇下载后，pipeline 只对新增/变更件调用本方法，进度随 docs_processed 平滑推进。"""
+        if not self._download_dir:
+            return None
+        target = self._download_dir / attachment_key / _safe_filename(
+            filename or f"{attachment_key}.pdf"
+        )
+        try:
+            return Path(self._client.download_user_file(self._user_id, attachment_key, target))
+        except ZoteroWebApiError as exc:
+            logger.warning("Zotero web file download failed for %s: %s", attachment_key, exc)
+            return None
 
     def _collection_items(self, payload: list[dict[str, Any]]) -> list[tuple[str, str]]:
         pairs: list[tuple[str, str]] = []

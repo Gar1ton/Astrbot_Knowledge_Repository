@@ -75,12 +75,13 @@ def test_web_api_reader_builds_personal_snapshot(tmp_path: Path) -> None:
             target_path.write_bytes(b"%PDF-1.4")
             return target_path
 
-    snapshot = ZoteroWebApiReader(
+    reader = ZoteroWebApiReader(
         Client(),  # type: ignore[arg-type]
         user_id="123",
         username="alice",
         download_dir=tmp_path / "cache",
-    ).read_snapshot()
+    )
+    snapshot = reader.read_snapshot()
 
     assert snapshot.library.library_id == "123"
     assert snapshot.library.name == "alice"
@@ -90,4 +91,8 @@ def test_web_api_reader_builds_personal_snapshot(tmp_path: Path) -> None:
     assert snapshot.collection_items == [("COLL1", "ITEM1")]
     assert snapshot.item_tags["ITEM1"][0].tag == "zotero"
     assert snapshot.attachments[0].parent_item_key == "ITEM1"
-    assert Path(snapshot.attachments[0].resolved_path).exists()
+    # read_snapshot 只读元数据、不预下载（下载延迟到 pipeline 的 syncing_documents 阶段）。
+    assert snapshot.attachments[0].resolved_path == ""
+    # 惰性单篇下载：按需调用才真正落盘。
+    fetched = reader.fetch_attachment_file("ATT1", "paper.pdf")
+    assert fetched is not None and fetched.exists()

@@ -25,6 +25,8 @@
 
 ### 修复 (Fixed)
 
+- **Zotero server 模式同步卡死在 3%**：`ZoteroWebApiReader.read_snapshot()` 在 `reading_snapshot` 阶段就串行下载整库所有 PDF（每篇 15s 超时），而 `docs_total/docs_processed` 要等读取整段返回后才设置，进度条因此长时间假死在阶段底值 3%；且增量「未变更」判断在下载之后，等于每次同步都重下整库。改为：`_attachments()` 只读元数据不下载、新增 `fetch_attachment_file()` 惰性单篇下载；pipeline 的 `_read_snapshot` 额外返回下载器，`_sync_documents` 重排为「先判增量未变更→直接跳过且不下载，仅新增/变更件在 syncing_documents 阶段按需下载（`asyncio.to_thread` 包裹避免阻塞事件循环）」，进度随 docs_processed 平滑推进（`core/adapters/zotero/web_api.py`、`core/pipelines/zotero_sync_pipeline.py`）。
+- **进度面板可被手动关闭**：`ProgressDock` 头部的 `×` 关闭按钮会让用户在后台任务未完成时提前隐藏面板；移除该按钮与 `dismissed` 状态，面板仅保留收起/展开，随后台任务存在与否自动出现/消失（任务终态后由 `/api/sync/zotero/active` 短暂展示再返回 null），保证「任务成功后才结束」（`web/frontend/components/progress/ProgressDock.tsx`）。
 - **FilePanel 同步按钮失效**：面板头部与 Zotero 区块的两个"同步"图标按钮缺少 `onClick` 绑定，点击无任何响应；补齐两处 `onClick={() => handleZoteroSync(true)}` 并新增 `handleZoteroSync` 函数（触发 `POST /api/sync/zotero/pull` + 本地轮询至完成 + 刷新 `listCollections`）、新增 i18n 键 `zotero_sync_started`（`web/frontend/components/panels/FilePanel.tsx`、`web/frontend/lib/i18n.ts`）。
 - **同步期间刷新 WebUI 偶发白屏**：`sync_frontend.py` 先 `shutil.rmtree(pages/)` 再逐文件复制，中间窗口期 HTTP 请求会因找不到 `index.html` 而 404；改为先写临时目录 `pages.__tmp__`、完成后整体 `rename` 替换旧目录，消除窗口期（`tools/sync_frontend.py`）。
 - **Flow 页同步卡住整个界面**：`get_zotero_config()` 中调用 `local_api.probe_connection()` 时使用同步 `urllib.request.urlopen`（timeout=1s），每次执行都阻塞 aiohttp 事件循环，导致所有并发 HTTP 请求在轮询周期内最多卡顿 1 秒；改为 `await asyncio.to_thread(local_api.probe_connection, ...)` 让阻塞 I/O 在线程池中运行（`core/api.py`，`get_zotero_config` 与 `probe_zotero_local` 两处）。
@@ -40,6 +42,7 @@
 ### 测试 (Tests)
 
 - 新增 capabilities 聚合计数回归测试，确保 `/api/capabilities` 不再调用 `list_chunks()`；新增 Zotero active success 短暂保留测试；修正 Zotero SQLite reader 测试中的 Windows 路径分隔符断言（`tests/backend/test_api.py`、`tests/backend/test_zotero_sync.py`）。
+- 新增 `test_pull_server_mode_downloads_lazily_and_skips_unchanged`：守护 web 模式首次按需下载恰好一次、二次增量跳过且不重下，防止 `read_snapshot` 预下载回归；更新 `test_web_api_reader_builds_personal_snapshot` 断言 `read_snapshot` 不再预下载、`fetch_attachment_file` 按需落盘（`tests/backend/test_zotero_sync.py`、`tests/backend/test_zotero_server.py`）。
 
 ## [v0.26.3] — 2026-06-20
 

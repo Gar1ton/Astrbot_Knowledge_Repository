@@ -183,17 +183,10 @@ export function ProgressDock() {
   const { setWorkflowOpen } = useConsole();
   const jobs = useProgressJobs();
   const [collapsed, setCollapsed] = useState(false);
-  // 关闭后隐藏，直到出现新的活动任务（上升沿重置）。
-  const [dismissed, setDismissed] = useState(false);
-  const prevActiveRef = useRef(false);
 
-  const anyActive = jobs.some((j) => j.active);
-  useEffect(() => {
-    if (anyActive && !prevActiveRef.current) setDismissed(false);
-    prevActiveRef.current = anyActive;
-  }, [anyActive]);
-
-  if (jobs.length === 0 || dismissed) return null;
+  // 不提供手动关闭：面板只随后台任务存在与否自动出现/消失（任务达终态后由 /active 短暂展示再返回
+  // null，见 api.get_active_zotero_sync_job），保证「任务成功后才结束」，用户只能收起/展开。
+  if (jobs.length === 0) return null;
 
   return (
     <div
@@ -232,16 +225,6 @@ export function ProgressDock() {
             ({jobs.length})
           </span>
         </span>
-        <button
-          onClick={() => setDismissed(true)}
-          aria-label="关闭"
-          style={{
-            background: "none", border: "none", cursor: "pointer",
-            color: "var(--fg-muted)", fontSize: 14, lineHeight: 1, padding: "0 2px",
-          }}
-        >
-          ×
-        </button>
       </div>
 
       {/* rows */}

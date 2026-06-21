@@ -74,6 +74,8 @@ def _unfiled_coll_key(library_id: str) -> str:
 IndexCb = Callable[[str, str], Awaitable[None]]
 RemoveIndexCb = Callable[[str], Awaitable[None]]
 LightRagCb = Callable[[str, str], Awaitable[None]]
+# web 模式惰性单篇下载器：(attachment_key, filename) -> 本地路径 | None（失败/无缓存目录）。
+WebFileFetcher = Callable[[str, str], "Path | None"]
 
 
 @dataclass
@@ -248,7 +250,7 @@ class ZoteroSyncPipeline:
             incremental,
         )
 
-        snapshot = await asyncio.to_thread(self._read_snapshot, cfg, result)
+        snapshot, web_fetch = await asyncio.to_thread(self._read_snapshot, cfg, result)
         if snapshot is None:
             if progress is not None:
                 for err in result.errors:
@@ -270,7 +272,12 @@ class ZoteroSyncPipeline:
             )
             progress.set_stage(ZOTERO_STAGE_SYNCING_DOCS)
         await self._sync_documents(
-            cfg, snapshot, incremental=incremental, result=result, progress=progress
+            cfg,
+            snapshot,
+            incremental=incremental,
+            result=result,
+            progress=progress,
+            web_fetch=web_fetch,
         )
 
         if progress is not None:
@@ -303,12 +310,13 @@ class ZoteroSyncPipeline:
 
     def _read_snapshot(
         self, cfg: ZoteroSyncConfig, result: ZoteroSyncResult
-    ) -> ZoteroSnapshot | None:
+    ) -> tuple[ZoteroSnapshot | None, WebFileFetcher | None]:
+        """读取快照（纯元数据，不下载文件）。server 模式额外返回惰性下载器供逐文档阶段按需取件。"""
         if cfg.access_mode == ZOTERO_ACCESS_SERVER:
             key = self._zotero_api_key(cfg)
             if not key:
                 result.errors.append("Zotero Web API key is not configured")
-                return None
+                return None, None
             try:
                 client = self._web_client_factory(key)
                 identity = current_key_identity(client.get_current_key())
@@ -318,16 +326,17 @@ class ZoteroSyncPipeline:
                     username=identity["username"],
                     download_dir=self._web_cache_dir,
                 )
-                return reader.read_snapshot()
+                return reader.read_snapshot(), reader.fetch_attachment_file
             except ZoteroWebApiError as exc:
                 result.errors.append(f"Zotero Web API: {exc}")
-                return None
+                return None, None
 
         data_dir = zpaths.resolve_data_dir(cfg.zotero_data_dir)
         if data_dir is None:
             result.errors.append("zotero.sqlite not found")
-            return None
-        return self._reader_factory(data_dir).read_snapshot()
+            return None, None
+        # 本地模式：resolved_path 已由 sqlite reader 指向本地文件，无需惰性下载器。
+        return self._reader_factory(data_dir).read_snapshot(), None
 
     def _zotero_api_key(self, cfg: ZoteroSyncConfig) -> str:
         if self._zotero_api_key_provider is not None:
@@ -372,6 +381,7 @@ class ZoteroSyncPipeline:
         incremental: bool,
         result: ZoteroSyncResult,
         progress: ZoteroSyncJob | None = None,
+        web_fetch: WebFileFetcher | None = None,
     ) -> None:
         lib = snapshot.library.library_id
         item_by_key = {i.item_key: i for i in snapshot.items}
@@ -392,9 +402,6 @@ class ZoteroSyncPipeline:
         for att in snapshot.attachments:
             if not _is_pdf(att.content_type, att.filename):
                 continue
-            src = self._resolve_source_path(att, link_root_override)
-            if src is None or not src.exists():
-                continue  # linked_url / 文件缺失：仅镜像元数据，不清洗。
 
             item_key = att.parent_item_key or att.attachment_key
             item = item_by_key.get(item_key)
@@ -417,12 +424,18 @@ class ZoteroSyncPipeline:
                 and existing.zotero_version == version
             )
             if incremental and unchanged:
+                # 增量未变更：直接跳过，且**绝不下载**（web 模式不再每次重下整库的关键）。
                 # 即便跳过清洗，也刷新多归属（覆盖迁移期临时归属，保证树形归属正确）。
                 await self._store.set_document_collections(document_id, coll_keys)
                 result.skipped_unchanged += 1
                 if progress is not None:
                     progress.skipped_unchanged += 1
                 continue
+
+            # 确认需要摄入后才解析/下载原件：web 模式在此惰性单篇下载（串行，逐篇推进进度条）。
+            src = await self._resolve_source_path(att, link_root_override, web_fetch)
+            if src is None or not src.exists():
+                continue  # linked_url / 文件缺失 / 下载失败：仅镜像元数据，不清洗。
 
             collection = primary_coll.get(item_key) or DEFAULT_ZOTERO_COLLECTION
             await self._ensure_unfiled_home(lib, collection, coll_keys)
@@ -470,9 +483,17 @@ class ZoteroSyncPipeline:
                 cfg, document_id, collection, result=result, progress=progress
             )
 
-    def _resolve_source_path(self, att, link_root_override: Path | None) -> Path | None:
+    async def _resolve_source_path(
+        self,
+        att,
+        link_root_override: Path | None,
+        web_fetch: WebFileFetcher | None = None,
+    ) -> Path | None:
         if att.resolved_path:
             return Path(att.resolved_path)
+        # web 模式：惰性下载该附件原件（阻塞 I/O 丢进线程，避免堵塞事件循环）。
+        if web_fetch is not None and _is_pdf(att.content_type, att.filename):
+            return await asyncio.to_thread(web_fetch, att.attachment_key, att.filename)
         # linked 覆盖根：用 linked_root + filename 兜底。
         if link_root_override and att.filename:
             cand = link_root_override / att.filename

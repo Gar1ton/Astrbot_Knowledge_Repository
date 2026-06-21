@@ -16,7 +16,7 @@ import pytest
 from core.adapters.zotero.sqlite_reader import ZoteroSqliteReader
 from core.config import Config, SourceStoreConfig
 from core.domain.models import DocumentLifecycle, DocumentOrigin
-from core.managers.ingest_manager import IngestManager
+from core.managers.ingest_manager import IngestManager, make_document_id
 from core.pipelines.zotero_sync_pipeline import ZoteroSyncPipeline
 from core.repository.source_store.memory import InMemorySourceDocumentStore
 from core.zotero_sync_job import ZoteroSyncJob
@@ -193,6 +193,72 @@ async def test_pull_conservative_creates_artifact_bundle(tmp_path: Path) -> None
     result2 = await pipeline.pull()
     assert result2.skipped_unchanged == 1
     assert result2.new_document_ids == []
+
+
+# ── pipeline: server(web api) 模式惰性下载 ───────────────────────
+
+
+async def test_pull_server_mode_downloads_lazily_and_skips_unchanged(tmp_path: Path) -> None:
+    """web 模式回归：首次按需下载并摄入；二次增量跳过且**不再下载**。
+
+    守护「reading 阶段不再串行拉全库 = 进度不假死在 3%」与「未变更件不重下整库」两条修复，
+    防止 read_snapshot 的预下载回归。"""
+    cloud_pdf = tmp_path / "cloud" / "paper.pdf"
+    _make_pdf(cloud_pdf)
+    downloads: list[str] = []
+
+    class FakeClient:
+        def get_current_key(self) -> dict:
+            return {
+                "userID": 123,
+                "username": "alice",
+                "access": {"user": {"library": True, "files": True}},
+            }
+
+        def list_user_collections(self, user_id: str) -> list[dict]:
+            return [{"key": "COLL1", "data": {"key": "COLL1", "name": "Papers"}}]
+
+        def list_user_items(self, user_id: str) -> list[dict]:
+            return [
+                {"key": "ITEM1", "version": 7, "data": {
+                    "key": "ITEM1", "itemType": "journalArticle",
+                    "title": "Server Paper", "collections": ["COLL1"]}},
+                {"key": "ATT1", "version": 7, "data": {
+                    "key": "ATT1", "itemType": "attachment", "parentItem": "ITEM1",
+                    "contentType": "application/pdf", "filename": "paper.pdf",
+                    "linkMode": "imported_file"}},
+            ]
+
+        def download_user_file(self, user_id: str, item_key: str, target_path: Path) -> Path:
+            downloads.append(item_key)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(cloud_pdf.read_bytes())
+            return target_path
+
+    store = InMemorySourceDocumentStore()
+    ingest = IngestManager(
+        source_store=store, config=SourceStoreConfig(), data_dir=tmp_path / "plugin"
+    )
+    cfg = Config({"zotero_sync": {"enabled": True, "access_mode": "server"}})
+    pipeline = ZoteroSyncPipeline(
+        source_store=store,
+        ingest_manager=ingest,
+        config=cfg,
+        web_client_factory=lambda key: FakeClient(),  # type: ignore[arg-type,return-value]
+        zotero_api_key_provider=lambda: "k",
+        web_cache_dir=tmp_path / "webcache",
+    )
+
+    doc_id = make_document_id("123", "ITEM1", "ATT1")
+    result = await pipeline.pull()
+    assert result.new_document_ids == [doc_id]
+    assert downloads == ["ATT1"]  # 首次：按需下载恰好一次
+    assert (await store.get_document(doc_id)) is not None
+
+    result2 = await pipeline.pull()
+    assert result2.skipped_unchanged == 1
+    assert result2.new_document_ids == []
+    assert downloads == ["ATT1"]  # 二次增量：未变更不重下
 
 
 async def test_pull_derives_unified_tree_and_membership(tmp_path: Path) -> None:

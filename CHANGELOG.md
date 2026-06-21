@@ -23,8 +23,11 @@
 
 ## [Unreleased]
 
+## [v0.27.0] — 2026-06-21
+
 ### 新增功能 (Added)
 
+- **发布资料 README 与插件 logo**：根目录 `README.md` 从框架模板 landing 改为中文插件介绍，补齐安装、基础配置、可选依赖、WebUI 导览、`/kr` 指令速查、高级配置和开发者架构入口；新增根目录 `logo.svg`，并由当前前端使用的 `knowledge-arch-icon.svg` 生成 AstrBot 可识别的 `logo.png`（`README.md`、`logo.svg`、`logo.png`）。
 - **登录页视觉重构**：按用户提供的 `Login Page.dc.html` 重做控制台登录页，新增本地 Bitcount 字体变量、深色点阵建筑背景、呼吸式亮暗动画、玻璃登录卡片与英文 `USERNAME` / `PASSWORD` 标签；登录 UI 从 console layout 抽离为独立 auth 组件，构建产物已同步到 `pages/`（`web/frontend/app/layout.tsx`、`web/frontend/components/auth/LoginScreen.tsx`、`web/frontend/components/auth/LoginScreen.module.css`、`pages/`）。
 
 ### 修复 (Fixed)
@@ -47,6 +50,10 @@
 
 - 新增 capabilities 聚合计数回归测试，确保 `/api/capabilities` 不再调用 `list_chunks()`；新增 Zotero active success 短暂保留测试；修正 Zotero SQLite reader 测试中的 Windows 路径分隔符断言（`tests/backend/test_api.py`、`tests/backend/test_zotero_sync.py`）。
 - 新增 `test_pull_server_mode_downloads_lazily_and_skips_unchanged`：守护 web 模式首次按需下载恰好一次、二次增量跳过且不重下，防止 `read_snapshot` 预下载回归；更新 `test_web_api_reader_builds_personal_snapshot` 断言 `read_snapshot` 不再预下载、`fetch_attachment_file` 按需落盘（`tests/backend/test_zotero_sync.py`、`tests/backend/test_zotero_server.py`）。
+
+### 构建与工程 (Build/CI)
+
+- **发布版本 bump 到 v0.27.0**：手动定点更新插件 manifest 版本，避免 `bump_version.py` 误改当前 TODO 顶部历史段落；新增 `docs/PROJECT_STRUCTURE.md` 承接旧根 README 的目录结构、治理文件和发布前检查 landing 功能（`metadata.yaml`、`TODO.md`、`docs/PROJECT_STRUCTURE.md`）。
 
 ## [v0.26.3] — 2026-06-20
 

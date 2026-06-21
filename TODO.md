@@ -95,6 +95,30 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.27.0 发布资料整理 (completed)
+
+### User constraints / 约束
+
+- 版本 bump 到 `v0.27.0`，用于 AstrBot 发布。
+- 根目录 `README.md` 改为中文插件介绍，整体格式和风格参考 `astrbot-plugin-moirai`。
+- AstrBot 可识别插件 logo 使用当前前端实际引用的 `knowledge-arch-icon.svg`，输出根目录 `logo.png`。
+- 根目录 README 覆写后，保留当前 README 的 landing / 目录指引能力，换名并更新链接到的文档。
+- `pages/` 是前端构建产物，本次不手工修改。
+
+### Technical implementation path
+
+- [x] **Phase 1 - TODO 开工 + 版本定点更新**：登记本次发布资料任务；手动更新 `metadata.yaml` 到 `v0.27.0`，不直接运行 `bump_version.py`，避免误改当前 TODO 顶部历史段落。
+- [x] **Phase 2 - README 插件化 + landing 迁移**：覆写根 README 为中文插件介绍；新增 `docs/PROJECT_STRUCTURE.md` 承接原 README 的项目结构和治理指引，并从 README 链接到治理文件与框架手册。
+- [x] **Phase 3 - 发布 logo 资产**：以 `web/frontend/public/knowledge-arch-icon.svg` 为源生成根目录 `logo.svg` 与 `logo.png`，其中 `logo.png` 为 AstrBot 识别用 256x256 PNG。
+- [x] **Phase 4 - CHANGELOG 发布 + 验证收尾**：将 `[Unreleased]` 发布为 `v0.27.0` 并补充 README/logo/metadata 条目；运行最小回归与静态检查，通过后标完成。
+
+### Verification
+
+- `python -m pytest tests/backend/test_config.py -q` → 26 passed。
+- `python tools/sync_frontend.py --check` → passed（`pages/` 已与 `web/frontend/out` 一致）。
+- `python logo size check` → passed（`logo.png` 为 256x256 RGBA）。
+- `git diff --check` → passed（仅 Windows autocrlf 换行提示，无 whitespace error）。
+
 ## v0.26.3 统一多归属集合树 (in progress)
 
 ### User constraints / 约束

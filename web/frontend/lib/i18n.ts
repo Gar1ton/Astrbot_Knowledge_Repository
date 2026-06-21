@@ -63,6 +63,8 @@ const zh = {
   file_build_error: "构建启动失败",
   file_lightrag_hide_progress: "收起进度面板",
   file_lightrag_show_progress: "展开进度面板",
+  file_lightrag_collapse: "收起 LightRAG 集合",
+  file_lightrag_expand: "展开 LightRAG 集合",
   file_action_r2_backup: "R2 备份",
   file_action_zotero_sync: "Zotero 同步",
   zotero_sync_started: "Zotero 同步已启动",
@@ -116,6 +118,7 @@ const zh = {
   file_deleted_toast: "已删除集合「{name}」",
   file_delete_failed_toast: "删除失败：{message}",
   file_build_idle: "暂无进行中的构建",
+  file_build_status_label: "构建进度",
   file_new_collection_title: "新建集合",
   file_new_collection_name_placeholder: "集合名称",
   file_new_collection_desc_placeholder: "描述（可选）",
@@ -551,6 +554,7 @@ const zh = {
   flow_help_zotero_local_api: "需要在 Zotero 设置 > 高级中允许其它应用与 Zotero 通讯；默认端口是 23119。",
   flow_help_zotero_server_key: "请在 Zotero 官网创建个人库 API key，并授予 library/files 读取权限；明文只在保存请求中出现，后端加密存储。",
   flow_help_zotero_linked_storage: "linked 模式需要插件能访问原始 PDF 位置；移动 Zotero storage 或网络盘离线会导致附件清洗失败。",
+  flow_help_zotero_sync_mode: "控制 Zotero 删除文档时的处理策略。\n• strict_mirror：强制覆盖；删除的文档标为 detached（保留 LightRAG 图索引，移除向量索引）并触发 Milvus 重建。\n• conservative（默认）：覆盖同步；删除的文档硬删除，集合只增不减，LightRAG 轻量标记待重建。\n• archive：只增不删；删除的文档保留并继续被向量检索召回，最少触发重建。",
   // 依赖管理面板
   flow_deps_title: "依赖管理",
   flow_deps_desc: "Milvus Lite 是默认向量库的必装依赖；其余扩展按需安装。一键安装后需重启插件才会加载。",
@@ -611,6 +615,9 @@ const zh = {
   progress_dock_milvus: "Milvus 构建",
   progress_dock_graph: "LightRAG 图谱",
   progress_dock_ingest: "文档摄入",
+  zotero_sync_done: "Zotero 同步完成",
+  zotero_sync_partial: "Zotero 同步部分失败",
+  zotero_sync_failed: "Zotero 同步失败",
 } as const;
 
 const en: Record<keyof typeof zh, string> = {
@@ -667,6 +674,8 @@ const en: Record<keyof typeof zh, string> = {
   file_build_error: "Failed to start build",
   file_lightrag_hide_progress: "Hide progress",
   file_lightrag_show_progress: "Show progress",
+  file_lightrag_collapse: "Collapse LightRAG",
+  file_lightrag_expand: "Expand LightRAG",
   file_action_r2_backup: "R2 backup",
   file_action_zotero_sync: "Zotero sync",
   zotero_sync_started: "Zotero sync started",
@@ -720,6 +729,7 @@ const en: Record<keyof typeof zh, string> = {
   file_deleted_toast: "Deleted collection \"{name}\"",
   file_delete_failed_toast: "Delete failed: {message}",
   file_build_idle: "No active build",
+  file_build_status_label: "Build status",
   file_new_collection_title: "New Collection",
   file_new_collection_name_placeholder: "Collection name",
   file_new_collection_desc_placeholder: "Description (optional)",
@@ -1141,6 +1151,7 @@ const en: Record<keyof typeof zh, string> = {
   flow_help_zotero_local_api: "Enable Zotero Settings > Advanced > Allow other applications to communicate with Zotero; default port is 23119.",
   flow_help_zotero_server_key: "Create a personal-library API key on zotero.org with library/files read access. Plaintext is only sent when saving; the backend stores it encrypted.",
   flow_help_zotero_linked_storage: "Linked mode requires the plugin to access original PDF paths; moved storage or offline network drives will make attachment cleaning fail.",
+  flow_help_zotero_sync_mode: "Controls how documents removed from Zotero are handled.\n• strict_mirror: Force override; removed docs become detached (graph kept, vectors removed) and trigger Milvus rebuild.\n• conservative (default): Normal sync; removed docs are hard-deleted; collections grow-only.\n• archive: Append-only; removed docs are preserved and remain searchable.",
   // Dependency panel
   flow_deps_title: "Dependency management",
   flow_deps_desc: "Milvus Lite is required for the default vector store; other extensions are optional. Restart the plugin after one-click install.",
@@ -1200,6 +1211,9 @@ const en: Record<keyof typeof zh, string> = {
   progress_dock_milvus: "Milvus build",
   progress_dock_graph: "LightRAG graph",
   progress_dock_ingest: "Ingesting",
+  zotero_sync_done: "Zotero sync complete",
+  zotero_sync_partial: "Zotero sync partially failed",
+  zotero_sync_failed: "Zotero sync failed",
 };
 
 export type I18nKey = keyof typeof zh;

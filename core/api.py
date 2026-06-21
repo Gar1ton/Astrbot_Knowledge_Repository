@@ -69,6 +69,7 @@ MILVUS_INDEX_RETRY_DELAYS = (0.5, 1.5)
 ZOTERO_SERVER_KEY_SECRET = "zotero.server_api_key"
 ACTIVE_BUILD_STATUSES = {"queued", "running", "pause_requested", "paused"}
 TERMINAL_BUILD_STATUSES = {"success", "partial_failure", "error", "interrupted"}
+ZOTERO_SYNC_TERMINAL_VISIBLE_SECONDS = 30.0
 
 
 def _build_scope(scope_type: str, scope_key: str, scope_library_id: str) -> RetrievalScope | None:
@@ -3185,7 +3186,17 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         if cfg.access_mode != ZOTERO_ACCESS_SERVER:
             out["connection"] = await asyncio.to_thread(local_api.probe_connection, cfg.api_port)
         if self._zotero_pipeline is not None:
-            availability = self._zotero_pipeline.is_available()
+            try:
+                availability = await asyncio.wait_for(
+                    asyncio.to_thread(self._zotero_pipeline.is_available),
+                    timeout=5.0,
+                )
+            except TimeoutError:
+                availability = {
+                    "available": False,
+                    "access_mode": cfg.access_mode,
+                    "reason": "Zotero availability probe timed out",
+                }
             out["availability"] = availability
             if cfg.access_mode == ZOTERO_ACCESS_SERVER:
                 out["server_user_id"] = str(availability.get("server_user_id") or "")
@@ -3210,7 +3221,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         if self._zotero_pipeline is None:
             read: dict[str, Any] = {"available": False, "reason": "Zotero 同步未启用或未装配"}
         else:
-            read = self._zotero_pipeline.probe_local_read()
+            read = await asyncio.to_thread(self._zotero_pipeline.probe_local_read)
         return {"connection": connection, "read": read}
 
     async def save_zotero_server_key(self, api_key: str) -> dict[str, Any]:
@@ -3303,13 +3314,20 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     def get_active_zotero_sync_job(self) -> dict[str, Any] | None:
         """返回当前需展示的 Zotero 同步任务快照（无则 None）。
 
-        running / partial_failure / error → 返回（后两者供前端显示原因与重试）；
-        success 或无任务 → 返回 None（前端隐藏进度条，与 `get_active_milvus_build_job` 一致）。
+        running → 返回；success / partial_failure / error → 短暂返回，供前端捕获终态 notice；
+        无任务或终态展示窗口过期 → 返回 None。
         """
         job = self._zotero_sync_job
-        if job is None or job.status == ZOTERO_SYNC_SUCCESS:
+        if job is None:
             return None
-        return job.to_dict()
+        if job.status == ZOTERO_SYNC_RUNNING:
+            return job.to_dict()
+        if (
+            job.finished_at is not None
+            and time.monotonic() - job.finished_at <= ZOTERO_SYNC_TERMINAL_VISIBLE_SECONDS
+        ):
+            return job.to_dict()
+        return None
 
     async def get_zotero_sync_status(self) -> dict[str, Any]:
         """返回上一次 Zotero Pull 的结果摘要（含 status；无则空）。"""

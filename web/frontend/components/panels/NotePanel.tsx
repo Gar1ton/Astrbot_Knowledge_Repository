@@ -111,7 +111,14 @@ export function NotePanel({ docId }: { docId: string }) {
   async function handleZoteroSync() {
     if (syncing) return;
     setSyncing(true);
-    try { await syncZoteroPull(true); } catch { /* ignore */ } finally { setSyncing(false); }
+    try {
+      await syncZoteroPull(true);
+      toast(t("zotero_sync_started"), "ok");
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : String(err), "error");
+    } finally {
+      setSyncing(false);
+    }
   }
 
   function handleBack() {

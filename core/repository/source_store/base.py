@@ -171,6 +171,22 @@ class SourceDocumentStore(ABC):
         """列出某文档的分块，按 ordinal 升序。文档不存在或无分块返回空列表。"""
         ...
 
+    async def get_corpus_stats(self) -> dict[str, int]:
+        """Return aggregate corpus counts used by hot status endpoints.
+
+        Production stores should override this with database-native aggregate queries. The fallback
+        preserves compatibility for small in-memory/fake stores without changing their contracts.
+        """
+        docs = await self.list_documents()
+        chunk_count = 0
+        for doc in docs:
+            chunk_count += len(await self.list_chunks(doc.doc_id))
+        return {
+            "document_count": len(docs),
+            "pending_reindex_count": sum(1 for doc in docs if getattr(doc, "needs_reindex", False)),
+            "chunk_count": chunk_count,
+        }
+
     # ── LightRAG 索引状态 ───────────────────────────────────────
 
     @abstractmethod

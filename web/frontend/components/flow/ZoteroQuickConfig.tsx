@@ -9,6 +9,7 @@ import {
   type ZoteroProbeResult,
   type ZoteroSyncResult,
 } from "@/lib/api";
+import { useToast } from "@/components/ui/Toast";
 import { DirPickerDialog } from "./DirPickerDialog";
 import {
   AdvancedSection,
@@ -39,7 +40,7 @@ function editableFields(config: QuickConfigPanelProps["config"], tab: AccessMode
     fields.push(textField("zotero_sync", "zotero_data_dir", "flow_quick_zotero_data_dir_override", readString(config, "zotero_sync", "zotero_data_dir"), true, true));
   }
   // 高级（折叠）：同步与存储策略，两种模式共用。
-  fields.push(selectField("zotero_sync", "sync_mode", "flow_quick_zotero_sync_mode", readString(config, "zotero_sync", "sync_mode", "conservative"), ZOTERO_SYNC_MODES));
+  fields.push(selectField("zotero_sync", "sync_mode", "flow_quick_zotero_sync_mode", readString(config, "zotero_sync", "sync_mode", "conservative"), ZOTERO_SYNC_MODES, false, "flow_help_zotero_sync_mode"));
   const storageMode = readString(config, "zotero_sync", "storage_mode", "managed_copy");
   fields.push(selectField("zotero_sync", "storage_mode", "flow_quick_zotero_storage_mode", storageMode, ZOTERO_STORAGE_MODES));
   if (storageMode === "linked") {
@@ -58,6 +59,7 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
   { config, lang, t, saving, onSave, onRefresh, onDirtyChange, advancedOpen, onToggleAdvanced, advancedSlot },
   ref,
 ) {
+  const { toast } = useToast();
   const tab = (readString(config, "zotero_sync", "access_mode", "local") === "server" ? "server" : "local") as AccessMode;
 
   const fields = useMemo(() => editableFields(config, tab), [config, tab]);
@@ -168,11 +170,13 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
   const handleSyncNow = useCallback(async () => {
     try {
       await syncZoteroPull(true);
+      toast(t("zotero_sync_started"), "ok");
       setSyncing(true);
     } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : String(err), "error");
       setSyncStatus({ status: "error", message: err instanceof Error ? err.message : String(err) });
     }
-  }, []);
+  }, [t, toast]);
 
   useEffect(() => {
     if (!syncing) return;

@@ -159,7 +159,7 @@ def test_reader_parses_items_and_attachments(tmp_path: Path) -> None:
     assert item.venue == "Journal of Ecology"
     assert item.doi == "10.1/x"
     assert len(snap.attachments) == 1
-    assert snap.attachments[0].resolved_path.endswith(f"{ATT}/paper.pdf")
+    assert Path(snap.attachments[0].resolved_path).parts[-2:] == (ATT, "paper.pdf")
     assert snap.collection_items == [("COLLAAAA", ITEM)]
     assert snap.item_tags[ITEM][0].tag == "ecology"
 

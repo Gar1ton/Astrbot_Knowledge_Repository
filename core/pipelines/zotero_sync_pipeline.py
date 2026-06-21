@@ -13,6 +13,7 @@ storage_mode：managed_copy（复制原件进制品包）/ linked（原件留 Zo
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -247,7 +248,7 @@ class ZoteroSyncPipeline:
             incremental,
         )
 
-        snapshot = self._read_snapshot(cfg, result)
+        snapshot = await asyncio.to_thread(self._read_snapshot, cfg, result)
         if snapshot is None:
             if progress is not None:
                 for err in result.errors:

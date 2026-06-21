@@ -623,6 +623,23 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 )
             return results
 
+    async def get_corpus_stats(self) -> dict[str, int]:
+        async with self._db.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM documents),
+                (SELECT COALESCE(SUM(CASE WHEN needs_reindex != 0 THEN 1 ELSE 0 END), 0)
+                   FROM documents),
+                (SELECT COUNT(*) FROM chunks)
+            """
+        ) as cursor:
+            row = await cursor.fetchone()
+        return {
+            "document_count": int(row[0] or 0) if row else 0,
+            "pending_reindex_count": int(row[1] or 0) if row else 0,
+            "chunk_count": int(row[2] or 0) if row else 0,
+        }
+
     # ── LightRAG 索引状态 ───────────────────────────────────────
 
     async def set_lightrag_index_status(

@@ -238,6 +238,14 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         ordered = sorted(chunks, key=lambda c: c.ordinal)
         return [copy.deepcopy(c) for c in ordered]
 
+    async def get_corpus_stats(self) -> dict[str, int]:
+        pending_reindex = sum(1 for doc in self._documents.values() if doc.needs_reindex)
+        return {
+            "document_count": len(self._documents),
+            "pending_reindex_count": pending_reindex,
+            "chunk_count": sum(len(chunks) for chunks in self._chunks.values()),
+        }
+
     # ── LightRAG 索引状态 ───────────────────────────────────────
 
     async def set_lightrag_index_status(

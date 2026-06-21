@@ -826,6 +826,57 @@ async def test_capabilities_reports_milvus_rebuild_required(tmp_path: Path) -> N
     assert vector_stage["detail"]["chunk_count"] == 1
 
 
+async def test_capabilities_uses_aggregate_chunk_count(tmp_path: Path) -> None:
+    from core.config import Config
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    class NoChunkScanStore(InMemorySourceDocumentStore):
+        async def list_chunks(self, doc_id: str) -> list[DocumentChunk]:
+            raise AssertionError(f"capabilities must not scan chunks for {doc_id}")
+
+    store = NoChunkScanStore()
+    await store.add_document(_doc("d1", "papers"))
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "evidence", "h1")])
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=InMemoryVectorStore(),
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    caps = await api.get_capabilities()
+    vector_stage = next(stage for stage in caps["pipeline"] if stage["id"] == "vector_store")
+
+    assert vector_stage["detail"]["document_count"] == 1
+    assert vector_stage["detail"]["chunk_count"] == 1
+
+
+async def test_zotero_active_keeps_success_briefly() -> None:
+    from core.zotero_sync_job import ZOTERO_SYNC_SUCCESS, ZoteroSyncJob
+
+    api = await _make_api()
+    job = ZoteroSyncJob()
+    job.start()
+    job.finish(ZOTERO_SYNC_SUCCESS)
+    api._zotero_sync_job = job
+
+    active = api.get_active_zotero_sync_job()
+    assert active is not None
+    assert active["status"] == ZOTERO_SYNC_SUCCESS
+
+    assert job.finished_at is not None
+    job.finished_at -= 31
+    assert api.get_active_zotero_sync_job() is None
+
+
 async def test_rebuild_index_pending_retries_transient_embedding_failure(tmp_path: Path) -> None:
     from core.config import Config
     from core.index_compatibility import IndexCompatibilityStore

@@ -18,6 +18,7 @@ import {
 import { I18nContext } from "@/lib/i18n";
 import { useConsole } from "@/lib/ConsoleContext";
 import { Z } from "@/lib/zLayers";
+import { useToast } from "@/components/ui/Toast";
 
 // ─── 归一化模型 ───────────────────────────────────────────────
 
@@ -49,8 +50,10 @@ function pctOf(percent: number | null | undefined): number | null {
 
 function useProgressJobs(): DockJob[] {
   const { t } = useContext(I18nContext);
+  const { toast } = useToast();
   const [jobs, setJobs] = useState<DockJob[]>([]);
   const anyActiveRef = useRef(false);
+  const notifiedZoteroRef = useRef<Set<string>>(new Set());
 
   const poll = useCallback(async () => {
     const [zotero, milvus, graph, ingest] = await Promise.all([
@@ -62,6 +65,18 @@ function useProgressJobs(): DockJob[] {
     const next: DockJob[] = [];
 
     if (zotero) {
+      if (zotero.status !== "running") {
+        const notifyKey = `${zotero.job_id}:${zotero.status}`;
+        if (!notifiedZoteroRef.current.has(notifyKey)) {
+          notifiedZoteroRef.current.add(notifyKey);
+          if (zotero.status === "success") toast(t("zotero_sync_done"), "ok");
+          else if (zotero.status === "partial_failure") {
+            toast(zotero.recent_error || t("zotero_sync_partial"), "error");
+          } else if (zotero.status === "error") {
+            toast(zotero.recent_error || t("zotero_sync_failed"), "error");
+          }
+        }
+      }
       next.push({
         key: `zotero_sync:${zotero.job_id}`,
         kind: "zotero_sync",
@@ -136,16 +151,19 @@ function useProgressJobs(): DockJob[] {
 
     anyActiveRef.current = next.some((j) => j.active);
     setJobs(next);
-  }, [t]);
+  }, [t, toast]);
 
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     async function tick() {
       if (cancelled) return;
-      await poll();
-      if (!cancelled) {
-        timer = setTimeout(tick, anyActiveRef.current ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+      try {
+        await poll();
+      } finally {
+        if (!cancelled) {
+          timer = setTimeout(tick, anyActiveRef.current ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+        }
       }
     }
     tick();

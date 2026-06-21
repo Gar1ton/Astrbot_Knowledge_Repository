@@ -29,6 +29,18 @@
 - **同步期间刷新 WebUI 偶发白屏**：`sync_frontend.py` 先 `shutil.rmtree(pages/)` 再逐文件复制，中间窗口期 HTTP 请求会因找不到 `index.html` 而 404；改为先写临时目录 `pages.__tmp__`、完成后整体 `rename` 替换旧目录，消除窗口期（`tools/sync_frontend.py`）。
 - **Flow 页同步卡住整个界面**：`get_zotero_config()` 中调用 `local_api.probe_connection()` 时使用同步 `urllib.request.urlopen`（timeout=1s），每次执行都阻塞 aiohttp 事件循环，导致所有并发 HTTP 请求在轮询周期内最多卡顿 1 秒；改为 `await asyncio.to_thread(local_api.probe_connection, ...)` 让阻塞 I/O 在线程池中运行（`core/api.py`，`get_zotero_config` 与 `probe_zotero_local` 两处）。
 - **Flow 页同步按钮长期禁用**：`ZoteroQuickConfig.handleSyncNow` 把整段同步（可能持续数分钟）的轮询 while 循环内联在 onClick 回调中，期间按钮一直禁用且无法通过 ProgressDock 感知进度；改为 fire-and-forget——`handleSyncNow` 仅启动同步后立即置 `syncing=true` 并返回，进度轮询移至独立 `useEffect`，同步完成后更新状态摘要并回调 `onRefresh`（`web/frontend/components/flow/ZoteroQuickConfig.tsx`）。
+- **Zotero 同步终态不可见**：`get_active_zotero_sync_job()` 过去在 success 时立即返回 `None`，导致 ProgressDock 和 toast 捕获不到完成态；改为 success/partial/error 终态保留 30 秒，前端在 ProgressDock 中对终态 toast 一次，所有同步入口点击后立即提示“已启动”（`core/api.py`、`web/frontend/components/progress/ProgressDock.tsx`、`web/frontend/components/flow/ZoteroQuickConfig.tsx`、`web/frontend/components/modals/SettingModal.tsx`、`web/frontend/components/panels/NotePanel.tsx`）。
+- **基础面板无限 loading**：`apiFetch` 增加 `timeoutMs` / `AbortController` 兜底，日志、进度 active、capabilities、配置类接口设置短超时；`TerminalPanel` 增加 in-flight guard，`ProgressDock` 的轮询调度改为 finally 中续约，避免单个请求异常后停止刷新（`web/frontend/lib/api.ts`、`web/frontend/components/ui/TerminalPanel.tsx`、`web/frontend/components/progress/ProgressDock.tsx`）。
+- **SettingModal 同步提示未走 i18n**：`handleZoteroSync` 的「已启动 / 失败」toast 为硬编码中文，英文环境不翻译；改用 `t("zotero_sync_started")` / `t("zotero_sync_failed")`，与其余三个同步入口一致（`web/frontend/components/modals/SettingModal.tsx`）。
+
+### 性能优化 (Performance)
+
+- **`/api/capabilities` 热路径轻量化**：新增 `SourceDocumentStore.get_corpus_stats()`，SQLite 生产实现使用聚合 SQL 一次返回 document/pending/chunk 计数，memory 实现直接读内存结构；`CapabilitiesApiMixin._milvus_runtime_health()` 不再逐文档 `list_chunks()` 拉取 14999 个 chunk 正文，Zotero availability 外部探测也不再阻塞 capabilities 心跳（`core/repository/source_store/base.py`、`core/repository/source_store/sqlite.py`、`core/repository/source_store/memory.py`、`core/api_capabilities.py`）。
+- **Flow 数据流面板刷新拆分**：自动刷新改走轻量 `getCapabilities()` + `getEffectiveConfig(1500ms)`；`recheckDependencies()` 仅用于手动刷新、依赖安装和重启确认，Zotero 详细配置异步补充，不再阻塞首屏 loading（`web/frontend/components/panels/FlowPageContent.tsx`、`web/frontend/lib/api.ts`）。
+
+### 测试 (Tests)
+
+- 新增 capabilities 聚合计数回归测试，确保 `/api/capabilities` 不再调用 `list_chunks()`；新增 Zotero active success 短暂保留测试；修正 Zotero SQLite reader 测试中的 Windows 路径分隔符断言（`tests/backend/test_api.py`、`tests/backend/test_zotero_sync.py`）。
 
 ## [v0.26.3] — 2026-06-20
 

@@ -8,6 +8,7 @@ import type { QuickConfigUpdate } from "@/components/flow/QuickConfigPanel";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
+  getCapabilities,
   getEffectiveConfig,
   getZoteroConfig,
   installDependency,
@@ -22,6 +23,7 @@ import {
 } from "@/lib/api";
 
 type Banner = { kind: "restart" | "rebuild" | "install"; msg?: string } | null;
+type RefreshOptions = { recheck?: boolean; includeZotero?: boolean; notify?: boolean };
 
 export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
   const { t, lang } = useI18n();
@@ -56,40 +58,60 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
   const refreshInFlight = useRef(false);
   const rerankStatusRef = useRef<string | null>(null);
 
-  const refreshFlow = useCallback(async () => {
+  const refreshFlow = useCallback(async (options: RefreshOptions = {}) => {
     if (refreshInFlight.current) return;
     refreshInFlight.current = true;
     try {
-      const [freshCaps, freshConfig, zoteroConfig] = await Promise.all([
-        recheckDependencies(),
-        getEffectiveConfig(),
-        getZoteroConfig(),
+      const [capsResult, configResult] = await Promise.allSettled([
+        options.recheck ? recheckDependencies() : getCapabilities(),
+        getEffectiveConfig(1_500),
       ]);
       if (!mountedRef.current) return;
-      const askStage = freshCaps.pipeline.find((stage) => stage.id === "ask");
-      const runtime = askStage?.detail?.rerank_runtime as Record<string, unknown> | undefined;
-      const status = String(runtime?.status ?? askStage?.detail?.rerank_status ?? "");
-      const model = String(runtime?.model ?? askStage?.detail?.rerank_model ?? "");
-      const error = String(runtime?.last_error ?? "");
-      const nextRerankKey = status ? `${status}:${model}:${error}` : null;
-      if (
-        rerankStatusRef.current &&
-        nextRerankKey &&
-        nextRerankKey !== rerankStatusRef.current
-      ) {
-        if (status === "loading") toast(t("flow_rerank_loading"), "info");
-        else if (status === "ready") toast(t("flow_rerank_ready"), "ok");
-        else if (status === "failed") toast(`${t("flow_rerank_failed")}${error ? `: ${error}` : ""}`, "error");
+      if (capsResult.status === "fulfilled") {
+        const freshCaps = capsResult.value;
+        const askStage = freshCaps.pipeline.find((stage) => stage.id === "ask");
+        const runtime = askStage?.detail?.rerank_runtime as Record<string, unknown> | undefined;
+        const status = String(runtime?.status ?? askStage?.detail?.rerank_status ?? "");
+        const model = String(runtime?.model ?? askStage?.detail?.rerank_model ?? "");
+        const error = String(runtime?.last_error ?? "");
+        const nextRerankKey = status ? `${status}:${model}:${error}` : null;
+        if (
+          rerankStatusRef.current &&
+          nextRerankKey &&
+          nextRerankKey !== rerankStatusRef.current
+        ) {
+          if (status === "loading") toast(t("flow_rerank_loading"), "info");
+          else if (status === "ready") toast(t("flow_rerank_ready"), "ok");
+          else if (status === "failed") toast(`${t("flow_rerank_failed")}${error ? `: ${error}` : ""}`, "error");
+        }
+        rerankStatusRef.current = nextRerankKey;
+        setCaps(freshCaps);
+      } else if (options.notify) {
+        toast(capsResult.reason instanceof Error ? capsResult.reason.message : String(capsResult.reason), "error");
       }
-      rerankStatusRef.current = nextRerankKey;
-      setCaps(freshCaps);
-      setConfig({
-        ...freshConfig,
-        zotero_sync: {
-          ...(freshConfig.zotero_sync ?? {}),
-          ...zoteroConfig,
-        },
-      });
+      if (configResult.status === "fulfilled") {
+        setConfig(configResult.value);
+      } else if (options.notify) {
+        toast(configResult.reason instanceof Error ? configResult.reason.message : String(configResult.reason), "error");
+      }
+      if (options.includeZotero) {
+        getZoteroConfig(4_000)
+          .then((zoteroConfig) => {
+            if (!mountedRef.current) return;
+            setConfig((prev) => (
+              prev
+                ? {
+                  ...prev,
+                  zotero_sync: {
+                    ...(prev.zotero_sync ?? {}),
+                    ...zoteroConfig,
+                  },
+                }
+                : prev
+            ));
+          })
+          .catch(() => undefined);
+      }
     } finally {
       refreshInFlight.current = false;
     }
@@ -97,7 +119,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
 
   useEffect(() => {
     mountedRef.current = true;
-    refreshFlow()
+    refreshFlow({ includeZotero: true })
       .catch(() => {})
       .finally(() => {
         if (mountedRef.current) setLoading(false);
@@ -127,7 +149,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
       if (result.rebuild_required || result.restart_required) {
         setRestartPendingIds((prev) => new Set(prev).add(stage.id));
       }
-      await refreshFlow();
+      await refreshFlow({ includeZotero: true });
       setJustActivatedId(`${stage.id}-${value}`);
       if (flashTimer.current) clearTimeout(flashTimer.current);
       flashTimer.current = setTimeout(() => setJustActivatedId(null), 700);
@@ -152,7 +174,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
       if (results.some((r) => r.rebuild_required || r.restart_required)) {
         setRestartPendingIds((prev) => new Set(prev).add(stageId));
       }
-      await refreshFlow();
+      await refreshFlow({ includeZotero: true });
     } catch (err: unknown) {
       toast(`${t("flow_save_failed")}: ${err instanceof Error ? err.message : String(err)}`, "error");
     } finally {
@@ -171,7 +193,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
       } else {
         toast(result.message || t("flow_save_failed"), "error");
       }
-      await refreshFlow();
+      await refreshFlow({ recheck: true, includeZotero: true });
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : String(err), "error");
     } finally {
@@ -186,7 +208,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
     try {
       await rebuildIndexPending();
       toast(t("flow_milvus_rebuild_running"), "info");
-      await refreshFlow();
+      await refreshFlow({ includeZotero: true });
     } catch (err: unknown) {
       toast(`${t("flow_milvus_rebuild_failed")}: ${err instanceof Error ? err.message : String(err)}`, "error");
     } finally {
@@ -208,7 +230,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
         try {
           await recheckDependencies();
           if (!mountedRef.current) return;
-          await refreshFlow();
+          await refreshFlow({ includeZotero: true });
           setRestartPendingIds(new Set());
           setBanner(null);
           setRestarting(false);
@@ -224,6 +246,10 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
     };
     poll();
   }, [refreshFlow, t, toast]);
+
+  const handleManualRefresh = useCallback(() => {
+    return refreshFlow({ recheck: true, includeZotero: true, notify: true });
+  }, [refreshFlow]);
 
   const bannerText =
     banner?.kind === "rebuild" ? t("flow_rebuild_banner") :
@@ -293,7 +319,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
           onEditingChange={handleEditingChange}
           onSwitch={handleSwitch}
           onQuickConfigSave={handleQuickConfigSave}
-          onRefresh={refreshFlow}
+          onRefresh={handleManualRefresh}
           onInstall={handleInstall}
           onRebuildIndex={handleRebuildIndex}
           onClose={onClose}

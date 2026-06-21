@@ -64,6 +64,7 @@ export function TerminalPanel({
   const panelRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastTsRef = useRef(0);
+  const loadInFlightRef = useRef(false);
   const visible = embedded || open;
 
   const resolvedTriggerLabel = triggerLabel ?? t("terminal_trigger");
@@ -72,6 +73,11 @@ export function TerminalPanel({
 
   const loadLogs = useCallback(async (mode: "replace" | "append") => {
     if (mode === "replace") setLoading(true);
+    if (loadInFlightRef.current) {
+      if (mode === "replace") setLoading(false);
+      return;
+    }
+    loadInFlightRef.current = true;
     try {
       const after = mode === "append" ? lastTsRef.current : 0;
       const result = await getLogs(after, LOG_LIMIT);
@@ -87,6 +93,7 @@ export function TerminalPanel({
     } catch {
       setAvailable(false);
     } finally {
+      loadInFlightRef.current = false;
       if (mode === "replace") setLoading(false);
     }
   }, []);

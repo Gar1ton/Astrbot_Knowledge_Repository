@@ -908,6 +908,7 @@ export function FilePanel() {
   const [deletingCollection, setDeletingCollection] = useState<Collection | null>(null);
   const [deleteInProgress, setDeleteInProgress] = useState(false);
   const [progressOpen, setProgressOpen] = useState(true);
+  const [lightragOpen, setLightragOpen] = useState(true);
   const [showNewCollection, setShowNewCollection] = useState(false);
   const [newCollectionParent, setNewCollectionParent] = useState<Collection | null>(null);
   const [renamingCollection, setRenamingCollection] = useState<Collection | null>(null);
@@ -1204,7 +1205,7 @@ export function FilePanel() {
             }}
           />
           <IconButton name="cloud" label={t("file_action_r2_backup")} />
-          <IconButton name="sync" label={t("file_action_zotero_sync")} onClick={() => handleZoteroSync(true)} />
+          <IconButton name="download" label={t("file_action_zotero_sync")} onClick={() => handleZoteroSync(true)} />
         </>
       }
     >
@@ -1215,7 +1216,7 @@ export function FilePanel() {
           label={t("file_zotero_sync")}
           actions={
             <>
-              <IconButton name="sync" label={t("file_action_zotero_sync")} size={14} onClick={() => handleZoteroSync(true)} />
+              <IconButton name="download" label={t("file_action_zotero_sync")} size={14} onClick={() => handleZoteroSync(true)} />
               <IconButton name="plus" label={t("file_action_new_collection")} size={14} />
             </>
           }
@@ -1250,38 +1251,58 @@ export function FilePanel() {
           label={t("file_lightrag_collections")}
           actions={
             <IconButton
-              name={progressOpen ? "chevU" : "chevD"}
-              label={progressOpen ? t("file_lightrag_hide_progress") : t("file_lightrag_show_progress")}
-              onClick={() => setProgressOpen((v) => !v)}
+              name={lightragOpen ? "chevU" : "chevD"}
+              label={lightragOpen ? t("file_lightrag_collapse") : t("file_lightrag_expand")}
+              onClick={() => setLightragOpen((v) => !v)}
               size={14}
             />
           }
         />
-        {progressOpen && (
-          <ActiveBuildCard
-            job={buildJob}
-            interrupted={interruptedJob}
-            onPause={pauseBuild}
-            onResumeJob={resumeBuild}
-            onResume={(col) => { startBuild(col); }}
-          />
-        )}
-        {lightragCollections.map((c) => {
-          const k = `lr:${c.name}`;
-          return (
-            <div key={k}>
-              <Row
-                depth={0}
-                icon={<Icon name="layers" size={13} />}
-                label={c.name}
-                active={isSel("lr:", c.name)}
-                graphStatus={getCollectionGraphStatus(c.name)}
-                badge={renderBuildAction(c.name)}
-                onClick={() => selectCollection(k)}
-              />
+        {lightragOpen && (
+          <>
+            {/* 构建进度子行 */}
+            <div
+              onClick={() => setProgressOpen((v) => !v)}
+              title={progressOpen ? t("file_lightrag_hide_progress") : t("file_lightrag_show_progress")}
+              style={{
+                display: "flex", alignItems: "center", gap: 5,
+                padding: "3px 8px 3px 10px", cursor: "pointer",
+                color: "var(--fg-subtle)",
+              }}
+            >
+              <Icon name="clock" size={11} style={{ opacity: 0.7 }} />
+              <span style={{ flex: 1, fontSize: 10.5, fontWeight: 600, letterSpacing: ".04em" }}>
+                {t("file_build_status_label")}
+              </span>
+              <Icon name={progressOpen ? "chevU" : "chevD"} size={12} />
             </div>
-          );
-        })}
+            {progressOpen && (
+              <ActiveBuildCard
+                job={buildJob}
+                interrupted={interruptedJob}
+                onPause={pauseBuild}
+                onResumeJob={resumeBuild}
+                onResume={(col) => { startBuild(col); }}
+              />
+            )}
+            {lightragCollections.map((c) => {
+              const k = `lr:${c.name}`;
+              return (
+                <div key={k}>
+                  <Row
+                    depth={0}
+                    icon={<Icon name="layers" size={13} />}
+                    label={c.name}
+                    active={isSel("lr:", c.name)}
+                    graphStatus={getCollectionGraphStatus(c.name)}
+                    badge={renderBuildAction(c.name)}
+                    onClick={() => selectCollection(k)}
+                  />
+                </div>
+              );
+            })}
+          </>
+        )}
 
         {/* Milvus 向量构建进度已迁入统一进度面板 ProgressDock（左下角浮动停靠）。*/}
       </div>

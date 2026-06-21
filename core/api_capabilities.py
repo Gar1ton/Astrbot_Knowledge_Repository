@@ -48,7 +48,7 @@ class CapabilitiesApiMixin:
             raise NotImplementedError("get_capabilities: config unavailable")
         data = detect_capabilities(self._config)
         await self._overlay_milvus_runtime_health(data)
-        self._overlay_zotero_availability(data)
+        self._overlay_zotero_config_state(data)
         self._overlay_reranker_runtime_status(data)
         return data
 
@@ -65,7 +65,7 @@ class CapabilitiesApiMixin:
             return {"dependencies": dependency_statuses()}
         data = detect_capabilities(self._config)
         await self._overlay_milvus_runtime_health(data)
-        self._overlay_zotero_availability(data)
+        self._overlay_zotero_config_state(data)
         self._overlay_reranker_runtime_status(data)
         return data
 
@@ -93,21 +93,20 @@ class CapabilitiesApiMixin:
                 stage["status"] = "degraded"
             return
 
-    def _overlay_zotero_availability(self, data: dict[str, Any]) -> None:
-        """若 Zotero 已启用但数据目录探针未就绪，将状态降为 degraded（黄色）。"""
-        if getattr(self, "_zotero_pipeline", None) is None:
+    def _overlay_zotero_config_state(self, data: dict[str, Any]) -> None:
+        """Apply non-blocking Zotero config state to the capabilities snapshot."""
+        if self._config is None or getattr(self, "_zotero_pipeline", None) is None:
             return
+        cfg = self._config.get_zotero_sync_config()
         for stage in data.get("pipeline", []):
             if not isinstance(stage, dict) or stage.get("id") != "zotero":
                 continue
-            if stage.get("status") != "ready":
-                return
-            avail = self._zotero_pipeline.is_available()
-            if not avail.get("available", False):
-                stage["status"] = "degraded"
-                detail = stage.setdefault("detail", {})
-                if isinstance(detail, dict):
-                    detail["availability_reason"] = avail.get("reason", "")
+            detail = stage.setdefault("detail", {})
+            if not isinstance(detail, dict):
+                detail = {}
+                stage["detail"] = detail
+            detail["availability_probe"] = "deferred"
+            detail["access_mode"] = cfg.access_mode
             return
 
     async def _overlay_milvus_runtime_health(self, data: dict[str, Any]) -> None:
@@ -140,11 +139,10 @@ class CapabilitiesApiMixin:
                 detail["fallback_reason"] = health["reason"]
 
     async def _milvus_runtime_health(self) -> dict[str, Any]:
-        docs = await self._source_store.list_documents()
-        pending_count = sum(1 for doc in docs if getattr(doc, "needs_reindex", False))
-        chunk_count = 0
-        for doc in docs:
-            chunk_count += len(await self._source_store.list_chunks(doc.doc_id))
+        stats = await self._source_store.get_corpus_stats()
+        pending_count = int(stats.get("pending_reindex_count", 0))
+        document_count = int(stats.get("document_count", 0))
+        chunk_count = int(stats.get("chunk_count", 0))
 
         compatible = bool(
             self._vector_store
@@ -195,7 +193,7 @@ class CapabilitiesApiMixin:
             "compatible": compatible,
             "rebuild_required": bool(reason or pending_count or building),
             "pending_reindex_count": pending_count,
-            "document_count": len(docs),
+            "document_count": document_count,
             "chunk_count": chunk_count,
             "reason": reason,
             "building": building,

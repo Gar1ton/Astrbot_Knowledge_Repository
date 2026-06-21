@@ -1,5 +1,32 @@
 # TODO
 
+## v0.26.3 基础面板加载韧性修复（completed）
+
+### User constraints / 约束
+
+- 修复数据流面板、终端日志、Zotero 同步可见状态导致的基础体验卡顿。
+- 当前 HAR 基准：`/api/capabilities` 平均 6.95s、最慢 9.62s；目标 p95 <= 500ms，最坏 <= 1s。
+- 基础面板超时后必须降级显示，不允许无限 loading。
+
+### Technical implementation path
+
+- [x] **Phase 1 - capabilities 轻量化**：移除心跳路径 N+1 chunk 扫描，改用聚合统计或缓存；Zotero availability 不阻塞 capabilities。
+- [x] **Phase 2 - 前端请求韧性**：`apiFetch` 增加 timeout/abort；数据流自动刷新改走轻量 capabilities；终端日志和进度轮询增加 in-flight/timeout 保护。
+- [x] **Phase 3 - Zotero 同步可见性**：点击即 notice，running/terminal job 可见；success/partial/error 终态短暂保留，完成 notice 可被前端捕获。
+- [x] **Phase 4 - 验证与收尾**：补齐后端/前端相关测试，更新 CHANGELOG/TODO；真实 HAR 需在部署/重载插件后复测。
+
+### Verification
+
+- `python -m pytest tests/backend/test_api.py tests/backend/test_source_store.py tests/backend/test_sqlite_source_store.py tests/backend/test_zotero_sync_job.py -q` → 95 passed.
+- `python -m pytest tests/backend/test_zotero_sync.py tests/backend/test_zotero_sync_job.py -q` → 18 passed.
+- `python -m pytest tests/backend -q --ignore=tests/backend/test_r2_target.py --ignore=tests/backend/test_lifecycle_and_cli.py` → 397 passed, 2 skipped.
+- `python -m pytest tests/backend -q` → **418 passed**（在 Linux 环境复跑，`botocore`/`boto3` 已具备，原 Windows 上被缺失云依赖阻塞的 `test_r2_target.py` / `test_lifecycle_and_cli.py` 也已通过）。
+- `ruff check .` → All checks passed（Linux 复跑；曾发现并修复 `core/repository/source_store/memory.py` 一处 E501，原 Windows 无 `ruff` 未能捕获）。
+- `mypy` → Success: no issues found。
+- `npm run lint` → passed；`npm run build` → 成功（TypeScript + 13 静态页，Linux 下 `rm -rf` 与字体均无阻塞）。
+- HAR 复核 `deliverables/localhost.har`（基准/修复前）：`/api/capabilities` avg 6945ms、worst 9623ms，且 100% 为服务端 `wait`（`receive` 仅 1–4ms，响应 3670B）；同捕获中其余端点（4 个 active 轮询）avg ~35ms、max ~282ms。确认 capabilities 是唯一瓶颈。
+- 微基准（174 docs / 14999 chunks，内存 SQLite）：旧 N+1 `list_chunks` avg 193ms → 新 `get_corpus_stats` avg 0.67ms，计数一致（174/35/14999）。真实部署后端到端 HAR 仍需在重载插件后复测确认 p95 ≤ 500ms。
+
 > 本文件记录项目的开发计划、进行中的任务与待处理事项。
 > **所有参与者（含 AI Agent）在读写本文件时必须遵守下方规范。** 这是「先更新 TODO 再动代码」闭环的载体。
 

@@ -339,15 +339,10 @@ function SyncTab() {
   async function handleZoteroSync() {
     setSyncing(true);
     try {
-      const r = await syncZoteroPull(true);
-      toast(
-        r.status === "success"
-          ? `同步完成：${r.items_mirrored ?? 0} 条目`
-          : (r.message ?? "同步完成"),
-        "ok",
-      );
+      await syncZoteroPull(true);
+      toast(t("zotero_sync_started"), "ok");
     } catch (e) {
-      toast(e instanceof Error ? e.message : "同步失败", "error");
+      toast(e instanceof Error ? e.message : t("zotero_sync_failed"), "error");
     } finally {
       setSyncing(false);
     }

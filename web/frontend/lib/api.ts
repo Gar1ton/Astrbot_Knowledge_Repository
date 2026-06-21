@@ -377,14 +377,50 @@ export class ApiError extends Error {
 
 // ─── 核心 fetch 封装 ───────────────────────────────────────────
 
+const DEFAULT_API_TIMEOUT_MS = 30_000;
+
+type ApiFetchOptions = RequestInit & {
+  timeoutMs?: number;
+};
+
 async function apiFetch<T>(
   path: string,
-  options?: RequestInit
+  options?: ApiFetchOptions,
 ): Promise<T> {
-  const res = await fetch(path, {
-    ...options,
-    credentials: "include",
-  });
+  const { timeoutMs = DEFAULT_API_TIMEOUT_MS, signal, ...fetchOptions } = options ?? {};
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  let timedOut = false;
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let abortFromCaller: (() => void) | null = null;
+
+  if (controller && signal) {
+    abortFromCaller = () => controller.abort();
+    if (signal.aborted) abortFromCaller();
+    else signal.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  if (controller && timeoutMs > 0) {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      ...fetchOptions,
+      credentials: "include",
+      signal: controller?.signal ?? signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new ApiError(0, timedOut ? "请求超时，请稍后重试" : "请求已取消");
+    }
+    throw err;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (signal && abortFromCaller) signal.removeEventListener("abort", abortFromCaller);
+  }
   if (!res.ok) {
     let msg = res.statusText;
     let parsedBody: Record<string, unknown> | undefined;
@@ -797,9 +833,9 @@ export async function getQuota(): Promise<QuotaItem[]> {
   return apiFetch<QuotaItem[]>("/api/quota");
 }
 
-export async function getEffectiveConfig(): Promise<EffectiveConfig> {
+export async function getEffectiveConfig(timeoutMs = 8_000): Promise<EffectiveConfig> {
   if (isMock()) return { ...MOCK_CONFIG };
-  return apiFetch<EffectiveConfig>("/api/config/effective");
+  return apiFetch<EffectiveConfig>("/api/config/effective", { timeoutMs });
 }
 
 const MOCK_REBUILD_KEYS = new Set([
@@ -1014,7 +1050,9 @@ export async function rebuildIndexPending(): Promise<RebuildIndexResult> {
 
 export async function getActiveMilvusBuildJob(): Promise<MilvusBuildJob | null> {
   if (isMock()) return null;
-  const res = await apiFetch<{ job: MilvusBuildJob | null }>("/api/documents/rebuild-index/active");
+  const res = await apiFetch<{ job: MilvusBuildJob | null }>("/api/documents/rebuild-index/active", {
+    timeoutMs: 4_000,
+  });
   return res.job;
 }
 
@@ -1036,7 +1074,9 @@ export interface IngestJob {
 
 export async function getActiveIngestJob(): Promise<IngestJob | null> {
   if (isMock()) return null;
-  const res = await apiFetch<{ job: IngestJob | null }>("/api/documents/ingest/active");
+  const res = await apiFetch<{ job: IngestJob | null }>("/api/documents/ingest/active", {
+    timeoutMs: 4_000,
+  });
   return res.job;
 }
 
@@ -1166,7 +1206,9 @@ export async function getGraphBuildJob(jobId: string): Promise<GraphBuildJob> {
 
 export async function getActiveBuildJob(): Promise<GraphBuildJob | null> {
   if (isMock()) return null;
-  const res = await apiFetch<{ job: GraphBuildJob | null }>("/api/graph/build/active");
+  const res = await apiFetch<{ job: GraphBuildJob | null }>("/api/graph/build/active", {
+    timeoutMs: 4_000,
+  });
   return res.job;
 }
 
@@ -1253,7 +1295,7 @@ export async function syncDocuments(
 // Zotero 单向 Pull 同步
 // ─────────────────────────────────────────────────────────────
 
-export async function getZoteroConfig(): Promise<ZoteroConfig> {
+export async function getZoteroConfig(timeoutMs = 8_000): Promise<ZoteroConfig> {
   if (isMock()) {
     const z = (MOCK_CONFIG.zotero_sync ?? {}) as Record<string, unknown>;
     return {
@@ -1276,7 +1318,7 @@ export async function getZoteroConfig(): Promise<ZoteroConfig> {
       availability: { available: false, reason: "mock" },
     };
   }
-  return apiFetch<ZoteroConfig>("/api/zotero/config");
+  return apiFetch<ZoteroConfig>("/api/zotero/config", { timeoutMs });
 }
 
 export async function saveZoteroServerKey(apiKey: string): Promise<ZoteroConfig> {
@@ -1309,18 +1351,21 @@ export async function syncZoteroPull(incremental = true): Promise<ZoteroSyncResu
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ incremental }),
+    timeoutMs: 5_000,
   });
 }
 
 export async function getZoteroSyncStatus(): Promise<ZoteroSyncResult> {
   if (isMock()) return {};
-  return apiFetch<ZoteroSyncResult>("/api/sync/zotero/status");
+  return apiFetch<ZoteroSyncResult>("/api/sync/zotero/status", { timeoutMs: 4_000 });
 }
 
 // 统一进度面板轮询：当前 running/partial/error 的同步任务（success/无任务 → null）。
 export async function getActiveZoteroSyncJob(): Promise<ZoteroSyncJob | null> {
   if (isMock()) return null;
-  const res = await apiFetch<{ job: ZoteroSyncJob | null }>("/api/sync/zotero/active");
+  const res = await apiFetch<{ job: ZoteroSyncJob | null }>("/api/sync/zotero/active", {
+    timeoutMs: 4_000,
+  });
   return res.job;
 }
 
@@ -1503,7 +1548,7 @@ export async function postLogEvent(event: {
 
 export async function getLogs(after = 0, limit = 200): Promise<LogsResponse> {
   if (isMock()) return { lines: [], server_ts: Date.now() / 1000 };
-  return apiFetch<LogsResponse>(`/api/logs?after=${after}&limit=${limit}`);
+  return apiFetch<LogsResponse>(`/api/logs?after=${after}&limit=${limit}`, { timeoutMs: 4_000 });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1575,7 +1620,7 @@ const MOCK_CAPABILITIES: CapabilitiesData = {
 
 export async function getCapabilities(): Promise<CapabilitiesData> {
   if (isMock()) return JSON.parse(JSON.stringify(MOCK_CAPABILITIES));
-  return apiFetch<CapabilitiesData>("/api/capabilities");
+  return apiFetch<CapabilitiesData>("/api/capabilities", { timeoutMs: 1_500 });
 }
 
 export async function listDependencies(): Promise<DependencyStatus[]> {
@@ -1595,7 +1640,10 @@ export async function installDependency(pkg: string): Promise<InstallResult> {
 
 export async function recheckDependencies(): Promise<CapabilitiesData> {
   if (isMock()) return JSON.parse(JSON.stringify(MOCK_CAPABILITIES));
-  return apiFetch<CapabilitiesData>("/api/dependencies/recheck", { method: "POST" });
+  return apiFetch<CapabilitiesData>("/api/dependencies/recheck", {
+    method: "POST",
+    timeoutMs: 10_000,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────

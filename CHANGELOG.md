@@ -31,7 +31,6 @@
 - **Flow 页同步按钮长期禁用**：`ZoteroQuickConfig.handleSyncNow` 把整段同步（可能持续数分钟）的轮询 while 循环内联在 onClick 回调中，期间按钮一直禁用且无法通过 ProgressDock 感知进度；改为 fire-and-forget——`handleSyncNow` 仅启动同步后立即置 `syncing=true` 并返回，进度轮询移至独立 `useEffect`，同步完成后更新状态摘要并回调 `onRefresh`（`web/frontend/components/flow/ZoteroQuickConfig.tsx`）。
 - **Zotero 同步终态不可见**：`get_active_zotero_sync_job()` 过去在 success 时立即返回 `None`，导致 ProgressDock 和 toast 捕获不到完成态；改为 success/partial/error 终态保留 30 秒，前端在 ProgressDock 中对终态 toast 一次，所有同步入口点击后立即提示“已启动”（`core/api.py`、`web/frontend/components/progress/ProgressDock.tsx`、`web/frontend/components/flow/ZoteroQuickConfig.tsx`、`web/frontend/components/modals/SettingModal.tsx`、`web/frontend/components/panels/NotePanel.tsx`）。
 - **基础面板无限 loading**：`apiFetch` 增加 `timeoutMs` / `AbortController` 兜底，日志、进度 active、capabilities、配置类接口设置短超时；`TerminalPanel` 增加 in-flight guard，`ProgressDock` 的轮询调度改为 finally 中续约，避免单个请求异常后停止刷新（`web/frontend/lib/api.ts`、`web/frontend/components/ui/TerminalPanel.tsx`、`web/frontend/components/progress/ProgressDock.tsx`）。
-- **SettingModal 同步提示未走 i18n**：`handleZoteroSync` 的「已启动 / 失败」toast 为硬编码中文，英文环境不翻译；改用 `t("zotero_sync_started")` / `t("zotero_sync_failed")`，与其余三个同步入口一致（`web/frontend/components/modals/SettingModal.tsx`）。
 
 ### 性能优化 (Performance)
 

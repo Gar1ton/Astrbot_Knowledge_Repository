@@ -254,8 +254,15 @@ info "3. 编译前端（生产构建 → pages/）..."
 # 由于 set -e 直接中断脚本，dev server 永远起不来、前端端口无内容。
 # （npm 脚本已内置同样清理，这里再做一次以防 package.json 被回退。）
 rm -f tsconfig.tsbuildinfo
-# NEXT_TEST_WASM=1：强制 WASM bindings，避免下载 native SWC 后导致 lockfile Permission denied 崩溃
-NEXT_TEST_WASM=1 npm run build
+# SWC bindings 选择：优先用已安装的原生 SWC（@next/swc-linux-*）。
+# 仅当原生绑定缺失时才回退 NEXT_TEST_WASM=1——WASM 当初是为规避「下载 native SWC 触发
+# lockfile Permission denied」加的，但在 linux/x64 上强制 WASM 会让 TypeScript 检查阶段
+# 崩成 `invalid type: unit value, expected usize`，整体构建失败。
+if ls node_modules/@next/swc-linux-* >/dev/null 2>&1; then
+  npm run build
+else
+  NEXT_TEST_WASM=1 npm run build
+fi
 
 # ── 4. 同步静态文件 ──────────────────────────────────────────────────────────
 info "4. 同步前端静态文件..."

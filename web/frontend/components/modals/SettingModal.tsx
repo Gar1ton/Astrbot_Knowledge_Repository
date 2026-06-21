@@ -340,9 +340,9 @@ function SyncTab() {
     setSyncing(true);
     try {
       await syncZoteroPull(true);
-      toast(t("zotero_sync_started"), "ok");
+      toast("Zotero 同步已启动", "ok");
     } catch (e) {
-      toast(e instanceof Error ? e.message : t("zotero_sync_failed"), "error");
+      toast(e instanceof Error ? e.message : "同步失败", "error");
     } finally {
       setSyncing(false);
     }

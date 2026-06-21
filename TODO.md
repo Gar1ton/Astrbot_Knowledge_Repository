@@ -95,6 +95,29 @@
 
 <!-- ↓↓↓ 版本计划区（最新在上，Backlog 之上）↓↓↓ -->
 
+## v0.27.1 AstrBot LLM Provider 适配修复 (completed)
+
+### User constraints / 约束
+
+- 修复 Docker 内真实 AstrBot WebUI `6520` 上 Research Agent 返回离线占位答案的问题。
+- AstrBot 已配置默认 LLM Provider，插件应复用 AstrBot 主模型，不新增插件侧机密配置。
+- 保持 `pages/` 产物不手工修改。
+
+### Technical implementation path
+
+- [x] **Phase 1 - LLMAdapter 新 SDK 兼容**：在 `LLMAdapter` 中优先适配 AstrBot `context.llm_generate()` + `provider_manager.get_using_provider()`，并保留旧版 `call_llm`/`llm_provider` 兼容路径。
+- [x] **Phase 2 - 回归测试**：新增 LLM adapter 单测覆盖 `completion_text`、`result_chain` 与图谱抽取复用真实 provider 路径。
+- [x] **Phase 3 - 验证与收尾**：运行相关 pytest/ruff，更新 `CHANGELOG.md` 后标记完成。
+
+### Verification
+
+- `python -m pytest tests/backend/test_llm_adapter.py -q` → 3 passed。
+- `python -m pytest tests/backend/test_api.py -q -k "ask"` → 6 passed, 54 deselected。
+- `python -m pytest tests/backend/test_llm_adapter.py tests/backend/test_api.py -q -k "llm_adapter or ask"` → 9 passed, 54 deselected。
+- `python -m ruff check core/adapters/llm.py tests/backend/test_llm_adapter.py`（Docker）→ All checks passed。
+- `python -m pytest tests/backend/test_llm_adapter.py tests/backend/test_api.py -q -k 'llm_adapter or ask'`（Docker）→ 9 passed, 54 deselected。
+- `python -m py_compile /item/data/plugins/astrbot_plugin_knowledge_repository/core/adapters/llm.py`（Docker 运行插件副本）→ passed。
+
 ## v0.27.0 发布资料整理 (completed)
 
 ### User constraints / 约束

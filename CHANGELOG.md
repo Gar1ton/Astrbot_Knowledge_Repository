@@ -23,6 +23,14 @@
 
 ## [Unreleased]
 
+### 修复 (Fixed)
+
+- **AstrBot 主 LLM Provider 适配新 SDK**：`LLMAdapter` 新增 AstrBot 4.5.7+ 的 `context.llm_generate()` 调用路径，自动通过 `provider_manager.get_using_provider(ProviderType.CHAT_COMPLETION)` 或 `curr_provider_inst` 获取当前默认 chat provider，并统一解析 `LLMResponse.completion_text` / `result_chain.get_plain_text()`；同时保留旧版 `call_llm`、`llm_provider`、`get_llm_provider` 兼容路径，修复 Docker 真实 WebUI `6520` 中 Research Agent 误回退到“离线测试占位答案”的问题（`core/adapters/llm.py`）。
+
+### 测试 (Tests)
+
+- 新增 `LLMAdapter` 单元测试，覆盖 AstrBot `llm_generate` 返回 `completion_text`、`result_chain` 以及 `extract_graph()` 共用真实 provider 路径（`tests/backend/test_llm_adapter.py`）。
+
 ## [v0.27.0] — 2026-06-21
 
 ### 新增功能 (Added)

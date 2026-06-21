@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -162,33 +163,7 @@ class LLMAdapter:
 
         优先使用 AstrBot context 中的 LLM Provider；无运行态时返回离线占位答案。
         """
-        raw = ""
-        if self._context is not None:
-            try:
-                call_llm = getattr(self._context, "call_llm", None)
-                if callable(call_llm):
-                    raw = await call_llm(prompt, system_prompt=system_prompt or None)
-
-                if not raw:
-                    provider = getattr(self._context, "llm_provider", None)
-                    if provider is not None:
-                        chat_fn = getattr(provider, "chat", None) or getattr(
-                            provider, "generate", None
-                        )
-                        if callable(chat_fn):
-                            raw = await chat_fn(prompt, system_prompt=system_prompt or None)
-
-                if not raw:
-                    get_provider = getattr(self._context, "get_llm_provider", None)
-                    if callable(get_provider):
-                        provider = await get_provider()
-                        chat_fn = getattr(provider, "chat", None) or getattr(
-                            provider, "generate", None
-                        )
-                        if callable(chat_fn):
-                            raw = await chat_fn(prompt, system_prompt=system_prompt or None)
-            except Exception as e:
-                logger.error(f"LLMAdapter.generate failed: {e}")
+        raw = await self._call_context_llm(prompt, system_prompt)
 
         if not raw or not raw.strip():
             if not allow_mock:
@@ -199,6 +174,137 @@ class LLMAdapter:
             raw = self._mock_generate(prompt)
 
         return raw.strip()
+
+    async def _call_context_llm(self, prompt: str, system_prompt: str = "") -> str:
+        """按 AstrBot 新旧 SDK 顺序调用主 LLM，并统一抽取纯文本。"""
+        if self._context is None:
+            return ""
+
+        try:
+            raw = await self._call_astrbot_llm_generate(prompt, system_prompt)
+            if raw:
+                return raw
+
+            raw = await self._call_legacy_context_llm(prompt, system_prompt)
+            if raw:
+                return raw
+        except Exception as e:
+            logger.error(f"LLMAdapter context invocation failed: {e}")
+
+        return ""
+
+    async def _call_astrbot_llm_generate(self, prompt: str, system_prompt: str) -> str:
+        """适配 AstrBot 4.5.7+ 的 context.llm_generate()。"""
+        llm_generate = getattr(self._context, "llm_generate", None)
+        provider = await self._get_astrbot_chat_provider()
+        provider_id = self._provider_id(provider)
+
+        if callable(llm_generate) and provider_id:
+            response = await llm_generate(
+                chat_provider_id=provider_id,
+                prompt=prompt,
+                system_prompt=system_prompt or None,
+            )
+            text = self._response_text(response)
+            if text:
+                return text
+
+        text_chat = getattr(provider, "text_chat", None) if provider is not None else None
+        if callable(text_chat):
+            response = await text_chat(
+                prompt=prompt,
+                system_prompt=system_prompt or None,
+            )
+            return self._response_text(response)
+
+        return ""
+
+    async def _get_astrbot_chat_provider(self) -> Any:
+        provider_manager = getattr(self._context, "provider_manager", None)
+        if provider_manager is None:
+            return None
+
+        get_using_provider = getattr(provider_manager, "get_using_provider", None)
+        if callable(get_using_provider):
+            try:
+                from astrbot.core.provider.entities import ProviderType
+
+                provider = get_using_provider(ProviderType.CHAT_COMPLETION)
+                if inspect.isawaitable(provider):
+                    provider = await provider
+                if provider is not None:
+                    return provider
+            except Exception as exc:
+                logger.debug("AstrBot get_using_provider unavailable: %s", exc)
+
+        return getattr(provider_manager, "curr_provider_inst", None)
+
+    def _provider_id(self, provider: Any) -> str:
+        if provider is None:
+            return ""
+
+        meta_attr = getattr(provider, "meta", None)
+        meta = meta_attr() if callable(meta_attr) else meta_attr
+        if isinstance(meta, dict):
+            return str(meta.get("id") or "")
+        provider_id = getattr(meta, "id", None)
+        if provider_id:
+            return str(provider_id)
+
+        for attr in ("id", "provider_id"):
+            value = getattr(provider, attr, None)
+            if value:
+                return str(value)
+        return ""
+
+    async def _call_legacy_context_llm(self, prompt: str, system_prompt: str) -> str:
+        call_llm = getattr(self._context, "call_llm", None)
+        if callable(call_llm):
+            raw = await call_llm(prompt, system_prompt=system_prompt or None)
+            if raw:
+                return self._response_text(raw)
+
+        provider = getattr(self._context, "llm_provider", None)
+        raw = await self._call_provider_chat(provider, prompt, system_prompt)
+        if raw:
+            return raw
+
+        get_provider = getattr(self._context, "get_llm_provider", None)
+        if callable(get_provider):
+            provider = await get_provider()
+            return await self._call_provider_chat(provider, prompt, system_prompt)
+
+        return ""
+
+    async def _call_provider_chat(
+        self, provider: Any, prompt: str, system_prompt: str
+    ) -> str:
+        if provider is None:
+            return ""
+        chat_fn = getattr(provider, "chat", None) or getattr(provider, "generate", None)
+        if not callable(chat_fn):
+            return ""
+        response = await chat_fn(prompt, system_prompt=system_prompt or None)
+        return self._response_text(response)
+
+    def _response_text(self, response: Any) -> str:
+        if response is None:
+            return ""
+        if isinstance(response, str):
+            return response.strip()
+
+        completion_text = getattr(response, "completion_text", None)
+        if completion_text:
+            return str(completion_text).strip()
+
+        result_chain = getattr(response, "result_chain", None)
+        get_plain_text = getattr(result_chain, "get_plain_text", None)
+        if callable(get_plain_text):
+            text = get_plain_text()
+            if text:
+                return str(text).strip()
+
+        return ""
 
     def _mock_generate(self, prompt: str) -> str:
         """离线占位：从 prompt 中提取关键词，构造简单示例答案。"""
@@ -258,36 +364,7 @@ Output ONLY the raw JSON string.
             f"Please analyze the following academic text and extract the knowledge graph:\n\n{text}"
         )
 
-        raw_response = ""
-        if self._context is not None:
-            try:
-                # 1) 尝试 context.call_llm
-                call_llm = getattr(self._context, "call_llm", None)
-                if callable(call_llm):
-                    raw_response = await call_llm(user_prompt, system_prompt=system_prompt)
-
-                # 2) 尝试 context.llm_provider
-                if not raw_response:
-                    provider = getattr(self._context, "llm_provider", None)
-                    if provider is not None:
-                        chat_fn = getattr(provider, "chat", None) or getattr(
-                            provider, "generate", None
-                        )
-                        if callable(chat_fn):
-                            raw_response = await chat_fn(user_prompt, system_prompt=system_prompt)
-
-                # 3) 尝试 context.get_llm_provider
-                if not raw_response:
-                    get_provider = getattr(self._context, "get_llm_provider", None)
-                    if callable(get_provider):
-                        provider = await get_provider()
-                        chat_fn = getattr(provider, "chat", None) or getattr(
-                            provider, "generate", None
-                        )
-                        if callable(chat_fn):
-                            raw_response = await chat_fn(user_prompt, system_prompt=system_prompt)
-            except Exception as e:
-                logger.error(f"LLM Adapter invocation failed: {e}")
+        raw_response = await self._call_context_llm(user_prompt, system_prompt)
 
         # 4) 离线测试桩回退
         if not raw_response or not raw_response.strip():

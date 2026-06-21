@@ -57,3 +57,6 @@ tests/mock_data/Brian Massumi/
 tests/mock_data/**/__pycache__/
 /.test_data/
 /tests/archive/
+
+# ── 本地临时研究目录（防止误把嵌套 git 仓库 add 成孤儿 gitlink）──
+_tmp_*/

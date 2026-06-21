@@ -23,6 +23,10 @@
 
 ## [Unreleased]
 
+### 新增功能 (Added)
+
+- **登录页视觉重构**：按用户提供的 `Login Page.dc.html` 重做控制台登录页，新增本地 Bitcount 字体变量、深色点阵建筑背景、呼吸式亮暗动画、玻璃登录卡片与英文 `USERNAME` / `PASSWORD` 标签；登录 UI 从 console layout 抽离为独立 auth 组件，构建产物已同步到 `pages/`（`web/frontend/app/layout.tsx`、`web/frontend/components/auth/LoginScreen.tsx`、`web/frontend/components/auth/LoginScreen.module.css`、`pages/`）。
+
 ### 修复 (Fixed)
 
 - **Zotero server 模式同步卡死在 3%**：`ZoteroWebApiReader.read_snapshot()` 在 `reading_snapshot` 阶段就串行下载整库所有 PDF（每篇 15s 超时），而 `docs_total/docs_processed` 要等读取整段返回后才设置，进度条因此长时间假死在阶段底值 3%；且增量「未变更」判断在下载之后，等于每次同步都重下整库。改为：`_attachments()` 只读元数据不下载、新增 `fetch_attachment_file()` 惰性单篇下载；pipeline 的 `_read_snapshot` 额外返回下载器，`_sync_documents` 重排为「先判增量未变更→直接跳过且不下载，仅新增/变更件在 syncing_documents 阶段按需下载（`asyncio.to_thread` 包裹避免阻塞事件循环）」，进度随 docs_processed 平滑推进（`core/adapters/zotero/web_api.py`、`core/pipelines/zotero_sync_pipeline.py`）。

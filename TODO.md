@@ -1,6 +1,30 @@
 # TODO
 
-## v0.26.3 基础面板加载韧性修复（completed）
+## v0.26.5 登录页视觉重构 (completed)
+
+### User constraints / 约束
+
+- 按用户提供的 `Login Page.dc.html` 迁移当前登录页视觉，保留现有 `/api/auth` 与 `/api/login` 认证契约。
+- 移除参考 HTML 中的斜向波浪动画，改为点阵区域呼吸式亮暗动画。
+- 用户名与密码文案统一为英文；`USERNAME` / `PASSWORD` 标签使用用户提供的 Bitcount 字体，输入值继续使用 Inter。
+- `pages/` 仍为构建产物，只能通过 `npm run build` 与 `tools/sync_frontend.py` 生成，不手工编辑。
+
+### Technical implementation path
+
+- [x] **Phase 1 - TODO 开工 + 字体接入**：登记本次 UI 工作，复制 Bitcount TTF 到前端字体资源并通过 Next local font 注入 CSS 变量。
+- [x] **Phase 2 - 登录页组件抽离 + 视觉迁移**：把登录 UI 从 console layout 抽离为 auth 组件，迁移深色全屏、点阵背景、卡片光轨、英文字段与提交按钮；背景仅保留点阵呼吸动画。
+- [x] **Phase 3 - 构建同步 + 收尾**：运行前端类型检查、lint/build、同步 `pages/`，更新 `CHANGELOG.md` 与本节验证记录后标完成。
+
+### Verification
+
+- `node node_modules/typescript/bin/tsc --noEmit --incremental false`（`web/frontend`）→ passed。
+- `npm.cmd run lint`（`web/frontend`）→ passed。
+- `node node_modules/next/dist/bin/next build --webpack`（`web/frontend`）→ passed（需联网获取现有 `next/font/google` 字体）。
+- `python tools/sync_frontend.py` → synced 364 files to `pages/`。
+- `python tools/sync_frontend.py --check` → passed。
+- Playwright 截图 QA 未执行：本机 `playwright` 包可用，但自带 Chromium executable 未安装，且未发现本机 Chrome/Edge。
+
+## v0.26.4 基础面板加载韧性修复（completed）
 
 ### User constraints / 约束
 

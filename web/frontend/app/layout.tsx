@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import { RootProvider } from "fumadocs-ui/provider/next";
 import "./globals.css";
 
@@ -17,6 +18,13 @@ const jetbrainsMono = JetBrains_Mono({
   display: "swap",
 });
 
+const bitcount = localFont({
+  src: "./fonts/BitcountGridDouble_Cursive-Regular.ttf",
+  variable: "--font-bitcount",
+  weight: "400",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
   title: "Knowledge Repository · 控制台",
   description: "AstrBot 知识库管理控制台",
@@ -29,7 +37,7 @@ export default function RootLayout({
     <html
       lang="zh"
       suppressHydrationWarning
-      className={`${inter.variable} ${jetbrainsMono.variable}`}
+      className={`${inter.variable} ${jetbrainsMono.variable} ${bitcount.variable}`}
     >
       <body>
         {/* fumadocs-ui RootProvider: search disabled（我们用自定义检索页）; theme 使用 .dark class */}

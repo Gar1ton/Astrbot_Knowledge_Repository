@@ -1,0 +1,312 @@
+.screen {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: #0c0b09;
+  color: #f0ede6;
+  font-family: var(--font-sans);
+}
+
+.backdropCanvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.76;
+  filter: brightness(0.9) contrast(1.02);
+  animation: dotBreathe 5.8s ease-in-out infinite;
+  will-change: opacity, filter;
+}
+
+.vignette {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 70% 80% at 50% 50%, transparent 28%, rgba(12, 11, 9, 0.72) 100%),
+    linear-gradient(180deg, rgba(12, 11, 9, 0.18), rgba(12, 11, 9, 0.54));
+}
+
+.center {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 100%;
+  padding: 28px 20px calc(28px + 6vh);
+}
+
+.shell {
+  display: flex;
+  width: 100%;
+  max-width: 400px;
+  flex-direction: column;
+  align-items: center;
+  animation: loginFadeIn 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+.masthead {
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.title {
+  margin: 0 0 6px;
+  color: #f0ede6;
+  font-family: var(--font-bitcount), var(--font-mono);
+  font-size: 38px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.08;
+}
+
+.subtitle {
+  margin: 0;
+  color: rgba(200, 196, 190, 0.6);
+  font-family: var(--font-bitcount), var(--font-mono);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+
+.rule {
+  width: 100%;
+  height: 1px;
+  margin-bottom: 14px;
+  background: linear-gradient(
+    to right,
+    rgba(220, 218, 212, 0.26) 0%,
+    rgba(220, 218, 212, 0.05) 70%,
+    transparent 100%
+  );
+}
+
+.card {
+  --beam-angle: 0deg;
+  position: relative;
+  width: 100%;
+  padding: 26px 26px 24px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(18, 15, 12, 0.94);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.6),
+    0 10px 32px rgba(0, 0, 0, 0.52),
+    0 40px 100px rgba(0, 0, 0, 0.68);
+  backdrop-filter: blur(36px);
+  -webkit-backdrop-filter: blur(36px);
+}
+
+.card::after {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(138deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.06) 30%, transparent 55%);
+  content: "";
+  pointer-events: none;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+.card::before {
+  position: absolute;
+  inset: -1.5px;
+  z-index: 4;
+  padding: 1.5px;
+  border-radius: 9px;
+  background: conic-gradient(
+    from var(--beam-angle) at 50% 50%,
+    transparent 0deg,
+    transparent 292deg,
+    rgba(255, 255, 255, 0) 310deg,
+    rgba(255, 255, 255, 0.45) 338deg,
+    rgba(255, 255, 255, 0.8) 354deg,
+    rgba(255, 255, 255, 0) 360deg
+  );
+  content: "";
+  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.36)) drop-shadow(0 0 18px rgba(255, 255, 255, 0.18));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.32s ease;
+  animation: beamOrbit 2.6s linear infinite;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+.card:hover::before,
+.card:focus-within::before {
+  opacity: 1;
+}
+
+.form {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.fieldLabel {
+  color: #403c36;
+  font-family: var(--font-bitcount), var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.2;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+.input {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 7px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.04);
+  color: #e8e4da;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.35;
+  padding: 10px 13px;
+  transition: border-color 0.18s, box-shadow 0.18s, background-color 0.18s;
+}
+
+.input::placeholder {
+  color: #3e3c38;
+}
+
+.input:focus {
+  border-color: rgba(255, 255, 255, 0.32);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.07);
+}
+
+.divider {
+  height: 1px;
+  margin: 2px 0 4px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.submitButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  border: none;
+  border-radius: 7px;
+  background: rgba(238, 236, 230, 0.92);
+  color: #0c0b09;
+  cursor: pointer;
+  transition: filter 0.15s, opacity 0.15s;
+}
+
+.submitButton:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.submitButton:active:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+.submitButton:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.error {
+  margin: 0;
+  color: rgba(220, 180, 170, 0.88);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.footer {
+  margin: 16px 0 0;
+  color: #242220;
+  font-family: var(--font-bitcount), var(--font-mono);
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.4;
+  text-align: center;
+}
+
+@property --beam-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes beamOrbit {
+  to {
+    --beam-angle: 360deg;
+  }
+}
+
+@keyframes dotBreathe {
+  0%,
+  100% {
+    opacity: 0.62;
+    filter: brightness(0.82) contrast(1.02);
+  }
+  50% {
+    opacity: 0.92;
+    filter: brightness(1.18) contrast(1.06);
+  }
+}
+
+@keyframes loginFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 480px) {
+  .center {
+    align-items: flex-start;
+    padding-top: 16vh;
+    padding-bottom: 24px;
+  }
+
+  .title {
+    font-size: 31px;
+  }
+
+  .subtitle {
+    font-size: 11px;
+  }
+
+  .card {
+    padding: 22px 20px 20px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backdropCanvas,
+  .card::before,
+  .shell {
+    animation: none;
+  }
+}

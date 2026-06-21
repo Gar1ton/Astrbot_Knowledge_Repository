@@ -4,11 +4,11 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import { ToastProvider } from "@/components/ui/Toast";
 import { I18nContext, Lang, makeT } from "@/lib/i18n";
 import { initPalette } from "@/lib/theme";
-import { getAuth, login } from "@/lib/api";
+import { getAuth } from "@/lib/api";
 import { ConsoleProvider, useConsole } from "@/lib/ConsoleContext";
+import { LoginScreen } from "@/components/auth/LoginScreen";
 import { ProgressDock } from "@/components/progress/ProgressDock";
 import { TopBar } from "@/components/layout/TopBar";
-import { Z } from "@/lib/zLayers";
 import { FilePanel } from "@/components/panels/FilePanel";
 import { DocumentsPanel } from "@/components/panels/DocumentsPanel";
 import { ChatPanel } from "@/components/panels/ChatPanel";
@@ -16,110 +16,6 @@ import { NotePanel } from "@/components/panels/NotePanel";
 import { WorkflowModal } from "@/components/modals/WorkflowModal";
 import { SettingModal } from "@/components/modals/SettingModal";
 import { AstrBotModal } from "@/components/modals/AstrBotModal";
-
-// ─── 登录页面 ─────────────────────────────────────────────────
-
-function LoginScreen({ onLogin }: { onLogin: () => void }) {
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  async function handleLogin(e: React.FormEvent) {
-    e.preventDefault();
-    setLoading(true);
-    setError("");
-    try {
-      await login(username, password);
-      onLogin();
-    } catch {
-      setError("用户名或密码错误");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "var(--bg)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: Z.widget,
-      }}
-    >
-      <div
-        style={{
-          background: "var(--surface)",
-          border: "1px solid var(--border)",
-          borderRadius: 16,
-          padding: 32,
-          width: 320,
-          boxShadow: "var(--shadow-pop)",
-        }}
-      >
-        <h1
-          style={{
-            margin: "0 0 4px",
-            fontSize: 16,
-            fontWeight: 700,
-            color: "var(--heading)",
-            letterSpacing: "-0.02em",
-          }}
-        >
-          Knowledge Arch
-        </h1>
-        <p style={{ margin: "0 0 20px", fontSize: 13, color: "var(--fg-muted)" }}>
-          控制台登录
-        </p>
-
-        <form onSubmit={handleLogin} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="用户名"
-            autoFocus
-            required
-          />
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="密码"
-            required
-          />
-          <button
-            type="submit"
-            disabled={loading}
-            style={{
-              background: "var(--accent)",
-              color: "var(--accent-fg)",
-              border: "none",
-              borderRadius: 999,
-              padding: "9px 0",
-              fontSize: 14,
-              fontWeight: 600,
-              cursor: loading ? "wait" : "pointer",
-              opacity: loading ? 0.7 : 1,
-              transition: "opacity 0.15s",
-              fontFamily: "inherit",
-            }}
-          >
-            {loading ? "登录中..." : "登录"}
-          </button>
-          {error && (
-            <p style={{ margin: 0, fontSize: 12, color: "var(--danger)", textAlign: "center" }}>
-              {error}
-            </p>
-          )}
-        </form>
-      </div>
-    </div>
-  );
-}
 
 // ─── I18n Provider ────────────────────────────────────────────
 

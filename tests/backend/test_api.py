@@ -272,7 +272,7 @@ async def test_sync_all_fans_out_to_each_target() -> None:
     class StubPipeline:
         calls = []
 
-        async def sync(self, target, doc_ids=None):
+        async def sync(self, target, doc_ids=None, force=False):
             self.calls.append((target, doc_ids))
             return {"status": "success", "synced_count": 1, "failed_count": 0}
 

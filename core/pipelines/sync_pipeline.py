@@ -46,7 +46,12 @@ class SyncPipeline:
         self,
         target_kind: SyncTargetKind,
         doc_ids: list[str] | None = None,
+        force: bool = False,
     ) -> dict:
+        """同步文档到目标存储。
+
+        force=True：跳过增量过滤，对全部文档强制重传（忽略 sync record，覆盖云端）。
+        """
         target = self._sync_targets.get(target_kind)
         if target is None:
             return {"status": "error", "message": f"同步目标 {target_kind.value} 未配置"}
@@ -61,11 +66,15 @@ class SyncPipeline:
         else:
             docs = await self._source_store.list_documents()
 
-        # 2) 增量对比过滤出待上传的文档列表，计算待传大小 (pending_bytes)
+        # 2) 增量对比过滤出待上传的文档列表，计算待传大小 (pending_bytes)；force 时全量重传。
         pending_docs = []
         pending_bytes = 0
 
         for doc in docs:
+            if force:
+                pending_docs.append(doc)
+                pending_bytes += doc.size_bytes
+                continue
             record = await self._source_store.get_sync_record(doc.doc_id, target_kind)
             # 增量判定：未曾记录同步、上次失败、或本地哈希发生了改变，才判定为需要上传
             if (

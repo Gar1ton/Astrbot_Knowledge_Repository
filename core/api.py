@@ -435,6 +435,20 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         """列出全部集合。"""
         return await self._source_store.list_collections()
 
+    async def list_titles_by_collection(self) -> dict[str, list[str]]:
+        """返回 {collection_name: [title, ...]}，供 research skill 的范围解析使用。
+
+        复用 list_documents() 的 (collection, title)，按主集合名分组；纯读、零越层。
+        """
+        result: dict[str, list[str]] = {}
+        docs = await self._source_store.list_documents()
+        for doc in docs:
+            col = doc.collection or ""
+            if not col:
+                continue
+            result.setdefault(col, []).append(doc.title)
+        return result
+
     async def create_collection(self, name: str, description: str = "") -> None:
         """新建或更新集合（按 name upsert）。v0.3.0 起委派 category_manager。"""
         if self._category_manager:
@@ -1965,15 +1979,18 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     # 真实实现到对应版本接入（届时本类构造器注入对应 manager，方法体改为委派，签名不变）。
     # 现阶段统一抛 NotImplementedError，web 层捕获后回 501 + available_in，前端展示「将接入」。
 
-    async def sync_documents(self, target: str, doc_ids: list[str] | None = None) -> dict:
+    async def sync_documents(
+        self, target: str, doc_ids: list[str] | None = None, force: bool = False
+    ) -> dict:
         """把文档同步到在线目标（target=r2|notion|all）。doc_ids=None 表示全量。
 
+        force=True：跳过增量过滤，全量强制重传（覆盖云端）。
         Reserved（v0.3.0 R2 / v0.4.0 Notion 接入）：返回逐文档同步结果汇总 + 配额预警。
         """
         if self._sync_pipeline:
             if target == "all":
                 results = {
-                    kind.value: await self._sync_pipeline.sync(kind, doc_ids)
+                    kind.value: await self._sync_pipeline.sync(kind, doc_ids, force=force)
                     for kind in SyncTargetKind
                 }
                 return {
@@ -1988,7 +2005,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 kind = SyncTargetKind(target)
             except ValueError:
                 return {"status": "error", "message": f"未知的同步目标: {target}"}
-            return await self._sync_pipeline.sync(kind, doc_ids)
+            return await self._sync_pipeline.sync(kind, doc_ids, force=force)
 
         raise NotImplementedError("sync_documents: available in v0.3.0 (r2) / v0.4.0 (notion)")
 
@@ -2028,6 +2045,47 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         if self._config is None:
             raise NotImplementedError("get_effective_config: available in v0.8.0")
         return self._config.to_public_dict()
+
+    async def get_service_status(self) -> dict[str, Any]:
+        """返回服务框架概览：所用模型与各服务启用状态（供 /ka status 展示）。
+
+        仅给静态框架视图（模型 + 各服务 enabled）；运行时开关（agent/research/persona/webui）
+        的实时状态由命令层从 PluginInitializer 叠加，避免读到未刷新的持久化配置。
+        """
+        if self._config is None:
+            return {}
+        emb = self._config.get_embedding_config()
+        vdb = self._config.get_vector_db_config()
+        rerank = self._config.get_rerank_config()
+        deep = self._config.get_deep_thinking_config()
+        graph = self._config.get_graph_config()
+        r2 = self._config.get_r2_sync_config()
+        notion = self._config.get_notion_sync_config()
+        zotero = self._config.get_zotero_sync_config()
+        web = self._config.get_web_console_config()
+        return {
+            "models": {
+                "embedding": f"{emb.provider}:{emb.model}",
+                "vector_db": vdb.backend,
+                "rerank": (
+                    "noop" if rerank.provider == "noop" else f"{rerank.provider}:{rerank.model}"
+                ),
+                "deep_thinking_llm": deep.llm_model or "AstrBot 主 LLM",
+                "lightrag_llm": (
+                    (graph.lightrag_llm_model or graph.lightrag_llm_provider)
+                    if graph.enabled
+                    else "未启用"
+                ),
+            },
+            "services": {
+                "graph": graph.enabled,
+                "r2_sync": r2.enabled,
+                "notion_sync": notion.enabled,
+                "zotero_sync": zotero.enabled,
+                "zotero_auto_sync": zotero.auto_sync_enabled,
+            },
+            "web_console": {"enabled": web.enabled, "host": web.host, "port": web.port},
+        }
 
     _SECRET_KEYS: frozenset[str] = frozenset(
         {

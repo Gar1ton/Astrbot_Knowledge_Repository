@@ -425,12 +425,15 @@ async def test_plugin_shell_lifecycle(
 
     assert plugin._initializer is not None
     assert plugin._handler is not None
+    assert plugin._initializer.api is not None
 
-    # 2) 测试命令行 /kr add 文件不存在边界
-    res = await plugin.on_add("missing_file.pdf")
-    assert "Error: File not found" in res
+    # 2) /ka help 与 /ka status（运营控制面）
+    res_help = await plugin.on_ka_help()
+    assert "/ka help" in res_help and "/ka r2" in res_help
+    res_status = await plugin.on_ka_status()
+    assert "KA 服务框架" in res_status and "agent" in res_status
 
-    # 3) 创建一个真实的测试 PDF 并保存
+    # 3) 内容管理已下沉 WebUI：经 api 直接 seed 一篇真实 PDF 供后续 hook 测试
     pdf_path = temp_dir / "test_doc.pdf"
     doc = fitz.open()
     page = doc.new_page()
@@ -438,65 +441,21 @@ async def test_plugin_shell_lifecycle(
     doc.save(pdf_path)
     doc.close()
 
-    # 4) 测试 /kr collection create
-    res_col = await plugin.on_collection("create", name="papers", description="academic")
-    assert "Collection 'papers' created/updated." in res_col
+    await plugin._initializer.api.create_collection("papers", "academic")
+    doc_id = await plugin._initializer.api.register_document(
+        title=pdf_path.name,
+        file_path=str(pdf_path),
+        content_type="application/pdf",
+        size_bytes=pdf_path.stat().st_size,
+        content_hash="",
+        collection="papers",
+    )
 
-    # 5) 测试 /kr collection list
-    res_list = await plugin.on_collection("list")
-    assert "papers" in res_list
-
-    # 6) 测试 /kr add
-    res_ingest = await plugin.on_add(str(pdf_path), collection="papers", tags=["tag1", "tag2"])
-    assert "Success: Document ingested with ID" in res_ingest
-    doc_id = res_ingest.split(":")[-1].strip()
-
-    # 7) 测试 /kr tag show
-    res_show = await plugin.on_tag("show", doc_id)
-    assert "test_doc.pdf" in res_show
-    assert "tag1" in res_show
-    assert "tag2" in res_show
-
-    # 8) 测试 /kr tag set
-    res_set = await plugin.on_tag("set", doc_id, "new_tag")
-    assert "Tags set successfully" in res_set
-    res_show2 = await plugin.on_tag("show", doc_id)
-    assert "new_tag" in res_show2
-
-    # 9) 测试 /kr quota
-    # 建立 mock boto3.client 避免真实网络请求
-    mock_s3 = MagicMock()
-    # 模拟 check_quota 中的 list_objects_v2 or similar
-    mock_s3.list_objects_v2.return_value = {"Contents": []}
-    with patch("boto3.client", return_value=mock_s3):
-        res_quota = await plugin.on_quota()
-        assert "Limit" in res_quota
-
-    # 10) 测试 /kr sync r2
-    with patch("boto3.client", return_value=mock_s3):
-        res_sync = await plugin.on_sync_r2()
-        assert "Sync successful" in res_sync or "Sync BLOCKED" in res_sync
-
-    # 10.5) 测试 /kr graph build
-    res_graph_build = await plugin.on_graph_build("papers")
-    assert "estimate only" in res_graph_build
-    assert "no LLM call was started" in res_graph_build
-
-    # graph query requires graph.enabled and a configured LightRAG Core registry
-    res_graph_query = await plugin.on_graph_query("Transformer")
-    assert "Error: Graph query failed" in res_graph_query
-
-    # 10.6) 测试 /kr notion init 与 /kr sync notion --pull
-    res_notion_init = await plugin.on_notion_init()
-    assert "Notion database created" in res_notion_init
-    assert (temp_dir / "runtime_config.json").exists()
-
-    res_notion_pull = await plugin.on_sync_notion_pull()
-    assert "Notion Pull successful" in res_notion_pull
-
-    # 11) 测试 /kr agent on 状态下普通消息 Hook 自动检索文献并注入 (Phase 6 / Phase 7)
-    await plugin.on_agent("on")
+    # 4) /ka agent on → 开关开启且持久化
+    res_agent_on = await plugin.on_ka_agent("on")
+    assert "开启" in res_agent_on
     assert plugin._initializer.agent_enabled is True
+    assert (temp_dir / "runtime_config.json").exists()
 
     from core.domain.models import DocumentChunk
 
@@ -508,7 +467,7 @@ async def test_plugin_shell_lifecycle(
         content_hash="mock-hash",
     )
 
-    # 11a) inject 模式：on_llm_request 向 req.system_prompt 注入知识库上下文
+    # 4a) inject 模式：on_llm_request 向 req.system_prompt 注入知识库上下文
     mock_event_on = MagicMock()
     mock_event_on.message_str = "testing"
 
@@ -528,7 +487,7 @@ async def test_plugin_shell_lifecycle(
         assert "Knowledge Base Context" in mock_req.system_prompt
         assert "testing" in mock_req.system_prompt
 
-    # 11b) query_agent 模式：on_message 直接返回知识库答案字符串
+    # 4b) query_agent 模式：on_message 直接返回知识库答案字符串（persona 跟随开关，默认 off）
     plugin._initializer.config.raw.setdefault("ask", {})["conversation_enhancement_mode"] = (
         "query_agent"
     )
@@ -558,8 +517,9 @@ async def test_plugin_shell_lifecycle(
             retrieval_mode="default",
         )
 
-    # 11c) agent off 状态下完全旁路，on_message 返回 None
-    await plugin.on_agent("off")
+    # 4c) /ka agent off → 完全旁路，on_message 返回 None
+    res_agent_off = await plugin.on_ka_agent("off")
+    assert "关闭" in res_agent_off
     assert plugin._initializer.agent_enabled is False
 
     mock_event_off = MagicMock()
@@ -567,12 +527,67 @@ async def test_plugin_shell_lifecycle(
     result_off = await plugin._handler.on_message(mock_event_off)
     assert result_off is None
 
-    # 11.1) 删除文档并删除集合
-    assert plugin._initializer is not None
-    assert plugin._initializer.api is not None
-    await plugin._initializer.api.delete_document(doc_id)
-    res_del = await plugin.on_collection("delete", name="papers")
-    assert "deleted" in res_del
+    # 5) /ka r2 push（增量上传，mock boto3 避免真实网络）
+    mock_s3 = MagicMock()
+    mock_s3.list_objects_v2.return_value = {"Contents": []}
+    with patch("boto3.client", return_value=mock_s3):
+        res_push = await plugin.on_ka_r2("push")
+        assert res_push.startswith("R2 增量上传")
 
-    # 12) 销毁薄壳
+        # 6) /ka r2 force push 需二次确认：首发提示，窗口内二次执行
+        res_warn = await plugin.on_ka_r2("force push")
+        assert "再次发送" in res_warn
+        res_force = await plugin.on_ka_r2("force push")
+        assert res_force.startswith("R2 强制全量上传")
+
+    # 7) 销毁薄壳
+    await plugin._initializer.api.delete_document(doc_id)
+    await plugin.terminate()
+
+
+async def test_ka_toggles_persist_across_reinit(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    """agent/research/persona 开关写入 runtime_config.json，重建 initializer 后保留。"""
+    first = PluginInitializer(mock_context, raw_config, temp_dir)
+    await first.initialize()
+    first.set_toggle("agent", True)
+    first.set_toggle("research", True)
+    first.set_toggle("persona", True)
+    await first.teardown()
+
+    assert (temp_dir / "runtime_config.json").exists()
+
+    second = PluginInitializer(mock_context, raw_config, temp_dir)
+    await second.initialize()
+    assert second.agent_enabled is True
+    assert second.research_enabled is True
+    assert second.persona_enabled is True
+    await second.teardown()
+
+
+async def test_ka_r2_force_pull_confirmation_and_auto_restart(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    """force pull：首发待确认；确认后恢复并自动触发 restart_plugin。"""
+    plugin = KnowledgeRepositoryPlugin(mock_context, raw_config)
+    await plugin.initialize(temp_dir)
+    assert plugin._initializer is not None and plugin._initializer.api is not None
+
+    with (
+        patch.object(
+            plugin._initializer.api,
+            "restore_from_backup",
+            return_value={"status": "success"},
+        ),
+        patch.object(
+            plugin._initializer.api, "restart_plugin", return_value={"status": "restarting"}
+        ) as mock_restart,
+    ):
+        warn = await plugin.on_ka_r2("force pull")
+        assert "再次发送" in warn
+        done = await plugin.on_ka_r2("force pull")
+        assert "自动重启" in done
+        mock_restart.assert_awaited_once()
+
     await plugin.terminate()

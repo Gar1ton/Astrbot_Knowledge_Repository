@@ -187,6 +187,10 @@ class AskAgentConfig:
     """Ask Agent 的会话增强和回答配置。"""
 
     conversation_enhancement_mode: str = "inject"
+    # 以下三个为运行时开关，由 /ka 命令切换并持久化到 runtime_config.json（重启保留）。
+    agent_enabled: bool = False  # ka↔astrbot 回复关联（RAG 注入/旁路）总开关。
+    research_enabled: bool = False  # knowledge_research skill 是否响应自然语言调用。
+    persona_enabled: bool = False  # 是否在 ask 中启用 astrbot 人格 prompt（off=不污染 research）。
 
 
 @dataclass
@@ -647,6 +651,9 @@ class Config:
             conversation_enhancement_mode=s.get(
                 "conversation_enhancement_mode", AskAgentConfig.conversation_enhancement_mode
             ),
+            agent_enabled=bool(s.get("agent_enabled", AskAgentConfig.agent_enabled)),
+            research_enabled=bool(s.get("research_enabled", AskAgentConfig.research_enabled)),
+            persona_enabled=bool(s.get("persona_enabled", AskAgentConfig.persona_enabled)),
         )
 
     def get_rerank_config(self) -> RerankConfig:
@@ -766,6 +773,13 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
     "ask": {
         "conversation_enhancement_mode": ConfigKeyPolicy(True, True),
         "persona_enabled": ConfigKeyPolicy(False, True),
+        # /ka 运行时开关：仅持久化（不开放 API 写），由命令切换、重启保留。
+        "agent_enabled": ConfigKeyPolicy(False, True),
+        "research_enabled": ConfigKeyPolicy(False, True),
+    },
+    "web_console": {
+        # /ka webui on|off 实时启停并持久化；不走 update_config（避免 RESTART 后果误判）。
+        "enabled": ConfigKeyPolicy(False, True),
     },
     "graph": {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),

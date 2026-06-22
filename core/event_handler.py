@@ -3,23 +3,44 @@
 把框架事件/命令翻译并路由到对应 manager / api，自身不写业务。依赖组合根产出的子系统句柄
 （构造器注入），不自造依赖、不直接操作仓储。
 
-v0.3.0 生产实现：实现 /kr add, /kr sync r2, /kr quota, /kr collection, /kr tag 等命令路由。
+v0.28.0：聊天命令从 /kr 整体重写为 /ka（纯运营控制面 + research）。内容管理（add/collection/
+tag/notion/graph）已下沉 WebUI，聊天端不再暴露；此处仅保留 /ka 运营命令与消息/LLM hook。
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import mimetypes
-from pathlib import Path
+import time
 from typing import TYPE_CHECKING, Any
-
-from core.domain.models import SyncStatus, SyncTargetKind
 
 if TYPE_CHECKING:
     from core.plugin_initializer import PluginInitializer
 
 logger = logging.getLogger("EventHandler")
+
+# R2 危险操作的二次确认窗口（秒）：窗口内重发相同命令即视为确认。
+_CONFIRM_TTL_SEC = 60.0
+
+# /ka r2 各动作的人类可读描述，用于二次确认提示。
+_R2_ACTION_DESC = {
+    "force push": "忽略增量记录、全量覆盖上传所有文档到 R2",
+    "pull": "从 R2 拉取整库快照并覆盖本地数据库（需重启加载）",
+    "force pull": "从 R2 强制恢复整库快照、覆盖本地并自动重启插件",
+}
+
+_HELP_TEXT = (
+    "📖 /ka 指令一览\n"
+    "  /ka help                       — 显示本帮助\n"
+    "  /ka status                     — 服务框架概览（模型/服务/开关）\n"
+    "  /ka agent on|off               — ka 与 astrbot 回复的关联开关\n"
+    "  /ka research on|off            — 自然语言 research skill 开关\n"
+    "  /ka persona on|off             — astrbot 人格 prompt（off 不污染 research）\n"
+    "  /ka zotero pull                — 触发一次 Zotero 增量同步\n"
+    "  /ka r2 push|pull|force push|force pull — R2 备份/恢复（force 与 pull 需二次确认）\n"
+    "  /ka webui on|off               — 实时启停 Web 控制台\n"
+    "\n内容管理（文档/集合/标签/Notion/知识图谱）请在 WebUI 操作；"
+    "research 为只读检索，不会修改任何同步配置。"
+)
 
 
 class EventHandler:
@@ -27,354 +48,189 @@ class EventHandler:
 
     def __init__(self, initializer: PluginInitializer) -> None:
         self._initializer = initializer
+        # action_key -> 过期时间戳（time.monotonic）；R2 危险操作的待确认令牌。
+        self._pending_confirm: dict[str, float] = {}
 
-    def _fmt_size(self, b: int) -> str:
-        if b < 1024:
-            return f"{b} B"
-        if b < 1048576:
-            return f"{b / 1024:.1f} KB"
-        if b < 1073741824:
-            return f"{b / 1048576:.1f} MB"
-        return f"{b / 1073741824:.2f} GB"
+    # ── 二次确认令牌 ──────────────────────────────────────────────
 
-    # ── 命令路由 ──────────────────────────────────────────────────
+    def _arm_confirm(self, key: str) -> None:
+        self._pending_confirm[key] = time.monotonic() + _CONFIRM_TTL_SEC
 
-    async def on_add(
-        self,
-        file_path: str,
-        collection: str | None = None,
-        tags: list[str] | None = None,
-    ) -> str:
-        """/kr add <file_path> [--collection <col>] [--tag <tags>]"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
+    def _consume_confirm(self, key: str) -> bool:
+        """存在且未过期则消费并返回 True；否则返回 False。"""
+        expiry = self._pending_confirm.pop(key, None)
+        return expiry is not None and time.monotonic() <= expiry
 
-        path = Path(file_path)
-        if not path.exists():
-            return f"Error: File not found: {file_path}"
+    # ── /ka 命令路由 ──────────────────────────────────────────────
 
-        title = path.name
-        size_bytes = path.stat().st_size
+    async def on_ka_help(self) -> str:
+        """/ka help"""
+        return _HELP_TEXT
 
+    async def on_ka_status(self) -> str:
+        """/ka status — 服务框架概览。"""
+        api = self._initializer.api
+        if api is None:
+            return "插件未初始化。"
         try:
-            with open(path, "rb") as f:
-                content_hash = hashlib.sha256(f.read()).hexdigest()
+            status = await api.get_service_status()
         except Exception as e:
-            return f"Error: Failed to read file: {e}"
+            return f"获取状态失败：{e}"
 
-        content_type, _ = mimetypes.guess_type(file_path)
-        if not content_type:
-            content_type = "application/octet-stream"
+        models = status.get("models", {})
+        services = status.get("services", {})
+        web = status.get("web_console", {})
 
-        col = collection or "default"
+        def _onoff(v: bool) -> str:
+            return "on" if v else "off"
 
-        try:
-            doc_id = await self._initializer.api.register_document(
-                title=title,
-                file_path=str(path.resolve()),
-                content_type=content_type,
-                size_bytes=size_bytes,
-                content_hash=content_hash,
-                collection=col,
-                tags=tags,
-            )
-            return f"Success: Document ingested with ID: {doc_id}"
-        except Exception as e:
-            return f"Error: Ingestion failed: {e}"
+        lines = ["🧩 KA 服务框架"]
+        lines.append("· 模型")
+        lines.append(f"    embedding   : {models.get('embedding', 'N/A')}")
+        lines.append(f"    vector_db   : {models.get('vector_db', 'N/A')}")
+        lines.append(f"    rerank      : {models.get('rerank', 'N/A')}")
+        lines.append(f"    deep_think  : {models.get('deep_thinking_llm', 'N/A')}")
+        lines.append(f"    lightrag    : {models.get('lightrag_llm', 'N/A')}")
+        lines.append("· 服务")
+        lines.append(f"    graph       : {_onoff(services.get('graph', False))}")
+        lines.append(f"    r2_sync     : {_onoff(services.get('r2_sync', False))}")
+        lines.append(f"    notion_sync : {_onoff(services.get('notion_sync', False))}")
+        lines.append(
+            f"    zotero_sync : {_onoff(services.get('zotero_sync', False))}"
+            f"（auto={_onoff(services.get('zotero_auto_sync', False))}）"
+        )
+        lines.append("· 运行时开关")
+        lines.append(f"    agent       : {_onoff(self._initializer.agent_enabled)}")
+        lines.append(f"    research    : {_onoff(self._initializer.research_enabled)}")
+        lines.append(f"    persona     : {_onoff(self._initializer.persona_enabled)}")
+        running = self._initializer.web_console_running
+        lines.append(
+            f"    webui       : {_onoff(running)}"
+            f"（http://{web.get('host', '?')}:{web.get('port', '?')}）"
+        )
+        return "\n".join(lines)
 
-    async def on_sync_r2(self) -> str:
-        """/kr sync r2"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
+    async def on_ka_agent(self, action: str) -> str:
+        """/ka agent <on|off>"""
+        return self._toggle("agent", action, "ka 回复关联")
 
-        try:
-            res = await self._initializer.api.sync_documents("r2")
-            if res.get("status") == "success":
-                synced = res.get("synced_count", 0)
-                failed = res.get("failed_count", 0)
-                msg = f"Sync successful! Synced: {synced}, Failed: {failed}."
-                if "warning" in res:
-                    msg += f"\nWarning: {res['warning']}"
-                return msg
-            elif res.get("status") == "blocked":
-                return f"Sync BLOCKED: {res.get('message')}"
-            else:
-                return f"Sync failed: {res.get('message')}"
-        except Exception as e:
-            return f"Error: Sync execution failed: {e}"
+    async def on_ka_research(self, action: str) -> str:
+        """/ka research <on|off>"""
+        return self._toggle("research", action, "research skill")
 
-    async def on_quota(self) -> str:
-        """/kr quota"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
+    async def on_ka_persona(self, action: str) -> str:
+        """/ka persona <on|off>"""
+        return self._toggle("persona", action, "astrbot 人格")
 
-        try:
-            usages = await self._initializer.api.list_quota()
-            if not usages:
-                return "No sync targets configured."
-            lines = ["--- Quota Dashboard ---"]
-            for u in usages:
-                ratio = u.ratio * 100
-                used_str = self._fmt_size(u.used_bytes)
-                limit_str = self._fmt_size(u.limit_bytes)
-                lines.append(
-                    f"[{u.target.value}] Used: {used_str} / Limit: {limit_str} ({ratio:.1f}%)"
-                )
-                if u.detail:
-                    lines.append(f"  Detail: {u.detail}")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error: Failed to fetch quota: {e}"
-
-    async def on_collection(
-        self,
-        action: str,
-        name: str | None = None,
-        description: str = "",
-    ) -> str:
-        """/kr collection <action> [name] [description]"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
-
-        try:
-            if action == "list":
-                cols = await self._initializer.api.list_collections()
-                if not cols:
-                    return "No collections found."
-                return "\n".join([f"- {c.name}: {c.description}" for c in cols])
-            elif action == "create":
-                if not name:
-                    return "Error: Collection name required."
-                await self._initializer.api.create_collection(name, description)
-                return f"Collection '{name}' created/updated."
-            elif action == "delete":
-                if not name:
-                    return "Error: Collection name required."
-                success = await self._initializer.api.delete_collection(name)
-                if success:
-                    return f"Collection '{name}' deleted."
-                return f"Collection '{name}' not found."
-            else:
-                return "Invalid collection action. Use 'list', 'create', or 'delete'."
-        except Exception as e:
-            return f"Error: Collection command failed: {e}"
-
-    async def on_tag(
-        self,
-        action: str,
-        doc_id: str,
-        tags_str: str | None = None,
-    ) -> str:
-        """/kr tag <action> <doc_id> [tags_str]"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
-
-        try:
-            if action == "set":
-                if not tags_str:
-                    return "Error: Tags list required (comma-separated)."
-                tags = [t.strip() for t in tags_str.split(",") if t.strip()]
-                success = await self._initializer.api.classify_document(doc_id, tags=tags)
-                if success:
-                    return f"Tags set successfully for document {doc_id}."
-                return f"Document {doc_id} not found."
-            elif action == "show":
-                doc = await self._initializer.api.get_document(doc_id)
-                if not doc:
-                    return f"Document {doc_id} not found."
-                return f"Document '{doc.title}' tags: {', '.join(doc.tags) if doc.tags else 'None'}"
-            else:
-                return "Invalid tag action. Use 'set' or 'show'."
-        except Exception as e:
-            return f"Error: Tag command failed: {e}"
-
-    async def on_sync_notion(self) -> str:
-        """/kr sync notion"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
-
-        try:
-            # 增量检查，对待推送文档数大于 10 篇给出时延预计警示
-            assert self._initializer.source_store is not None
-            docs = await self._initializer.source_store.list_documents()
-            pending_count = 0
-            for doc in docs:
-                rec = await self._initializer.source_store.get_sync_record(
-                    doc.doc_id, SyncTargetKind.NOTION
-                )
-                if (
-                    rec is None
-                    or rec.status != SyncStatus.SYNCED
-                    or rec.content_hash != doc.content_hash
-                ):
-                    pending_count += 1
-
-            warning_msg = ""
-            if pending_count > 10:
-                notion_cfg = self._initializer.config.get_notion_sync_config()
-                est_sec = int(pending_count / max(1, notion_cfg.rate_limit_rps))
-                warning_msg = (
-                    f"⚠️ [频控提示] 当前有 {pending_count} 篇文档待同步。由于 Notion 3 req/s 频控，"
-                    f"预计将耗时约 {est_sec} 秒，后台正在平滑同步中，请耐心等待..."
-                )
-                logger.warning(warning_msg)
-
-            res = await self._initializer.api.sync_documents("notion")
-            if res.get("status") == "success":
-                synced = res.get("synced_count", 0)
-                failed = res.get("failed_count", 0)
-                msg = f"Notion Sync successful! Synced: {synced}, Failed: {failed}."
-                if warning_msg:
-                    msg = warning_msg + "\n\n" + msg
-                return msg
-            elif res.get("status") == "blocked":
-                return f"Notion Sync BLOCKED: {res.get('message')}"
-            else:
-                return f"Notion Sync failed: {res.get('message')}"
-        except Exception as e:
-            return f"Error: Notion Sync execution failed: {e}"
-
-    async def on_notion_init(
-        self,
-        parent_page_id: str | None = None,
-        database_title: str | None = None,
-    ) -> str:
-        """/kr notion init [parent_page_id] [database_title]"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
-
-        try:
-            res = await self._initializer.api.initialize_notion_database(
-                parent_page_id=parent_page_id,
-                database_title=database_title,
-            )
-            if res.get("status") == "success":
-                action = "created" if res.get("created") else "already configured"
-                return f"Notion database {action}: {res.get('database_id')}"
-            return f"Notion init failed: {res.get('message')}"
-        except Exception as e:
-            return f"Error: Notion init failed: {e}"
-
-    async def on_sync_notion_pull(self) -> str:
-        """/kr sync notion --pull"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
-
-        try:
-            res = await self._initializer.api.pull_notion_metadata()
-            if res.get("status") == "success":
-                updated = res.get("updated_count", 0)
-                skipped = res.get("skipped_count", 0)
-                msg = f"Notion Pull successful! Updated: {updated}, Skipped: {skipped}."
-                warnings = res.get("warnings") or []
-                if warnings:
-                    msg += "\nWarnings:\n" + "\n".join(f"- {w}" for w in warnings[:5])
-                return msg
-            return f"Notion Pull failed: {res.get('message')}"
-        except Exception as e:
-            return f"Error: Notion Pull execution failed: {e}"
-
-    async def on_sync_status(self) -> str:
-        """/kr sync status"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
-
-        try:
-            records = await self._initializer.api.get_sync_status()
-            if not records:
-                return "No synchronization records found."
-            lines = ["--- Synchronization Status ---"]
-            for r in records:
-                time_str = r["synced_at"][:19] if r["synced_at"] else "Never"
-                lines.append(
-                    f"DocID: {r['doc_id']} | Target: {r['target']} | "
-                    f"Status: {r['status']} | SyncedAt: {time_str}"
-                )
-                if r["message"] and r["message"] != "同步成功":
-                    lines.append(f"  Message: {r['message']}")
-            return "\n".join(lines)
-        except Exception as e:
-            return f"Error: Failed to fetch sync status: {e}"
-
-    async def on_graph_build(self, collection: str | None = None) -> str:
-        """/kr graph build [--collection <col>]"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
-
-        try:
-            estimate = await self._initializer.api.estimate_graph_build(collection)
-            return (
-                "LightRAG build estimate only; no LLM call was started. "
-                f"collection={estimate['collection']} docs={estimate['docs_count']} "
-                f"chunks={estimate['chunks_count']} chars={estimate['chars_count']} "
-                f"llm_calls={estimate['estimated_llm_calls_min']}-"
-                f"{estimate['estimated_llm_calls_max']}. "
-                "Open the WebUI Graph page to review the estimate and confirm the build. "
-                + str(estimate["estimate_notice"])
-            )
-        except Exception as e:
-            return f"Error: Graph estimate failed: {e}"
-
-    async def on_graph_query(self, query: str, top_k: int = 5) -> str:
-        """/kr graph query <q> [--top_k <top_k>]"""
-        if self._initializer.api is None:
-            return "Error: API facade not initialized."
-
-        try:
-            res = await self._initializer.api.query_graph(query, top_k=top_k)
-            if res.get("status") == "success":
-                lines = [f"=== LightRAG Query Results for '{query}' ==="]
-                if res.get("answer"):
-                    lines.append("\n[Answer]")
-                    lines.append(str(res["answer"]))
-                if res.get("entities"):
-                    lines.append("\n[Entities]")
-                    for ent in res["entities"][:5]:
-                        lines.append(
-                            f"- [{ent['entity_type']}] {ent['name']}: "
-                            f"{ent['description']} (Degree: {ent['degree']})"
-                        )
-                if res.get("relations"):
-                    lines.append("\n[Relations]")
-                    for rel in res["relations"][:5]:
-                        lines.append(
-                            f"- {rel['src_entity_id']} --({rel['relation']})--> "
-                            f"{rel['dst_entity_id']}: {rel['description']}"
-                        )
-                if res.get("chunks"):
-                    lines.append("\n[Text Chunks]")
-                    for i, ch in enumerate(res["chunks"]):
-                        lines.append(
-                            f"Chunk {i + 1} (DocID: {ch['doc_id']}): {ch['text'][:150]}..."
-                        )
-
-                if res.get("context"):
-                    lines.append("\n[Academic Context Header Preview]")
-                    preview_len = 300
-                    lines.append(
-                        res["context"][:preview_len] + "\n..."
-                        if len(res["context"]) > preview_len
-                        else res["context"]
-                    )
-                return "\n".join(lines)
-            return f"Error: Graph query failed: {res.get('message')}"
-        except Exception as e:
-            return f"Error: Graph query failed: {e}"
-
-    async def on_agent(self, action: str) -> str:
-        """/kr agent <on|off>"""
+    def _toggle(self, name: str, action: str, label: str) -> str:
+        action = (action or "").strip().lower()
         if action not in ("on", "off"):
-            return "Invalid action. Use '/kr agent on' or '/kr agent off'."
+            return f"用法：/ka {name} <on|off>"
+        try:
+            self._initializer.set_toggle(name, action == "on")
+        except Exception as e:
+            return f"切换 {label} 失败：{e}"
+        return f"{label} 已{'开启' if action == 'on' else '关闭'}（已持久化，重启保留）。"
 
-        enabled = action == "on"
-        self._initializer.agent_enabled = enabled
-        if enabled:
+    async def on_ka_zotero_pull(self) -> str:
+        """/ka zotero pull — 触发一次 Zotero 增量同步。"""
+        api = self._initializer.api
+        if api is None:
+            return "插件未初始化。"
+        try:
+            res = await api.sync_zotero_pull(incremental=True)
+        except Exception as e:
+            return f"Zotero 同步触发失败：{e}"
+        status = res.get("status", "")
+        if status in ("error",) or res.get("message", "").startswith("Zotero 同步未启用"):
+            return f"Zotero 同步未启动：{res.get('message', status)}"
+        return f"Zotero 同步已在后台启动（status={status or 'running'}）。"
+
+    async def on_ka_webui(self, action: str) -> str:
+        """/ka webui <on|off> — 实时启停 Web 控制台。"""
+        action = (action or "").strip().lower()
+        if action not in ("on", "off"):
+            return "用法：/ka webui <on|off>"
+        try:
+            if action == "on":
+                ok = await self._initializer.start_web_console()
+                if not ok:
+                    return (
+                        "Web 控制台启动失败：请先在配置中设置 web_console.password "
+                        "并确认端口可用。"
+                    )
+                return "Web 控制台已启动（已持久化，重启保留）。"
+            await self._initializer.stop_web_console()
+            return "Web 控制台已关闭（已持久化，重启保留）。"
+        except Exception as e:
+            return f"切换 Web 控制台失败：{e}"
+
+    async def on_ka_r2(self, action: str) -> str:
+        """/ka r2 <push|pull|force push|force pull>
+
+        push 直接执行；force push / pull / force pull 需在 60s 内重发同命令确认。
+        """
+        api = self._initializer.api
+        if api is None:
+            return "插件未初始化。"
+        action = " ".join((action or "").strip().lower().split())
+        if action not in ("push", "pull", "force push", "force pull"):
+            return "用法：/ka r2 <push|pull|force push|force pull>"
+
+        if action == "push":
+            return await self._r2_push(force=False)
+
+        confirm_key = f"r2:{action}"
+        if not self._consume_confirm(confirm_key):
+            self._arm_confirm(confirm_key)
             return (
-                "Ask Agent has been turned ON. Discord uses the configured default retrieval "
-                "(Milvus by default, with controlled AstrBot fallback); enable high-precision "
-                "LightRAG in the Web Research Agent."
+                f"⚠️ `/ka r2 {action}` 将{_R2_ACTION_DESC[action]}。"
+                f"\n如确认，请在 60 秒内再次发送 `/ka r2 {action}`。"
             )
-        return "Ask Agent has been turned OFF."
+
+        if action == "force push":
+            return await self._r2_push(force=True)
+        # pull / force pull：force pull 在恢复后自动重启（跳过手动重启）。
+        return await self._r2_pull(auto_restart=(action == "force pull"))
+
+    async def _r2_push(self, force: bool) -> str:
+        api = self._initializer.api
+        assert api is not None
+        try:
+            res = await api.sync_documents("r2", force=force)
+        except Exception as e:
+            return f"R2 上传失败：{e}"
+        status = res.get("status")
+        label = "强制全量上传" if force else "增量上传"
+        if status == "success":
+            synced = res.get("synced_count", 0)
+            failed = res.get("failed_count", 0)
+            msg = f"R2 {label}完成：成功 {synced}，失败 {failed}。"
+            if res.get("warning"):
+                msg += f"\n提示：{res['warning']}"
+            return msg
+        if status == "blocked":
+            return f"R2 {label}被阻断：{res.get('message')}"
+        return f"R2 {label}失败：{res.get('message', status)}"
+
+    async def _r2_pull(self, auto_restart: bool) -> str:
+        api = self._initializer.api
+        assert api is not None
+        try:
+            res = await api.restore_from_backup()
+        except Exception as e:
+            return f"R2 恢复失败：{e}"
+        if res.get("status") != "success":
+            return f"R2 恢复失败：{res.get('message', res.get('status'))}"
+        if not auto_restart:
+            return "R2 整库快照已恢复，请重启插件以加载恢复后的数据。"
+        try:
+            await api.restart_plugin()
+        except Exception as e:
+            return f"R2 整库快照已恢复，但自动重启失败（请手动重启）：{e}"
+        return "R2 整库快照已强制恢复，插件正在自动重启以加载数据。"
+
+    # ── 消息 / LLM Hook（agent 注入与旁路）────────────────────────
 
     async def on_message(self, event: Any) -> str | None:
         """捕获 AstrBot 消息事件。
@@ -447,7 +303,7 @@ class EventHandler:
                 collection=None,
                 top_k=5,
                 conversation_id=conversation_id,
-                persona_enabled=False,
+                persona_enabled=self._initializer.persona_enabled,
                 retrieval_mode="default",
             )
             agent_answer = ask_res.get("answer") or ""
@@ -458,12 +314,11 @@ class EventHandler:
         logger.info("query_agent mode: answer ready (%d chars).", len(agent_answer))
         return agent_answer or None
 
-
     async def on_llm_request(self, event: Any, req: Any) -> None:
         """inject 模式：在 LLM 请求前向 req.system_prompt 注入知识库上下文。
 
         由 main.py 的 @filter.on_llm_request() 触发，仅在 LLM 即将被调用时执行，
-        命令处理（/kr ...）不会触发此 hook。
+        命令处理（/ka ...）不会触发此 hook。
         """
         if not self._initializer.agent_enabled:
             return
@@ -493,7 +348,7 @@ class EventHandler:
             all_cols = [c.name for c in cols[:5]] if cols else ["default"]
 
             chunks = []
-            seen_ids: set = set()
+            seen_ids: set[str] = set()
             for col in all_cols:
                 results = await self._initializer.retrieval_orchestrator.retrieve(
                     collection=col, query=query, top_k=3

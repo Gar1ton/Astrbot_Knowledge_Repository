@@ -6,7 +6,7 @@
 
 **AstrBot 知识库原件管理、同步备份与 Research Agent 插件**
 
-[![version](https://img.shields.io/badge/版本-v0.27.0-blueviolet)](metadata.yaml)
+[![version](https://img.shields.io/badge/版本-v0.28.0-blueviolet)](metadata.yaml)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-6f42c1)](https://github.com/AstrBotDevs/AstrBot)
 
@@ -96,25 +96,28 @@ pip install -r requirements-additional.txt
 | 图谱构建 | 对集合及其后代文档构建单一 LightRAG workspace，支持暂停、恢复和历史状态 |
 | 同步备份 | R2 备份原件与状态；Notion 镜像文档元数据；Zotero pull 同步文献库 |
 
-### /kr 指令速查
+### /ka 指令速查
+
+聊天端只保留运营控制面；内容管理（文档/集合/标签/Notion/知识图谱）请在 WebUI 操作。
+开关均持久化到 `runtime_config.json`，重启保留。
 
 | 指令 | 说明 |
 |------|------|
-| `/kr add <file_path> [collection] [tags]` | 从本地路径登记并摄入文档 |
-| `/kr quota` | 查看同步目标配额 |
-| `/kr agent <on\|off>` | 开关 AstrBot 对话中的知识库增强 |
-| `/kr collection list` | 查看集合 |
-| `/kr collection create <name> [description]` | 创建或更新集合 |
-| `/kr collection delete <name>` | 删除集合 |
-| `/kr tag set <doc_id> <tags>` | 设置文档标签，逗号分隔 |
-| `/kr tag show <doc_id>` | 查看文档标签 |
-| `/kr sync r2` | 同步到 Cloudflare R2 |
-| `/kr sync notion` | 推送到 Notion |
-| `/kr sync status` | 查看同步状态 |
-| `/kr notion init [parent_page_id] [database_title]` | 初始化 Notion Database |
-| `/kr notion pull` | 从 Notion 拉取元数据 |
-| `/kr graph build [collection]` | 预估图谱构建成本；实际确认在 WebUI 完成 |
-| `/kr graph query <query> [top_k]` | 查询 LightRAG 图谱 |
+| `/ka help` | 指令一览 |
+| `/ka status` | 服务框架概览（所用模型 / 各服务 / 运行时开关） |
+| `/ka agent <on\|off>` | 开关 ka 与 AstrBot 回复的关联（RAG 注入/旁路） |
+| `/ka research <on\|off>` | 开关自然语言 research skill |
+| `/ka persona <on\|off>` | 开关 AstrBot 人格 prompt（off 时不污染 research 精度） |
+| `/ka zotero pull` | 触发一次 Zotero 增量同步 |
+| `/ka r2 push` | 增量上传备份到 Cloudflare R2 |
+| `/ka r2 force push` | 全量覆盖上传（需 60s 内重发确认） |
+| `/ka r2 pull` | 从 R2 整库快照恢复，覆盖本地（需重启；需确认） |
+| `/ka r2 force pull` | 强制恢复并自动重启（需确认） |
+| `/ka webui <on\|off>` | 实时启停 Web 控制台 |
+
+> **自然语言 research**：开启 `/ka research on` 后，可在对话中直接用自然语言提问，
+> AstrBot 会调用 `knowledge_research` 工具，按「范围 → 模式 → 检索」分步召回并作答；
+> 该工具只读，不会修改任何同步配置。
 
 ### WebUI 面板导览
 

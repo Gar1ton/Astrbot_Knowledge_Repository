@@ -1,5 +1,31 @@
 # TODO
 
+## v0.28.0 指令集重写：移除 /kr，新建 /ka + research skill (completed)
+
+### User constraints / 约束
+
+- 聊天命令从 `/kr` 整体重写为 `/ka`，旧 `/kr` 全部相关代码删除。
+- `/ka` 只保留 8 类运营命令：`help` / `status` / `agent on|off` / `research on|off` / `zotero pull` / `persona on|off` / `r2 push|pull|force push|force pull` / `webui on|off`。
+- 文档/集合/标签/Notion/图谱等内容管理下沉 WebUI，聊天端不再暴露。
+- research 做成由 AstrBot LLM 自然语言调用的 `knowledge_research` skill：只读检索，**绝不**修改 Zotero/Notion/R2 的 token/url 等同步配置。
+- R2 的 `force push` / `pull` / `force pull` 需二次确认（60s 窗口内重发同命令）。
+- agent/research/persona/webui 四个开关持久化到 `runtime_config.json`，重启保留。
+- 版本 v0.27.x → v0.28.0（用户明确授权 minor）。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 配置与持久化基座**：`core/config.py` 加 `ask.agent_enabled`/`ask.research_enabled`/`web_console.enabled` 策略与 `AskAgentConfig` 字段；`plugin_initializer` 三开关从 config 读初值 + `set_toggle` 落盘。
+- [x] **Phase 2 - 删除 /kr 搭 /ka 骨架**：`main.py` 换命令组；`event_handler` 删旧路由、加 `on_ka_*` + R2 确认令牌；`api.get_service_status()` / `list_titles_by_collection()`。
+- [x] **Phase 3 - R2 force 与 webui 实时启停**：`sync_pipeline.sync()` 加 `force`、`api.sync_documents` 透传；`force pull` 在命令层经 `api.restart_plugin()` 自动重启（restore 本身不改）；`initializer.start/stop_web_console()`。
+- [x] **Phase 4 - research skill**：新建 `core/research_skill.py`（ScopeResolver/ModeSelector/ResearchSkill，handle 为流式生成器）；`initializer` 暴露 `research_skill`；`main.py` `@filter.llm_tool` 注册。
+- [x] **Phase 5 - 文档与版本**：清理 `/kr` 文档引用（README 改 `/ka` 速查），`metadata.yaml`/`main.py` 版本 `v0.28.0`，补 CHANGELOG。
+
+### Verification
+
+- `python -m pytest tests/backend -q` → **439 passed**。
+- `ruff check .` → All checks passed；`mypy`（核心 gate：`core/domain/`）→ Success。
+- `force pull` 改为命令层自动重启（`api.restart_plugin()`），未给 `restore()` 加无意义 `force` 参数。
+
 ## v0.26.5 登录页视觉重构 (completed)
 
 ### User constraints / 约束

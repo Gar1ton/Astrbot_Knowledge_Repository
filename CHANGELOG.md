@@ -21,7 +21,27 @@
 
 ---
 
-## [Unreleased]
+## [v0.28.0] — 2026-06-22
+
+### 新增功能 (Added)
+
+- **聊天指令集从 `/kr` 重写为 `/ka`（纯运营控制面 + 自然语言 research）**：新增 `/ka help`、`/ka status`（模型/服务/运行时开关概览）、`/ka agent on|off`、`/ka research on|off`、`/ka persona on|off`、`/ka zotero pull`、`/ka r2 push|pull|force push|force pull`、`/ka webui on|off`；其中 `r2` 的 `force push`/`pull`/`force pull` 需 60s 窗口内重发同命令二次确认，`force pull` 恢复后自动触发软重启。文档/集合/标签/Notion/知识图谱等内容管理下沉 WebUI，聊天端不再暴露（`main.py`、`core/event_handler.py`、`core/main.py`）。
+- **`knowledge_research` LLM 工具（research skill）**：由 AstrBot 主 LLM 经自然语言调用的只读知识检索工具，分四步流式产出「范围解析 → 模式选择 → api.ask → 答案」。范围解析（`KeywordScopeResolver`：显式集合名命中 + title 覆盖率评分）与模式选择（`ModeSelector`：quick/deep/auto × LightRAG 就绪度 → default/deep_thinking/high_precision）各为接口先行的可替换模块；工具仅做检索，绝不修改 Zotero/Notion/R2 同步配置（`core/research_skill.py`、`core/plugin_initializer.py`、`main.py`）。
+- **运行时开关持久化**：`agent`/`research`/`persona`/`webui` 四个开关写入 `runtime_config.json`，重启保留；新增 `ask.agent_enabled`/`ask.research_enabled`/`web_console.enabled` 持久化策略与 `AskAgentConfig` 字段、`PluginInitializer.set_toggle()` 与 `start_web_console()`/`stop_web_console()` 实时启停（`core/config.py`、`core/plugin_initializer.py`）。
+
+### 新增接口 (Added)
+
+- `api.get_service_status()`（服务框架概览）、`api.list_titles_by_collection()`（research 范围解析的轻量门面）；`SyncPipeline.sync()` 与 `api.sync_documents()` 新增 `force` 参数（强制全量覆盖上传）（`core/api.py`、`core/pipelines/sync_pipeline.py`）。
+
+### 架构健康 (Refactor)
+
+- 删除 `/kr` 全部命令路由与对应 `EventHandler`/薄壳方法（add/quota/collection/tag/sync/notion/graph/agent），收敛聊天命令面（`core/event_handler.py`、`core/main.py`、`main.py`）。
+
+### 测试 (Tests)
+
+- 新增 `tests/backend/test_research_skill.py`（范围解析/模式选择/handle 流式与 research 关闭短路）；重写 `test_lifecycle_and_cli.py` 的薄壳测试覆盖 `/ka` 路由、开关持久化往返与 R2 二次确认/自动重启；`test_config.py` 增 `/ka` 开关键持久化往返；`test_sync_pipeline.py` 增 `force` 全量重传（`tests/backend/`）。
+
+## [v0.27.1] - 2026-06-21
 
 ### 修复 (Fixed)
 

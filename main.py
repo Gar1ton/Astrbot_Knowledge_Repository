@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v0.17.0"
+_PLUGIN_VERSION = "v0.28.0"
 
 
 @register(
@@ -81,151 +81,102 @@ class KnowledgeRepositoryPlugin(Star):
         if self._handler:
             await self._handler.on_llm_request(event, req)
 
-    # ── 命令组 /kr ───────────────────────────────────────────────
+    # ── 命令组 /ka（纯运营控制面）──────────────────────────────────
 
-    @filter.command_group("kr")
-    def kr():
+    @filter.command_group("ka")
+    def ka():
         pass
 
-    @kr.command("add")
-    async def kr_add(
-        self,
-        event: AstrMessageEvent,
-        file_path: str,
-        collection: str = "",
-        tags: str = "",
-    ):
-        '''/kr add <file_path> [collection] [tags(逗号分隔)]'''
+    @ka.command("help")
+    async def ka_help(self, event: AstrMessageEvent):
+        '''/ka help — 指令一览'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
             return
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
-        yield event.plain_result(
-            await self._handler.on_add(file_path, collection or None, tag_list)
-        )
+        yield event.plain_result(await self._handler.on_ka_help())
 
-    @kr.command("quota")
-    async def kr_quota(self, event: AstrMessageEvent):
-        '''/kr quota — 显示存储配额'''
+    @ka.command("status")
+    async def ka_status(self, event: AstrMessageEvent):
+        '''/ka status — 服务框架概览'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
             return
-        yield event.plain_result(await self._handler.on_quota())
+        yield event.plain_result(await self._handler.on_ka_status())
 
-    @kr.command("agent")
-    async def kr_agent(self, event: AstrMessageEvent, action: str):
-        '''/kr agent <on|off> — 启用/关闭 RAG 注入'''
+    @ka.command("agent")
+    async def ka_agent(self, event: AstrMessageEvent, action: str = ""):
+        '''/ka agent <on|off> — ka 与 astrbot 回复关联开关'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
             return
-        yield event.plain_result(await self._handler.on_agent(action))
+        yield event.plain_result(await self._handler.on_ka_agent(action))
 
-    @kr.command("collection")
-    async def kr_collection(
-        self,
-        event: AstrMessageEvent,
-        action: str,
-        name: str = "",
-        description: str = "",
-    ):
-        '''/kr collection <list|create|delete> [name] [description]'''
+    @ka.command("research")
+    async def ka_research(self, event: AstrMessageEvent, action: str = ""):
+        '''/ka research <on|off> — research skill 开关'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
             return
-        yield event.plain_result(
-            await self._handler.on_collection(action, name or None, description)
-        )
+        yield event.plain_result(await self._handler.on_ka_research(action))
 
-    @kr.command("tag")
-    async def kr_tag(self, event: AstrMessageEvent, action: str, doc_id: str, tags_str: str = ""):
-        '''/kr tag <set|show> <doc_id> [tags(逗号分隔)]'''
+    @ka.command("persona")
+    async def ka_persona(self, event: AstrMessageEvent, action: str = ""):
+        '''/ka persona <on|off> — astrbot 人格 prompt 开关'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
             return
-        yield event.plain_result(
-            await self._handler.on_tag(action, doc_id, tags_str or None)
-        )
+        yield event.plain_result(await self._handler.on_ka_persona(action))
 
-    # ── /kr sync 子组 ────────────────────────────────────────────
+    @ka.command("webui")
+    async def ka_webui(self, event: AstrMessageEvent, action: str = ""):
+        '''/ka webui <on|off> — 实时启停 Web 控制台'''
+        if not self._handler:
+            yield event.plain_result("插件未初始化。")
+            return
+        yield event.plain_result(await self._handler.on_ka_webui(action))
 
-    @kr.group("sync")
-    def kr_sync():
+    @ka.command("r2")
+    async def ka_r2(self, event: AstrMessageEvent, action: str = "", target: str = ""):
+        '''/ka r2 <push|pull|force push|force pull> — R2 备份/恢复'''
+        if not self._handler:
+            yield event.plain_result("插件未初始化。")
+            return
+        combined = (action + " " + target).strip()
+        yield event.plain_result(await self._handler.on_ka_r2(combined))
+
+    # ── /ka zotero 子组 ──────────────────────────────────────────
+
+    @ka.group("zotero")
+    def ka_zotero():
         pass
 
-    @kr_sync.command("r2")
-    async def kr_sync_r2(self, event: AstrMessageEvent):
-        '''/kr sync r2 — 同步到 Cloudflare R2'''
+    @ka_zotero.command("pull")
+    async def ka_zotero_pull(self, event: AstrMessageEvent):
+        '''/ka zotero pull — 触发一次 Zotero 增量同步'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
             return
-        yield event.plain_result(await self._handler.on_sync_r2())
+        yield event.plain_result(await self._handler.on_ka_zotero_pull())
 
-    @kr_sync.command("notion")
-    async def kr_sync_notion(self, event: AstrMessageEvent):
-        '''/kr sync notion — 推送到 Notion'''
-        if not self._handler:
-            yield event.plain_result("插件未初始化。")
+    # ── 自然语言 research skill（LLM 工具）────────────────────────
+
+    @filter.llm_tool(name="knowledge_research")
+    async def knowledge_research(self, event: AstrMessageEvent, query: str, depth: str = "auto"):
+        '''查询本地知识库，回答关于已收藏文献、学术论文的问题。
+
+        当用户询问具体研究内容、要求文献分析、或引用某篇论文时调用。
+        本工具仅做只读检索，绝不修改 Zotero/Notion/R2 的任何同步配置（token/url）。
+
+        Args:
+            query(string): 用户的完整问题，原文传入。
+            depth(string): quick=快速答案；deep=综合分析；auto=由系统判断（默认 auto）。
+        '''
+        skill = self._initializer.research_skill if self._initializer else None
+        if skill is None:
+            yield event.plain_result("research skill 未装配。")
             return
-        yield event.plain_result(await self._handler.on_sync_notion())
-
-    @kr_sync.command("status")
-    async def kr_sync_status(self, event: AstrMessageEvent):
-        '''/kr sync status — 查看同步状态'''
-        if not self._handler:
-            yield event.plain_result("插件未初始化。")
-            return
-        yield event.plain_result(await self._handler.on_sync_status())
-
-    # ── /kr notion 子组 ──────────────────────────────────────────
-
-    @kr.group("notion")
-    def kr_notion():
-        pass
-
-    @kr_notion.command("init")
-    async def kr_notion_init(
-        self,
-        event: AstrMessageEvent,
-        parent_page_id: str = "",
-        database_title: str = "",
-    ):
-        '''/kr notion init [parent_page_id] [database_title]'''
-        if not self._handler:
-            yield event.plain_result("插件未初始化。")
-            return
-        yield event.plain_result(
-            await self._handler.on_notion_init(parent_page_id or None, database_title or None)
-        )
-
-    @kr_notion.command("pull")
-    async def kr_notion_pull(self, event: AstrMessageEvent):
-        '''/kr notion pull — 从 Notion 拉取元数据'''
-        if not self._handler:
-            yield event.plain_result("插件未初始化。")
-            return
-        yield event.plain_result(await self._handler.on_sync_notion_pull())
-
-    # ── /kr graph 子组 ───────────────────────────────────────────
-
-    @kr.group("graph")
-    def kr_graph():
-        pass
-
-    @kr_graph.command("build")
-    async def kr_graph_build(self, event: AstrMessageEvent, collection: str = ""):
-        '''/kr graph build [collection] — 构建知识图谱'''
-        if not self._handler:
-            yield event.plain_result("插件未初始化。")
-            return
-        yield event.plain_result(await self._handler.on_graph_build(collection or None))
-
-    @kr_graph.command("query")
-    async def kr_graph_query(self, event: AstrMessageEvent, query: str, top_k: int = 5):
-        '''/kr graph query <q> [top_k] — 查询知识图谱'''
-        if not self._handler:
-            yield event.plain_result("插件未初始化。")
-            return
-        yield event.plain_result(await self._handler.on_graph_query(query, top_k))
+        async for chunk in skill.handle(event, query, depth):
+            yield event.plain_result(chunk)
 
     # ── 生命周期 ─────────────────────────────────────────────────
 

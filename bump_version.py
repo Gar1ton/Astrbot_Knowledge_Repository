@@ -5,7 +5,6 @@ import re
 from datetime import date
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parent
 METADATA_PATH = ROOT / "metadata.yaml"
 TODO_PATH = ROOT / "TODO.md"

@@ -88,7 +88,13 @@ class PluginInitializer:
         self.embedding_fingerprint: str | None = None
         self.index_compatibility: IndexCompatibilityStore | None = None
         self.retrieval_orchestrator: RetrievalOrchestrator | None = None
-        self.agent_enabled: bool = False
+        self.research_skill: Any | None = None
+        # /ka 运行时开关：初值取自持久化配置（runtime_config.json 已合并进 self._config），
+        # 由命令切换并经 set_toggle 落盘，reload 时在 initialize() 重新刷新。
+        _ask_cfg = self._config.get_ask_agent_config()
+        self.agent_enabled: bool = _ask_cfg.agent_enabled
+        self.research_enabled: bool = _ask_cfg.research_enabled
+        self.persona_enabled: bool = _ask_cfg.persona_enabled
         self.metrics: PerformanceTracker = PerformanceTracker()
         self.progress_store: ProgressStore = ProgressStore()
         self.secret_store: EncryptedSecretStore = EncryptedSecretStore(data_dir / "secrets")
@@ -117,6 +123,12 @@ class PluginInitializer:
         source_cfg = self._config.get_source_store_config()
         r2_cfg = self._config.get_r2_sync_config()
         notion_cfg = self._config.get_notion_sync_config()
+
+        # 1.1) 刷新 /ka 运行时开关（reload 后 self._config 已重建，需重新读回持久化值）。
+        _ask_cfg = self._config.get_ask_agent_config()
+        self.agent_enabled = _ask_cfg.agent_enabled
+        self.research_enabled = _ask_cfg.research_enabled
+        self.persona_enabled = _ask_cfg.persona_enabled
 
         # 2) 无依赖层先行：DB 连接 + 迁移 + 仓储生产实现（v0.3.0 接入 sqlite）。
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -485,6 +497,20 @@ class PluginInitializer:
         )
         self.api.attach_zotero_pipeline(self.zotero_sync_pipeline)
 
+        # 5.6) Research Skill（自然语言只读检索工具）：范围解析 + 模式选择 + api.ask 编排。
+        from core.research_skill import (
+            KeywordScopeResolver,
+            ModeSelector,
+            ResearchSkill,
+        )
+
+        self.research_skill = ResearchSkill(
+            api=self.api,
+            scope_resolver=KeywordScopeResolver(api=self.api),
+            mode_selector=ModeSelector(api=self.api),
+            flags=self,
+        )
+
         # 6) 周期任务（如 R2 周期备份，v0.3.0 起注册）。
         if r2_cfg.enabled and r2_cfg.backup_interval_sec > 0:
             self._backup_task = asyncio.create_task(
@@ -519,6 +545,40 @@ class PluginInitializer:
 
     def _persist_config_value(self, section: str, key: str, value: object) -> None:
         self._runtime_config.set_value(section, key, value)
+
+    # ── /ka 运行时开关 ────────────────────────────────────────────
+    def set_toggle(self, name: str, value: bool) -> None:
+        """切换 agent/research/persona 内存开关并持久化到 runtime_config.json（ask 段）。"""
+        if name not in ("agent", "research", "persona"):
+            raise ValueError(f"unknown toggle: {name}")
+        setattr(self, f"{name}_enabled", value)
+        self._persist_config_value("ask", f"{name}_enabled", value)
+
+    async def start_web_console(self) -> bool:
+        """实时启动 Web 控制台并持久化 web_console.enabled=True。已在运行则幂等返回 True。"""
+        web_cfg = self._config.get_web_console_config()
+        if self._web_runner is not None:
+            self._persist_config_value("web_console", "enabled", True)
+            return True
+        if not web_cfg.password:
+            return False
+        await self._start_web_console(web_cfg)
+        self._persist_config_value("web_console", "enabled", True)
+        return self._web_runner is not None
+
+    async def stop_web_console(self) -> None:
+        """实时关闭 Web 控制台并持久化 web_console.enabled=False。未运行则仅落盘。"""
+        if self._web_runner is not None:
+            try:
+                await self._web_runner.cleanup()
+            except Exception as e:
+                logger.warning(f"Web 控制台关闭异常：{e}")
+            self._web_runner = None
+        self._persist_config_value("web_console", "enabled", False)
+
+    @property
+    def web_console_running(self) -> bool:
+        return self._web_runner is not None
 
     def _astrbot_config_persist(self, override: dict[str, Any]) -> None:
         """尝试将合并后的运行时配置写回 AstrBot 原生配置系统。"""

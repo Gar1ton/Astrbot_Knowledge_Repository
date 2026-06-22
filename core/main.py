@@ -37,115 +37,74 @@ class KnowledgeRepositoryPlugin:
             await self._initializer.teardown()
 
     # ── 框架命令回调：每个「取参 → 委派」，无业务 ────────────────
-    # @register_command("kr add")
-    async def on_add(
-        self,
-        file_path: str,
-        collection: str | None = None,
-        tags: list[str] | None = None,
-    ) -> str:
-        """/kr add <file_path> [--collection <col>] [--tag <tags>]"""
-        if self._handler is None:
-            return "Error: EventHandler not initialized."
-        return await self._handler.on_add(file_path, collection, tags)
+    # 内容管理（add/collection/tag/notion/graph）已下沉 WebUI，聊天端不再暴露；
+    # 此处仅保留 /ka 运营命令薄壳与消息 hook。
 
-    # @register_command("kr sync r2")
-    async def on_sync_r2(self) -> str:
-        """/kr sync r2"""
+    # @register_command("ka help")
+    async def on_ka_help(self) -> str:
+        """/ka help"""
         if self._handler is None:
             return "Error: EventHandler not initialized."
-        return await self._handler.on_sync_r2()
+        return await self._handler.on_ka_help()
 
-    # @register_command("kr sync notion")
-    async def on_sync_notion(self) -> str:
-        """/kr sync notion"""
+    # @register_command("ka status")
+    async def on_ka_status(self) -> str:
+        """/ka status"""
         if self._handler is None:
             return "Error: EventHandler not initialized."
-        return await self._handler.on_sync_notion()
+        return await self._handler.on_ka_status()
 
-    # @register_command("kr notion init")
-    async def on_notion_init(
-        self,
-        parent_page_id: str | None = None,
-        database_title: str | None = None,
-    ) -> str:
-        """/kr notion init [parent_page_id] [database_title]"""
+    # @register_command("ka agent")
+    async def on_ka_agent(self, action: str) -> str:
+        """/ka agent <on|off>"""
         if self._handler is None:
             return "Error: EventHandler not initialized."
-        return await self._handler.on_notion_init(parent_page_id, database_title)
+        return await self._handler.on_ka_agent(action)
 
-    # @register_command("kr sync notion --pull")
-    async def on_sync_notion_pull(self) -> str:
-        """/kr sync notion --pull"""
+    # @register_command("ka research")
+    async def on_ka_research(self, action: str) -> str:
+        """/ka research <on|off>"""
         if self._handler is None:
             return "Error: EventHandler not initialized."
-        return await self._handler.on_sync_notion_pull()
+        return await self._handler.on_ka_research(action)
 
-    # @register_command("kr sync status")
-    async def on_sync_status(self) -> str:
-        """/kr sync status"""
+    # @register_command("ka persona")
+    async def on_ka_persona(self, action: str) -> str:
+        """/ka persona <on|off>"""
         if self._handler is None:
             return "Error: EventHandler not initialized."
-        return await self._handler.on_sync_status()
+        return await self._handler.on_ka_persona(action)
 
-    # @register_command("kr quota")
-    async def on_quota(self) -> str:
-        """/kr quota"""
+    # @register_command("ka zotero pull")
+    async def on_ka_zotero_pull(self) -> str:
+        """/ka zotero pull"""
         if self._handler is None:
             return "Error: EventHandler not initialized."
-        return await self._handler.on_quota()
+        return await self._handler.on_ka_zotero_pull()
 
-    # @register_command("kr collection")
-    async def on_collection(
-        self,
-        action: str,
-        name: str | None = None,
-        description: str = "",
-    ) -> str:
-        """/kr collection <action> [name] [description]"""
+    # @register_command("ka webui")
+    async def on_ka_webui(self, action: str) -> str:
+        """/ka webui <on|off>"""
         if self._handler is None:
             return "Error: EventHandler not initialized."
-        return await self._handler.on_collection(action, name, description)
+        return await self._handler.on_ka_webui(action)
 
-    # @register_command("kr tag")
-    async def on_tag(
-        self,
-        action: str,
-        doc_id: str,
-        tags_str: str | None = None,
-    ) -> str:
-        """/kr tag <action> <doc_id> [tags_str]"""
+    # @register_command("ka r2")
+    async def on_ka_r2(self, action: str) -> str:
+        """/ka r2 <push|pull|force push|force pull>"""
         if self._handler is None:
             return "Error: EventHandler not initialized."
-        return await self._handler.on_tag(action, doc_id, tags_str)
-
-    # @register_command("kr graph build")
-    async def on_graph_build(self, collection: str | None = None) -> str:
-        """/kr graph build [--collection <col>]"""
-        if self._handler is None:
-            return "Error: EventHandler not initialized."
-        return await self._handler.on_graph_build(collection)
-
-    # @register_command("kr graph query")
-    async def on_graph_query(self, query: str, top_k: int = 5) -> str:
-        """/kr graph query <q> [--top_k <top_k>]"""
-        if self._handler is None:
-            return "Error: EventHandler not initialized."
-        return await self._handler.on_graph_query(query, top_k)
-
-    # @register_command("kr agent")
-    async def on_agent(self, action: str) -> str:
-        """/kr agent <on|off>"""
-        if self._handler is None:
-            return "Error: EventHandler not initialized."
-        return await self._handler.on_agent(action)
+        return await self._handler.on_ka_r2(action)
 
     # @register_event_listener("message")
     async def on_message(self, event: Any) -> Any:
-        """普通消息捕获 Hook 骨架 (Phase 5)."""
+        """普通消息捕获 Hook 骨架。"""
         if self._handler is None:
             return None
         return await self._handler.on_message(event)
+
+    # @filter.llm_tool("knowledge_research")
+    # 运行态在 main.py 真壳用 @filter.llm_tool 注册，委派 initializer.research_skill.handle()。
 
 
 __all__ = ["KnowledgeRepositoryPlugin"]

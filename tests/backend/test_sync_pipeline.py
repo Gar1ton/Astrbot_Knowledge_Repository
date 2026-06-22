@@ -251,3 +251,23 @@ async def test_restore_rejects_invalid_sqlite_snapshot(pipeline: SyncPipeline) -
 
     assert result["status"] == "error"
     assert pipeline._db_path.read_bytes() == original
+
+
+async def test_force_sync_repushes_all_even_when_synced(
+    pipeline: SyncPipeline,
+    store: InMemorySourceDocumentStore,
+) -> None:
+    """force=True 跳过增量过滤：即使全部已 SYNCED 也强制全量重传。"""
+    # 1) 首次同步标记两篇为 SYNCED
+    first = await pipeline.sync(SyncTargetKind.R2)
+    assert first["synced_count"] == 2
+
+    # 2) 普通增量同步：无变更 → 0 篇
+    incremental = await pipeline.sync(SyncTargetKind.R2)
+    assert incremental["synced_count"] == 0
+
+    # 3) 强制同步：忽略 sync record，全量重传两篇
+    forced = await pipeline.sync(SyncTargetKind.R2, force=True)
+    assert forced["status"] == "success"
+    assert forced["synced_count"] == 2
+    assert forced["failed_count"] == 0

@@ -290,6 +290,28 @@ def test_runtime_config_store_permits_vector_db_and_ask_keys(tmp_path: Path) -> 
     assert data["deep_thinking"]["max_verify_rounds"] == 2
 
 
+def test_runtime_config_store_persists_ka_toggle_keys(tmp_path: Path) -> None:
+    """/ka 的四个运行时开关键均可持久化并经 get_ask_agent_config 读回。"""
+    path = tmp_path / "runtime_config.json"
+    store = RuntimeConfigStore(path)
+
+    store.set_value("ask", "agent_enabled", True)
+    store.set_value("ask", "research_enabled", True)
+    store.set_value("ask", "persona_enabled", True)
+    store.set_value("web_console", "enabled", False)
+
+    data = store.load()
+    assert data["ask"]["agent_enabled"] is True
+    assert data["ask"]["research_enabled"] is True
+    assert data["ask"]["persona_enabled"] is True
+    assert data["web_console"]["enabled"] is False
+
+    ask_cfg = Config(data).get_ask_agent_config()
+    assert ask_cfg.agent_enabled is True
+    assert ask_cfg.research_enabled is True
+    assert ask_cfg.persona_enabled is True
+
+
 # ── Deep Thinking / Rerank config ───────────────────────────
 def test_deep_thinking_and_rerank_defaults_without_st(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("core.config._module_available", lambda name: False)

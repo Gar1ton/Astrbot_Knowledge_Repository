@@ -20,12 +20,12 @@ def test_astrbot_conf_schema_only_keeps_core_sections() -> None:
     schema_path = Path(__file__).resolve().parents[2] / "_conf_schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
+    # v0.28.0：移除 ask 段（原仅含已废弃的 conversation_enhancement_mode）。
     assert list(schema.keys()) == [
         "web_console",
         "r2_sync",
         "notion_sync",
         "embedding",
-        "ask",
     ]
 
 
@@ -275,7 +275,7 @@ def test_runtime_config_store_permits_vector_db_and_ask_keys(tmp_path: Path) -> 
     store.set_value("vector_db", "backend", "milvus")
     store.set_value("embedding", "provider", "local")
     store.set_value("embedding", "model", "BAAI/bge-m3")
-    store.set_value("ask", "conversation_enhancement_mode", "query_agent")
+    store.set_value("ask", "persona_enabled", True)
     store.set_value("source_store", "default_collection", "papers")
     store.set_value("deep_thinking", "verify_enabled", False)
     store.set_value("deep_thinking", "max_verify_rounds", 2)
@@ -284,7 +284,7 @@ def test_runtime_config_store_permits_vector_db_and_ask_keys(tmp_path: Path) -> 
     assert data["vector_db"]["backend"] == "milvus"
     assert data["embedding"]["provider"] == "local"
     assert data["embedding"]["model"] == "BAAI/bge-m3"
-    assert data["ask"]["conversation_enhancement_mode"] == "query_agent"
+    assert data["ask"]["persona_enabled"] is True
     assert data["source_store"]["default_collection"] == "papers"
     assert data["deep_thinking"]["verify_enabled"] is False
     assert data["deep_thinking"]["max_verify_rounds"] == 2

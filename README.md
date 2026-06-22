@@ -58,7 +58,6 @@ git clone https://github.com/Gar1ton/Astrbot_Knowledge_Repository astrbot_plugin
 | `web_console.port` | Web 控制台端口，默认 `26618` |
 | `web_console.username` | 登录用户名，默认 `admin` |
 | `web_console.password` | 登录密码；建议用环境变量 `KR_WEB_PASSWORD` 注入，留空会拒绝启动 WebUI |
-| `ask.conversation_enhancement_mode` | `inject` 为检索上下文注入，`query_agent` 为 Ask Agent 直接回答 |
 
 ### 可选依赖
 
@@ -92,7 +91,7 @@ pip install -r requirements-additional.txt
 |------|------|
 | 上传 / 同步资料 | 保存原件，抽取 markdown，切分 chunks，写入 SQLite 源库 |
 | 集合与标签管理 | 本地集合可编辑；Zotero 集合只读镜像；ask 和 LightRAG 范围包含选中集合及后代 |
-| 对话增强 | `inject` 模式把召回片段注入主 LLM；`query_agent` 模式由插件直接生成答案 |
+| 对话增强 | `/ka agent on` 时把召回片段注入主 LLM（被动 grounding）；主动检索用自然语言触发 research skill |
 | 图谱构建 | 对集合及其后代文档构建单一 LightRAG workspace，支持暂停、恢复和历史状态 |
 | 同步备份 | R2 备份原件与状态；Notion 镜像文档元数据；Zotero pull 同步文献库 |
 
@@ -147,7 +146,6 @@ pip install -r requirements-additional.txt
 | Notion 镜像 | `notion_sync.enabled` | 关 |
 | Zotero 同步 | `zotero_sync.enabled` | 关 |
 | LightRAG 图谱 | `graph.enabled` | 关 |
-| 对话增强 | `ask.conversation_enhancement_mode` | `inject` |
 | 本地 / 外部 Embedding | `embedding.provider` | `local` |
 
 ### 推荐部署组合

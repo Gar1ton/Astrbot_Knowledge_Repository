@@ -576,7 +576,6 @@ const MOCK_CONFIG: EffectiveConfig = {
   notion_sync: { enabled: true, database_id: "db-****", max_upload_mib: 5 },
   web_console: { enabled: true, host: "0.0.0.0", port: 26618, username: "admin", password: "****" },
   graph: { enabled: false, query_mode: "mix", llm_max_async: 4, embedding_max_async: 8, working_dir: "lightrag_workspaces", max_doc_chars: 30000, lightrag_llm_provider: "main", lightrag_llm_base_url: "", lightrag_llm_model: "", lightrag_llm_timeout_seconds: 900 },
-  ask: { conversation_enhancement_mode: "inject" },
   rerank: { provider: "cross_encoder", model: "Alibaba-NLP/gte-reranker-modernbert-base", device: "auto", batch_size: 32, max_candidates: 30, keep: 12 },
   deep_thinking: {
     max_rounds: 4,
@@ -895,10 +894,6 @@ function applyMockConfigUpdate(section: string, key: string, value: unknown): vo
   if (section === "vector_db" && vectorStore) {
     if (key === "backend") vectorStore.current = String(value);
     if (key === "auto_index_enabled") vectorStore.detail.auto_index_enabled = Boolean(value);
-  }
-
-  if (section === "ask" && key === "conversation_enhancement_mode" && ask) {
-    ask.current = String(value);
   }
 
   if (section === "rerank" && ask) {
@@ -1611,7 +1606,7 @@ const MOCK_CAPABILITIES: CapabilitiesData = {
     { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true, astrbot_locked: true, compatible: true, rebuild_required: false, pending_reindex_count: 0, document_count: 0, chunk_count: 0, reason: "" } },
     { id: "retrieval", current: "rrf_fusion", candidates: ["rrf_fusion"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { engines: ["milvus", "sqlite_lexical"] } },
     { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix", llm_provider: "main", llm_model: "", llm_label: "<main - AstrBot main LLM>" } },
-    { id: "ask", current: "inject", candidates: ["inject", "query_agent"], status: "ready", switchable: true, consequence: "none", required_deps: [], configured: true, detail: { rerank_provider: "cross_encoder", rerank_model: "Alibaba-NLP/gte-reranker-modernbert-base", rerank_status: "idle", rerank_dependency_ready: true, rerank_runtime: { provider: "cross_encoder", status: "idle", model: "Alibaba-NLP/gte-reranker-modernbert-base", enabled: true, last_error: null } } },
+    { id: "ask", current: "", candidates: [], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { rerank_provider: "cross_encoder", rerank_model: "Alibaba-NLP/gte-reranker-modernbert-base", rerank_status: "idle", rerank_dependency_ready: true, rerank_runtime: { provider: "cross_encoder", status: "idle", model: "Alibaba-NLP/gte-reranker-modernbert-base", enabled: true, last_error: null } } },
     { id: "sync", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { r2_enabled: false, notion_enabled: false } },
   ],
   dependencies: MOCK_DEPENDENCIES,

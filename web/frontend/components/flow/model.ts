@@ -108,7 +108,6 @@ export const FIELD_LABEL_KEYS: Partial<Record<FlowStageId, I18nKey>> = {
   vector_store: "flow_field_backend",
   retrieval: "flow_field_strategy",
   graph: "flow_field_enabled",
-  ask: "flow_field_mode",
   sync: "flow_field_enabled",
 };
 
@@ -116,7 +115,6 @@ export const SWITCH_MAP: Partial<Record<FlowStageId, { section: string; key: str
   zotero: { section: "zotero_sync", key: "enabled", toBool: true },
   embedding: { section: "embedding", key: "provider" },
   vector_store: { section: "vector_db", key: "backend" },
-  ask: { section: "ask", key: "conversation_enhancement_mode" },
   graph: { section: "graph", key: "enabled", toBool: true },
 };
 
@@ -151,8 +149,6 @@ const BACKEND_LABEL_ZH: Record<string, string> = {
   astr: "AstrBot KB",
   on: "开启",
   off: "关闭",
-  inject: "原生注入",
-  query_agent: "内部代理",
   cross_encoder: "本地 Rerank",
   noop: "关闭 Rerank",
   idle: "待首次使用",
@@ -178,8 +174,6 @@ const BACKEND_LABEL_EN: Record<string, string> = {
   astr: "AstrBot KB",
   on: "On",
   off: "Off",
-  inject: "Inject",
-  query_agent: "Query Agent",
   cross_encoder: "Local Rerank",
   noop: "Rerank Off",
   idle: "Idle",

@@ -25,6 +25,7 @@
 - `python -m pytest tests/backend -q` → **439 passed**。
 - `ruff check .` → All checks passed；`mypy`（核心 gate：`core/domain/`）→ Success。
 - `force pull` 改为命令层自动重启（`api.restart_plugin()`），未给 `restore()` 加无意义 `force` 参数。
+- [x] **收尾 - 移除 query_agent 模式**：删 `ask.conversation_enhancement_mode` 与 `on_message` hook，agent 仅保留 inject；同步去掉 WebUI 数据流图 Ask 的 MODE 切换并重建 `pages/`。原因：query_agent 短路会静默吞掉 `knowledge_research` skill 且高度冗余。
 
 ## v0.26.5 登录页视觉重构 (completed)
 

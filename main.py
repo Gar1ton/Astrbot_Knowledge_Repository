@@ -67,14 +67,7 @@ class KnowledgeRepositoryPlugin(Star):
         await self._initializer.initialize()
         self._handler = EventHandler(self._initializer)
 
-    # ── 消息 Hook（RAG 注入）─────────────────────────────────────
-
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def on_message(self, event: AstrMessageEvent):
-        if self._handler:
-            answer = await self._handler.on_message(event)
-            if answer is not None:
-                yield event.plain_result(answer)
+    # ── LLM Hook（agent 上下文注入）──────────────────────────────
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: ProviderRequest) -> None:

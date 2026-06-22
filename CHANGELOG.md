@@ -36,6 +36,7 @@
 ### 架构健康 (Refactor)
 
 - 删除 `/kr` 全部命令路由与对应 `EventHandler`/薄壳方法（add/quota/collection/tag/sync/notion/graph/agent），收敛聊天命令面（`core/event_handler.py`、`core/main.py`、`main.py`）。
+- **移除会话增强 `query_agent` 模式与 `ask.conversation_enhancement_mode` 配置**：该模式在 `on_message` 阶段短路、会静默吞掉新的 `knowledge_research` skill，且与之高度冗余。agent 开启时只保留 `inject` 一种行为（被动上下文注入），主动检索统一走 research skill；删除 `on_message` 消息 hook（`@filter.event_message_type`）、`AskAgentConfig.conversation_enhancement_mode` 字段/策略/`to_public_dict` 暴露、`capabilities` 的 ask mode 候选项。WebUI 数据流图 STAGE 06「问答 Ask」的 MODE 切换（原生注入/内部代理）随之移除，仅保留 rerank 状态展示（`core/event_handler.py`、`main.py`、`core/main.py`、`core/config.py`、`core/capabilities.py`、`web/frontend/components/flow/model.ts`、`web/frontend/components/flow/FlowNode.tsx`、`web/frontend/lib/api.ts`、`web/frontend/lib/i18n.ts`、`pages/`）。
 
 ### 测试 (Tests)
 

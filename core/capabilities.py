@@ -184,7 +184,6 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
     embedding_cfg = config.get_embedding_config()
     vdb_cfg = config.get_vector_db_config()
     graph_cfg = config.get_graph_config()
-    ask_cfg = config.get_ask_agent_config()
     rerank_cfg = config.get_rerank_config()
     r2_cfg = config.get_r2_sync_config()
     notion_cfg = config.get_notion_sync_config()
@@ -345,12 +344,13 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         if not rerank_enabled
         else (STATUS_READY if rerank_ready else STATUS_DEGRADED)
     )
+    # v0.28.0：Ask 仅保留 inject 一种行为，不再是可切换 mode；该 stage 仅展示 rerank 就绪态。
     ask = {
         "id": "ask",
-        "current": ask_cfg.conversation_enhancement_mode,
-        "candidates": ["inject", "query_agent"],
+        "current": "",
+        "candidates": [],
         "status": STATUS_DEGRADED if rerank_enabled and not has_local else STATUS_READY,
-        "switchable": True,
+        "switchable": False,
         "consequence": CONSEQUENCE_NONE,
         "required_deps": ["local_embedding"] if rerank_enabled and not has_local else [],
         "configured": True,

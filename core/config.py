@@ -184,11 +184,13 @@ class EmbeddingConfig:
 
 @dataclass
 class AskAgentConfig:
-    """Ask Agent 的会话增强和回答配置。"""
+    """Ask Agent 的运行时开关配置（均由 /ka 命令切换并持久化，重启保留）。
 
-    conversation_enhancement_mode: str = "inject"
-    # 以下三个为运行时开关，由 /ka 命令切换并持久化到 runtime_config.json（重启保留）。
-    agent_enabled: bool = False  # ka↔astrbot 回复关联（RAG 注入/旁路）总开关。
+    v0.28.0：移除 conversation_enhancement_mode——agent 开启时只有「inject 注入」一种行为，
+    主动检索改由 knowledge_research skill 承担（原 query_agent 会静默吞掉 research，已删）。
+    """
+
+    agent_enabled: bool = False  # ka↔astrbot 回复关联（RAG 上下文注入）总开关。
     research_enabled: bool = False  # knowledge_research skill 是否响应自然语言调用。
     persona_enabled: bool = False  # 是否在 ask 中启用 astrbot 人格 prompt（off=不污染 research）。
 
@@ -312,7 +314,6 @@ class Config:
         graph = self.get_graph_config()
         vector_db = self.get_vector_db_config()
         embedding = self.get_embedding_config()
-        ask = self.get_ask_agent_config()
         rerank = self.get_rerank_config()
         deep_thinking = self.get_deep_thinking_config()
         zotero = self.get_zotero_sync_config()
@@ -370,9 +371,6 @@ class Config:
                 "max_token_size": embedding.max_token_size,
                 "actual_dimension": self.runtime_embedding_dimension,
                 "api_key": _mask(_secret("", ENV_EMBEDDING_API_KEY)),
-            },
-            "ask": {
-                "conversation_enhancement_mode": ask.conversation_enhancement_mode,
             },
             "rerank": {
                 "provider": rerank.provider,
@@ -648,9 +646,6 @@ class Config:
     def get_ask_agent_config(self) -> AskAgentConfig:
         s = _section(self.raw, "ask")
         return AskAgentConfig(
-            conversation_enhancement_mode=s.get(
-                "conversation_enhancement_mode", AskAgentConfig.conversation_enhancement_mode
-            ),
             agent_enabled=bool(s.get("agent_enabled", AskAgentConfig.agent_enabled)),
             research_enabled=bool(s.get("research_enabled", AskAgentConfig.research_enabled)),
             persona_enabled=bool(s.get("persona_enabled", AskAgentConfig.persona_enabled)),
@@ -771,7 +766,6 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
     },
     "ask": {
-        "conversation_enhancement_mode": ConfigKeyPolicy(True, True),
         "persona_enabled": ConfigKeyPolicy(False, True),
         # /ka 运行时开关：仅持久化（不开放 API 写），由命令切换、重启保留。
         "agent_enabled": ConfigKeyPolicy(False, True),

@@ -96,13 +96,6 @@ class KnowledgeRepositoryPlugin:
             return "Error: EventHandler not initialized."
         return await self._handler.on_ka_r2(action)
 
-    # @register_event_listener("message")
-    async def on_message(self, event: Any) -> Any:
-        """普通消息捕获 Hook 骨架。"""
-        if self._handler is None:
-            return None
-        return await self._handler.on_message(event)
-
     # @filter.llm_tool("knowledge_research")
     # 运行态在 main.py 真壳用 @filter.llm_tool 注册，委派 initializer.research_skill.handle()。
 

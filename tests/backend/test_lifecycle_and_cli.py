@@ -487,45 +487,24 @@ async def test_plugin_shell_lifecycle(
         assert "Knowledge Base Context" in mock_req.system_prompt
         assert "testing" in mock_req.system_prompt
 
-    # 4b) query_agent 模式：on_message 直接返回知识库答案字符串（persona 跟随开关，默认 off）
-    plugin._initializer.config.raw.setdefault("ask", {})["conversation_enhancement_mode"] = (
-        "query_agent"
-    )
-    assert (
-        plugin._initializer.config.get_ask_agent_config().conversation_enhancement_mode
-        == "query_agent"
-    )
-
-    mock_event_query = MagicMock()
-    mock_event_query.message_str = "testing"
-    mock_event_query.session_id = "test-session-123"
-
-    mock_ask_result = {
-        "conversation_id": "event-test-session-123",
-        "answer": "This is the generated academic answer from standalone ask agent.",
-        "sources": [],
-    }
-    with patch.object(plugin._initializer.api, "ask", return_value=mock_ask_result) as mock_ask:
-        answer = await plugin._handler.on_message(mock_event_query)
-        assert answer == "This is the generated academic answer from standalone ask agent."
-        mock_ask.assert_called_once_with(
-            question="testing",
-            collection=None,
-            top_k=5,
-            conversation_id="event-test-session-123",
-            persona_enabled=False,
-            retrieval_mode="default",
-        )
-
-    # 4c) /ka agent off → 完全旁路，on_message 返回 None
+    # 4b) /ka agent off → on_llm_request 完全旁路，不注入、不检索（query_agent 已删，无 on_message）
     res_agent_off = await plugin.on_ka_agent("off")
     assert "关闭" in res_agent_off
     assert plugin._initializer.agent_enabled is False
 
     mock_event_off = MagicMock()
     mock_event_off.message_str = "testing"
-    result_off = await plugin._handler.on_message(mock_event_off)
-    assert result_off is None
+
+    class _MockReqOff:
+        system_prompt = "You are a bot."
+
+    mock_req_off = _MockReqOff()
+    with patch.object(
+        plugin._initializer.retrieval_orchestrator, "retrieve", return_value=[mock_chunk]
+    ) as mock_retrieve_off:
+        await plugin._handler.on_llm_request(mock_event_off, mock_req_off)
+        assert mock_retrieve_off.await_count == 0
+        assert mock_req_off.system_prompt == "You are a bot."
 
     # 5) /ka r2 push（增量上传，mock boto3 避免真实网络）
     mock_s3 = MagicMock()

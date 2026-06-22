@@ -230,108 +230,15 @@ class EventHandler:
             return f"R2 整库快照已恢复，但自动重启失败（请手动重启）：{e}"
         return "R2 整库快照已强制恢复，插件正在自动重启以加载数据。"
 
-    # ── 消息 / LLM Hook（agent 注入与旁路）────────────────────────
-
-    async def on_message(self, event: Any) -> str | None:
-        """捕获 AstrBot 消息事件。
-
-        query_agent 模式：返回知识库答案字符串，由 main.py 通过 yield 接管回复，
-        AstrBot LLM 不被调用。
-        inject 模式：pass-through 返回 None，上下文注入由 on_llm_request hook 负责。
-        """
-        if not self._initializer.agent_enabled:
-            logger.debug("Slot Hook bypassed (agent disabled).")
-            return None
-
-        # 提取文本
-        message_text = ""
-        if hasattr(event, "message_str"):
-            message_text = getattr(event, "message_str")
-        elif hasattr(event, "message") and hasattr(event.message, "text"):
-            message_text = event.message.text
-        elif hasattr(event, "text"):
-            message_text = getattr(event, "text")
-        elif isinstance(event, dict):
-            message_text = event.get("text") or event.get("message") or ""
-
-        query = str(message_text).strip()
-        if not query:
-            return None
-
-        # 仅 query_agent 模式在此处理；inject 模式由 on_llm_request 接管
-        mode = "inject"
-        if self._initializer.config is not None:
-            try:
-                ask_config = self._initializer.config.get_ask_agent_config()
-                mode = ask_config.conversation_enhancement_mode
-            except Exception as ce:
-                logger.warning(
-                    "Failed to get conversation_enhancement_mode, default to inject: %s", ce
-                )
-
-        if mode != "query_agent":
-            return None
-
-        if self._initializer.api is None:
-            return None
-
-        logger.info("query_agent mode: retrieving answer for message.")
-
-        # 提取 session_id
-        session_id = None
-        if hasattr(event, "session_id") and getattr(event, "session_id"):
-            session_id = getattr(event, "session_id")
-        elif hasattr(event, "conversation_id") and getattr(event, "conversation_id"):
-            session_id = getattr(event, "conversation_id")
-        elif hasattr(event, "unified_msg_id") and getattr(event, "unified_msg_id"):
-            session_id = getattr(event, "unified_msg_id")
-        elif (
-            hasattr(event, "message")
-            and hasattr(event.message, "session_id")
-            and getattr(event.message, "session_id")
-        ):
-            session_id = getattr(event.message, "session_id")
-
-        if not session_id:
-            session_id = "default-session"
-
-        conversation_id = f"event-{session_id}"
-
-        try:
-            ask_res = await self._initializer.api.ask(
-                question=query,
-                collection=None,
-                top_k=5,
-                conversation_id=conversation_id,
-                persona_enabled=self._initializer.persona_enabled,
-                retrieval_mode="default",
-            )
-            agent_answer = ask_res.get("answer") or ""
-        except Exception as exc:
-            logger.error("query_agent api.ask failed: %s", exc)
-            return None
-
-        logger.info("query_agent mode: answer ready (%d chars).", len(agent_answer))
-        return agent_answer or None
+    # ── LLM Hook（agent 上下文注入）──────────────────────────────
 
     async def on_llm_request(self, event: Any, req: Any) -> None:
-        """inject 模式：在 LLM 请求前向 req.system_prompt 注入知识库上下文。
+        """agent 开启时，在 LLM 请求前向 req.system_prompt 注入知识库上下文。
 
         由 main.py 的 @filter.on_llm_request() 触发，仅在 LLM 即将被调用时执行，
-        命令处理（/ka ...）不会触发此 hook。
+        命令处理（/ka ...）不会触发此 hook。主动检索走 knowledge_research skill。
         """
         if not self._initializer.agent_enabled:
-            return
-
-        mode = "inject"
-        if self._initializer.config is not None:
-            try:
-                ask_config = self._initializer.config.get_ask_agent_config()
-                mode = ask_config.conversation_enhancement_mode
-            except Exception:
-                pass
-
-        if mode != "inject":
             return
 
         if self._initializer.api is None or self._initializer.retrieval_orchestrator is None:

@@ -143,22 +143,5 @@
         "hint": "兼容 OpenAI Embeddings 接口的端点，例如 https://api.openai.com/v1 或自建代理地址"
       }
     }
-  },
-  "ask": {
-    "description": "问答行为",
-    "type": "object",
-    "hint": "控制知识库在普通 AstrBot 对话中的工作方式",
-    "items": {
-      "conversation_enhancement_mode": {
-        "description": "对话增强模式",
-        "type": "string",
-        "default": "inject",
-        "options": [
-          "inject",
-          "query_agent"
-        ],
-        "hint": "inject：将检索到的片段作为背景上下文注入 system prompt，由主 LLM 自然融入回答（推荐，保留对话风格）；query_agent：由独立 Ask Agent 闭环生成严谨的学术风格答案，强制覆盖主 LLM 人格"
-      }
-    }
   }
 }

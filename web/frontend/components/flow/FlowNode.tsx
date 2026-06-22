@@ -261,7 +261,8 @@ export function FlowNode({
       <p className="flow-node-desc">{t(meta.descKey)}</p>
 
       <div className="flow-node-body">
-        {canSwitch ? (
+        {/* v0.28.0：Ask 不再有可切换 mode（仅 inject），不渲染字段，仅保留 rerank 信息条。 */}
+        {id !== "ask" && (canSwitch ? (
           <Field label={t(fieldKey)}>
             <Segmented
               options={stage.candidates}
@@ -279,7 +280,7 @@ export function FlowNode({
           <Field label={t(fieldKey)} locked>
             <ReadonlyField value={stage.current} lang={lang} />
           </Field>
-        )}
+        ))}
 
         {detailParts.length > 0 && (
           <div className="flow-meta-strip">

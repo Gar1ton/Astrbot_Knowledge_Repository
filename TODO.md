@@ -1,5 +1,29 @@
 # TODO
 
+## v0.28.1 research 对话式重构：LLM 主导范围/模式 + reranker/wide + 引用 + 中英双语 (P1 done, P2 待 AstrBot 实测)
+
+### User constraints / 约束
+
+- 交互模型改为「探查 → 自然语言报范围+模式 → 高置信直接执行 / 模糊则确认 → 召回」，由主 LLM 主导判断、吃聊天上下文、支持追问。
+- ① 召回默认英文、按问题语言作答。
+- ② 范围界定与模式选择交给 LLM（probe 喂元数据：标题+author/year、集合名/描述、标签；不搜注释）。
+- ③ reranker 静默自适应（配了 cross_encoder 就宽召回→重排→取 top_k，默认 answer top_k 不变）；general 问题在 research on 时允许 breadth=wide。
+- 答案谁说由 persona 开关决定（on=主 LLM 转述+引用；off=grounded 原文+引用）；引用列表确定性拼装 `Author - Year - Title`。
+- 替换上一版 one-shot `knowledge_research` 工具。
+
+### Technical implementation path
+
+- [x] **P1-A 检索管线**：`retrieve_with_outcome` 加 `candidate_k`+`reranker`（融合后重排再截断）；`api` 持 default 路径 reranker（与 deep_thinking 共享）；`ask()` 加 `candidate_k`/`use_reranker`。
+- [x] **P1-B `research_scope_probe`**：标题/集合/标签模糊检索 + author-year enrich + `ambiguity` 信号 + suggested_mode（`ResearchService.probe`）。
+- [x] **P1-C `research_execute`**：英文召回+按语言答+rerank/breadth + 确定性引用列表（`ResearchService.execute`）。
+- [x] **P2 AstrBot 集成（代码侧）**：`ResearchService` 入 `plugin_initializer`；`main.py` 注册 `research_scope_probe`/`research_execute` 两工具替换 `knowledge_research`，描述编码「先确认/高置信跳过」工作流，persona 驱动 voicing。**跨轮 function-calling 与返回语义待真实 AstrBot 实测**；不稳时退化单工具 `phase`。
+
+### Verification
+
+- `python -m pytest tests/backend -q` → **438 passed**；`ruff check .` → 通过；`mypy` → Success。
+- 新增 `tests/backend/test_research_skill.py`（probe ambiguity/enrich/可用模式、execute 英文召回/wide+reranker/引用拼装）；`test_api.py`/`test_retrieval_orchestrator.py` 适配新参数。
+- **待真实 AstrBot 验证**：两工具跨轮调用、`return` 回喂 LLM、persona-off 原文呈现。
+
 ## v0.28.0 指令集重写：移除 /kr，新建 /ka + research skill (completed)
 
 ### User constraints / 约束

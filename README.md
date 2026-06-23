@@ -6,7 +6,7 @@
 
 **AstrBot 知识库原件管理、同步备份与 Research Agent 插件**
 
-[![version](https://img.shields.io/badge/版本-v0.28.0-blueviolet)](metadata.yaml)
+[![version](https://img.shields.io/badge/版本-v0.28.1-blueviolet)](metadata.yaml)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-6f42c1)](https://github.com/AstrBotDevs/AstrBot)
 
@@ -114,9 +114,11 @@ pip install -r requirements-additional.txt
 | `/ka r2 force pull` | 强制恢复并自动重启（需确认） |
 | `/ka webui <on\|off>` | 实时启停 Web 控制台 |
 
-> **自然语言 research**：开启 `/ka research on` 后，可在对话中直接用自然语言提问，
-> AstrBot 会调用 `knowledge_research` 工具，按「范围 → 模式 → 检索」分步召回并作答；
-> 该工具只读，不会修改任何同步配置。
+> **自然语言 research**（中英双语）：开启 `/ka research on` 后，可在对话中直接提问。
+> 主 LLM 先用 `research_scope_probe` 探查范围（命中论文/集合/标签），范围明确就直接召回、
+> 模糊则先用自然语言告诉你范围与模式并征求确认，确认后用 `research_execute` 召回并在
+> 答案下方附 `Author - Year - Title` 引用列表。默认英文召回、按你提问的语言作答；
+> 配置了 cross-encoder reranker 时自动「宽召回→重排」。两个工具均只读，不改任何同步配置。
 
 ### WebUI 面板导览
 

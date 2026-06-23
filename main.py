@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v0.28.0"
+_PLUGIN_VERSION = "v0.28.1"
 
 
 @register(
@@ -151,25 +151,59 @@ class KnowledgeRepositoryPlugin(Star):
             return
         yield event.plain_result(await self._handler.on_ka_zotero_pull())
 
-    # ── 自然语言 research skill（LLM 工具）────────────────────────
+    # ── 对话式 research（两工具，主 LLM 当指挥）───────────────────
+    # 工作流：先 research_scope_probe 了解范围 → 范围明确(ambiguity=low)就直接 research_execute
+    # 并在回答里说明用了什么范围；模糊(high)就用自然语言把范围+模式告诉用户、问是否执行，
+    # 据用户确认/修正再调用 research_execute。两工具均只读，绝不修改任何同步配置。
+    # 注意：@filter.llm_tool 的返回语义（return 字符串回喂 LLM）依 AstrBot SDK，接入需实测。
 
-    @filter.llm_tool(name="knowledge_research")
-    async def knowledge_research(self, event: AstrMessageEvent, query: str, depth: str = "auto"):
-        '''查询本地知识库，回答关于已收藏文献、学术论文的问题。
+    @filter.llm_tool(name="research_scope_probe")
+    async def research_scope_probe(self, event: AstrMessageEvent, query: str):
+        '''探查知识库里与问题相关的范围。返回命中的论文(author-year-title)、集合、标签，
+        以及范围是否明确(ambiguity: low/medium/high)、建议召回模式与可用模式。
 
-        当用户询问具体研究内容、要求文献分析、或引用某篇论文时调用。
-        本工具仅做只读检索，绝不修改 Zotero/Notion/R2 的任何同步配置（token/url）。
+        用户问到已收藏文献/研究内容时先调用本工具：ambiguity=low 可直接 research_execute；
+        medium/high 应先用自然语言把范围与模式告诉用户、询问是否执行。本工具只读。
 
         Args:
-            query(string): 用户的完整问题，原文传入。
-            depth(string): quick=快速答案；deep=综合分析；auto=由系统判断（默认 auto）。
+            query(string): 用户的完整问题（结合上下文改写后的检索意图），原文传入。
         '''
-        skill = self._initializer.research_skill if self._initializer else None
-        if skill is None:
-            yield event.plain_result("research skill 未装配。")
-            return
-        async for chunk in skill.handle(event, query, depth):
-            yield event.plain_result(chunk)
+        svc = self._initializer.research_service if self._initializer else None
+        if svc is None or not self._initializer.research_enabled:
+            return "research 未开启或未装配，请提示用户先发送 /ka research on。"
+        import json
+
+        return json.dumps(await svc.probe(query), ensure_ascii=False)
+
+    @filter.llm_tool(name="research_execute")
+    async def research_execute(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        collection: str = "",
+        mode: str = "default",
+        breadth: str = "normal",
+    ):
+        '''在确认范围后执行知识库召回并作答，返回答案 + 确定性引用列表(Author - Year - Title)。
+
+        通常在 research_scope_probe 之后、范围已明确或用户已确认时调用。把答案与引用列表
+        原样呈现给用户（引用列表勿改写）。本工具只读，绝不修改任何同步配置。
+
+        Args:
+            query(string): 用户问题（结合上下文的检索意图），原文传入。
+            collection(string): 召回范围集合名；留空=全局检索。
+            mode(string): default=标准召回；deep_thinking=综合分析；high_precision=图谱召回。
+            breadth(string): narrow/normal/wide——问题宽泛时用 wide 放大候选池再重排（默认 normal）。
+        '''
+        svc = self._initializer.research_service if self._initializer else None
+        if svc is None or not self._initializer.research_enabled:
+            return "research 未开启或未装配，请提示用户先发送 /ka research on。"
+        import json
+
+        result = await svc.execute(
+            query, collection or None, mode=mode, breadth=breadth
+        )
+        return json.dumps(result, ensure_ascii=False)
 
     # ── 生命周期 ─────────────────────────────────────────────────
 

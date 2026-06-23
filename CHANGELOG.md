@@ -21,6 +21,23 @@
 
 ---
 
+## [v0.28.1] — 2026-06-23
+
+### 新增功能 (Added)
+
+- **research 改为对话式（主 LLM 指挥 + 两个无状态工具），支持中英双语**：`research_scope_probe`（模糊检索标题/集合/标签元数据 → 候选 + `ambiguity` + 建议/可用模式，供主 LLM 判断回应范围、决定直接执行或先与用户确认）与 `research_execute`（真召回 + 确定性 `Author - Year - Title` 引用列表）取代原 one-shot `knowledge_research`；范围界定与模式选择交给主对话 LLM，天然吃聊天上下文与追问。execute 默认英文召回（`use_english_retrieval`）+ 按提问语言作答（`answer_language=auto`）；probe 分词支持 CJK 2-gram，中文 query 可命中中文集合名/标题（`core/research_skill.py` 新 `ResearchService`、`main.py`、`core/plugin_initializer.py`、`core/main.py`）。
+- **语义检索：reranker 静默自适应 + 宽召回**：`RetrievalOrchestrator.retrieve_with_outcome()` 新增 `candidate_k`/`reranker`——配置 cross-encoder 时「宽召回候选池 → 二次重排 → 取 top_k」（默认 answer top_k 不变，无 reranker 自动退回 RRF 截断）；`api.ask()` 新增 `candidate_k`/`use_reranker`，`research_execute` 据 `breadth`（narrow/normal/wide）放大候选池；reranker 实例由 `PluginInitializer` 共享给 default 路径与 deep_thinking（`core/pipelines/retrieval_orchestrator.py`、`core/api.py`、`core/plugin_initializer.py`）。
+
+### 架构健康 (Refactor)
+
+- 删除 one-shot research 的 `ScopeResolver`/`KeywordScopeResolver`/`ModeSelector`/`ResearchSkill`，收敛为 `ResearchService`（probe + execute）（`core/research_skill.py`）。
+
+### 测试 (Tests)
+
+- 重写 `tests/backend/test_research_skill.py` 覆盖 probe（ambiguity/author-year enrich/可用模式/中文集合命中）与 execute（英文召回/wide+reranker/引用拼装）；`test_api.py`、`test_retrieval_orchestrator.py` 适配 `candidate_k`/`reranker` 新参数。
+
+> 注：`@filter.llm_tool` 的跨轮调用与返回语义依 AstrBot SDK，接入真实 AstrBot 需实测；不稳时退化为单工具 `phase: propose|execute`（见 `main.py` 注释与 TODO）。
+
 ## [v0.28.0] — 2026-06-22
 
 ### 新增功能 (Added)

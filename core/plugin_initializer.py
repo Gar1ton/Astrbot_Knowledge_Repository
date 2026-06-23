@@ -88,7 +88,7 @@ class PluginInitializer:
         self.embedding_fingerprint: str | None = None
         self.index_compatibility: IndexCompatibilityStore | None = None
         self.retrieval_orchestrator: RetrievalOrchestrator | None = None
-        self.research_skill: Any | None = None
+        self.research_service: Any | None = None
         # /ka 运行时开关：初值取自持久化配置（runtime_config.json 已合并进 self._config），
         # 由命令切换并经 set_toggle 落盘，reload 时在 initialize() 重新刷新。
         _ask_cfg = self._config.get_ask_agent_config()
@@ -472,6 +472,7 @@ class PluginInitializer:
             embedding_provider=self.embedding_provider,
             retrieval_orchestrator=self.retrieval_orchestrator,
             deep_thinking_orchestrator=self.deep_thinking_orchestrator,
+            reranker=self.reranker,
             metrics=self.metrics,
             progress_store=self.progress_store,
             index_compatibility=self.index_compatibility,
@@ -497,19 +498,10 @@ class PluginInitializer:
         )
         self.api.attach_zotero_pipeline(self.zotero_sync_pipeline)
 
-        # 5.6) Research Skill（自然语言只读检索工具）：范围解析 + 模式选择 + api.ask 编排。
-        from core.research_skill import (
-            KeywordScopeResolver,
-            ModeSelector,
-            ResearchSkill,
-        )
+        # 5.6) Research 服务（对话式只读检索）：probe（范围探查）+ execute（召回+引用）。
+        from core.research_skill import ResearchService
 
-        self.research_skill = ResearchSkill(
-            api=self.api,
-            scope_resolver=KeywordScopeResolver(api=self.api),
-            mode_selector=ModeSelector(api=self.api),
-            flags=self,
-        )
+        self.research_service = ResearchService(api=self.api, flags=self)
 
         # 6) 周期任务（如 R2 周期备份，v0.3.0 起注册）。
         if r2_cfg.enabled and r2_cfg.backup_interval_sec > 0:

@@ -96,8 +96,8 @@ class KnowledgeRepositoryPlugin:
             return "Error: EventHandler not initialized."
         return await self._handler.on_ka_r2(action)
 
-    # @filter.llm_tool("knowledge_research")
-    # 运行态在 main.py 真壳用 @filter.llm_tool 注册，委派 initializer.research_skill.handle()。
+    # @filter.llm_tool("research_scope_probe") / @filter.llm_tool("research_execute")
+    # 运行态在 main.py 真壳注册这两个工具，分别委派 initializer.research_service.probe()/execute()。
 
 
 __all__ = ["KnowledgeRepositoryPlugin"]

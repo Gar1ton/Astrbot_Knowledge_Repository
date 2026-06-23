@@ -401,7 +401,9 @@ async def test_high_precision_uses_context_and_one_outer_llm_call(tmp_path: Path
             return collection == "papers"
 
     class Orchestrator:
-        async def retrieve_with_outcome(self, collection, query, top_k, scope=None):
+        async def retrieve_with_outcome(
+            self, collection, query, top_k, scope=None, candidate_k=None, reranker=None
+        ):
             return RetrievalOutcome(
                 [DocumentChunk("c1", "d1", 0, "chunk evidence", "h1")],
                 ["milvus", "sqlite_lexical"],
@@ -602,7 +604,9 @@ async def test_high_precision_can_answer_with_only_lightrag_context(tmp_path: Pa
             return True
 
     class Orchestrator:
-        async def retrieve_with_outcome(self, collection, query, top_k, scope=None):
+        async def retrieve_with_outcome(
+            self, collection, query, top_k, scope=None, candidate_k=None, reranker=None
+        ):
             return RetrievalOutcome([], [])
 
         async def retrieve_lightrag_context(self, collection, query, scope=None) -> str:

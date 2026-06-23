@@ -257,6 +257,7 @@ if TYPE_CHECKING:
     from core.pipelines.sync_pipeline import SyncPipeline
     from core.repository.embedding.base import EmbeddingProvider
     from core.repository.kb_reader.base import KnowledgeBaseReader
+    from core.repository.reranker.base import Reranker
     from core.repository.source_store.base import SourceDocumentStore
     from core.repository.sync_targets.base import SyncTarget
     from core.repository.vector_store.base import VectorStore
@@ -380,6 +381,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         embedding_provider: EmbeddingProvider | None = None,
         retrieval_orchestrator: RetrievalOrchestrator | None = None,
         deep_thinking_orchestrator: DeepThinkingOrchestrator | None = None,
+        reranker: Reranker | None = None,
         metrics: PerformanceTracker | None = None,
         progress_store: ProgressStore | None = None,
         index_compatibility: IndexCompatibilityStore | None = None,
@@ -393,6 +395,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._embedding_provider = embedding_provider
         self._retrieval_orchestrator = retrieval_orchestrator
         self._deep_thinking_orchestrator = deep_thinking_orchestrator
+        self._reranker = reranker  # default 路径研究召回的重排器（与 deep_thinking 共享同一实例）
         self._sync_targets = sync_targets or {}
         self._ingest_manager = ingest_manager
         self._category_manager = category_manager
@@ -448,6 +451,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 continue
             result.setdefault(col, []).append(doc.title)
         return result
+
+    def is_reranker_active(self) -> bool:
+        """default 研究路径是否有可用的真实 cross-encoder 重排器（非 passthrough）。"""
+        return self._reranker is not None and not self._reranker.is_passthrough
 
     async def create_collection(self, name: str, description: str = "") -> None:
         """新建或更新集合（按 name upsert）。v0.3.0 起委派 category_manager。"""
@@ -1495,8 +1502,14 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         scope_type: str = "",
         scope_key: str = "",
         scope_library_id: str = "",
+        candidate_k: int | None = None,
+        use_reranker: bool = False,
     ) -> dict:
-        """Retrieve evidence and generate one final answer."""
+        """Retrieve evidence and generate one final answer.
+
+        candidate_k / use_reranker：研究路径用——候选池宽召回 + cross-encoder 重排再取 top_k
+        （仅 default 模式生效；默认 answer top_k 不变）。reranker 为 passthrough 时自动退回 RRF。
+        """
         scope = _build_scope(scope_type, scope_key, scope_library_id)
         # 未显式传 scope 但选了集合：默认按「选中集合 + 所有子目录」检索（含后代），
         # 由 coll_key 派生 collection scope，覆盖统一树的整棵子树。
@@ -1663,7 +1676,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 try:
                     if self._retrieval_orchestrator is not None:
                         outcome = await self._retrieval_orchestrator.retrieve_with_outcome(
-                            col, retrieval_question, top_k, scope
+                            col,
+                            retrieval_question,
+                            top_k,
+                            scope,
+                            candidate_k=candidate_k,
+                            reranker=self._reranker if use_reranker else None,
                         )
                         current_chunks = outcome.chunks
                         engines.extend(outcome.engines)
@@ -1732,6 +1750,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 zmeta = await self.get_zotero_item_meta(doc.library_id, doc.zotero_item_key)
                 if zmeta:
                     first_author = (zmeta["creators"][0].split(",")[0] if zmeta["creators"] else "")
+                    source["author"] = first_author
+                    source["year"] = zmeta["year"]
                     source["citation"] = " ".join(
                         x for x in [first_author, zmeta["year"]] if x
                     ).strip()
@@ -2930,7 +2950,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             self._config_persist(section, key, value)
 
     def _apply_rerank_runtime_config(self) -> None:
-        if self._config is None or self._deep_thinking_orchestrator is None:
+        if self._config is None:
             return
         from core.repository.reranker import build_reranker
 
@@ -2942,7 +2962,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             batch_size=rerank_cfg.batch_size,
             max_candidates=rerank_cfg.max_candidates,
         )
-        self._deep_thinking_orchestrator.update_reranker(reranker, rerank_cfg)
+        # 同一实例同时供 default 研究路径与 deep_thinking 使用，热切换后两处都指向新实例。
+        self._reranker = reranker
+        if self._deep_thinking_orchestrator is not None:
+            self._deep_thinking_orchestrator.update_reranker(reranker, rerank_cfg)
         logger.info(
             "reranker hot-swapped: provider=%s model=%s",
             rerank_cfg.provider,

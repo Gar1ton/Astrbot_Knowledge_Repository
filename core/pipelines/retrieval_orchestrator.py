@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from core.lightrag_core import LightRAGCoreRegistry
     from core.repository.embedding.base import EmbeddingProvider
     from core.repository.kb_reader.base import KnowledgeBaseReader
+    from core.repository.reranker.base import Reranker
     from core.repository.source_store.base import SourceDocumentStore
     from core.repository.vector_store.base import VectorStore
 
@@ -172,9 +173,20 @@ class RetrievalOrchestrator:
         query: str,
         top_k: int = 5,
         scope: RetrievalScope | None = None,
+        candidate_k: int | None = None,
+        reranker: Reranker | None = None,
     ) -> RetrievalOutcome:
+        """统一证据召回。
+
+        candidate_k：候选池大小（默认 top_k*2）；> top_k*2 时各引擎宽召回更多候选。
+        reranker：非 passthrough 时对融合后的候选池做 cross-encoder 重排再取 top_k
+        （宽召回→重排→截断；为 None 或 passthrough 时退回 RRF 名次截断）。
+        """
         if top_k <= 0:
             return RetrievalOutcome([])
+
+        # 候选池：至少 top_k*2（保留既有行为）；研究路径可传更大 candidate_k 配合 reranker 宽召回。
+        pool_k = max(top_k * 2, candidate_k or 0)
 
         allowed_doc_ids = await self.resolve_scope(scope)
         if allowed_doc_ids is not None and not allowed_doc_ids:
@@ -202,7 +214,7 @@ class RetrievalOrchestrator:
                     vec_results = await self._vector_store.search(
                         collection=collection,
                         query_vector=query_vector,
-                        top_k=top_k * 2,
+                        top_k=pool_k,
                     )
                     for chunk_id, _ in vec_results:
                         chunk = await self._find_local_chunk(chunk_id)
@@ -219,17 +231,17 @@ class RetrievalOrchestrator:
                 fallback_reason = "milvus_no_hits"
             engines.append("astrbot")
             try:
-                dense_chunks = await self._kb_reader.search(collection, query, top_k * 2)
+                dense_chunks = await self._kb_reader.search(collection, query, pool_k)
             except Exception as exc:
                 logger.error("AstrBot native search fallback failed: %s", exc)
 
         anchor_chunks: list[DocumentChunk] = []
         lexical_chunks: list[DocumentChunk] = []
         try:
-            anchor_chunks = await self._search_anchor_sqlite(collection, query, top_k * 2)
+            anchor_chunks = await self._search_anchor_sqlite(collection, query, pool_k)
             if anchor_chunks:
                 engines.append("sqlite_anchor")
-            lexical_chunks = await self._search_lexical_sqlite(collection, query, top_k * 2)
+            lexical_chunks = await self._search_lexical_sqlite(collection, query, pool_k)
             if lexical_chunks:
                 engines.append("sqlite_lexical")
         except Exception as exc:
@@ -269,15 +281,36 @@ class RetrievalOrchestrator:
             if content_hash:
                 seen_hashes.add(content_hash)
             deduped.append((chunk, score))
-        top = deduped[:top_k]
+
+        # 重排：有真实 cross-encoder 且候选多于 top_k 时，对候选池二次联合打分再取 top_k；
+        # 否则退回 RRF 名次截断（保留既有行为）。candidate_k 已让候选池更宽，重排在此收口。
+        candidates = deduped[:pool_k]
+        if (
+            reranker is not None
+            and not reranker.is_passthrough
+            and len(candidates) > top_k
+        ):
+            try:
+                scored = await reranker.rerank(
+                    query, [chunk for chunk, _ in candidates], top_n=top_k
+                )
+                top_chunks = [sc.chunk for sc in scored]
+                engines.append("rerank")
+            except Exception as exc:
+                logger.warning("Reranker failed, falling back to RRF cut: %s", exc)
+                top_chunks = [chunk for chunk, _ in candidates[:top_k]]
+        else:
+            top_chunks = [chunk for chunk, _ in candidates[:top_k]]
+
         per_chunk_signals = {
             chunk.chunk_id: ChunkSignal(
-                rrf_score=score, anchor_hit=chunk.chunk_id in anchor_ids
+                rrf_score=rrf_scores.get(chunk.chunk_id, (chunk, 0.0))[1],
+                anchor_hit=chunk.chunk_id in anchor_ids,
             )
-            for chunk, score in top
+            for chunk in top_chunks
         }
         return RetrievalOutcome(
-            chunks=[chunk for chunk, _ in top],
+            chunks=top_chunks,
             engines=list(dict.fromkeys(engines)),
             fallback_reason=fallback_reason,
             per_chunk_signals=per_chunk_signals,

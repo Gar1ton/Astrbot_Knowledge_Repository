@@ -21,6 +21,16 @@
 
 ---
 
+## [v0.28.2] — 2026-06-23
+
+### 修复 (Fixed)
+
+- **聊天端 Deep Thinking 改为后台执行，避免 AstrBot LLM tool 120s 同步超时**：`research_execute(mode="deep_thinking")` 在运行态 `main.py` 中先向原会话发送可见启动提示，再用 `asyncio.create_task` 后台完整执行 `ResearchService.execute(..., mode="deep_thinking")`，工具本身立即返回 `started` JSON，完成后主动回发答案与确定性引用；普通 `research_execute` 也会先发送“已开始检索”提示，避免长时间静默被误判为卡死。WebUI `/api/ask`、`KnowledgeRepositoryApi.ask()` 与 `DeepThinkingOrchestrator` 未改动，WebUI Deep Thinking 行为保持不变（`main.py`）。
+
+### 构建与工程 (Build/CI)
+
+- 版本号 bump 到 `v0.28.2`，并补齐 `bump_version.py` 的 `main.py` 与 README badge 同步能力，避免后续发布漏改（`metadata.yaml`、`main.py`、`README.md`、`bump_version.py`）。
+
 ## [v0.28.1] — 2026-06-23
 
 ### 新增功能 (Added)

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 # ruff: noqa: E402
+import asyncio
+import inspect
+import json
+import logging
 import sys
 from pathlib import Path
 
@@ -31,7 +35,7 @@ def _purge_stale_local_modules() -> None:
 
 _purge_stale_local_modules()
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, StarTools, register
@@ -43,7 +47,8 @@ if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v0.28.1"
+_PLUGIN_VERSION = "v0.28.2"
+logger = logging.getLogger(__name__)
 
 
 @register(
@@ -59,6 +64,7 @@ class KnowledgeRepositoryPlugin(Star):
         self.config = config or {}
         self._initializer: PluginInitializer | None = None
         self._handler: EventHandler | None = None
+        self._research_tasks: set[asyncio.Task[None]] = set()
 
     async def initialize(self) -> None:
         data_dir: Path = StarTools.get_data_dir("astrbot_plugin_knowledge_repository")
@@ -171,7 +177,6 @@ class KnowledgeRepositoryPlugin(Star):
         svc = self._initializer.research_service if self._initializer else None
         if svc is None or not self._initializer.research_enabled:
             return "research 未开启或未装配，请提示用户先发送 /ka research on。"
-        import json
 
         return json.dumps(await svc.probe(query), ensure_ascii=False)
 
@@ -198,15 +203,159 @@ class KnowledgeRepositoryPlugin(Star):
         svc = self._initializer.research_service if self._initializer else None
         if svc is None or not self._initializer.research_enabled:
             return "research 未开启或未装配，请提示用户先发送 /ka research on。"
-        import json
+
+        requested_mode = (mode or "default").strip() or "default"
+        requested_breadth = (breadth or "normal").strip() or "normal"
+        scope_label = collection or "全局"
+        start_text = self._research_start_message(
+            scope_label, requested_mode, requested_breadth
+        )
+        notice_sent = await self._send_plain_message(event, start_text)
+
+        if requested_mode == "deep_thinking":
+            task = asyncio.create_task(
+                self._run_research_execute_background(
+                    event=event,
+                    svc=svc,
+                    query=query,
+                    collection=collection or None,
+                    mode=requested_mode,
+                    breadth=requested_breadth,
+                )
+            )
+            self._track_research_task(task)
+            return json.dumps(
+                {
+                    "status": "started",
+                    "async": True,
+                    "mode": requested_mode,
+                    "breadth": requested_breadth,
+                    "scope": scope_label,
+                    "notice_sent": notice_sent,
+                    "instruction": (
+                        "Deep Thinking 已在后台完整执行；不要重复调用 research_execute，"
+                        "完成后插件会主动向用户发送答案。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
 
         result = await svc.execute(
-            query, collection or None, mode=mode, breadth=breadth
+            query, collection or None, mode=requested_mode, breadth=requested_breadth
         )
         return json.dumps(result, ensure_ascii=False)
 
     # ── 生命周期 ─────────────────────────────────────────────────
 
     async def terminate(self) -> None:
+        if self._research_tasks:
+            for task in list(self._research_tasks):
+                task.cancel()
+            await asyncio.gather(*self._research_tasks, return_exceptions=True)
+            self._research_tasks.clear()
         if self._initializer:
             await self._initializer.teardown()
+
+    # ── research 后台任务与主动回发 ───────────────────────────────
+
+    @staticmethod
+    def _research_start_message(scope: str, mode: str, breadth: str) -> str:
+        mode_label = "Deep Thinking" if mode == "deep_thinking" else mode
+        if mode == "deep_thinking":
+            return (
+                f"🔬 已开始 {mode_label}：范围「{scope}」，breadth={breadth}。"
+                "这个任务可能需要几分钟，我会完成后直接发结果。"
+            )
+        return f"🔎 已开始检索：范围「{scope}」，mode={mode_label}，breadth={breadth}。"
+
+    def _track_research_task(self, task: asyncio.Task[None]) -> None:
+        self._research_tasks.add(task)
+
+        def _done(done_task: asyncio.Task[None]) -> None:
+            self._research_tasks.discard(done_task)
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001 - 后台任务不能把异常泄漏到事件循环
+                logger.warning("background research task failed: %s", exc, exc_info=True)
+
+        task.add_done_callback(_done)
+
+    async def _run_research_execute_background(
+        self,
+        *,
+        event: AstrMessageEvent,
+        svc: Any,
+        query: str,
+        collection: str | None,
+        mode: str,
+        breadth: str,
+    ) -> None:
+        try:
+            result = await svc.execute(query, collection, mode=mode, breadth=breadth)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 主动回发失败信息，避免静默吞异常
+            logger.warning("Deep Thinking research_execute failed: %s", exc, exc_info=True)
+            await self._send_plain_message(event, f"⚠️ Deep Thinking 执行失败：{exc}")
+            return
+
+        await self._send_plain_message(event, self._format_research_result(result))
+
+    @staticmethod
+    def _format_research_result(result: dict[str, Any]) -> str:
+        answer = str(result.get("answer") or "未找到相关内容。").strip()
+        scope = str(result.get("scope") or "全局")
+        mode = str(result.get("mode") or "deep_thinking")
+        citations = [str(item) for item in (result.get("citations") or []) if item]
+
+        parts = [
+            "✅ Deep Thinking 完成",
+            f"范围：{scope}；模式：{mode}",
+            "",
+            answer,
+        ]
+        if citations:
+            parts.extend(["", "引用：", *[f"- {item}" for item in citations]])
+        return "\n".join(parts)
+
+    async def _send_plain_message(self, event: AstrMessageEvent, text: str) -> bool:
+        result = event.plain_result(text) if hasattr(event, "plain_result") else text
+
+        event_send = getattr(event, "send", None)
+        if callable(event_send):
+            try:
+                maybe = event_send(result)
+                if inspect.isawaitable(maybe):
+                    await maybe
+                return True
+            except Exception as exc:
+                logger.warning("event.send failed, trying context.send_message: %s", exc)
+
+        origin = getattr(event, "unified_msg_origin", None)
+        context_send = getattr(self.context, "send_message", None)
+        if origin and callable(context_send):
+            payloads = self._context_message_payloads(text, result)
+            for payload in payloads:
+                try:
+                    maybe = context_send(origin, payload)
+                    if inspect.isawaitable(maybe):
+                        await maybe
+                    return True
+                except Exception as exc:
+                    logger.warning("context.send_message payload failed: %s", exc)
+        logger.warning("no available AstrBot send method for research notice")
+        return False
+
+    @staticmethod
+    def _context_message_payloads(text: str, fallback: Any) -> list[Any]:
+        payloads: list[Any] = []
+        try:
+            from astrbot.api.message_components import MessageChain
+
+            payloads.append(MessageChain().message(text))
+        except Exception:
+            pass
+        payloads.extend([fallback, text])
+        return payloads

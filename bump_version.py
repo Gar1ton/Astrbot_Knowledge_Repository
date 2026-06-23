@@ -7,11 +7,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 METADATA_PATH = ROOT / "metadata.yaml"
+MAIN_PATH = ROOT / "main.py"
+README_PATH = ROOT / "README.md"
 TODO_PATH = ROOT / "TODO.md"
 CHANGELOG_PATH = ROOT / "CHANGELOG.md"
 
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 METADATA_VERSION_RE = re.compile(r"^(version:\s*)v?(\d+\.\d+\.\d+)(.*)$", re.MULTILINE)
+MAIN_VERSION_RE = re.compile(
+    r'^(_PLUGIN_VERSION\s*=\s*")v?\d+\.\d+\.\d+(".*)$',
+    re.MULTILINE,
+)
+README_BADGE_VERSION_RE = re.compile(
+    r"(\[!\[version\]\(https://img\.shields\.io/badge/版本-)v?\d+\.\d+\.\d+"
+    r"(-blueviolet\)\]\(metadata\.yaml\))"
+)
 TODO_HEADING_RE = re.compile(r"^(##\s+)v?(\d+\.\d+\.\d+)(\s+.+)$", re.MULTILINE)
 CHANGELOG_UNRELEASED_RE = re.compile(r"^## \[Unreleased\]\s*", re.MULTILINE)
 CHANGELOG_RELEASE_RE = re.compile(r"^## \[v\d+\.\d+\.\d+\]", re.MULTILINE)
@@ -68,6 +78,24 @@ def _update_metadata(target: str, *, dry_run: bool) -> bool:
     return updated != content
 
 
+def _update_main_version(target: str, *, dry_run: bool) -> bool:
+    content = _read(MAIN_PATH)
+    updated, count = MAIN_VERSION_RE.subn(rf"\g<1>{target}\g<2>", content, count=1)
+    if count != 1:
+        raise RuntimeError("Failed to update main.py _PLUGIN_VERSION")
+    _write(MAIN_PATH, updated, dry_run=dry_run)
+    return updated != content
+
+
+def _update_readme_badge(target: str, *, dry_run: bool) -> bool:
+    content = _read(README_PATH)
+    updated, count = README_BADGE_VERSION_RE.subn(rf"\g<1>{target}\g<2>", content, count=1)
+    if count != 1:
+        raise RuntimeError("Failed to update README.md version badge")
+    _write(README_PATH, updated, dry_run=dry_run)
+    return updated != content
+
+
 def _update_todo_top_version(target: str, *, dry_run: bool) -> bool:
     content = _read(TODO_PATH)
     updated, count = TODO_HEADING_RE.subn(rf"\g<1>{target}\g<3>", content, count=1)
@@ -100,8 +128,8 @@ def _release_changelog(target: str, release_date: str, *, dry_run: bool) -> bool
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Bump project version across metadata.yaml, the top TODO.md version heading, "
-            "and CHANGELOG.md [Unreleased]."
+            "Bump project version across metadata.yaml, main.py, README.md, "
+            "the top TODO.md version heading, and CHANGELOG.md [Unreleased]."
         )
     )
     parser.add_argument(
@@ -132,6 +160,8 @@ def main() -> int:
 
     changed = {
         "metadata.yaml": _update_metadata(target, dry_run=args.dry_run),
+        "main.py": _update_main_version(target, dry_run=args.dry_run),
+        "README.md": _update_readme_badge(target, dry_run=args.dry_run),
         "TODO.md": _update_todo_top_version(target, dry_run=args.dry_run),
         "CHANGELOG.md": _release_changelog(target, args.date, dry_run=args.dry_run),
     }

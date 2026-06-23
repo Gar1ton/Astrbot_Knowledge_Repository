@@ -2,6 +2,6 @@
 name: astrbot_plugin_knowledge_repository   # 机器名（包名/标识），snake_case
 display_name: Knowledge Repository          # 展示名
 desc: AstrBot 知识库应用：复用默认 KB，支持原件管理、分类、Notion/R2 同步备份与 LightRAG 知识图谱
-version: v0.28.1                            # SemVer；与 CHANGELOG.md/TODO.md 顶部版本对齐
+version: v0.28.2                            # SemVer；与 CHANGELOG.md/TODO.md 顶部版本对齐
 author: uceiz73
 repo: https://github.com/Gar1ton/Astrbot_Knowledge_Repository

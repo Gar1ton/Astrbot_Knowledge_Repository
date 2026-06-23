@@ -1,5 +1,29 @@
 # TODO
 
+## v0.28.2 聊天端 Deep Thinking 异步执行与可见启动提示 (completed)
+
+### User constraints / 约束
+
+- 聊天端仍要运行完整 `deep_thinking`，不能降级成普通召回。
+- 解决 AstrBot `research_execute` 同步 tool 120s timeout；长耗时任务启动时必须先给用户可见提示。
+- 本次改动不得影响 WebUI `/api/ask` 内的 Deep Thinking、进度轮询与思考过程展示。
+- 版本 bump 到 `v0.28.2`。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 聊天端异步任务**：仅在运行态 `main.py` 的 `research_execute(mode=deep_thinking)` 分支中发送开始提示并 `asyncio.create_task` 后台执行完整 `ResearchService.execute()`；tool 立即返回 `started` JSON，避免 AstrBot 120s 同步超时。
+- [x] **Phase 2 - 主动回发与生命周期**：后台任务完成后主动向原会话发送答案/引用/错误；插件 `terminate()` 取消未完成 research 任务，避免重载后悬挂。
+- [x] **Phase 3 - 版本与验证**：bump `metadata.yaml`/`main.py`/`README.md` 到 `v0.28.2`，补 `bump_version.py` 的同步范围与 CHANGELOG，运行 research 相关单测与静态检查。
+
+### Verification
+
+- `python -m pytest tests/backend/test_research_skill.py tests/backend/test_config.py -q` → 40 passed。
+- `python -m pytest tests/backend/test_api.py -q -k "deep_thinking or ask"` → 16 passed, 44 deselected。
+- `python -m pytest tests/backend/test_web_server.py -q -k "ask"` → 10 passed, 39 deselected。
+- `python -m py_compile main.py core/research_skill.py` → passed。
+- `ruff` 未执行：当前 Windows Python 环境未安装 `ruff`（`ruff` 与 `python -m ruff` 均不可用）。
+- `python -m pytest tests/backend/test_lifecycle_and_cli.py -q` → 13 passed, 1 failed；失败点为本地缺少可选依赖 `boto3`，发生在既有 R2 mock patch 导入阶段，非本次改动路径。
+
 ## v0.28.1 research 对话式重构：LLM 主导范围/模式 + reranker/wide + 引用 + 中英双语 (P1 done, P2 待 AstrBot 实测)
 
 ### User constraints / 约束

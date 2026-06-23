@@ -238,7 +238,7 @@ export function LoginScreen({ onLogin }: { onLogin: () => void }) {
 
           <div className={styles.rule} aria-hidden="true" />
 
-          <section className={styles.card} aria-label="Knowledge Repository login">
+          <section className={styles.card} aria-label="Knowledge Arch login">
             <form className={styles.form} onSubmit={handleLogin}>
               <label className={styles.field}>
                 <span className={styles.fieldLabel}>USERNAME</span>
@@ -284,7 +284,7 @@ export function LoginScreen({ onLogin }: { onLogin: () => void }) {
             </form>
           </section>
 
-          <p className={styles.footer}>KNOWLEDGE REPOSITORY · CONSOLE</p>
+          <p className={styles.footer}>KNOWLEDGE ARCH · CONSOLE</p>
         </div>
       </div>
     </div>

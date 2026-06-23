@@ -14,7 +14,8 @@
 - [x] **Phase 1 - 聊天端异步任务**：仅在运行态 `main.py` 的 `research_execute(mode=deep_thinking)` 分支中发送开始提示并 `asyncio.create_task` 后台执行完整 `ResearchService.execute()`；tool 立即返回 `started` JSON，避免 AstrBot 120s 同步超时；严格模式无 collection 时先 probe，低歧义才自动绑定，否则返回 `needs_scope`，禁止全局静默降级。
 - [x] **Phase 2 - 主动回发与生命周期**：后台任务完成后主动向原会话发送答案/引用/错误；插件 `terminate()` 取消未完成 research 任务，避免重载后悬挂。
 - [x] **Phase 3 - 严格模式审计**：`deep_thinking`、`high_precision`、`graph_only` 必须按用户选择的链路执行；`ResearchService.execute()` 删除严格模式到 `default` 的旧降级，`api.ask()` 在 DeepThinkingOrchestrator 未装配时直接报错。
-- [x] **Phase 4 - 版本与验证**：bump `metadata.yaml`/`main.py`/`README.md` 到 `v0.28.2`，补 `bump_version.py` 的同步范围与 CHANGELOG，运行 research 相关单测与静态检查。
+- [x] **Phase 4 - 长答案分段发送**：Deep Thinking 后台结果按段落整理并分条发送，避免聊天平台单条消息长度限制导致答案被截断。
+- [x] **Phase 5 - 版本与验证**：bump `metadata.yaml`/`main.py`/`README.md` 到 `v0.28.2`，补 `bump_version.py` 的同步范围与 CHANGELOG，运行 research 相关单测与静态检查。
 
 ### Verification
 
@@ -27,6 +28,7 @@
 - `python -m pytest tests/backend/test_deep_thinking_orchestrator.py -q` → 38 passed。
 - `python -m pytest tests/backend/test_retrieval_orchestrator.py -q -k "lightrag"` → 2 passed, 10 deselected。
 - `python -m py_compile main.py core/research_skill.py core/api.py bump_version.py` → passed。
+- 长答案分段脚本模拟：6 chunks，最大 1569 字；全部低于 1600 字安全限制。
 - `ruff` 未执行：当前 Windows Python 环境未安装 `ruff`（`ruff` 与 `python -m ruff` 均不可用）。
 - `python -m pytest tests/backend/test_lifecycle_and_cli.py -q` → 13 passed, 1 failed；失败点为本地缺少可选依赖 `boto3`，发生在既有 R2 mock patch 导入阶段，非本次改动路径。
 

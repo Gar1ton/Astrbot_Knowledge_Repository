@@ -5,6 +5,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -49,6 +50,8 @@ if TYPE_CHECKING:
 
 _PLUGIN_VERSION = "v0.28.2"
 logger = logging.getLogger(__name__)
+_RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
+_RESEARCH_PARAGRAPH_LIMIT = 700
 
 
 @register(
@@ -367,11 +370,13 @@ class KnowledgeRepositoryPlugin(Star):
             await self._send_plain_message(event, f"⚠️ Deep Thinking 执行失败：{exc}")
             return
 
-        await self._send_plain_message(event, self._format_research_result(result))
+        await self._send_plain_message_chunks(event, self._format_research_result(result))
 
     @staticmethod
     def _format_research_result(result: dict[str, Any]) -> str:
-        answer = str(result.get("answer") or "未找到相关内容。").strip()
+        answer = self._paragraphize_research_text(
+            str(result.get("answer") or "未找到相关内容。").strip()
+        )
         scope = str(result.get("scope") or "全局")
         mode = str(result.get("mode") or "deep_thinking")
         citations = [str(item) for item in (result.get("citations") or []) if item]
@@ -385,6 +390,106 @@ class KnowledgeRepositoryPlugin(Star):
         if citations:
             parts.extend(["", "引用：", *[f"- {item}" for item in citations]])
         return "\n".join(parts)
+
+    async def _send_plain_message_chunks(
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        *,
+        limit: int = _RESEARCH_MESSAGE_CHUNK_LIMIT,
+    ) -> bool:
+        chunks = self._split_message_text(text, limit=limit)
+        ok = True
+        for chunk in chunks:
+            ok = await self._send_plain_message(event, chunk) and ok
+        return ok
+
+    @staticmethod
+    def _split_message_text(text: str, *, limit: int = _RESEARCH_MESSAGE_CHUNK_LIMIT) -> list[str]:
+        cleaned = text.strip()
+        if not cleaned:
+            return []
+        if len(cleaned) <= limit:
+            return [cleaned]
+
+        parts = KnowledgeRepositoryPlugin._split_text_by_blocks(cleaned, max_chars=limit - 24)
+        if len(parts) == 1:
+            return parts
+        total = len(parts)
+        return [f"（{idx}/{total}）\n{part}" for idx, part in enumerate(parts, start=1)]
+
+    @staticmethod
+    def _paragraphize_research_text(
+        text: str, *, max_chars: int = _RESEARCH_PARAGRAPH_LIMIT
+    ) -> str:
+        blocks = [block.strip() for block in re.split(r"\n{2,}", text) if block.strip()]
+        if not blocks:
+            return ""
+        paragraphs: list[str] = []
+        for block in blocks:
+            if len(block) <= max_chars or "\n" in block:
+                paragraphs.append(block)
+                continue
+            paragraphs.extend(
+                KnowledgeRepositoryPlugin._split_text_by_sentences(block, max_chars=max_chars)
+            )
+        return "\n\n".join(paragraphs)
+
+    @staticmethod
+    def _split_text_by_blocks(text: str, *, max_chars: int) -> list[str]:
+        chunks: list[str] = []
+        current = ""
+        for block in [b.strip() for b in re.split(r"\n{2,}", text) if b.strip()]:
+            pieces = (
+                [block]
+                if len(block) <= max_chars
+                else KnowledgeRepositoryPlugin._split_text_by_sentences(block, max_chars=max_chars)
+            )
+            for piece in pieces:
+                candidate = f"{current}\n\n{piece}" if current else piece
+                if len(candidate) <= max_chars:
+                    current = candidate
+                    continue
+                if current:
+                    chunks.append(current)
+                if len(piece) <= max_chars:
+                    current = piece
+                else:
+                    chunks.extend(
+                        piece[i : i + max_chars] for i in range(0, len(piece), max_chars)
+                    )
+                    current = ""
+        if current:
+            chunks.append(current)
+        return chunks
+
+    @staticmethod
+    def _split_text_by_sentences(text: str, *, max_chars: int) -> list[str]:
+        sentences = re.findall(r".+?(?:[。！？!?\.](?=\s|$)|$)", text, flags=re.S)
+        if not sentences:
+            sentences = [text]
+        chunks: list[str] = []
+        current = ""
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            candidate = f"{current} {sentence}" if current else sentence
+            if len(candidate) <= max_chars:
+                current = candidate
+                continue
+            if current:
+                chunks.append(current)
+            if len(sentence) <= max_chars:
+                current = sentence
+            else:
+                chunks.extend(
+                    sentence[i : i + max_chars] for i in range(0, len(sentence), max_chars)
+                )
+                current = ""
+        if current:
+            chunks.append(current)
+        return chunks
 
     async def _send_plain_message(self, event: AstrMessageEvent, text: str) -> bool:
         result = event.plain_result(text) if hasattr(event, "plain_result") else text

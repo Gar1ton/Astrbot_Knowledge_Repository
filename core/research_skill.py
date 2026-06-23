@@ -23,6 +23,8 @@ logger = logging.getLogger("ResearchService")
 # 答案默认 top_k 不变；breadth 只放大「候选池」，由 reranker 收口（无 reranker 时不放大）。
 _ANSWER_TOP_K = 5
 _BREADTH_MULT = {"narrow": 1, "normal": 3, "wide": 8}
+_VALID_MODES = {"default", "high_precision", "graph_only", "deep_thinking"}
+_STRICT_COLLECTION_MODES = {"high_precision", "graph_only", "deep_thinking"}
 
 # probe 结果上限，控制喂给 LLM 的 token。
 _MAX_COLLECTIONS = 8
@@ -206,11 +208,20 @@ class ResearchService:
         persona_enabled: bool | None = None,
     ) -> dict[str, Any]:
         """真正召回并作答：英文召回 + 按问题语言答 + reranker/wide + 确定性引用列表。"""
-        if mode not in {"default", "high_precision", "graph_only", "deep_thinking"}:
+        if mode not in _VALID_MODES:
             mode = "default"
-        # high_precision/deep_thinking/graph_only 需要具体集合；全局时降级 default。
-        if mode != "default" and not collection:
-            mode = "default"
+        if mode in _STRICT_COLLECTION_MODES and not collection:
+            return _mode_failure_result(
+                query=query,
+                collection=collection,
+                mode=mode,
+                status="needs_scope",
+                error=f"{mode} requires a concrete collection",
+                answer=(
+                    f"{mode} 需要先确认一个具体 collection；"
+                    "不能在全局范围静默改用 default 检索。"
+                ),
+            )
 
         use_reranker = self._api.is_reranker_active()
         mult = _BREADTH_MULT.get(breadth, _BREADTH_MULT["normal"])
@@ -233,22 +244,47 @@ class ResearchService:
             )
         except Exception as exc:  # noqa: BLE001 - 工具入口需兜底，不向框架抛出
             logger.error("ResearchService.execute api.ask failed: %s", exc)
-            return {
-                "answer": "检索时发生错误，请稍后再试。",
-                "citations": [],
-                "scope": collection or "全局",
-                "mode": mode,
-                "sources": [],
-            }
+            return _mode_failure_result(
+                query=query,
+                collection=collection,
+                mode=mode,
+                status="error",
+                error=str(exc),
+                answer=f"{mode} 执行失败：{exc}",
+            )
 
         sources = result.get("sources") or []
         return {
+            "status": "ok",
             "answer": result.get("answer") or "未找到相关内容。",
             "citations": _build_citations(sources),
             "scope": collection or "全局",
             "mode": result.get("actual_retrieval_mode") or mode,
+            "requested_mode": mode,
             "sources": sources,
         }
+
+
+def _mode_failure_result(
+    *,
+    query: str,
+    collection: str | None,
+    mode: str,
+    status: str,
+    error: str,
+    answer: str,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "answer": answer,
+        "citations": [],
+        "scope": collection or "全局",
+        "mode": mode,
+        "requested_mode": mode,
+        "sources": [],
+        "error": error,
+        "query": query,
+    }
 
 
 def _build_citations(sources: list[dict[str, Any]]) -> list[str]:

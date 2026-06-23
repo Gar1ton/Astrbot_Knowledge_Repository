@@ -26,6 +26,8 @@
 ### 修复 (Fixed)
 
 - **聊天端 Deep Thinking 改为后台执行，避免 AstrBot LLM tool 120s 同步超时**：`research_execute(mode="deep_thinking")` 在运行态 `main.py` 中先向原会话发送可见启动提示，再用 `asyncio.create_task` 后台完整执行 `ResearchService.execute(..., mode="deep_thinking")`，工具本身立即返回 `started` JSON，完成后主动回发答案与确定性引用；普通 `research_execute` 也会先发送“已开始检索”提示，避免长时间静默被误判为卡死。WebUI `/api/ask`、`KnowledgeRepositoryApi.ask()` 与 `DeepThinkingOrchestrator` 未改动，WebUI Deep Thinking 行为保持不变（`main.py`）。
+- **阻止聊天端 Deep Thinking 在全局范围静默退化成普通召回**：`research_execute(mode="deep_thinking", collection="")` 现在会先调用 `research_scope_probe`；仅当范围低歧义时自动绑定 top collection，否则直接提示用户确认范围并返回 `needs_scope`，避免出现“已开始 Deep Thinking”但实际走 `default/astrbot_fallback` 的误导结果（`main.py`）。
+- **严格保持用户选择的 research 模式**：`research_execute` 对 `deep_thinking`、`high_precision`、`graph_only` 统一要求明确 collection，不再允许全局范围静默改成 `default`；`ResearchService.execute()` 删除旧的严格模式降级逻辑，底层失败时保留请求 mode 返回 `error`；`KnowledgeRepositoryApi.ask(retrieval_mode="deep_thinking")` 在 DeepThinkingOrchestrator 未装配时直接报错，避免继续落到普通向量召回（`main.py`、`core/research_skill.py`、`core/api.py`）。
 
 ### 构建与工程 (Build/CI)
 

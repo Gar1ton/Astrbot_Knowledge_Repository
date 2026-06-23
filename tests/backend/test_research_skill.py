@@ -19,6 +19,7 @@ class FakeApi:
         reranker_active: bool = False,
         zmeta: dict[tuple[str, str], dict[str, Any]] | None = None,
         ask_result: dict[str, Any] | None = None,
+        ask_exception: Exception | None = None,
     ) -> None:
         self._cols = [SimpleNamespace(name=n, description=d) for n, d in collections]
         self._titles = titles
@@ -27,6 +28,7 @@ class FakeApi:
         self._reranker_active = reranker_active
         self._zmeta = zmeta or {}
         self._ask_result = ask_result or {"answer": "A", "sources": []}
+        self._ask_exception = ask_exception
         self.ask_calls: list[dict[str, Any]] = []
 
     async def list_collections(self) -> list[Any]:
@@ -49,6 +51,8 @@ class FakeApi:
 
     async def ask(self, **kwargs: Any) -> dict[str, Any]:
         self.ask_calls.append(kwargs)
+        if self._ask_exception is not None:
+            raise self._ask_exception
         return self._ask_result
 
 
@@ -166,10 +170,26 @@ async def test_execute_wide_widens_candidate_pool_only_with_reranker() -> None:
     assert api_off.ask_calls[0]["candidate_k"] is None
 
 
-async def test_execute_downgrades_nonglobal_mode_without_collection() -> None:
+async def test_execute_rejects_strict_mode_without_collection() -> None:
     api = FakeApi([("ml", "")], {"ml": ["X"]})
-    await _svc(api).execute("q", None, mode="high_precision")
-    assert api.ask_calls[0]["retrieval_mode"] == "default"
+    res = await _svc(api).execute("q", None, mode="high_precision")
+    assert api.ask_calls == []
+    assert res["status"] == "needs_scope"
+    assert res["mode"] == "high_precision"
+    assert "default" in res["answer"]
+
+
+async def test_execute_preserves_requested_mode_on_backend_error() -> None:
+    api = FakeApi(
+        [("ml", "")],
+        {"ml": ["X"]},
+        ask_exception=RuntimeError("LightRAG not ready"),
+    )
+    res = await _svc(api).execute("q", "ml", mode="high_precision")
+    assert api.ask_calls[0]["retrieval_mode"] == "high_precision"
+    assert res["status"] == "error"
+    assert res["mode"] == "high_precision"
+    assert "LightRAG not ready" in res["error"]
 
 
 async def test_execute_builds_citations_author_year_title() -> None:

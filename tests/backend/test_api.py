@@ -1493,6 +1493,13 @@ async def test_deep_thinking_requires_collection() -> None:
         await api.ask(question="q", retrieval_mode="deep_thinking")
 
 
+async def test_deep_thinking_requires_orchestrator() -> None:
+    """deep_thinking 后端未装配时不能退回 default/vector 路径。"""
+    api = await _make_api()
+    with pytest.raises(RuntimeError, match="DeepThinkingOrchestrator"):
+        await api.ask(question="q", collection="kb1", retrieval_mode="deep_thinking")
+
+
 async def test_deep_thinking_returns_trace_and_synthesizes() -> None:
     from core.domain.deep_thinking import (
         Checklist,

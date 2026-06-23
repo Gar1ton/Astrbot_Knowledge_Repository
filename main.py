@@ -206,7 +206,33 @@ class KnowledgeRepositoryPlugin(Star):
 
         requested_mode = (mode or "default").strip() or "default"
         requested_breadth = (breadth or "normal").strip() or "normal"
-        scope_label = collection or "全局"
+        resolved_collection = collection or None
+        scope_probe: dict[str, Any] | None = None
+        strict_collection_modes = {"deep_thinking", "high_precision", "graph_only"}
+        if requested_mode in strict_collection_modes and not resolved_collection:
+            scope_probe = await svc.probe(query)
+            resolved_collection = self._collection_from_probe(scope_probe)
+            if resolved_collection is None:
+                message = self._strict_mode_scope_required_message(requested_mode, scope_probe)
+                notice_sent = await self._send_plain_message(event, message)
+                return json.dumps(
+                    {
+                        "status": "needs_scope",
+                        "async": False,
+                        "mode": requested_mode,
+                        "breadth": requested_breadth,
+                        "notice_sent": notice_sent,
+                        "reason": f"{requested_mode}_requires_collection",
+                        "probe": scope_probe,
+                        "instruction": (
+                            f"{requested_mode} 必须绑定明确 collection。请向用户确认范围后，"
+                            "带 collection 参数再次调用 research_execute；不要改用其它 mode。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+
+        scope_label = resolved_collection or "全局"
         start_text = self._research_start_message(
             scope_label, requested_mode, requested_breadth
         )
@@ -218,7 +244,7 @@ class KnowledgeRepositoryPlugin(Star):
                     event=event,
                     svc=svc,
                     query=query,
-                    collection=collection or None,
+                    collection=resolved_collection,
                     mode=requested_mode,
                     breadth=requested_breadth,
                 )
@@ -241,7 +267,7 @@ class KnowledgeRepositoryPlugin(Star):
             )
 
         result = await svc.execute(
-            query, collection or None, mode=requested_mode, breadth=requested_breadth
+            query, resolved_collection, mode=requested_mode, breadth=requested_breadth
         )
         return json.dumps(result, ensure_ascii=False)
 
@@ -267,6 +293,46 @@ class KnowledgeRepositoryPlugin(Star):
                 "这个任务可能需要几分钟，我会完成后直接发结果。"
             )
         return f"🔎 已开始检索：范围「{scope}」，mode={mode_label}，breadth={breadth}。"
+
+    @staticmethod
+    def _collection_from_probe(probe: dict[str, Any]) -> str | None:
+        if probe.get("ambiguity") != "low":
+            return None
+        collections = probe.get("collections")
+        if not isinstance(collections, list) or not collections:
+            return None
+        first = collections[0]
+        if not isinstance(first, dict):
+            return None
+        name = str(first.get("name") or "").strip()
+        return name or None
+
+    @staticmethod
+    def _strict_mode_scope_required_message(mode: str, probe: dict[str, Any]) -> str:
+        collections = probe.get("collections")
+        candidates: list[str] = []
+        if isinstance(collections, list):
+            for item in collections[:3]:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                score = item.get("match_score")
+                candidates.append(f"{name} ({score})" if score is not None else name)
+        suffix = ""
+        if candidates:
+            suffix = "\n候选范围：" + "、".join(candidates)
+        mode_label = {
+            "deep_thinking": "Deep Thinking",
+            "high_precision": "LightRAG high_precision",
+            "graph_only": "LightRAG graph_only",
+        }.get(mode, mode)
+        return (
+            f"🔬 {mode_label} 需要先锁定一个具体 collection，不能用「全局」范围运行；"
+            "否则就不是用户选择的那条检索链。请先确认范围。"
+            f"{suffix}"
+        )
 
     def _track_research_task(self, task: asyncio.Task[None]) -> None:
         self._research_tasks.add(task)

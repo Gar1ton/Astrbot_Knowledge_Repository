@@ -1648,7 +1648,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             }
 
         deep_outcome = None  # DeepThinkingOutcome | None（仅 deep_thinking 路径非空）。
-        if retrieval_mode == "deep_thinking" and self._deep_thinking_orchestrator is not None:
+        if retrieval_mode == "deep_thinking" and self._deep_thinking_orchestrator is None:
+            raise RuntimeError("DeepThinkingOrchestrator is not configured")
+        if retrieval_mode == "deep_thinking":
             _progress("deep_thinking", 20)
             t_dt = time.monotonic()
             deep_outcome = await self._deep_thinking_orchestrator.run(

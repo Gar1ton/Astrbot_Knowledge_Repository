@@ -31,6 +31,30 @@ class MockKnowledgeBaseReader(KnowledgeBaseReader):
         return self.chunks[:top_k]
 
 
+class FakeEmbeddingProvider:
+    async def embed_query(self, text: str) -> list[float]:
+        return [1.0, 0.0, 0.0, 0.0]
+
+
+class FakeVectorStore:
+    def __init__(self, results: list[tuple[str, float]]) -> None:
+        self.results = results
+
+    async def search(
+        self,
+        collection: str,
+        query_vector: list[float],
+        top_k: int,
+        filter_metadata: dict | None = None,
+    ) -> list[tuple[str, float]]:
+        return self.results[:top_k]
+
+
+class CompatibleIndex:
+    def is_milvus_compatible(self, fingerprint: str) -> bool:
+        return True
+
+
 @pytest.fixture
 def temp_dir():
     d = tempfile.mkdtemp()
@@ -140,6 +164,48 @@ async def test_retrieval_orchestrator_lexical_fallback(sqlite_store):
     assert len(results) >= 1
     assert results[0].chunk_id == "c1"
     assert "attention" in results[0].text
+
+
+@pytest.mark.asyncio
+async def test_retrieval_orchestrator_hydrates_milvus_chunks_in_batch(sqlite_store):
+    doc = SourceDocument(
+        doc_id="doc-batch",
+        title="Batch Hydrate Paper",
+        file_path="batch.pdf",
+        content_type="application/pdf",
+        size_bytes=1000,
+        content_hash="hash-batch",
+        collection="papers",
+    )
+    await sqlite_store.add_document(doc)
+    await sqlite_store.replace_chunks(
+        "doc-batch",
+        [
+            DocumentChunk("c-a", "doc-batch", 0, "alpha evidence", "ha"),
+            DocumentChunk("c-b", "doc-batch", 1, "beta evidence", "hb"),
+        ],
+    )
+
+    orchestrator = RetrievalOrchestrator(
+        source_store=sqlite_store,
+        kb_reader=MockKnowledgeBaseReader(),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=FakeVectorStore(
+            [("c-b", 0.9), ("missing", 0.8), ("c-a", 0.7)]
+        ),  # type: ignore[arg-type]
+        embedding_provider=FakeEmbeddingProvider(),  # type: ignore[arg-type]
+        index_compatibility=CompatibleIndex(),  # type: ignore[arg-type]
+        embedding_fingerprint="fp",
+    )
+
+    async def fail_single_lookup(chunk_id: str):  # noqa: ANN202
+        raise AssertionError("_find_local_chunk should not be used for Milvus hydration")
+
+    orchestrator._find_local_chunk = fail_single_lookup  # type: ignore[method-assign]
+
+    result = await orchestrator.retrieve_with_outcome("papers", "no lexical token", top_k=3)
+    assert [chunk.chunk_id for chunk in result.chunks] == ["c-b", "c-a"]
+    assert "milvus" in result.engines
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
@@ -202,8 +203,7 @@ class SourceDocumentStore(ABC):
             if doc.lifecycle_state != DocumentLifecycle.ACTIVE:
                 continue
             for chunk in await self.list_chunks(doc.doc_id):
-                lower = chunk.text.lower()
-                matched = [t for t in normalized if t in lower]
+                matched = _matched_exact_terms(chunk.text, normalized)
                 if not matched:
                     continue
                 hits.append(
@@ -477,6 +477,25 @@ def _normalize_exact_terms(terms: list[str]) -> list[str]:
         seen.add(cleaned)
         out.append(cleaned)
     return out
+
+
+def _matched_exact_terms(text: str, normalized_terms: list[str]) -> list[str]:
+    """返回正文中真正命中的精确词；纯 ASCII 字母数字词要求词边界。"""
+    lower = text.lower()
+    matched: list[str] = []
+    for term in normalized_terms:
+        if _is_ascii_alnum_term(term):
+            pattern = rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])"
+            if re.search(pattern, lower):
+                matched.append(term)
+            continue
+        if term in lower:
+            matched.append(term)
+    return matched
+
+
+def _is_ascii_alnum_term(term: str) -> bool:
+    return bool(re.fullmatch(r"[a-z0-9]+", term))
 
 
 def _exact_snippet(text: str, term: str, *, window: int = 60) -> str:

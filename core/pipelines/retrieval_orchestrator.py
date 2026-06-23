@@ -218,10 +218,9 @@ class RetrievalOrchestrator:
                         query_vector=query_vector,
                         top_k=pool_k,
                     )
-                    for chunk_id, _ in vec_results:
-                        chunk = await self._find_local_chunk(chunk_id)
-                        if chunk:
-                            dense_chunks.append(chunk)
+                    dense_chunks = await self._find_local_chunks(
+                        [chunk_id for chunk_id, _ in vec_results]
+                    )
                 except Exception as exc:
                     fallback_reason = f"milvus_error: {exc}"
                     logger.error("Milvus dense search failed: %s", exc)
@@ -600,22 +599,32 @@ class RetrievalOrchestrator:
         return False
 
     async def _find_local_chunk(self, chunk_id: str) -> DocumentChunk | None:
+        chunks = await self._find_local_chunks([chunk_id])
+        return chunks[0] if chunks else None
+
+    async def _find_local_chunks(self, chunk_ids: list[str]) -> list[DocumentChunk]:
         db_conn = getattr(self._source_store, "_db", None)
-        if db_conn is None:
-            return None
+        ordered_ids = [cid for cid in chunk_ids if cid]
+        if db_conn is None or not ordered_ids:
+            return []
         try:
+            placeholders = ",".join("?" for _ in ordered_ids)
             async with db_conn.execute(
-                "SELECT doc_id, ordinal, text, content_hash, metadata "
-                "FROM chunks WHERE chunk_id = ?",
-                (chunk_id,),
+                "SELECT chunk_id, doc_id, ordinal, text, content_hash, metadata "
+                f"FROM chunks WHERE chunk_id IN ({placeholders})",
+                tuple(ordered_ids),
             ) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    metadata = _loads_metadata(row[4])
-                    return DocumentChunk(chunk_id, row[0], row[1], row[2], row[3], metadata)
+                by_id: dict[str, DocumentChunk] = {}
+                async for row in cursor:
+                    chunk_id = row[0]
+                    metadata = _loads_metadata(row[5])
+                    by_id[chunk_id] = DocumentChunk(
+                        chunk_id, row[1], row[2], row[3], row[4], metadata
+                    )
+                return [by_id[cid] for cid in ordered_ids if cid in by_id]
         except Exception as exc:
-            logger.error("Failed to find local chunk %s: %s", chunk_id, exc)
-        return None
+            logger.error("Failed to find local chunks: %s", exc)
+        return []
 
 
 def _loads_metadata(raw: object) -> dict[str, object]:

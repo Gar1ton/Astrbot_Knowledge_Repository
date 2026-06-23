@@ -21,6 +21,22 @@
 
 ---
 
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **收口 research breadth 的最终上下文量**：保留候选池 `narrow=5` / `normal=15` / `wide=40`，但喂给 LLM 的最终 evidence 数改为 `narrow=5` / `normal=8` / `wide=10`，降低长答案与上下文噪声风险（`core/research_skill.py`、`tests/backend/test_research_skill.py`）。
+- **修复聊天端普通 research_execute 仍可能触发 AstrBot 120s tool timeout**：`main.py` 将所有实际执行路径统一改为后台任务，tool 立即返回 `started`，完成后主动向原会话分段回发结果；同时修复后台结果格式化误用 `staticmethod+self` 导致完成回发失败的问题（`main.py`）。
+- **修复 ASCII 精确术语误命中词干的问题**：`search_exact_mentions` 增加公共边界复核，`SHAP` 可命中 `SHAP/XAI`/`SHAP values`，不再误命中 `shape`/`shaping`；probe/execute 额外返回文档级去重命中摘要与计数，避免同一文档多 chunk 淹没其他相关文章（`core/repository/source_store/base.py`、`core/repository/source_store/sqlite.py`、`core/research_skill.py`）。
+
+### 性能优化 (Performance)
+
+- **减少 Milvus 召回后本地 chunk 回填的串行 SQLite 查询**：`RetrievalOrchestrator` 将向量检索返回的 chunk_id 批量 hydrate，并按向量结果顺序恢复候选列表；缺失 chunk 自动跳过，不改变 RRF/reranker 行为（`core/pipelines/retrieval_orchestrator.py`）。
+
+### 测试 (Tests)
+
+- 补充 research breadth plan、文档级 exact hit 摘要、Milvus 批量 hydrate、memory/sqlite ASCII 边界匹配回归测试（`tests/backend/test_research_skill.py`、`test_retrieval_orchestrator.py`、`test_source_store.py`、`test_sqlite_source_store.py`）。
+
 ## [v0.28.3] — 2026-06-23
 
 ### 修复 (Fixed)

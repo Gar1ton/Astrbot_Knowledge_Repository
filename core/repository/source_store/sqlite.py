@@ -34,6 +34,7 @@ from core.domain.models import (
 from core.repository.source_store.base import (
     SourceDocumentStore,
     _exact_snippet,
+    _matched_exact_terms,
     _normalize_exact_terms,
 )
 
@@ -668,8 +669,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         async with self._db.execute(sql, tuple(params)) as cursor:
             async for row in cursor:
                 text = row[4] or ""
-                lower = text.lower()
-                matched = [t for t in normalized if t in lower]
+                matched = _matched_exact_terms(text, normalized)
                 if not matched:
                     continue
                 hits.append(

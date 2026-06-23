@@ -20,9 +20,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("ResearchService")
 
-# 答案默认 top_k 不变；breadth 只放大「候选池」，由 reranker 收口（无 reranker 时不放大）。
-_ANSWER_TOP_K = 5
-_BREADTH_MULT = {"narrow": 1, "normal": 3, "wide": 8}
+# breadth 同时控制候选池与最终召回量。无 reranker 时不放大候选池，但最终 top_k 仍生效。
+_BREADTH_PLAN = {
+    "narrow": (5, 5),
+    "normal": (15, 8),
+    "wide": (40, 10),
+}
 _VALID_MODES = {"default", "high_precision", "graph_only", "deep_thinking"}
 _STRICT_COLLECTION_MODES = {"high_precision", "graph_only", "deep_thinking"}
 
@@ -30,6 +33,7 @@ _STRICT_COLLECTION_MODES = {"high_precision", "graph_only", "deep_thinking"}
 _MAX_COLLECTIONS = 8
 _MAX_PAPERS = 8
 _MAX_TAGS = 10
+_MAX_EXACT_CHUNK_HITS = 40
 
 # ambiguity 判定阈值（与旧 KeywordScopeResolver 对齐）。
 _MIN_COVERAGE = 0.25
@@ -154,10 +158,11 @@ class ResearchService:
         # 命中正文时 exact_match=True，主 LLM 不得再回答「库里没有」。
         exact_terms = _exact_terms(query)
         exact_hits = (
-            await self._api.search_exact_mentions(exact_terms, None, _MAX_PAPERS)
+            await self._api.search_exact_mentions(exact_terms, None, _MAX_EXACT_CHUNK_HITS)
             if exact_terms
             else []
         )
+        exact_doc_hits = _dedupe_exact_hits_by_doc(exact_hits)
 
         return {
             "query": query,
@@ -171,6 +176,8 @@ class ResearchService:
             "exact_terms": exact_terms,
             "exact_match": bool(exact_hits),
             "exact_hits_top5": exact_hits[:5],
+            "exact_doc_hit_count": len(exact_doc_hits),
+            "exact_doc_hits_top5": exact_doc_hits[:5],
         }
 
     async def _match_papers_and_tags(
@@ -253,8 +260,10 @@ class ResearchService:
             )
 
         use_reranker = self._api.is_reranker_active()
-        mult = _BREADTH_MULT.get(breadth, _BREADTH_MULT["normal"])
-        candidate_k = _ANSWER_TOP_K * mult if (use_reranker and mult > 1) else None
+        candidate_pool, answer_top_k = _BREADTH_PLAN.get(
+            breadth, _BREADTH_PLAN["normal"]
+        )
+        candidate_k = candidate_pool if (use_reranker and candidate_pool > answer_top_k) else None
 
         if persona_enabled is None:
             persona_enabled = bool(getattr(self._flags, "persona_enabled", False))
@@ -263,7 +272,7 @@ class ResearchService:
             result = await self._api.ask(
                 question=query,
                 collection=collection,
-                top_k=_ANSWER_TOP_K,
+                top_k=answer_top_k,
                 retrieval_mode=mode,
                 use_english_retrieval=True,
                 answer_language="auto",
@@ -288,10 +297,11 @@ class ResearchService:
         # 审计：实际范围内的正文精确命中数，区分「本次未命中」与「库里没有」。
         exact_terms = _exact_terms(query)
         exact_hits = (
-            await self._api.search_exact_mentions(exact_terms, collection, _MAX_PAPERS)
+            await self._api.search_exact_mentions(exact_terms, collection, _MAX_EXACT_CHUNK_HITS)
             if exact_terms
             else []
         )
+        exact_doc_hits = _dedupe_exact_hits_by_doc(exact_hits)
 
         answer = result.get("answer")
         if not answer:
@@ -303,7 +313,9 @@ class ResearchService:
             "citations": _build_citations(sources),
             "scope": collection or "全局",
             "searched_scope": scope_label,
-            "exact_hit_count": len(exact_hits),
+            "exact_hit_count": len(exact_doc_hits),
+            "exact_chunk_hit_count": len(exact_hits),
+            "exact_doc_hits_top5": exact_doc_hits[:5],
             "mode": result.get("actual_retrieval_mode") or mode,
             "requested_mode": mode,
             "sources": sources,
@@ -351,6 +363,39 @@ def _build_citations(sources: list[dict[str, Any]]) -> list[str]:
         if line:
             out.append(line)
     return out
+
+
+def _dedupe_exact_hits_by_doc(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把 chunk 级精确命中折叠为文档级摘要，保留每篇最早出现的 snippet。"""
+    docs: dict[str, dict[str, Any]] = {}
+    for hit in hits:
+        doc_id = str(hit.get("doc_id") or "")
+        if not doc_id:
+            continue
+        current = docs.get(doc_id)
+        ordinal = int(hit.get("ordinal") or 0)
+        if current is None:
+            docs[doc_id] = {
+                "doc_id": doc_id,
+                "title": hit.get("title") or doc_id,
+                "collection": hit.get("collection") or "",
+                "matched_terms": list(hit.get("matched_terms") or []),
+                "first_ordinal": ordinal,
+                "snippet": hit.get("snippet") or "",
+                "chunk_hit_count": 1,
+            }
+            continue
+        current["chunk_hit_count"] = int(current.get("chunk_hit_count") or 0) + 1
+        merged = set(current.get("matched_terms") or [])
+        merged.update(hit.get("matched_terms") or [])
+        current["matched_terms"] = sorted(merged)
+        if ordinal < int(current.get("first_ordinal") or 0):
+            current["first_ordinal"] = ordinal
+            current["snippet"] = hit.get("snippet") or current.get("snippet") or ""
+    return sorted(
+        docs.values(),
+        key=lambda item: (-int(item.get("chunk_hit_count") or 0), item.get("title") or ""),
+    )
 
 
 __all__ = ["ResearchService"]

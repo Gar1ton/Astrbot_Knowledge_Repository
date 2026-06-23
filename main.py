@@ -241,38 +241,32 @@ class KnowledgeRepositoryPlugin(Star):
         )
         notice_sent = await self._send_plain_message(event, start_text)
 
-        if requested_mode == "deep_thinking":
-            task = asyncio.create_task(
-                self._run_research_execute_background(
-                    event=event,
-                    svc=svc,
-                    query=query,
-                    collection=resolved_collection,
-                    mode=requested_mode,
-                    breadth=requested_breadth,
-                )
+        task = asyncio.create_task(
+            self._run_research_execute_background(
+                event=event,
+                svc=svc,
+                query=query,
+                collection=resolved_collection,
+                mode=requested_mode,
+                breadth=requested_breadth,
             )
-            self._track_research_task(task)
-            return json.dumps(
-                {
-                    "status": "started",
-                    "async": True,
-                    "mode": requested_mode,
-                    "breadth": requested_breadth,
-                    "scope": scope_label,
-                    "notice_sent": notice_sent,
-                    "instruction": (
-                        "Deep Thinking 已在后台完整执行；不要重复调用 research_execute，"
-                        "完成后插件会主动向用户发送答案。"
-                    ),
-                },
-                ensure_ascii=False,
-            )
-
-        result = await svc.execute(
-            query, resolved_collection, mode=requested_mode, breadth=requested_breadth
         )
-        return json.dumps(result, ensure_ascii=False)
+        self._track_research_task(task)
+        return json.dumps(
+            {
+                "status": "started",
+                "async": True,
+                "mode": requested_mode,
+                "breadth": requested_breadth,
+                "scope": scope_label,
+                "notice_sent": notice_sent,
+                "instruction": (
+                    "research_execute 已在后台完整执行；不要重复调用 research_execute，"
+                    "完成后插件会主动向用户发送答案。"
+                ),
+            },
+            ensure_ascii=False,
+        )
 
     # ── 生命周期 ─────────────────────────────────────────────────
 
@@ -366,23 +360,24 @@ class KnowledgeRepositoryPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - 主动回发失败信息，避免静默吞异常
-            logger.warning("Deep Thinking research_execute failed: %s", exc, exc_info=True)
-            await self._send_plain_message(event, f"⚠️ Deep Thinking 执行失败：{exc}")
+            logger.warning("background research_execute failed: %s", exc, exc_info=True)
+            await self._send_plain_message(event, f"⚠️ research_execute 执行失败：{exc}")
             return
 
         await self._send_plain_message_chunks(event, self._format_research_result(result))
 
-    @staticmethod
-    def _format_research_result(result: dict[str, Any]) -> str:
+    def _format_research_result(self, result: dict[str, Any]) -> str:
         answer = self._paragraphize_research_text(
             str(result.get("answer") or "未找到相关内容。").strip()
         )
         scope = str(result.get("scope") or "全局")
-        mode = str(result.get("mode") or "deep_thinking")
+        mode = str(result.get("mode") or result.get("requested_mode") or "default")
+        requested_mode = str(result.get("requested_mode") or mode)
+        done_label = "Deep Thinking 完成" if requested_mode == "deep_thinking" else "检索完成"
         citations = [str(item) for item in (result.get("citations") or []) if item]
 
         parts = [
-            "✅ Deep Thinking 完成",
+            f"✅ {done_label}",
             f"范围：{scope}；模式：{mode}",
             "",
             answer,

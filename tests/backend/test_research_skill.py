@@ -200,15 +200,27 @@ async def test_execute_wires_english_retrieval_and_persona_default() -> None:
     assert call["collection"] == "ml"
 
 
-async def test_execute_wide_widens_candidate_pool_only_with_reranker() -> None:
+async def test_execute_breadth_plan_sets_top_k_and_candidate_pool() -> None:
+    api_narrow = FakeApi([("ml", "")], {"ml": ["X"]}, reranker_active=True)
+    await _svc(api_narrow).execute("q", "ml", breadth="narrow")
+    assert api_narrow.ask_calls[0]["top_k"] == 5
+    assert api_narrow.ask_calls[0]["candidate_k"] is None
+
+    api_normal = FakeApi([("ml", "")], {"ml": ["X"]}, reranker_active=True)
+    await _svc(api_normal).execute("q", "ml", breadth="normal")
+    assert api_normal.ask_calls[0]["top_k"] == 8
+    assert api_normal.ask_calls[0]["candidate_k"] == 15
+
     api_on = FakeApi([("ml", "")], {"ml": ["X"]}, reranker_active=True)
     await _svc(api_on).execute("q", "ml", breadth="wide")
     assert api_on.ask_calls[0]["use_reranker"] is True
-    assert api_on.ask_calls[0]["candidate_k"] == 5 * 8
+    assert api_on.ask_calls[0]["top_k"] == 10
+    assert api_on.ask_calls[0]["candidate_k"] == 40
 
     api_off = FakeApi([("ml", "")], {"ml": ["X"]}, reranker_active=False)
     await _svc(api_off).execute("q", "ml", breadth="wide")
     assert api_off.ask_calls[0]["use_reranker"] is False
+    assert api_off.ask_calls[0]["top_k"] == 10
     assert api_off.ask_calls[0]["candidate_k"] is None
 
 
@@ -257,7 +269,47 @@ async def test_execute_returns_audit_scope_and_exact_count() -> None:
     res = await _svc(api).execute("mention EXACTTERMA", "ROOT_SCOPE_A", mode="default")
     assert res["searched_scope"] == "ROOT_SCOPE_A"
     assert res["exact_hit_count"] == 1
+    assert res["exact_chunk_hit_count"] == 1
     assert api.exact_calls[0]["collection"] == "ROOT_SCOPE_A"
+
+
+async def test_probe_exact_hits_include_deduped_document_summary() -> None:
+    """probe 的 chunk 命中保留细节，另给文档级摘要，避免同一文档多 chunk 淹没其他文章。"""
+    api = FakeApi(
+        [("c", "")],
+        {"c": ["t"]},
+        exact_hits=[
+            {
+                "doc_id": "doc-a",
+                "title": "A",
+                "collection": "c",
+                "ordinal": 3,
+                "matched_terms": ["shap"],
+                "snippet": "late",
+            },
+            {
+                "doc_id": "doc-a",
+                "title": "A",
+                "collection": "c",
+                "ordinal": 1,
+                "matched_terms": ["shap"],
+                "snippet": "early",
+            },
+            {
+                "doc_id": "doc-b",
+                "title": "B",
+                "collection": "c",
+                "ordinal": 0,
+                "matched_terms": ["shap"],
+                "snippet": "other",
+            },
+        ],
+    )
+    res = await _svc(api).probe("SHAP")
+    assert res["exact_doc_hit_count"] == 2
+    assert [h["doc_id"] for h in res["exact_doc_hits_top5"]] == ["doc-a", "doc-b"]
+    assert res["exact_doc_hits_top5"][0]["chunk_hit_count"] == 2
+    assert res["exact_doc_hits_top5"][0]["snippet"] == "early"
 
 
 async def test_execute_global_empty_answer_is_honest() -> None:

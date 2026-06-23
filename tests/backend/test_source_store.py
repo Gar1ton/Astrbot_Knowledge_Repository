@@ -318,3 +318,32 @@ async def test_exact_mentions_no_hit_and_short_terms(
     assert await store.search_exact_mentions(["MISSING_TERM_Z"], None) == []
     # 过短词被丢弃 → 空 terms → 空结果（不退化为全表）。
     assert await store.search_exact_mentions(["a"], None) == []
+
+
+async def test_exact_mentions_ascii_terms_require_boundaries(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    """ASCII 精确术语要求字母数字边界：SHAP 不应误命中 shape/shaping。"""
+    coll = Collection(name="BOUNDARY_SCOPE_A")
+    await store.upsert_collection(coll)
+
+    true_doc = _doc("doc-true", collection="BOUNDARY_SCOPE_A")
+    true_doc.collection_keys = [coll.coll_key]
+    await store.add_document(true_doc)
+    await store.replace_chunks(
+        "doc-true",
+        [
+            DocumentChunk("bt-0", "doc-true", 0, "SHAP/XAI and SHAP values appear here", "bt")
+        ],
+    )
+
+    false_doc = _doc("doc-false", collection="BOUNDARY_SCOPE_A")
+    false_doc.collection_keys = [coll.coll_key]
+    await store.add_document(false_doc)
+    await store.replace_chunks(
+        "doc-false",
+        [DocumentChunk("bf-0", "doc-false", 0, "shape and shaping are unrelated", "bf")],
+    )
+
+    hits = await store.search_exact_mentions(["SHAP"], coll.coll_key)
+    assert {hit["doc_id"] for hit in hits} == {"doc-true"}

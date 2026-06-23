@@ -1,5 +1,46 @@
 # TODO
 
+## v0.28.5 research LLM 上下文预算收口 (completed)
+
+### User constraints / 约束
+
+- 喂给 LLM 的最终 evidence 数量保守一些：`narrow=5` / `normal=8` / `wide=10`。
+- 保留上一轮的候选池宽召回能力，避免降低 reranker 的可选范围。
+
+### Technical implementation path
+
+- [x] **Phase 1 - breadth answer top_k 收口**：仅调整 `_BREADTH_PLAN` 的最终召回量，候选池保持 `5/15/40` 不变；同步 research breadth 单测。
+- [x] **Phase 2 - 验证与收尾**：运行 research 单测，更新 CHANGELOG 与本节验证记录。
+
+### Verification
+
+- `python -m py_compile core/research_skill.py` → passed。
+- `python -m pytest tests/backend/test_research_skill.py -q` → 19 passed。
+
+## v0.28.4 research 超时与精确命中收口 (completed)
+
+### User constraints / 约束
+
+- 修复聊天端 `research_execute(mode=default, breadth=wide)` 仍会触发 AstrBot 120s tool timeout 的问题。
+- `breadth` 不只放大候选池，也要放大最终召回量：`normal` 返回 10 条，`wide` 返回 15 条；无 reranker 时仍按该最终召回量生效。
+- 全局 wide 检索需要减少 Milvus chunk_id 回填 SQLite 的串行开销。
+- `SHAP` 这类 ASCII 精确术语不得误命中 `shape`/`shaping`，probe 需要展示文档级去重命中摘要，避免同一文档多 chunk 淹没其他相关文章。
+- 不手工修改 `pages/`。
+
+### Technical implementation path
+
+- [x] **Phase 1 - breadth plan 与聊天端后台化**：`ResearchService.execute` 改为 `_BREADTH_PLAN` 驱动 `top_k/candidate_k`；`main.py` 将普通 `research_execute` 也转为后台执行并主动回发，避免 AstrBot tool 同步等待超时。
+- [x] **Phase 2 - Milvus chunk 回填批量化**：`RetrievalOrchestrator` 将向量结果的 chunk_id 列表批量查 SQLite，保持候选排序与现有 RRF/reranker 行为不变。
+- [x] **Phase 3 - 精确正文命中文档级审计**：`search_exact_mentions` 增加 ASCII 边界复核；probe/execute 返回文档级去重命中计数与摘要。
+- [x] **Phase 4 - 回归测试与收尾**：补 research breadth/后台格式化、retrieval 批量 hydrate、memory/sqlite 精确术语边界测试；运行相关 pytest 后更新 CHANGELOG 与本节验证记录。
+
+### Verification
+
+- `python -m py_compile main.py core/research_skill.py core/pipelines/retrieval_orchestrator.py core/repository/source_store/base.py core/repository/source_store/sqlite.py` → passed。
+- `python -m pytest tests/backend/test_research_skill.py tests/backend/test_retrieval_orchestrator.py tests/backend/test_source_store.py tests/backend/test_sqlite_source_store.py -q` → 68 passed, 1 skipped。
+- `python -m pytest tests/backend/test_api.py -q -k "ask or deep_thinking or search_exact"` → 19 passed, 45 deselected。
+- `ruff check ...` / `python -m ruff check ...` 未执行：当前 Windows Python 环境未安装 `ruff`。
+
 ## v0.28.3 正文精确召回与全局 Deep Thinking (completed)
 
 ### User constraints / 约束

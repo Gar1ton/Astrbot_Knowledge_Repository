@@ -419,3 +419,32 @@ async def test_exact_mentions_sqlite_scope_and_subtree(
     # 无命中 / 过短词。
     assert await sqlite_store.search_exact_mentions(["MISSING_TERM_Z"], None) == []
     assert await sqlite_store.search_exact_mentions(["a"], None) == []
+
+
+async def test_exact_mentions_sqlite_ascii_terms_require_boundaries(
+    sqlite_store: SQLiteSourceDocumentStore,
+) -> None:
+    """SQLite LIKE 只做粗筛，返回前仍要复核 ASCII 词边界。"""
+    coll = Collection(name="BOUNDARY_SCOPE_A")
+    await sqlite_store.upsert_collection(coll)
+
+    true_doc = _doc("doc-true", collection="BOUNDARY_SCOPE_A")
+    true_doc.collection_keys = [coll.coll_key]
+    await sqlite_store.add_document(true_doc)
+    await sqlite_store.replace_chunks(
+        "doc-true",
+        [
+            DocumentChunk("bt-0", "doc-true", 0, "SHAP/XAI and SHAP values appear here", "bt")
+        ],
+    )
+
+    false_doc = _doc("doc-false", collection="BOUNDARY_SCOPE_A")
+    false_doc.collection_keys = [coll.coll_key]
+    await sqlite_store.add_document(false_doc)
+    await sqlite_store.replace_chunks(
+        "doc-false",
+        [DocumentChunk("bf-0", "doc-false", 0, "shape and shaping are unrelated", "bf")],
+    )
+
+    hits = await sqlite_store.search_exact_mentions(["SHAP"], coll.coll_key)
+    assert {hit["doc_id"] for hit in hits} == {"doc-true"}

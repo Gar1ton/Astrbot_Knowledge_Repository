@@ -10,7 +10,7 @@ import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.domain.models import (
     Collection,
@@ -31,7 +31,11 @@ from core.domain.models import (
     ZoteroRelation,
     ZoteroTag,
 )
-from core.repository.source_store.base import SourceDocumentStore
+from core.repository.source_store.base import (
+    SourceDocumentStore,
+    _exact_snippet,
+    _normalize_exact_terms,
+)
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -622,6 +626,64 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                     )
                 )
             return results
+
+    async def search_exact_mentions(
+        self,
+        terms: list[str],
+        collection_key: str | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """SQLite 覆写：单条 JOIN 查询在 chunks 正文做 LIKE 精确命中（含 collection 子树/全局）。"""
+        normalized = _normalize_exact_terms(terms)
+        if not normalized:
+            return []
+
+        conditions = ["d.lifecycle_state = 'active'"]
+        params: list[object] = []
+
+        if collection_key:
+            scoped = await self.list_documents_by_collection_key(
+                collection_key, descendants=True
+            )
+            doc_ids = [d.doc_id for d in scoped]
+            if not doc_ids:
+                return []
+            conditions.append(f"c.doc_id IN ({','.join('?' for _ in doc_ids)})")
+            params.extend(doc_ids)
+
+        like_clause = " OR ".join("c.text LIKE ?" for _ in normalized)
+        conditions.append(f"({like_clause})")
+        params.extend(f"%{term}%" for term in normalized)
+
+        # 限定扫描行数（命中后在 Python 端按命中 term 数排序再取 limit），避免大库全表物化。
+        sql = (
+            "SELECT c.doc_id, d.title, d.collection, c.ordinal, c.text "
+            "FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "
+            f"WHERE {' AND '.join(conditions)} "
+            "ORDER BY c.doc_id, c.ordinal LIMIT ?"
+        )
+        params.append(max(limit * 20, limit))
+
+        hits: list[dict[str, Any]] = []
+        async with self._db.execute(sql, tuple(params)) as cursor:
+            async for row in cursor:
+                text = row[4] or ""
+                lower = text.lower()
+                matched = [t for t in normalized if t in lower]
+                if not matched:
+                    continue
+                hits.append(
+                    {
+                        "doc_id": row[0],
+                        "title": row[1],
+                        "collection": row[2],
+                        "ordinal": row[3],
+                        "matched_terms": matched,
+                        "snippet": _exact_snippet(text, matched[0]),
+                    }
+                )
+        hits.sort(key=lambda h: len(h["matched_terms"]), reverse=True)
+        return hits[:limit]
 
     async def get_corpus_stats(self) -> dict[str, int]:
         async with self._db.execute(

@@ -52,7 +52,7 @@ from core.milvus_build import (
     MILVUS_BUILD_SUCCESS,
     MilvusBuildJob,
 )
-from core.pipelines.retrieval_orchestrator import RetrievalScope
+from core.pipelines.retrieval_orchestrator import ChunkSignal, RetrievalScope
 from core.zotero_sync_job import (
     ZOTERO_SYNC_ERROR,
     ZOTERO_SYNC_PARTIAL,
@@ -451,6 +451,22 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 continue
             result.setdefault(col, []).append(doc.title)
         return result
+
+    async def search_exact_mentions(
+        self, terms: list[str], collection: str | None = None, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """正文精确命中检索（供 research probe 防假阴性）。
+
+        collection 为展示名：None=全局所有 ACTIVE 文档；非空→该集合**子树**。
+        指定了不存在的集合名时返回空（无此范围），不退化为全局。
+        """
+        coll_key: str | None = None
+        if collection:
+            col = await self._source_store.get_collection_by_name(collection)
+            if col is None:
+                return []
+            coll_key = col.coll_key
+        return await self._source_store.search_exact_mentions(terms, coll_key, limit)
 
     def is_reranker_active(self) -> bool:
         """default 研究路径是否有可用的真实 cross-encoder 重排器（非 passthrough）。"""
@@ -1526,7 +1542,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 "retrieval_mode must be 'default', 'high_precision', 'graph_only', "
                 "or 'deep_thinking'"
             )
-        if retrieval_mode in {"high_precision", "graph_only", "deep_thinking"} and not collection:
+        # high_precision / graph_only 走图谱 workspace，必须有具体 collection；
+        # deep_thinking 允许 collection 为空（全局深挖，跨所有 active 集合的证据链）。
+        if retrieval_mode in {"high_precision", "graph_only"} and not collection:
             raise ValueError(f"{retrieval_mode} retrieval requires a collection")
         if answer_language not in {"auto", "zh", "en"}:
             answer_language = "auto"
@@ -1674,7 +1692,15 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             _progress("vector_search", 20)
             t_vs = time.monotonic()
             seen_ids: set[str] = set()
-            for col in await self._resolve_ask_collections(collection, scope):
+            # 跨集合聚合候选：先搜完所有目标集合，再按 RRF 分全局排序取 top_k。
+            # 不再「凑满 top_k 就 break」——否则早期弱相关塞满后，后面装着精确命中的
+            # 集合永远搜不到（假阴性根因之一）。
+            target_collections = await self._resolve_ask_collections(collection, scope)
+            multi_scope = len(target_collections) > 1
+            scored_candidates: list[tuple[float, int, DocumentChunk]] = []
+            order = 0
+            for col in target_collections:
+                signals: dict[str, ChunkSignal] = {}
                 try:
                     if self._retrieval_orchestrator is not None:
                         outcome = await self._retrieval_orchestrator.retrieve_with_outcome(
@@ -1686,6 +1712,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                             reranker=self._reranker if use_reranker else None,
                         )
                         current_chunks = outcome.chunks
+                        signals = outcome.per_chunk_signals
                         engines.extend(outcome.engines)
                         fallback_reason = fallback_reason or outcome.fallback_reason
                     else:
@@ -1699,13 +1726,18 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     fallback_reason = fallback_reason or f"collection_error:{col}"
                     continue
                 for chunk in current_chunks:
-                    if chunk.chunk_id not in seen_ids:
-                        seen_ids.add(chunk.chunk_id)
-                        chunks.append(chunk)
-                    if len(chunks) >= top_k:
-                        break
-                if len(chunks) >= top_k:
-                    break
+                    if chunk.chunk_id in seen_ids:
+                        continue
+                    seen_ids.add(chunk.chunk_id)
+                    sig = signals.get(chunk.chunk_id)
+                    rrf = sig.rrf_score if sig is not None else 0.0
+                    scored_candidates.append((rrf, order, chunk))
+                    order += 1
+            # 单集合：保留 orchestrator 给出的次序（rerank/RRF 已排好），不再重排；
+            # 多集合：按 RRF 分降序、缺失分（kb_reader 回退）按原始顺序兜底。
+            if multi_scope:
+                scored_candidates.sort(key=lambda item: (-item[0], item[1]))
+            chunks = [c for _, _, c in scored_candidates[:top_k]]
             _record("vector_search", t_vs, hits=len(chunks))
 
         _record("embed_query", t0)
@@ -1906,10 +1938,15 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 return names
         if collection:
             return [collection]
-        collections = [item.name for item in await self.list_collections()]
+        # 全局：覆盖所有 active 集合（name 不以 '_' 开头的系统集合除外）；
+        # 不再截断到前 5 个，否则后面的集合永远搜不到（假阴性根因之一）。
+        collections = [
+            item.name for item in await self.list_collections()
+            if not item.name.startswith("_")
+        ]
         if not collections:
             collections = await self.list_kb_collections()
-        return collections[:5]
+        return collections
 
     async def get_lightrag_readiness(self, collection: str) -> dict[str, Any]:
         if not collection:

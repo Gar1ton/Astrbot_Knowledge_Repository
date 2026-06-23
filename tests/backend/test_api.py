@@ -12,6 +12,7 @@ import pytest
 
 from core.api import KnowledgeRepositoryApi, LightRAGNotReadyError
 from core.domain.models import (
+    Collection,
     DocumentChunk,
     SourceDocument,
     SyncRecord,
@@ -1486,10 +1487,55 @@ class _MockDeepThinking:
         return self._outcome
 
 
-async def test_deep_thinking_requires_collection() -> None:
-    """deep_thinking 必须显式 collection（校验先于 orchestrator 调用）。"""
+async def test_strict_graph_modes_require_collection() -> None:
+    """high_precision / graph_only 走图谱 workspace，必须显式 collection。"""
     api = await _make_api()
-    with pytest.raises(ValueError):
+    for mode in ("high_precision", "graph_only"):
+        with pytest.raises(ValueError):
+            await api.ask(question="q", retrieval_mode=mode)
+
+
+async def test_resolve_ask_collections_global_covers_all_active() -> None:
+    """全局（无 collection）覆盖所有 active 集合，不再截断到前 5 个，且排除 '_' 系统集合。"""
+    store = InMemorySourceDocumentStore()
+    for name in ["_uncategorized", "a", "b", "c", "d", "e", "f"]:
+        await store.upsert_collection(Collection(name=name))
+    kb = InMemoryKnowledgeBaseReader({})
+    api = KnowledgeRepositoryApi(source_store=store, kb_reader=kb, sync_targets={})
+    cols = await api._resolve_ask_collections(None, None)
+    assert set(cols) == {"a", "b", "c", "d", "e", "f"}
+    assert "_uncategorized" not in cols
+    assert len(cols) == 6  # 6 > 5：证明 [:5] 截断已移除
+
+
+async def test_search_exact_mentions_wrapper_scopes_by_name() -> None:
+    """api.search_exact_mentions：全局命中正文；指定不存在的集合返回空（不退化全局）。"""
+    store = InMemorySourceDocumentStore()
+    col = Collection(name="ROOT_SCOPE_A")
+    await store.upsert_collection(col)
+    doc = _doc("doc-child", "ROOT_SCOPE_A")
+    doc.collection_keys = [col.coll_key]
+    await store.add_document(doc)
+    await store.replace_chunks(
+        "doc-child", [DocumentChunk("ch-0", "doc-child", 0, "body has EXACT_TERM_A", "h0")]
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=store, kb_reader=InMemoryKnowledgeBaseReader({}), sync_targets={}
+    )
+    assert {h["doc_id"] for h in await api.search_exact_mentions(["EXACT_TERM_A"])} == {"doc-child"}
+    assert {
+        h["doc_id"] for h in await api.search_exact_mentions(["EXACT_TERM_A"], "ROOT_SCOPE_A")
+    } == {"doc-child"}
+    assert await api.search_exact_mentions(["EXACT_TERM_A"], "NO_SUCH_COLLECTION") == []
+
+
+async def test_deep_thinking_allows_global_scope() -> None:
+    """deep_thinking 允许 collection 为空（全局深挖）：不再因缺 collection 抛 ValueError。
+
+    orchestrator 未装配时抛 RuntimeError，证明已通过 collection 必填校验。
+    """
+    api = await _make_api()
+    with pytest.raises(RuntimeError, match="DeepThinkingOrchestrator"):
         await api.ask(question="q", retrieval_mode="deep_thinking")
 
 

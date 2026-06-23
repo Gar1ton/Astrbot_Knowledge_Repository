@@ -81,6 +81,23 @@ def _coverage(query_tokens: set[str], corpus_tokens: set[str]) -> float:
     return len(query_tokens & corpus_tokens) / len(query_tokens)
 
 
+def _exact_terms(query: str) -> list[str]:
+    """抽取适合正文精确命中的 ASCII 术语（如 SHAP/LIME/XGBoost），去停用词、去重保序。
+
+    只取 ASCII 字母数字串，刻意不含中文 2-gram——正文子串里中文碎片噪声大，
+    精确召回靠英文术语/缩写更可靠（probe 的中文覆盖率走 metadata token 那一路）。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in re.findall(r"[A-Za-z][A-Za-z0-9]+", query):
+        lowered = match.lower()
+        if lowered in _STOP_WORDS or lowered in seen:
+            continue
+        seen.add(lowered)
+        out.append(match)
+    return out
+
+
 class ResearchService:
     """probe + execute 两个无状态能力的后端实现。
 
@@ -133,6 +150,15 @@ class ResearchService:
         if any(lightrag_ready.values()):
             available_modes.append("high_precision")
 
+        # 正文精确命中：防「title/tag 没标 → 误判库里没有」的假阴性。
+        # 命中正文时 exact_match=True，主 LLM 不得再回答「库里没有」。
+        exact_terms = _exact_terms(query)
+        exact_hits = (
+            await self._api.search_exact_mentions(exact_terms, None, _MAX_PAPERS)
+            if exact_terms
+            else []
+        )
+
         return {
             "query": query,
             "collections": scored_cols[:_MAX_COLLECTIONS],
@@ -142,6 +168,9 @@ class ResearchService:
             "suggested_mode": self._suggest_mode(query, lightrag_ready),
             "available_modes": available_modes,
             "lightrag_ready": lightrag_ready,
+            "exact_terms": exact_terms,
+            "exact_match": bool(exact_hits),
+            "exact_hits_top5": exact_hits[:5],
         }
 
     async def _match_papers_and_tags(
@@ -254,11 +283,27 @@ class ResearchService:
             )
 
         sources = result.get("sources") or []
+        scope_label = collection or "全局（所有 active 集合及子目录）"
+
+        # 审计：实际范围内的正文精确命中数，区分「本次未命中」与「库里没有」。
+        exact_terms = _exact_terms(query)
+        exact_hits = (
+            await self._api.search_exact_mentions(exact_terms, collection, _MAX_PAPERS)
+            if exact_terms
+            else []
+        )
+
+        answer = result.get("answer")
+        if not answer:
+            answer = f"本次检索未命中（范围：{scope_label}）。"
+
         return {
             "status": "ok",
-            "answer": result.get("answer") or "未找到相关内容。",
+            "answer": answer,
             "citations": _build_citations(sources),
             "scope": collection or "全局",
+            "searched_scope": scope_label,
+            "exact_hit_count": len(exact_hits),
             "mode": result.get("actual_retrieval_mode") or mode,
             "requested_mode": mode,
             "sources": sources,

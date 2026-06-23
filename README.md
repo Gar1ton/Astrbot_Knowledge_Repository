@@ -6,7 +6,7 @@
 
 **AstrBot 知识库原件管理、同步备份与 Research Agent 插件**
 
-[![version](https://img.shields.io/badge/版本-v0.28.2-blueviolet)](metadata.yaml)
+[![version](https://img.shields.io/badge/版本-v0.28.3-blueviolet)](metadata.yaml)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-6f42c1)](https://github.com/AstrBotDevs/AstrBot)
 

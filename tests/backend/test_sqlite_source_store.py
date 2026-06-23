@@ -378,3 +378,44 @@ async def test_same_name_subcollections_sqlite(sqlite_store: SQLiteSourceDocumen
     assert s1.coll_key != s2.coll_key
     names = [c.name for c in await sqlite_store.list_collections() if c.name == "Dup"]
     assert len(names) == 2
+
+
+async def test_exact_mentions_sqlite_scope_and_subtree(
+    sqlite_store: SQLiteSourceDocumentStore,
+) -> None:
+    """SQLite 单 SQL 覆写：正文精确命中 + 父集合覆盖子树 + 子集合排除兄弟（中性占位词）。"""
+    root = Collection(name="ROOT_SCOPE_A")
+    await sqlite_store.upsert_collection(root)
+    child = Collection(name="CHILD_SCOPE_B", parent_key=root.coll_key)
+    await sqlite_store.upsert_collection(child)
+    sibling = Collection(name="SIBLING_SCOPE_C")
+    await sqlite_store.upsert_collection(sibling)
+
+    child_doc = _doc("doc-child", collection="CHILD_SCOPE_B")
+    child_doc.collection_keys = [child.coll_key]
+    await sqlite_store.add_document(child_doc)
+    await sqlite_store.replace_chunks(
+        "doc-child",
+        [DocumentChunk("ch-0", "doc-child", 0, "body text with EXACT_TERM_A inside", "h0")],
+    )
+    sib_doc = _doc("doc-sibling", collection="SIBLING_SCOPE_C")
+    sib_doc.collection_keys = [sibling.coll_key]
+    await sqlite_store.add_document(sib_doc)
+    await sqlite_store.replace_chunks(
+        "doc-sibling",
+        [DocumentChunk("sb-0", "doc-sibling", 0, "sibling body with EXACT_TERM_A too", "h1")],
+    )
+
+    # 全局：正文命中两篇，标题都不含该词。
+    g = await sqlite_store.search_exact_mentions(["EXACT_TERM_A"], None)
+    assert {h["doc_id"] for h in g} == {"doc-child", "doc-sibling"}
+    assert all("EXACT_TERM_A" not in h["title"] for h in g)
+    # 父集合覆盖子树、排除树外兄弟。
+    root_hits = await sqlite_store.search_exact_mentions(["EXACT_TERM_A"], root.coll_key)
+    assert {h["doc_id"] for h in root_hits} == {"doc-child"}
+    # 子集合只含自身。
+    child_hits = await sqlite_store.search_exact_mentions(["EXACT_TERM_A"], child.coll_key)
+    assert {h["doc_id"] for h in child_hits} == {"doc-child"}
+    # 无命中 / 过短词。
+    assert await sqlite_store.search_exact_mentions(["MISSING_TERM_Z"], None) == []
+    assert await sqlite_store.search_exact_mentions(["a"], None) == []

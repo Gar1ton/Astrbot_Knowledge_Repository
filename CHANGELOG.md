@@ -21,6 +21,25 @@
 
 ---
 
+## [v0.28.3] — 2026-06-23
+
+### 修复 (Fixed)
+
+- **修复 research/deep_thinking 的“假阴性”召回（库里有却答“没有”）**：根因是检索链多处在没真正搜全/没搜正文时就判空。① probe 现在除 collection/title/tag 元数据外，会对查询里的 ASCII 精确术语做正文命中检索（`exact_match`/`exact_hits_top5`），命中正文即不得回答“库里没有”；② 全局 default 取消 `_resolve_ask_collections` 的前 5 个 collection 截断与 ask 默认循环“凑满 top_k 就 break”的提前停止，改为跨所有 active 集合聚合候选、按 RRF 分全局排序一次截断，并排除 `_` 系统集合；③ `deep_thinking` 允许 collection 为空时全局深挖（`high_precision`/`graph_only` 仍要求明确 collection），指定父集合时 SQLite 词法/锚点通道按 scope 的 allowed_doc_ids 覆盖子树，collection 为空时走全局 active 文档（`core/api.py`、`core/research_skill.py`、`core/pipelines/retrieval_orchestrator.py`）。
+- **research 回答区分“本次未命中”与“库里没有”**：`research_execute` 返回 `searched_scope`/`exact_hit_count`，空结果文案统一为“本次检索未命中（范围：X）”，避免把范围未覆盖说成库里不存在（`core/research_skill.py`）。
+
+### 新增功能 (Added)
+
+- **source store 新增只读正文精确检索 `search_exact_mentions(terms, collection_key, limit)`**：base 提供默认实现（复用 `list_documents_by_collection_key(descendants=True)`/`list_documents`，按 ACTIVE 文档扫 chunks），SQLite 以单条 JOIN+LIKE SQL 覆写提速；返回 doc_id/title/collection/ordinal/matched_terms/snippet。`KnowledgeRepositoryApi.search_exact_mentions` 按 collection name→coll_key 解析范围（`core/repository/source_store/base.py`、`sqlite.py`、`core/api.py`）。
+
+### 测试 (Tests)
+
+- 新增 source store（memory+sqlite）精确召回、probe-exact/execute-audit、`_resolve_ask_collections` 全局、retrieval orchestrator 全局/子树、deep_thinking 全局/strict 模式用例，全部使用中性占位词（`EXACT_TERM_A`/`ROOT_SCOPE_A`/`CHILD_SCOPE_B`），不含真实关键词或论文信息（`tests/backend/test_source_store.py`、`test_sqlite_source_store.py`、`test_research_skill.py`、`test_api.py`、`test_retrieval_orchestrator.py`）。
+
+### 构建与工程 (Build/CI)
+
+- 版本号 bump 到 `v0.28.3`（`metadata.yaml`、`main.py`、`README.md`）。
+
 ## [v0.28.2] — 2026-06-23
 
 ### 修复 (Fixed)

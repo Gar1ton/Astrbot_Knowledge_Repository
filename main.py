@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v0.28.2"
+_PLUGIN_VERSION = "v0.28.3"
 logger = logging.getLogger(__name__)
 _RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
 _RESEARCH_PARAGRAPH_LIMIT = 700

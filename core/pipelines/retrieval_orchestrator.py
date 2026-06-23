@@ -202,7 +202,9 @@ class RetrievalOrchestrator:
             and self._embedding_fingerprint
             and self._index_compatibility.is_milvus_compatible(self._embedding_fingerprint)
         )
-        if vdb.backend == "milvus":
+        # collection 为空 = 全局深挖（deep_thinking 无 collection）：milvus 按 workspace 分库，
+        # 无法跨全部 workspace dense 检索，故跳过 dense，靠下方 SQLite 词法/锚点全局召回。
+        if vdb.backend == "milvus" and collection:
             if not self._vector_store or not self._embedding_provider:
                 fallback_reason = "milvus_unavailable"
             elif not milvus_compatible:
@@ -226,7 +228,7 @@ class RetrievalOrchestrator:
         else:
             fallback_reason = None
 
-        if not dense_chunks:
+        if not dense_chunks and collection:
             if vdb.backend == "milvus" and fallback_reason is None:
                 fallback_reason = "milvus_no_hits"
             engines.append("astrbot")
@@ -238,10 +240,14 @@ class RetrievalOrchestrator:
         anchor_chunks: list[DocumentChunk] = []
         lexical_chunks: list[DocumentChunk] = []
         try:
-            anchor_chunks = await self._search_anchor_sqlite(collection, query, pool_k)
+            anchor_chunks = await self._search_anchor_sqlite(
+                collection, query, pool_k, allowed_doc_ids
+            )
             if anchor_chunks:
                 engines.append("sqlite_anchor")
-            lexical_chunks = await self._search_lexical_sqlite(collection, query, pool_k)
+            lexical_chunks = await self._search_lexical_sqlite(
+                collection, query, pool_k, allowed_doc_ids
+            )
             if lexical_chunks:
                 engines.append("sqlite_lexical")
         except Exception as exc:
@@ -342,8 +348,38 @@ class RetrievalOrchestrator:
             raise RuntimeError("LightRAG returned empty context")
         return context
 
+    async def _resolve_candidate_doc_ids(
+        self, db_conn: object, collection: str, allowed_doc_ids: set[str] | None
+    ) -> list[str]:
+        """决定 SQLite 词法/锚点通道的候选文档集（统一覆盖单集合 / 子树 / 全局）。
+
+        - allowed_doc_ids 非空（scope 已解析子树/item/tag/library）→ 直接用该集合（含后代）。
+        - 否则有 collection → 按 primary collection 名取 active 文档（既有 default 行为）。
+        - 否则（collection 为空 = 全局深挖）→ 取全部 active 文档。
+        """
+        if allowed_doc_ids is not None:
+            return list(allowed_doc_ids)
+        if collection:
+            sql = (
+                "SELECT doc_id FROM documents "
+                "WHERE collection = ? AND lifecycle_state = 'active'"
+            )
+            params: tuple[str, ...] = (collection,)
+        else:
+            sql = "SELECT doc_id FROM documents WHERE lifecycle_state = 'active'"
+            params = ()
+        out: list[str] = []
+        async with db_conn.execute(sql, params) as cursor:  # type: ignore[attr-defined]
+            async for row in cursor:
+                out.append(row[0])
+        return out
+
     async def _search_anchor_sqlite(
-        self, collection: str, query: str, limit: int
+        self,
+        collection: str,
+        query: str,
+        limit: int,
+        allowed_doc_ids: set[str] | None = None,
     ) -> list[DocumentChunk]:
         anchors = self._structural_anchors(query)
         if not anchors:
@@ -352,13 +388,9 @@ class RetrievalOrchestrator:
         if db_conn is None:
             return []
 
-        doc_ids: list[str] = []
-        async with db_conn.execute(
-            "SELECT doc_id FROM documents WHERE collection = ? AND lifecycle_state = 'active'",
-            (collection,),
-        ) as cursor:
-            async for row in cursor:
-                doc_ids.append(row[0])
+        doc_ids = await self._resolve_candidate_doc_ids(
+            db_conn, collection, allowed_doc_ids
+        )
         if not doc_ids:
             return []
 
@@ -380,7 +412,11 @@ class RetrievalOrchestrator:
         return matched
 
     async def _search_lexical_sqlite(
-        self, collection: str, query: str, limit: int
+        self,
+        collection: str,
+        query: str,
+        limit: int,
+        allowed_doc_ids: set[str] | None = None,
     ) -> list[DocumentChunk]:
         terms = self._lexical_terms(query)
         if not terms:
@@ -390,14 +426,10 @@ class RetrievalOrchestrator:
         if db_conn is None:
             return []
 
-        doc_ids: list[str] = []
-        # 排除 detached 文档（strict 脱管），避免词汇召回越过生命态。
-        async with db_conn.execute(
-            "SELECT doc_id FROM documents WHERE collection = ? AND lifecycle_state = 'active'",
-            (collection,),
-        ) as cursor:
-            async for row in cursor:
-                doc_ids.append(row[0])
+        # 候选文档集（单集合 / 子树 / 全局）统一解析；detached 文档不进候选（生命态约束）。
+        doc_ids = await self._resolve_candidate_doc_ids(
+            db_conn, collection, allowed_doc_ids
+        )
         if not doc_ids:
             return []
 

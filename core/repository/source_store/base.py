@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from core.domain.models import (
@@ -170,6 +170,54 @@ class SourceDocumentStore(ABC):
     async def list_chunks(self, doc_id: str) -> list[DocumentChunk]:
         """列出某文档的分块，按 ordinal 升序。文档不存在或无分块返回空列表。"""
         ...
+
+    async def search_exact_mentions(
+        self,
+        terms: list[str],
+        collection_key: str | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """在 ACTIVE 文档的**正文 chunk** 里做精确（子串）命中检索，供 probe 防假阴性 + 审计。
+
+        - collection_key=None → 全局所有 ACTIVE 文档；非空 → 该 coll_key **子树**
+          （复用 list_documents_by_collection_key(descendants=True)）。
+        - 返回每条命中 {doc_id, title, collection, ordinal, matched_terms, snippet}，
+          按命中 term 数降序取前 limit 条。纯只读，不碰元数据匹配（那是 probe 另一路）。
+
+        本默认实现按文档逐个扫 chunks（适合内存/小库）；SQLite 实现以单条 SQL 覆写提速。
+        """
+        from core.domain.models import DocumentLifecycle
+
+        normalized = _normalize_exact_terms(terms)
+        if not normalized:
+            return []
+        if collection_key:
+            docs = await self.list_documents_by_collection_key(
+                collection_key, descendants=True
+            )
+        else:
+            docs = await self.list_documents()
+        hits: list[dict[str, Any]] = []
+        for doc in docs:
+            if doc.lifecycle_state != DocumentLifecycle.ACTIVE:
+                continue
+            for chunk in await self.list_chunks(doc.doc_id):
+                lower = chunk.text.lower()
+                matched = [t for t in normalized if t in lower]
+                if not matched:
+                    continue
+                hits.append(
+                    {
+                        "doc_id": doc.doc_id,
+                        "title": doc.title,
+                        "collection": doc.collection,
+                        "ordinal": chunk.ordinal,
+                        "matched_terms": matched,
+                        "snippet": _exact_snippet(chunk.text, matched[0]),
+                    }
+                )
+        hits.sort(key=lambda h: len(h["matched_terms"]), reverse=True)
+        return hits[:limit]
 
     async def get_corpus_stats(self) -> dict[str, int]:
         """Return aggregate corpus counts used by hot status endpoints.
@@ -413,6 +461,35 @@ class SourceDocumentStore(ABC):
     async def list_page_chunks(self, document_id: str) -> list[PageChunk]:
         """列出某文档的页面偏移表，按 page 升序。"""
         ...
+
+
+# ── 精确正文检索辅助（base 默认实现与 sqlite 覆写共用）────────────
+
+
+def _normalize_exact_terms(terms: list[str]) -> list[str]:
+    """归一精确检索词：小写、去空白、去重、丢弃过短（<2）噪声词。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        cleaned = term.strip().lower()
+        if len(cleaned) < 2 or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        out.append(cleaned)
+    return out
+
+
+def _exact_snippet(text: str, term: str, *, window: int = 60) -> str:
+    """围绕首个命中位置截一段上下文片段（供 LLM/审计展示，非全文）。"""
+    idx = text.lower().find(term.lower())
+    if idx < 0:
+        return text[: window * 2].strip()
+    start = max(0, idx - window)
+    end = min(len(text), idx + len(term) + window)
+    snippet = text[start:end].strip()
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{snippet}{suffix}"
 
 
 __all__ = ["SourceDocumentStore"]

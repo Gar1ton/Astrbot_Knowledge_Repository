@@ -246,3 +246,75 @@ async def test_multi_membership_and_scoped_listing(store: InMemorySourceDocument
     await store.set_document_collections("d3", [extra.coll_key])
     assert await store.list_document_collection_keys("d3") == [extra.coll_key]
     assert {d.doc_id for d in await store.list_documents_by_collection_key(keys["child"])} == {"d1"}
+
+
+# ── 正文精确命中（search_exact_mentions）契约 ─────────────────────────
+#
+# 全部用中性占位词（EXACT_TERM_A / ROOT_SCOPE_A / CHILD_SCOPE_B / SIBLING_SCOPE_C），
+# 不含任何真实关键词、集合名或论文信息。
+
+
+async def _seed_exact_corpus(store: InMemorySourceDocumentStore) -> dict[str, str]:
+    """建 ROOT_SCOPE_A → CHILD_SCOPE_B 树 + 同级 SIBLING_SCOPE_C，正文含占位词、标题不含。"""
+    root = Collection(name="ROOT_SCOPE_A")
+    await store.upsert_collection(root)
+    child = Collection(name="CHILD_SCOPE_B", parent_key=root.coll_key)
+    await store.upsert_collection(child)
+    sibling = Collection(name="SIBLING_SCOPE_C")
+    await store.upsert_collection(sibling)
+
+    child_doc = _doc("doc-child", collection="CHILD_SCOPE_B")
+    child_doc.collection_keys = [child.coll_key]
+    await store.add_document(child_doc)
+    await store.replace_chunks(
+        "doc-child",
+        [DocumentChunk("ch-0", "doc-child", 0, "intro mentions EXACT_TERM_A in body", "h0")],
+    )
+
+    sib_doc = _doc("doc-sibling", collection="SIBLING_SCOPE_C")
+    sib_doc.collection_keys = [sibling.coll_key]
+    await store.add_document(sib_doc)
+    await store.replace_chunks(
+        "doc-sibling",
+        [DocumentChunk("sb-0", "doc-sibling", 0, "another note about EXACT_TERM_A here", "h1")],
+    )
+    return {"root": root.coll_key, "child": child.coll_key, "sibling": sibling.coll_key}
+
+
+async def test_exact_mentions_global_finds_body_only_term(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    await _seed_exact_corpus(store)
+    hits = await store.search_exact_mentions(["EXACT_TERM_A"], None)
+    # 标题里没有该词（title-doc-child），仍能靠正文命中——杜绝「metadata 空就判没有」。
+    assert {h["doc_id"] for h in hits} == {"doc-child", "doc-sibling"}
+    assert all("EXACT_TERM_A" not in h["title"] for h in hits)
+    assert all("EXACT_TERM_A".lower() in h["matched_terms"] for h in hits)
+
+
+async def test_exact_mentions_parent_scope_covers_subtree(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    keys = await _seed_exact_corpus(store)
+    hits = await store.search_exact_mentions(["EXACT_TERM_A"], keys["root"])
+    # 指定父集合 → 覆盖子集合的正文命中，但不含树外的 SIBLING_SCOPE_C。
+    assert {h["doc_id"] for h in hits} == {"doc-child"}
+
+
+async def test_exact_mentions_child_scope_excludes_siblings(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    keys = await _seed_exact_corpus(store)
+    child_hits = await store.search_exact_mentions(["EXACT_TERM_A"], keys["child"])
+    assert {h["doc_id"] for h in child_hits} == {"doc-child"}
+    sibling_hits = await store.search_exact_mentions(["EXACT_TERM_A"], keys["sibling"])
+    assert {h["doc_id"] for h in sibling_hits} == {"doc-sibling"}
+
+
+async def test_exact_mentions_no_hit_and_short_terms(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    await _seed_exact_corpus(store)
+    assert await store.search_exact_mentions(["MISSING_TERM_Z"], None) == []
+    # 过短词被丢弃 → 空 terms → 空结果（不退化为全表）。
+    assert await store.search_exact_mentions(["a"], None) == []

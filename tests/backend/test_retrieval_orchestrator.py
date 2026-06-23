@@ -587,3 +587,41 @@ async def test_lightrag_context_rejects_missing_workspace(tmp_path):
 
     with pytest.raises(RuntimeError, match="workspace has not been built"):
         await orchestrator.retrieve_lightrag_context("papers", "q")
+
+
+@pytest.mark.asyncio
+async def test_retrieval_global_and_subtree_lexical(sqlite_store):
+    """collection 为空=全局召回；指定父集合时词法通道覆盖子树（中性占位词，正文命中）。"""
+    from core.pipelines.retrieval_orchestrator import SCOPE_COLLECTION, RetrievalScope
+
+    root = Collection(name="ROOT_SCOPE_A")
+    await sqlite_store.upsert_collection(root)
+    child = Collection(name="CHILD_SCOPE_B", parent_key=root.coll_key)
+    await sqlite_store.upsert_collection(child)
+
+    doc = SourceDocument(
+        "doc-child", "title without the term", "f.pdf", "application/pdf", 1, "h", "CHILD_SCOPE_B"
+    )
+    doc.collection_keys = [child.coll_key]
+    await sqlite_store.add_document(doc)
+    await sqlite_store.replace_chunks(
+        "doc-child",
+        [DocumentChunk("ch-0", "doc-child", 0, "the body discusses EXACTTERMA at length", "h0")],
+    )
+
+    orchestrator = RetrievalOrchestrator(
+        source_store=sqlite_store,
+        kb_reader=MockKnowledgeBaseReader(),
+        config=Config({}),
+    )
+
+    # 全局（collection=""）：靠 SQLite 词法跨全部 active 文档命中正文，标题不含该词。
+    g = await orchestrator.retrieve_with_outcome("", "EXACTTERMA", top_k=3)
+    assert any(c.doc_id == "doc-child" for c in g.chunks)
+
+    # 指定父集合 ROOT_SCOPE_A：scope 子树解析让词法通道覆盖 CHILD_SCOPE_B 的文档。
+    scope = RetrievalScope(
+        scope_type=SCOPE_COLLECTION, scope_key=root.coll_key, library_id=root.library_id
+    )
+    p = await orchestrator.retrieve_with_outcome("ROOT_SCOPE_A", "EXACTTERMA", top_k=3, scope=scope)
+    assert any(c.doc_id == "doc-child" for c in p.chunks)

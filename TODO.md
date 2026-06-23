@@ -1,5 +1,29 @@
 # TODO
 
+## v0.28.3 正文精确召回与全局 Deep Thinking (completed)
+
+### User constraints / 约束
+
+- 修复 research 在精确术语（exact-term）上先判空的问题：probe 不能只看 collection/title/tag，还要查正文精确命中。
+- “全局”必须覆盖所有 active collections，不能只查前 5 个 collection，也不能凑满弱相关 top_k 就提前停止。
+- `deep_thinking` 未指定 collection 时允许走全局 default 证据链；指定 collection 时仍严格限定在该 collection 及其子 collection。
+- `high_precision` / `graph_only` 仍必须要求明确 collection。
+- 新增测试/示例语料一律用中性占位词（`EXACT_TERM_A` / `ROOT_SCOPE_A` / `CHILD_SCOPE_B`），不含真实关键词、真实集合名或论文信息。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 精确正文搜索契约**：`SourceDocumentStore.search_exact_mentions(terms, collection_key, limit)` —— base 提供默认实现（复用 `list_documents_by_collection_key(descendants=True)` / `list_documents`，按 ACTIVE 文档扫 chunks），SQLite 以单条 JOIN+LIKE SQL 覆写提速；返回 doc_id/title/collection/ordinal/matched_terms/snippet。
+- [x] **Phase 2 - probe + execute 审计字段**：`probe` 抽 ASCII 精确术语调 `search_exact_mentions`，返回 `exact_terms`/`exact_match`/`exact_hits_top5`；`execute` 返回 `searched_scope`/`exact_hit_count`，空结果文案改“本次检索未命中（范围：X）”，禁止“库里没有”。`api.search_exact_mentions` 薄封装按 name→coll_key 解析范围。
+- [x] **Phase 3 - 全局 default 召回**：`_resolve_ask_collections` 删 `[:5]` 截断、排除 `_` 系统集合；ask 默认循环去掉 `len>=top_k` 的 early-stop，改为跨集合聚合候选后按 RRF 分全局排序一次截断（单集合保留 orchestrator 次序）。
+- [x] **Phase 4 - deep_thinking 全局 + 子树**：放开 deep_thinking 的 collection 必填（`high_precision`/`graph_only` 仍要求）；retrieval orchestrator 的 SQLite 词法/锚点通道改用统一候选解析——scope 提供 allowed_doc_ids 时按 doc_id（覆盖子树/全局），collection 为空时走全局 active 文档，milvus dense 在无 collection 时跳过。
+- [x] **Phase 5 - 回归测试与收尾**：补 source store（memory+sqlite）精确召回、probe-exact/execute-audit、`_resolve_ask_collections` 全局、orchestrator 全局/子树、deep_thinking 全局/strict 模式用例（全中性占位词）；运行 pytest/ruff/mypy；更新 CHANGELOG 与本节。
+
+### Verification
+
+- `python -m pytest tests/backend -q` → 454 passed。
+- `ruff check core/ tests/backend/` → All checks passed。
+- `mypy` → Success: no issues found in 3 source files。
+
 ## v0.28.2 聊天端 Deep Thinking 异步执行与可见启动提示 (completed)
 
 ### User constraints / 约束

@@ -20,6 +20,7 @@ class FakeApi:
         zmeta: dict[tuple[str, str], dict[str, Any]] | None = None,
         ask_result: dict[str, Any] | None = None,
         ask_exception: Exception | None = None,
+        exact_hits: list[dict[str, Any]] | None = None,
     ) -> None:
         self._cols = [SimpleNamespace(name=n, description=d) for n, d in collections]
         self._titles = titles
@@ -29,7 +30,9 @@ class FakeApi:
         self._zmeta = zmeta or {}
         self._ask_result = ask_result or {"answer": "A", "sources": []}
         self._ask_exception = ask_exception
+        self._exact_hits = exact_hits or []
         self.ask_calls: list[dict[str, Any]] = []
+        self.exact_calls: list[dict[str, Any]] = []
 
     async def list_collections(self) -> list[Any]:
         return self._cols
@@ -48,6 +51,12 @@ class FakeApi:
 
     def is_reranker_active(self) -> bool:
         return self._reranker_active
+
+    async def search_exact_mentions(
+        self, terms: list[str], collection: str | None = None, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        self.exact_calls.append({"terms": terms, "collection": collection, "limit": limit})
+        return self._exact_hits[:limit]
 
     async def ask(self, **kwargs: Any) -> dict[str, Any]:
         self.ask_calls.append(kwargs)
@@ -145,6 +154,39 @@ async def test_probe_uncategorized_excluded() -> None:
     assert all(c["name"] != "_uncategorized" for c in res["collections"])
 
 
+async def test_probe_exact_body_hit_sets_exact_match() -> None:
+    """metadata（集合名/标题/标签）全不含术语，但正文命中 → exact_match=True（防假阴性）。"""
+    api = FakeApi(
+        [("ROOT_SCOPE_A", "")],
+        {"ROOT_SCOPE_A": ["title without the term"]},
+        exact_hits=[
+            {
+                "doc_id": "doc-child",
+                "title": "title without the term",
+                "collection": "CHILD_SCOPE_B",
+                "ordinal": 0,
+                "matched_terms": ["exactterma"],
+                "snippet": "…body with EXACTTERMA…",
+            }
+        ],
+    )
+    res = await _svc(api).probe("does the library mention EXACTTERMA")
+    assert res["exact_match"] is True
+    assert res["exact_hits_top5"][0]["doc_id"] == "doc-child"
+    # 抽到的精确术语为 ASCII，且全局检索（collection=None）。
+    assert "EXACTTERMA" in res["exact_terms"]
+    assert api.exact_calls[0]["collection"] is None
+
+
+async def test_probe_no_exact_terms_skips_body_search() -> None:
+    """纯中文无 ASCII 术语 → 不触发正文搜索，exact_match=False。"""
+    api = FakeApi([("c", "")], {"c": ["t"]})
+    res = await _svc(api).probe("本地库里有什么内容")
+    assert res["exact_terms"] == []
+    assert res["exact_match"] is False
+    assert api.exact_calls == []
+
+
 # ── execute ──────────────────────────────────────────────────────────
 
 
@@ -202,6 +244,28 @@ async def test_execute_builds_citations_author_year_title() -> None:
     res = await _svc(api).execute("q", "ml")
     assert res["citations"] == ["Vaswani - 2017 - Attention Transformer", "Local Note Only"]
     assert res["answer"] == "ANS"
+
+
+async def test_execute_returns_audit_scope_and_exact_count() -> None:
+    """execute 返回 searched_scope + exact_hit_count，正文精确搜索按实际 collection 范围。"""
+    api = FakeApi(
+        [("ROOT_SCOPE_A", "")],
+        {"ROOT_SCOPE_A": ["t"]},
+        ask_result={"answer": "ANS", "sources": []},
+        exact_hits=[{"doc_id": "doc-child", "matched_terms": ["exactterma"]}],
+    )
+    res = await _svc(api).execute("mention EXACTTERMA", "ROOT_SCOPE_A", mode="default")
+    assert res["searched_scope"] == "ROOT_SCOPE_A"
+    assert res["exact_hit_count"] == 1
+    assert api.exact_calls[0]["collection"] == "ROOT_SCOPE_A"
+
+
+async def test_execute_global_empty_answer_is_honest() -> None:
+    """全局无命中时文案为「本次检索未命中（范围：…）」，不得说「库里没有」。"""
+    api = FakeApi([("c", "")], {"c": ["t"]}, ask_result={"answer": "", "sources": []})
+    res = await _svc(api).execute("q", None, mode="default")
+    assert "本次检索未命中" in res["answer"]
+    assert "全局" in res["searched_scope"]
 
 
 def test_build_citations_dedup_and_fallback() -> None:

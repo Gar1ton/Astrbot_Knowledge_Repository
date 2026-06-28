@@ -68,6 +68,13 @@ class KnowledgeRepositoryPlugin:
             return "Error: EventHandler not initialized."
         return await self._handler.on_ka_research(action)
 
+    # @register_command("ka research_language")
+    async def on_ka_research_language(self, value: str) -> str:
+        """/ka research_language <cn|en|cn&en>"""
+        if self._handler is None:
+            return "Error: EventHandler not initialized."
+        return await self._handler.on_ka_research_language(value)
+
     # @register_command("ka persona")
     async def on_ka_persona(self, action: str) -> str:
         """/ka persona <on|off>"""

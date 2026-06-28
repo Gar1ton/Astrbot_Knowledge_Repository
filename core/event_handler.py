@@ -34,6 +34,7 @@ _HELP_TEXT = (
     "  /ka status                     — 服务框架概览（模型/服务/开关）\n"
     "  /ka agent on|off               — ka 与 astrbot 回复的关联开关\n"
     "  /ka research on|off            — 自然语言 research skill 开关\n"
+    "  /ka research_language cn|en|cn&en — research 回答语言（召回恒英文；cn&en=跟随提问，默认）\n"
     "  /ka persona on|off             — astrbot 人格 prompt（off 不污染 research）\n"
     "  /ka zotero pull                — 触发一次 Zotero 增量同步\n"
     "  /ka r2 push|pull|force push|force pull — R2 备份/恢复（force 与 pull 需二次确认）\n"
@@ -102,6 +103,10 @@ class EventHandler:
         lines.append("· 运行时开关")
         lines.append(f"    agent       : {_onoff(self._initializer.agent_enabled)}")
         lines.append(f"    research    : {_onoff(self._initializer.research_enabled)}")
+        _lang_label = {"zh": "cn", "en": "en", "auto": "cn&en"}.get(
+            self._initializer.research_answer_language, "cn&en"
+        )
+        lines.append(f"    research_lang: {_lang_label}（召回恒英文）")
         lines.append(f"    persona     : {_onoff(self._initializer.persona_enabled)}")
         running = self._initializer.web_console_running
         lines.append(
@@ -121,6 +126,19 @@ class EventHandler:
     async def on_ka_persona(self, action: str) -> str:
         """/ka persona <on|off>"""
         return self._toggle("persona", action, "astrbot 人格")
+
+    async def on_ka_research_language(self, value: str) -> str:
+        """/ka research_language <cn|en|cn&en> — 召回恒英文，此项只定回答语言。"""
+        raw = (value or "").strip().lower()
+        lang = {"cn": "zh", "zh": "zh", "en": "en", "cn&en": "auto", "auto": "auto"}.get(raw)
+        if lang is None:
+            return "用法：/ka research_language <cn|en|cn&en>（cn=中文 en=英文 cn&en=跟随提问，默认 cn&en）"
+        try:
+            self._initializer.set_research_answer_language(lang)
+        except Exception as e:
+            return f"切换 research 语言失败：{e}"
+        label = {"zh": "中文(cn)", "en": "英文(en)", "auto": "跟随提问(cn&en)"}[lang]
+        return f"research 回答语言已设为 {label}（召回恒英文，已持久化，重启保留）。"
 
     def _toggle(self, name: str, action: str, label: str) -> str:
         action = (action or "").strip().lower()

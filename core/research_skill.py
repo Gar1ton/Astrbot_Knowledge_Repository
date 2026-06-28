@@ -1,12 +1,16 @@
 """Research 服务：对话式知识检索的两个无状态后端能力（见 ../ARCHITECTURE.md）。
 
 交互模型（v0.28.0 重构）：主对话 LLM 当指挥，下面挂两个工具——
-  · probe(query)：模糊检索元数据（标题/集合/标签），返回候选 + ambiguity + 建议模式，
-    供主 LLM 判断「回应范围 + 模式」并决定直接执行还是反问用户确认；
-  · execute(...)：真正的 chunk 召回（英文召回 + 按问题语言作答 + reranker/wide）+ 确定性引用列表。
+  · probe(query)：模糊检索元数据（标题/集合/标签），返回候选 + ambiguity + 建议模式 +
+    directive_guidance（指引主 LLM 把对话凝练成一条自包含「调令」），供主 LLM 判断
+    「回应范围 + 模式」并决定直接执行还是反问用户确认；
+  · execute(...)：真正的 chunk 召回 + 作答 + 确定性引用列表。调令模型：答案恒为内部 agent 的
+    纯输出（persona 一律关闭）；召回恒英文（query 含 CJK 才翻译，已是英文则跳过翻译省一次 LLM
+    调用）；回答语言取自 flags.research_answer_language（auto/zh/en，与前端 askAI 同一参数）。
 
 本模块只做编排与打分，不写召回算法、不碰任何同步配置（Zotero/Notion/R2 的 token/url）。
-范围界定与模式选择最终交给主 LLM；这里的 ambiguity/suggested_mode 只是廉价启发式提示。
+范围界定与模式选择最终交给主 LLM；这里的 ambiguity/suggested_mode 只是廉价启发式提示
+（成本感知：正文已精确命中 + 「有没有/是否提到」类查存 → 维持 default，不无谓升 deep_thinking）。
 """
 
 from __future__ import annotations
@@ -63,6 +67,26 @@ _GRAPH_SIGNALS = frozenset(
     }
 )
 
+# 「查存」类信号：偏向「有没有/是否提到 X」的事实存在性查询，配合正文精确命中即可走 default。
+_LOOKUP_SIGNALS = frozenset(
+    {
+        "有没有", "是否有", "有无", "有哪些", "提到", "提及", "包含", "查一下", "找找",
+        "is there", "are there", "does", "do you", "mention", "any paper", "any papers",
+    }
+)
+
+# probe 回传给主 LLM 的「调令」指引：把对话意图凝练成一条自包含检索问题再调 execute。
+_DIRECTIVE_GUIDANCE = (
+    "范围明确(ambiguity=low)后，请把对话意图凝练成一条自包含、聚焦的检索问题作为 query 调用 "
+    "research_execute（不要原样转发零碎对话）；deep_thinking 时尤其要把「想让内部检索 agent "
+    "回答的问题」写完整清楚。内部 agent 会据此直接产出纯净答案并发给用户，你无需复述或二次总结。"
+)
+
+
+def _has_cjk(text: str) -> bool:
+    """文本是否含 CJK 字符——决定召回前是否需把 query 翻译成英文（召回恒英文，英文 query 跳过翻译）。"""
+    return any("一" <= ch <= "鿿" for ch in text)
+
 
 def _tokenize(text: str) -> set[str]:
     """中英双语分词：英文取 3+ 字母词（去停用词），中文取 CJK 连续段的 2-gram。
@@ -105,7 +129,8 @@ def _exact_terms(query: str) -> list[str]:
 class ResearchService:
     """probe + execute 两个无状态能力的后端实现。
 
-    flags：暴露 .research_enabled / .persona_enabled 的对象（运行态即 PluginInitializer）。
+    flags：暴露 .research_enabled / .research_answer_language 的对象（运行态即 PluginInitializer）；
+    persona 不再从 flags 读取——research 答案恒为内部 agent 纯输出（调令模型），persona 一律关闭。
     """
 
     def __init__(self, api: KnowledgeRepositoryApi, flags: Any) -> None:
@@ -170,7 +195,8 @@ class ResearchService:
             "papers": papers[:_MAX_PAPERS],
             "tags": tags[:_MAX_TAGS],
             "ambiguity": self._assess_ambiguity(scored_cols),
-            "suggested_mode": self._suggest_mode(query, lightrag_ready),
+            "suggested_mode": self._suggest_mode(query, lightrag_ready, bool(exact_hits)),
+            "directive_guidance": _DIRECTIVE_GUIDANCE,
             "available_modes": available_modes,
             "lightrag_ready": lightrag_ready,
             "exact_terms": exact_terms,
@@ -225,8 +251,14 @@ class ResearchService:
             return "high"
         return "low"
 
-    def _suggest_mode(self, query: str, lightrag_ready: dict[str, bool]) -> str:
+    def _suggest_mode(
+        self, query: str, lightrag_ready: dict[str, bool], exact_match: bool = False
+    ) -> str:
         q = query.lower()
+        # 成本感知路由：正文已精确命中 + 像「有没有/是否提到」的查存问题 → 维持 default（1 次合成），
+        # 不因 query 里偶然出现「综述/review」等词就升到昂贵的 deep_thinking（~10+ LLM 调用）。
+        if exact_match and any(sig in q for sig in _LOOKUP_SIGNALS):
+            return "default"
         if any(sig in q for sig in _DEEP_SIGNALS):
             return "deep_thinking"
         if any(sig in q for sig in _GRAPH_SIGNALS) and any(lightrag_ready.values()):
@@ -241,9 +273,13 @@ class ResearchService:
         collection: str | None = None,
         mode: str = "default",
         breadth: str = "normal",
-        persona_enabled: bool | None = None,
     ) -> dict[str, Any]:
-        """真正召回并作答：英文召回 + 按问题语言答 + reranker/wide + 确定性引用列表。"""
+        """真正召回并作答：英文召回 + 按配置语言作答 + reranker/wide + 确定性引用列表。
+
+        调令模型：答案恒为内部 agent 的纯输出——persona 一律关闭（deep 本就不套，default 也强制关）。
+        召回恒英文：query 含 CJK 才翻译成英文，已是英文则跳过翻译省一次 LLM 调用。
+        回答语言取自 flags.research_answer_language（auto/zh/en，与前端 askAI 同一参数）。
+        """
         if mode not in _VALID_MODES:
             mode = "default"
         if mode in _STRICT_COLLECTION_MODES and not collection:
@@ -265,8 +301,12 @@ class ResearchService:
         )
         candidate_k = candidate_pool if (use_reranker and candidate_pool > answer_top_k) else None
 
-        if persona_enabled is None:
-            persona_enabled = bool(getattr(self._flags, "persona_enabled", False))
+        # 召回恒英文：英文 query 直接召回（跳过翻译），含 CJK 才翻译成英文，省掉系统性浪费的翻译调用。
+        use_english_retrieval = _has_cjk(query)
+        # 回答语言：取统一配置（auto/zh/en），与前端 askAI 同一参数；非法值回退 auto。
+        answer_language = str(getattr(self._flags, "research_answer_language", "auto"))
+        if answer_language not in {"auto", "zh", "en"}:
+            answer_language = "auto"
 
         try:
             result = await self._api.ask(
@@ -274,9 +314,9 @@ class ResearchService:
                 collection=collection,
                 top_k=answer_top_k,
                 retrieval_mode=mode,
-                use_english_retrieval=True,
-                answer_language="auto",
-                persona_enabled=persona_enabled,
+                use_english_retrieval=use_english_retrieval,
+                answer_language=answer_language,
+                persona_enabled=False,
                 candidate_k=candidate_k,
                 use_reranker=use_reranker,
             )

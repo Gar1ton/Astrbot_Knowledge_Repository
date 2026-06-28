@@ -23,8 +23,13 @@
 
 ## [Unreleased]
 
+### 新增功能 (Added)
+
+- **research 召回语言开关 `/ka research_language <cn|en|cn&en>`**：新增 `ask.answer_language`（auto/zh/en）运行时配置，与前端 askAI 的中英文开关同一参数；召回恒英文，此项只决定回答语言（cn→zh、en→en、cn&en→auto，默认 auto）。命令切换即持久化、重启保留，并经 `/api/config` 暴露给 Web 控制台供 askAI 初值共享（`main.py`、`core/main.py`、`core/event_handler.py`、`core/plugin_initializer.py`、`core/config.py`、`web/frontend/components/panels/ChatPanel.tsx`、`web/frontend/lib/api.ts`）。
+
 ### 修复 (Fixed)
 
+- **修复 deep_thinking 回答“被压缩”**：deep 合成模板 `_SYNTH_SYSTEM_DEEP` 改为要求按信息点/维度分节展开、证据支持就充分展开、勿人为缩短，保留禁臆造/禁跨源与“有据推断”硬约束；deep 与 default-fallback 两条合成入口共用此模板（`core/pipelines/answer_synthesis.py`）。
 - **收口 research breadth 的最终上下文量**：保留候选池 `narrow=5` / `normal=15` / `wide=40`，但喂给 LLM 的最终 evidence 数改为 `narrow=5` / `normal=8` / `wide=10`，降低长答案与上下文噪声风险（`core/research_skill.py`、`tests/backend/test_research_skill.py`）。
 - **修复聊天端普通 research_execute 仍可能触发 AstrBot 120s tool timeout**：`main.py` 将所有实际执行路径统一改为后台任务，tool 立即返回 `started`，完成后主动向原会话分段回发结果；同时修复后台结果格式化误用 `staticmethod+self` 导致完成回发失败的问题（`main.py`）。
 - **修复 ASCII 精确术语误命中词干的问题**：`search_exact_mentions` 增加公共边界复核，`SHAP` 可命中 `SHAP/XAI`/`SHAP values`，不再误命中 `shape`/`shaping`；probe/execute 额外返回文档级去重命中摘要与计数，避免同一文档多 chunk 淹没其他相关文章（`core/repository/source_store/base.py`、`core/repository/source_store/sqlite.py`、`core/research_skill.py`）。
@@ -32,10 +37,17 @@
 ### 性能优化 (Performance)
 
 - **减少 Milvus 召回后本地 chunk 回填的串行 SQLite 查询**：`RetrievalOrchestrator` 将向量检索返回的 chunk_id 批量 hydrate，并按向量结果顺序恢复候选列表；缺失 chunk 自动跳过，不改变 RRF/reranker 行为（`core/pipelines/retrieval_orchestrator.py`）。
+- **research 召回省一次翻译 LLM 调用**：`research_skill.execute` 仅当 query 含 CJK 时才翻译成英文（`use_english_retrieval=_has_cjk(query)`），已是英文的 query 直接英文召回，去掉系统性浪费的翻译调用；召回恒英文不变（`core/research_skill.py`）。
+- **成本感知模式建议（Adaptive-RAG 思路）**：probe 的 `_suggest_mode` 对“有没有/是否提到 X”类查存 + 正文精确命中维持 `default`，避免因 query 偶含“综述/review”等词被升到昂贵的 deep_thinking（`core/research_skill.py`）。
+
+### 架构健康 (Refactor)
+
+- **research 答案恒为内部 agent 纯输出（调令模型）**：`research_skill.execute` 不再从 flags 读 persona、对 default/deep 一律传 `persona_enabled=False`（移除该形参）；probe 返回 `directive_guidance`，引导主 LLM 把对话凝练成一条自包含检索指令再调 execute；`research_execute` 的 query docstring 同步澄清为“调令”（`core/research_skill.py`、`main.py`）。
 
 ### 测试 (Tests)
 
 - 补充 research breadth plan、文档级 exact hit 摘要、Milvus 批量 hydrate、memory/sqlite ASCII 边界匹配回归测试（`tests/backend/test_research_skill.py`、`test_retrieval_orchestrator.py`、`test_source_store.py`、`test_sqlite_source_store.py`）。
+- 补充 research 语言映射（英文 query 跳翻译 / 中文翻译 / answer_language 取 flags）、persona 恒关、probe `directive_guidance`、查存+精确命中维持 default 的回归测试（`tests/backend/test_research_skill.py`）。
 
 ## [v0.28.3] — 2026-06-23
 

@@ -95,6 +95,8 @@ class PluginInitializer:
         self.agent_enabled: bool = _ask_cfg.agent_enabled
         self.research_enabled: bool = _ask_cfg.research_enabled
         self.persona_enabled: bool = _ask_cfg.persona_enabled
+        # research 答案语言（auto/zh/en）：ResearchService.execute 读取，召回恒英文。
+        self.research_answer_language: str = _ask_cfg.answer_language
         self.metrics: PerformanceTracker = PerformanceTracker()
         self.progress_store: ProgressStore = ProgressStore()
         self.secret_store: EncryptedSecretStore = EncryptedSecretStore(data_dir / "secrets")
@@ -129,6 +131,7 @@ class PluginInitializer:
         self.agent_enabled = _ask_cfg.agent_enabled
         self.research_enabled = _ask_cfg.research_enabled
         self.persona_enabled = _ask_cfg.persona_enabled
+        self.research_answer_language = _ask_cfg.answer_language
 
         # 2) 无依赖层先行：DB 连接 + 迁移 + 仓储生产实现（v0.3.0 接入 sqlite）。
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -545,6 +548,16 @@ class PluginInitializer:
             raise ValueError(f"unknown toggle: {name}")
         setattr(self, f"{name}_enabled", value)
         self._persist_config_value("ask", f"{name}_enabled", value)
+
+    def set_research_answer_language(self, value: str) -> None:
+        """切换 research 答案语言（auto/zh/en）并持久化到 runtime_config.json（ask 段）。
+
+        与前端 askAI 的 answer_language 同一参数；召回恒英文，本项只决定回答语言。
+        """
+        if value not in ("auto", "zh", "en"):
+            raise ValueError(f"answer_language must be auto/zh/en: {value}")
+        self.research_answer_language = value
+        self._persist_config_value("ask", "answer_language", value)
 
     async def start_web_console(self) -> bool:
         """实时启动 Web 控制台并持久化 web_console.enabled=True。已在运行则幂等返回 True。"""

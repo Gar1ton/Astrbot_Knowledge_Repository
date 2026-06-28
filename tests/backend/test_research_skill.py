@@ -73,8 +73,18 @@ def _doc(title: str, collection: str, *, tags: list[str] | None = None,
     )
 
 
-def _svc(api: FakeApi, *, research_enabled: bool = True, persona: bool = False) -> ResearchService:
-    flags = SimpleNamespace(research_enabled=research_enabled, persona_enabled=persona)
+def _svc(
+    api: FakeApi,
+    *,
+    research_enabled: bool = True,
+    persona: bool = False,
+    answer_language: str = "auto",
+) -> ResearchService:
+    flags = SimpleNamespace(
+        research_enabled=research_enabled,
+        persona_enabled=persona,
+        research_answer_language=answer_language,
+    )
     return ResearchService(api, flags)
 
 
@@ -137,6 +147,25 @@ async def test_probe_suggests_deep_thinking_on_signal() -> None:
     assert res["suggested_mode"] == "deep_thinking"
 
 
+async def test_probe_returns_directive_guidance() -> None:
+    """probe 回传调令指引，引导主 LLM 把对话凝练成自包含检索问题。"""
+    api = FakeApi([("ml", "")], {"ml": ["X"]})
+    res = await _svc(api).probe("transformer")
+    assert res["directive_guidance"]
+
+
+async def test_probe_lookup_with_exact_hit_stays_default() -> None:
+    """成本路由：「有没有提到 X」查存 + 正文精确命中 → default，不因含「综述」升 deep_thinking。"""
+    api = FakeApi(
+        [("c", "")],
+        {"c": ["t"]},
+        exact_hits=[{"doc_id": "d", "matched_terms": ["shap"], "title": "T", "collection": "c"}],
+    )
+    res = await _svc(api).probe("综述里有没有提到 SHAP")
+    assert res["exact_match"] is True
+    assert res["suggested_mode"] == "default"
+
+
 async def test_probe_matches_chinese_collection_name() -> None:
     # 中文 query 命中中文集合名（probe 分词支持 CJK bigram），双语 research 的范围探查可用。
     api = FakeApi([("机器学习", "深度学习论文"), ("biology", "")], {"机器学习": [], "biology": []})
@@ -190,14 +219,29 @@ async def test_probe_no_exact_terms_skips_body_search() -> None:
 # ── execute ──────────────────────────────────────────────────────────
 
 
-async def test_execute_wires_english_retrieval_and_persona_default() -> None:
+async def test_execute_english_query_skips_translation_and_forces_persona_off() -> None:
+    """英文 query：直接英文召回、跳过翻译；persona 即便 flags 打开也恒关（调令纯输出）。"""
     api = FakeApi([("ml", "")], {"ml": ["X"]}, ask_result={"answer": "ANS", "sources": []})
-    await _svc(api, persona=True).execute("q", "ml", mode="default")
+    await _svc(api, persona=True).execute("transformer attention", "ml", mode="default")
     call = api.ask_calls[0]
-    assert call["use_english_retrieval"] is True
+    assert call["use_english_retrieval"] is False
     assert call["answer_language"] == "auto"
-    assert call["persona_enabled"] is True
+    assert call["persona_enabled"] is False
     assert call["collection"] == "ml"
+
+
+async def test_execute_chinese_query_translates_for_english_recall() -> None:
+    """中文 query：含 CJK → use_english_retrieval=True（翻译成英文再召回，召回恒英文）。"""
+    api = FakeApi([("ml", "")], {"ml": ["X"]}, ask_result={"answer": "ANS", "sources": []})
+    await _svc(api).execute("深度学习有哪些应用", "ml", mode="default")
+    assert api.ask_calls[0]["use_english_retrieval"] is True
+
+
+async def test_execute_answer_language_from_flags() -> None:
+    """回答语言取自 flags.research_answer_language（与前端 askAI 同一参数）。"""
+    api = FakeApi([("ml", "")], {"ml": ["X"]}, ask_result={"answer": "ANS", "sources": []})
+    await _svc(api, answer_language="en").execute("transformer", "ml")
+    assert api.ask_calls[0]["answer_language"] == "en"
 
 
 async def test_execute_breadth_plan_sets_top_k_and_candidate_pool() -> None:

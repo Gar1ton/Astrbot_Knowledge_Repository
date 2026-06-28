@@ -193,6 +193,9 @@ class AskAgentConfig:
     agent_enabled: bool = False  # ka↔astrbot 回复关联（RAG 上下文注入）总开关。
     research_enabled: bool = False  # knowledge_research skill 是否响应自然语言调用。
     persona_enabled: bool = False  # 是否在 ask 中启用 astrbot 人格 prompt（off=不污染 research）。
+    # research 答案语言（与前端 askAI 的 answer_language 同一参数）：auto=跟随提问语言 / zh / en。
+    # 召回恒英文，本项只决定回答语言；/ka research_language cn|en|cn&en → zh|en|auto。
+    answer_language: str = "auto"
 
 
 @dataclass
@@ -317,7 +320,12 @@ class Config:
         rerank = self.get_rerank_config()
         deep_thinking = self.get_deep_thinking_config()
         zotero = self.get_zotero_sync_config()
+        ask = self.get_ask_agent_config()
         return {
+            "ask": {
+                # 与前端 askAI 的 answer_language 同一参数；召回恒英文，仅决定回答语言。
+                "answer_language": ask.answer_language,
+            },
             "source_store": {
                 "db_filename": source.db_filename,
                 "default_collection": source.default_collection,
@@ -645,10 +653,14 @@ class Config:
 
     def get_ask_agent_config(self) -> AskAgentConfig:
         s = _section(self.raw, "ask")
+        answer_language = str(s.get("answer_language", AskAgentConfig.answer_language))
+        if answer_language not in {"auto", "zh", "en"}:
+            answer_language = AskAgentConfig.answer_language
         return AskAgentConfig(
             agent_enabled=bool(s.get("agent_enabled", AskAgentConfig.agent_enabled)),
             research_enabled=bool(s.get("research_enabled", AskAgentConfig.research_enabled)),
             persona_enabled=bool(s.get("persona_enabled", AskAgentConfig.persona_enabled)),
+            answer_language=answer_language,
         )
 
     def get_rerank_config(self) -> RerankConfig:
@@ -770,6 +782,8 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         # /ka 运行时开关：仅持久化（不开放 API 写），由命令切换、重启保留。
         "agent_enabled": ConfigKeyPolicy(False, True),
         "research_enabled": ConfigKeyPolicy(False, True),
+        # 召回语言（回答语言）：开放 API 写，使前端 askAI 与配置项共享同一参数。
+        "answer_language": ConfigKeyPolicy(True, True),
     },
     "web_console": {
         # /ka webui on|off 实时启停并持久化；不走 update_config（避免 RESTART 后果误判）。

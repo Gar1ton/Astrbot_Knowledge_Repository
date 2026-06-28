@@ -575,6 +575,7 @@ const MOCK_CONFIG: EffectiveConfig = {
   r2_sync: { enabled: true, bucket: "kr-bucket", account_id: "ac****nt", access_key_id: "ak****id", secret_access_key: "****", free_tier_gb: 10, warn_threshold: 0.8 },
   notion_sync: { enabled: true, database_id: "db-****", max_upload_mib: 5 },
   web_console: { enabled: true, host: "0.0.0.0", port: 26618, username: "admin", password: "****" },
+  ask: { answer_language: "auto" },
   graph: { enabled: false, query_mode: "mix", llm_max_async: 4, embedding_max_async: 8, working_dir: "lightrag_workspaces", max_doc_chars: 30000, lightrag_llm_provider: "main", lightrag_llm_base_url: "", lightrag_llm_model: "", lightrag_llm_timeout_seconds: 900 },
   rerank: { provider: "cross_encoder", model: "Alibaba-NLP/gte-reranker-modernbert-base", device: "auto", batch_size: 32, max_candidates: 30, keep: 12 },
   deep_thinking: {

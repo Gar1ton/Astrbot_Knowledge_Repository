@@ -33,25 +33,31 @@ _SYNTH_SYSTEM_BASE = (
     + _SOURCE_ISOLATION_RULE
 )
 
-# Deep Thinking 专用：在严格 grounded 的前提下要求机制级、分维度、带跨实体对比的深度回答。
-# 关键：允许「有据推断」——证据部分相关但未逐字命中问题措辞时给出带 hedge 的推断，
-# 而非一律判「无证据」全盘否定（这是修复「部分可支持→完全无证据」误判的钥匙）。
+# Deep Thinking 专用：在严格 grounded 的前提下要求机制级、分维度、带跨实体对比的**完整**回答。
+# 去压缩关键：① 按信息点/维度分节展开，每节充分展开、勿人为缩短（修复「单次合成短而拘谨」）；
+# ② 允许「有据推断」——证据部分相关但未逐字命中问题措辞时给出带 hedge 的推断，而非一律判
+#   「无证据」全盘否定（修复「部分可支持→完全无证据」误判）。硬约束（禁臆造/禁跨源）保留。
 _SYNTH_SYSTEM_DEEP = (
-    "You are a rigorous research assistant writing an in-depth, evidence-grounded answer. "
-    "Answer based solely on the provided context; do not use outside knowledge; "
-    "cite every claim with [n] notation. "
+    "You are a rigorous research assistant writing a COMPREHENSIVE, in-depth, report-style "
+    "evidence-grounded answer. Answer based solely on the provided context; do not use outside "
+    "knowledge; cite every claim with [n] notation. "
+    "Organize the answer into clearly-headed sections covering the distinct dimensions of the "
+    "question (e.g. definition/background, mechanisms & methods, comparison across entities, "
+    "timeline/trends, limitations, and a closing synthesis). Under each section develop the point "
+    "fully, naming the specific mechanisms, techniques, datasets, models and terms that appear in "
+    "the context rather than generic abstractions. "
+    "Be thorough: when the evidence supports a point, expand it as far as the evidence allows and "
+    "do NOT artificially shorten or compress; draw on every relevant retrieved source, not only "
+    "the first few. "
     "When the question's framing (a claimed trend, shift, relationship or synthesis) is not "
     "stated verbatim in any single source but the evidence partially bears on it, do NOT "
     "refuse with 'no evidence'; instead synthesize a clearly hedged, evidence-grounded "
     "inference (e.g. '证据部分支持……' / 'the evidence partially supports …' / '可据 [n] 推断……') "
     "and cite the partial evidence. Reserve an explicit 'no evidence' statement only for points "
     "the context genuinely does not touch at all. Never invent facts or cross-attribute sources. "
-    "Go as deep as the evidence allows: name the specific mechanisms, techniques and terms "
-    "that appear in the context rather than generic abstractions. "
-    "Adapt structure to the question: for comparison or 'shared X of A and B' questions, "
-    "enumerate the concrete dimensions; under each dimension give each entity's specific "
-    "mechanism with its citation, then add one synthesis line on how they align. "
-    "Prefer mechanism-level specificity over vague summary. "
+    "For comparison or 'shared X of A and B' questions, enumerate the concrete dimensions; under "
+    "each dimension give each entity's specific mechanism with its citation, then add a synthesis "
+    "line on how they align. "
     + _SOURCE_ISOLATION_RULE
 )
 

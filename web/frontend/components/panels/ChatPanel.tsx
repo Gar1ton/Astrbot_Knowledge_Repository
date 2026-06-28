@@ -17,6 +17,7 @@ import {
   getChatHistory, clearChatHistory, lockChatAnswer,
   createDocumentNote, createCollectionNote,
   getAskProgress, type LiveProgressDetail,
+  getEffectiveConfig,
 } from "@/lib/api";
 
 // ─── Types ────────────────────────────────────────────────────
@@ -669,6 +670,24 @@ export function ChatPanel({ width }: { width?: number }) {
   useEffect(() => {
     const cid = getOrCreateConvId();
     setConversationId(cid);
+  }, []);
+
+  // askAI 的中英文开关与后端 ask.answer_language 是同一参数：挂载时以配置项为初值，保持前后端一致。
+  useEffect(() => {
+    let cancelled = false;
+    getEffectiveConfig()
+      .then((cfg) => {
+        const lang = (cfg.ask as { answer_language?: string } | undefined)?.answer_language;
+        if (!cancelled && (lang === "auto" || lang === "zh" || lang === "en")) {
+          setAnswerLanguage(lang);
+        }
+      })
+      .catch(() => {
+        /* 配置不可用时保持默认 auto，不打断聊天 */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {

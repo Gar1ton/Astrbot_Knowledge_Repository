@@ -1,5 +1,29 @@
 # TODO
 
+## v0.28.6 调令式 research：召回语言开关 + 去压缩 + 降本 (completed)
+
+### User constraints / 约束
+
+- 核心改动集中在 `core/research_skill.py`，其它文件尽量少动；deep 去压缩允许在 `research_skill.py` 之外做“一处最小改动”（= 改 deep 合成 prompt）。
+- 召回**始终英文**，**不新增任何翻译/双语召回**；中英文控制复用前端 askAI 的 `answer_language`（auto/zh/en）这唯一参数。命令 `/ka research_language cn|en|cn&en` → `zh|en|auto`，`cn&en` 即 `auto`、默认 `auto`。
+- 输出框架保持现状（`✅ 检索完成/范围/模式` 头 + 引用 + deep 的 verification 提示都保留）。
+- research 强制 `persona_enabled=False`：两模式答案都是内部 agent 纯输出（调令模型）。
+- 不手工修改 `pages/`（前端构建产物）。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 语言配置管线**：`AskAgentConfig.answer_language`（auto/zh/en）+ 校验 + `CONFIG_KEY_POLICY["ask"]`（api_writable+runtime_persistable）+ `to_public_dict` 新增 `ask` 段；`PluginInitializer.research_answer_language` 初值/刷新 + `set_research_answer_language`（`core/config.py`、`core/plugin_initializer.py`）。
+- [x] **Phase 2 - 命令**：`/ka research_language <cn|en|cn&en>` 经 `event_handler.on_ka_research_language` 映射 zh/en/auto 持久化；`/ka status`/`/ka help` 反映（`main.py`、`core/main.py`、`core/event_handler.py`）。
+- [x] **Phase 3 - research_skill 核心**：`_has_cjk` + `execute` 用 `use_english_retrieval=_has_cjk(query)`（英文 query 跳翻译）、`answer_language` 取 flags、`persona_enabled=False` 恒定（移除形参）；`probe` 返回 `directive_guidance`；`_suggest_mode` 成本路由（查存+精确命中维持 default）（`core/research_skill.py`）。
+- [x] **Phase 4 - 去压缩（一处最小改动）**：`_SYNTH_SYSTEM_DEEP` 改为按维度分节展开、勿人为缩短，保留禁臆造/有据推断硬约束（`core/pipelines/answer_synthesis.py`）。
+- [x] **Phase 5 - 前后端端口同步**：`ChatPanel` askAI 的中英文开关初值从 `getEffectiveConfig().ask.answer_language` 读入，与配置项同一参数；`MOCK_CONFIG` 补 `ask` 段（`web/frontend/components/panels/ChatPanel.tsx`、`web/frontend/lib/api.ts`）。**注：前端需 `npm run build` + `python tools/sync_frontend.py` 后才在 `pages/` 生效。**
+- [x] **Phase 6 - 回归测试与收尾**：更新/补 research 单测，运行 pytest，更新 CHANGELOG 与本节。
+
+### Verification
+
+- `python -m pytest tests/backend/test_research_skill.py tests/backend/test_config.py tests/backend/test_api.py tests/backend/test_deep_thinking_orchestrator.py tests/backend/test_lifecycle_and_cli.py -q` → 165 passed；唯一失败 `test_plugin_shell_lifecycle` 因本机未装可选依赖 `boto3`（`patch("boto3.client")`），与本次改动无关。
+- `ruff check` / `mypy` 未执行：当前 Windows Python 环境未安装 `ruff`/`mypy`（与既往版本一致）。
+
 ## v0.28.5 research LLM 上下文预算收口 (completed)
 
 ### User constraints / 约束

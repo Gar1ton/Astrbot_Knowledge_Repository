@@ -121,6 +121,14 @@ class KnowledgeRepositoryPlugin(Star):
             return
         yield event.plain_result(await self._handler.on_ka_research(action))
 
+    @ka.command("research_language")
+    async def ka_research_language(self, event: AstrMessageEvent, value: str = ""):
+        '''/ka research_language <cn|en|cn&en> — research 回答语言（召回恒英文；cn&en=跟随提问）'''
+        if not self._handler:
+            yield event.plain_result("插件未初始化。")
+            return
+        yield event.plain_result(await self._handler.on_ka_research_language(value))
+
     @ka.command("persona")
     async def ka_persona(self, event: AstrMessageEvent, action: str = ""):
         '''/ka persona <on|off> — astrbot 人格 prompt 开关'''
@@ -198,7 +206,8 @@ class KnowledgeRepositoryPlugin(Star):
         原样呈现给用户（引用列表勿改写）。本工具只读，绝不修改任何同步配置。
 
         Args:
-            query(string): 用户问题（结合上下文的检索意图），原文传入。
+            query(string): 凝练后的自包含检索指令（调令）——把对话意图整理成一条完整、聚焦、
+                可独立理解的问题；deep_thinking 时尤其写清要让内部检索 agent 回答的问题。
             collection(string): 召回范围集合名；留空=全局检索。
             mode(string): default=标准召回；deep_thinking=综合分析；high_precision=图谱召回。
             breadth(string): narrow/normal/wide——问题宽泛时用 wide 放大候选池再重排（默认 normal）。

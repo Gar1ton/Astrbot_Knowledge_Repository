@@ -106,6 +106,7 @@ class PluginInitializer:
         self.category_manager: CategoryManager | None = None
         self.quota_manager: QuotaManager | None = None
         self.sync_pipeline: SyncPipeline | None = None
+        self.r2_backup_manager: Any | None = None
 
     @property
     def config(self) -> Config:
@@ -118,6 +119,14 @@ class PluginInitializer:
         from core.log_capture import install as _install_log_capture
         _install_log_capture()
         logger.info("PluginInitializer.initialize() 开始")
+
+        # 完整恢复必须发生在 SQLite/Milvus/LightRAG 建立连接之前。
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        from core.managers.r2_backup_manager import apply_pending_restore
+
+        if await asyncio.to_thread(apply_pending_restore, self._data_dir, self._config):
+            self._config = Config(self._runtime_config.merged_with(self._raw_config))
+            logger.info("R2 pending restore 已应用，按恢复后的运行时配置继续初始化")
 
         self._exit_stack = AsyncExitStack()
 
@@ -134,7 +143,6 @@ class PluginInitializer:
         self.research_answer_language = _ask_cfg.answer_language
 
         # 2) 无依赖层先行：DB 连接 + 迁移 + 仓储生产实现（v0.3.0 接入 sqlite）。
-        self._data_dir.mkdir(parents=True, exist_ok=True)
         db_path = self._data_dir / source_cfg.db_filename
 
         db = await self._exit_stack.enter_async_context(aiosqlite.connect(str(db_path)))
@@ -457,6 +465,20 @@ class PluginInitializer:
             rerank_config=rerank_cfg,
         )
 
+        # 4.9) R2 完整备份管理器：inventory/manifest 是 R2 v1 的唯一恢复真相源。
+        from core.managers.r2_backup_manager import R2BackupManager
+
+        self.r2_backup_manager = R2BackupManager(
+            target=r2_target,
+            source_store=self.source_store,
+            config=self._config,
+            r2_config=r2_cfg,
+            data_dir=self._data_dir,
+            db_path=db_path,
+            quiesce_indexes=self._quiesce_indexes_for_backup,
+            reload_callback=self.reload,
+        )
+
         # 5) 业务门面（依赖已装配的仓储/managers）。
         self.api = KnowledgeRepositoryApi(
             source_store=self.source_store,
@@ -482,6 +504,7 @@ class PluginInitializer:
             embedding_fingerprint=self.embedding_fingerprint,
             secret_store=self.secret_store,
             reload_callback=self.reload,
+            r2_backup_manager=self.r2_backup_manager,
         )
         await self.api.restore_paused_build_job()
 
@@ -537,6 +560,38 @@ class PluginInitializer:
         web_cfg = self._config.get_web_console_config()
         if web_cfg.enabled:
             await self._start_web_console(web_cfg)
+
+        from core.managers.r2_backup_manager import commit_applied_restore
+
+        await asyncio.to_thread(commit_applied_restore, self._data_dir)
+
+    async def _quiesce_indexes_for_backup(self) -> None:
+        """完成索引落盘并释放文件锁；后续访问会按现有懒初始化契约重新打开。"""
+        if self.api is not None:
+            active_graph = await self.api.get_active_build_job()
+            active_jobs = [
+                ("LightRAG", active_graph),
+                ("Milvus", self.api.get_active_milvus_build_job()),
+                ("Zotero", self.api.get_active_zotero_sync_job()),
+                ("文档摄入", self.api.get_active_ingest_job()),
+            ]
+            running = [
+                name
+                for name, job in active_jobs
+                if job is not None
+                and (
+                    name == "LightRAG"
+                    or str(job.get("status") or "") == "running"
+                )
+            ]
+            if running:
+                raise RuntimeError(
+                    f"以下持久化任务仍在运行，请完成后再备份：{', '.join(running)}"
+                )
+        if self.lightrag_registry is not None:
+            await self.lightrag_registry.close()
+        if self.vector_store is not None:
+            await self.vector_store.close()
 
     def _persist_config_value(self, section: str, key: str, value: object) -> None:
         self._runtime_config.set_value(section, key, value)
@@ -647,9 +702,9 @@ class PluginInitializer:
         try:
             while True:
                 await asyncio.sleep(interval_sec)
-                if self.sync_pipeline is not None:
+                if self.r2_backup_manager is not None:
                     logger.info("Triggering periodic background backup to R2...")
-                    await self.sync_pipeline.sync(SyncTargetKind.R2)
+                    await self.r2_backup_manager.backup(force=False)
         except asyncio.CancelledError:
             logger.info("Background periodic backup task cancelled.")
         except Exception as e:
@@ -737,7 +792,15 @@ class PluginInitializer:
         logger.info("PluginInitializer.reload() 触发插件软重启")
         await self.teardown()
         self._config = Config(self._runtime_config.merged_with(self._raw_config))
-        await self.initialize()
+        try:
+            await self.initialize()
+        except Exception:
+            from core.managers.r2_backup_manager import rollback_applied_restore
+
+            if await asyncio.to_thread(rollback_applied_restore, self._data_dir):
+                self._config = Config(self._runtime_config.merged_with(self._raw_config))
+                await self.initialize()
+            raise
         logger.info("PluginInitializer.reload() 软重启完成")
 
 

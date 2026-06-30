@@ -15,6 +15,7 @@ from core.domain.models import (
     Collection,
     ConsoleScopeState,
     DocumentChunk,
+    DocumentOrigin,
     ScopedNote,
     SourceDocument,
     SyncRecord,
@@ -328,6 +329,86 @@ async def test_console_scope_state_upsert(sqlite_store: SQLiteSourceDocumentStor
     assert state is not None
     assert state.selected_doc_id == "d1"
     assert state.payload == {"right": "notes"}
+
+
+async def test_purge_zotero_mirror_keeps_local_state(
+    sqlite_store: SQLiteSourceDocumentStore,
+) -> None:
+    zotero_collection = Collection(
+        name="zotero-old",
+        coll_key="123:ZC",
+        library_id="123",
+        origin=DocumentOrigin.ZOTERO,
+        read_only=True,
+    )
+    await sqlite_store.upsert_collection(zotero_collection)
+    local_doc = _doc("local-doc")
+    zotero_doc = _doc("zotero-doc", "zotero-old")
+    zotero_doc.origin = DocumentOrigin.ZOTERO
+    zotero_doc.library_id = "123"
+    zotero_doc.read_only = True
+    zotero_doc.collection_keys = [zotero_collection.coll_key]
+    await sqlite_store.add_document(local_doc)
+    await sqlite_store.add_document(zotero_doc)
+    await sqlite_store.add_scoped_note(
+        ScopedNote(
+            "local-note",
+            "document",
+            "local-doc",
+            "keep",
+            doc_id="local-doc",
+            library_id="LOCAL",
+        )
+    )
+    await sqlite_store.add_scoped_note(
+        ScopedNote(
+            "zotero-note",
+            "document",
+            "zotero-doc",
+            "drop",
+            doc_id="zotero-doc",
+            library_id="123",
+        )
+    )
+    await sqlite_store.upsert_build_job(
+        {
+            "job_id": "local-job",
+            "collection": "default",
+            "status": "success",
+            "stage": "done",
+            "started_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    await sqlite_store.upsert_build_job(
+        {
+            "job_id": "zotero-job",
+            "collection": "zotero-old",
+            "status": "success",
+            "stage": "done",
+            "started_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    await sqlite_store.upsert_console_scope_state(
+        ConsoleScopeState("document", "local-doc", selected_doc_id="local-doc")
+    )
+    await sqlite_store.upsert_console_scope_state(
+        ConsoleScopeState("document", "zotero-doc", selected_doc_id="zotero-doc")
+    )
+    await sqlite_store.set_source_account_binding("zotero_server", "123", "old")
+
+    await sqlite_store.purge_zotero_mirror()
+
+    assert {doc.doc_id for doc in await sqlite_store.list_documents()} == {"local-doc"}
+    assert "zotero-old" not in {item.name for item in await sqlite_store.list_collections()}
+    assert await sqlite_store.get_scoped_note("local-note") is not None
+    assert await sqlite_store.get_scoped_note("zotero-note") is None
+    assert [job["job_id"] for job in await sqlite_store.list_build_jobs()] == ["local-job"]
+    assert await sqlite_store.get_console_scope_state("document", "local-doc") is not None
+    assert await sqlite_store.get_console_scope_state("document", "zotero-doc") is None
+    assert await sqlite_store.get_source_account_binding("zotero_server") == {
+        "account_id": "123",
+        "account_name": "old",
+    }
 
 
 # ── 统一多归属集合树（v0.26.3）SQL 实现契约 ──────────────────────

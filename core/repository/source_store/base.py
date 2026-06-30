@@ -448,6 +448,23 @@ class SourceDocumentStore(ABC):
         """返回带指定标签的 item_key 列表。"""
         ...
 
+    @abstractmethod
+    async def get_source_account_binding(self, source: str) -> dict[str, str] | None:
+        """读取外部同步源绑定账号；未绑定返回 None。"""
+        ...
+
+    @abstractmethod
+    async def set_source_account_binding(
+        self, source: str, account_id: str, account_name: str = ""
+    ) -> None:
+        """持久化外部同步源账号绑定。"""
+        ...
+
+    @abstractmethod
+    async def purge_zotero_mirror(self) -> None:
+        """删除全部 Zotero-origin 镜像与统一集合；LOCAL 数据必须保留。"""
+        ...
+
     # ── 页面级 provenance（clean.md 字符偏移）────────────────────
 
     @abstractmethod

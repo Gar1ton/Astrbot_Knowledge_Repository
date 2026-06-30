@@ -14,6 +14,7 @@ from core.api import KnowledgeRepositoryApi, LightRAGNotReadyError
 from core.domain.models import (
     Collection,
     DocumentChunk,
+    DocumentOrigin,
     SourceDocument,
     SyncRecord,
     SyncStatus,
@@ -252,6 +253,59 @@ async def test_delete_document_cleans_remote_and_managed_file(tmp_path: Path) ->
     assert not managed_file.exists()
     assert target._objects == {}
     assert await store.list_sync_records() == []
+
+
+async def test_zotero_reset_removes_linked_artifacts_but_not_external_original(
+    tmp_path: Path,
+) -> None:
+    managed_dir = tmp_path / "library"
+    zotero_bundle = managed_dir / "zotero-doc"
+    local_bundle = managed_dir / "local-doc"
+    zotero_bundle.mkdir(parents=True)
+    local_bundle.mkdir(parents=True)
+    (zotero_bundle / "clean.md").write_text("old account", encoding="utf-8")
+    (local_bundle / "original.pdf").write_bytes(b"local")
+    external = tmp_path / "zotero-storage" / "linked.pdf"
+    external.parent.mkdir()
+    external.write_bytes(b"linked")
+
+    store = InMemorySourceDocumentStore()
+    zotero_doc = SourceDocument(
+        "zotero-doc",
+        "Zotero",
+        str(external),
+        "application/pdf",
+        6,
+        "z",
+        "papers",
+        origin=DocumentOrigin.ZOTERO,
+        library_id="123",
+        read_only=True,
+    )
+    local_doc = SourceDocument(
+        "local-doc",
+        "Local",
+        str(local_bundle / "original.pdf"),
+        "application/pdf",
+        5,
+        "l",
+        "papers",
+    )
+    await store.add_document(zotero_doc)
+    await store.add_document(local_doc)
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        managed_documents_dir=managed_dir,
+    )
+
+    await api._reset_local_zotero_mirror()
+
+    assert external.exists()
+    assert not zotero_bundle.exists()
+    assert local_bundle.exists()
+    assert await store.get_document("zotero-doc") is None
+    assert await store.get_document("local-doc") is not None
 
 
 async def test_list_quota() -> None:

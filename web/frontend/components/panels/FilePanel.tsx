@@ -6,7 +6,7 @@ import { Panel } from "@/components/ds/Panel";
 import { IconButton } from "@/components/ds/IconButton";
 import { Icon } from "@/components/ds/Icon";
 import { useConsole } from "@/lib/ConsoleContext";
-import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, deleteCollectionByKey, renameCollection, createCollection, uploadDocument, syncZoteroPull, getActiveZoteroSyncJob, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
+import { listCollections, getActiveBuildJob, getBuildJobHistory, buildGraph, pauseBuildJob, resumeBuildJob, deleteCollection, deleteCollectionByKey, renameCollection, createCollection, uploadDocument, syncZoteroPull, getActiveZoteroSyncJob, backupNow, Collection, GraphBuildJob, BuildJobRecord } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 
@@ -1204,7 +1204,14 @@ export function FilePanel() {
               startBuild(name);
             }}
           />
-          <IconButton name="cloud" label={t("file_action_r2_backup")} />
+          <IconButton name="cloud" label={t("file_action_r2_backup")} onClick={async () => {
+            try {
+              await backupNow(false);
+              toast("R2 完整备份已启动", "ok");
+            } catch (err: unknown) {
+              toast(err instanceof Error ? err.message : String(err), "error");
+            }
+          }} />
           <IconButton name="download" label={t("file_action_zotero_sync")} onClick={() => handleZoteroSync(true)} />
         </>
       }

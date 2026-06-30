@@ -508,16 +508,39 @@ async def test_plugin_shell_lifecycle(
 
     # 5) /ka r2 push（增量上传，mock boto3 避免真实网络）
     mock_s3 = MagicMock()
-    mock_s3.list_objects_v2.return_value = {"Contents": []}
-    with patch("boto3.client", return_value=mock_s3):
+    mock_paginator = MagicMock()
+    mock_paginator.paginate.return_value = []
+    mock_s3.get_paginator.return_value = mock_paginator
+    boto3_module = ModuleType("boto3")
+    boto3_module.client = MagicMock(return_value=mock_s3)  # type: ignore[attr-defined]
+    botocore_module = ModuleType("botocore")
+    config_module = ModuleType("botocore.config")
+
+    class _BotoConfig:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    config_module.Config = _BotoConfig  # type: ignore[attr-defined]
+    botocore_module.config = config_module  # type: ignore[attr-defined]
+    with patch.dict(
+        sys.modules,
+        {
+            "boto3": boto3_module,
+            "botocore": botocore_module,
+            "botocore.config": config_module,
+        },
+    ):
         res_push = await plugin.on_ka_r2("push")
         assert res_push.startswith("R2 增量上传")
+        assert plugin._initializer.r2_backup_manager is not None
+        await plugin._initializer.r2_backup_manager.wait_current()
 
         # 6) /ka r2 force push 需二次确认：首发提示，窗口内二次执行
         res_warn = await plugin.on_ka_r2("force push")
         assert "再次发送" in res_warn
         res_force = await plugin.on_ka_r2("force push")
         assert res_force.startswith("R2 强制全量上传")
+        await plugin._initializer.r2_backup_manager.wait_current()
 
     # 7) 销毁薄壳
     await plugin._initializer.api.delete_document(doc_id)

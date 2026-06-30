@@ -9,6 +9,7 @@ from core.domain.models import (
     Collection,
     ConsoleScopeState,
     DocumentChunk,
+    DocumentOrigin,
     ScopedNote,
     SourceDocument,
 )
@@ -162,6 +163,75 @@ async def test_scoped_notes_chat_lock_and_console_state(
     assert state is not None
     assert state.selected_doc_id == "d1"
     assert state.payload == {"right": "notes"}
+
+
+async def test_purge_zotero_mirror_keeps_local_state(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    local_collection = Collection(name="local")
+    zotero_collection = Collection(
+        name="zotero-old",
+        coll_key="123:ZC",
+        library_id="123",
+        origin=DocumentOrigin.ZOTERO,
+        read_only=True,
+    )
+    await store.upsert_collection(local_collection)
+    await store.upsert_collection(zotero_collection)
+    local_doc = _doc("local-doc", "local")
+    zotero_doc = _doc("zotero-doc", "zotero-old")
+    zotero_doc.origin = DocumentOrigin.ZOTERO
+    zotero_doc.library_id = "123"
+    zotero_doc.read_only = True
+    await store.add_document(local_doc)
+    await store.add_document(zotero_doc)
+    await store.add_scoped_note(
+        ScopedNote(
+            "local-note",
+            "document",
+            "local-doc",
+            "keep",
+            doc_id="local-doc",
+            library_id="LOCAL",
+        )
+    )
+    await store.add_scoped_note(
+        ScopedNote(
+            "zotero-note",
+            "document",
+            "zotero-doc",
+            "drop",
+            doc_id="zotero-doc",
+            library_id="123",
+        )
+    )
+    await store.upsert_build_job(
+        {"job_id": "local-job", "collection": "local", "status": "success"}
+    )
+    await store.upsert_build_job(
+        {"job_id": "zotero-job", "collection": "zotero-old", "status": "success"}
+    )
+    await store.upsert_console_scope_state(
+        ConsoleScopeState("document", "local-doc", selected_doc_id="local-doc")
+    )
+    await store.upsert_console_scope_state(
+        ConsoleScopeState("document", "zotero-doc", selected_doc_id="zotero-doc")
+    )
+    await store.set_source_account_binding("zotero_server", "123", "old")
+
+    await store.purge_zotero_mirror()
+
+    assert [doc.doc_id for doc in await store.list_documents()] == ["local-doc"]
+    assert {item.name for item in await store.list_collections()} == {"local"}
+    assert await store.get_scoped_note("local-note") is not None
+    assert await store.get_scoped_note("zotero-note") is None
+    assert [job["job_id"] for job in await store.list_build_jobs()] == ["local-job"]
+    assert await store.get_console_scope_state("document", "local-doc") is not None
+    assert await store.get_console_scope_state("document", "zotero-doc") is None
+    assert await store.get_source_account_binding("zotero_server") == {
+        "account_id": "123",
+        "account_name": "old",
+    }
 
 
 # ── 统一多归属集合树（v0.26.3）────────────────────────────────────

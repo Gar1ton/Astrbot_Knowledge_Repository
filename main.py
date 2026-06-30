@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v0.28.3"
+_PLUGIN_VERSION = "v0.29.0"
 logger = logging.getLogger(__name__)
 _RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
 _RESEARCH_PARAGRAPH_LIMIT = 700
@@ -147,12 +147,16 @@ class KnowledgeRepositoryPlugin(Star):
 
     @ka.command("r2")
     async def ka_r2(self, event: AstrMessageEvent, action: str = "", target: str = ""):
-        '''/ka r2 <push|pull|force push|force pull> — R2 备份/恢复'''
+        '''/ka r2 <push|pull|force push|force pull|status> — R2 备份/恢复/容量'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
             return
         combined = (action + " " + target).strip()
-        yield event.plain_result(await self._handler.on_ka_r2(combined))
+        message = await self._handler.on_ka_r2(combined)
+        yield event.plain_result(message)
+        if "任务已启动" in message and self._initializer is not None:
+            task = asyncio.create_task(self._watch_r2_job(event))
+            self._track_research_task(task)
 
     # ── /ka zotero 子组 ──────────────────────────────────────────
 
@@ -167,6 +171,14 @@ class KnowledgeRepositoryPlugin(Star):
             yield event.plain_result("插件未初始化。")
             return
         yield event.plain_result(await self._handler.on_ka_zotero_pull())
+
+    @ka_zotero.command("account")
+    async def ka_zotero_account(self, event: AstrMessageEvent, action: str = ""):
+        '''/ka zotero account <replace|cancel> — 处理 Zotero 换号确认'''
+        if not self._handler:
+            yield event.plain_result("插件未初始化。")
+            return
+        yield event.plain_result(await self._handler.on_ka_zotero_account(action))
 
     # ── 对话式 research（两工具，主 LLM 当指挥）───────────────────
     # 工作流：先 research_scope_probe 了解范围 → 范围明确(ambiguity=low)就直接 research_execute
@@ -374,6 +386,31 @@ class KnowledgeRepositoryPlugin(Star):
             return
 
         await self._send_plain_message_chunks(event, self._format_research_result(result))
+
+    async def _watch_r2_job(self, event: AstrMessageEvent) -> None:
+        manager = self._initializer.r2_backup_manager if self._initializer else None
+        if manager is None:
+            return
+        result = await manager.wait_current()
+        if result is None:
+            return
+        if result.get("status") != "success":
+            await self._send_plain_message(
+                event, f"⚠️ R2 任务失败：{result.get('message', result.get('status'))}"
+            )
+            return
+        snapshot_id = result.get("snapshot_id") or "latest"
+        if result.get("restart_required"):
+            suffix = "插件将自动重启。" if result.get("auto_restart") else "请重启插件应用恢复。"
+            await self._send_plain_message(
+                event, f"✅ R2 完整快照 {snapshot_id} 已下载并验证；{suffix}"
+            )
+            return
+        await self._send_plain_message(
+            event,
+            f"✅ R2 完整备份完成：snapshot={snapshot_id}，"
+            f"files={result.get('file_count', 0)}。",
+        )
 
     def _format_research_result(self, result: dict[str, Any]) -> str:
         answer = self._paragraphize_research_text(

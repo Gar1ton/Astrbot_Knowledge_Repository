@@ -126,6 +126,46 @@ export interface ZoteroConfig {
   linked_probe?: { valid: boolean; reason: string; resolved: string };
 }
 
+export interface ZoteroAccountChangeRequired {
+  status: "account_change_required";
+  change_id: string;
+  current_account: { account_id: string; account_name: string };
+  new_account: { account_id: string; account_name: string };
+  actions: ["replace_local", "cancel"];
+}
+
+export interface R2BackupJob {
+  job_id: string;
+  action: string;
+  status: string;
+  stage: string;
+  progress: number;
+  detail?: string;
+  files_total: number;
+  files_done: number;
+  bytes_total: number;
+  bytes_done: number;
+  snapshot_id?: string;
+  error?: string;
+}
+
+export interface R2Status {
+  status: string;
+  message?: string;
+  bucket_used_bytes?: number;
+  plugin_used_bytes?: number;
+  bucket_limit_bytes?: number;
+  plugin_object_count?: number;
+  snapshot?: {
+    snapshot_id: string;
+    updated_at: string;
+    logical_bytes: number;
+    file_count: number;
+    deduplicated_bytes: number;
+  } | null;
+  job?: R2BackupJob | null;
+}
+
 export interface ZoteroSyncResult {
   sync_mode?: string;
   storage_mode?: string;
@@ -1317,17 +1357,28 @@ export async function getZoteroConfig(timeoutMs = 8_000): Promise<ZoteroConfig> 
   return apiFetch<ZoteroConfig>("/api/zotero/config", { timeoutMs });
 }
 
-export async function saveZoteroServerKey(apiKey: string): Promise<ZoteroConfig> {
+export async function saveZoteroServerKey(apiKey: string): Promise<ZoteroConfig | ZoteroAccountChangeRequired> {
   if (isMock()) {
     const z = (MOCK_CONFIG.zotero_sync ?? {}) as Record<string, unknown>;
     z.server_key_present = true;
     z.server_key_masked = apiKey ? "mo****ck" : "";
     return getZoteroConfig();
   }
-  return apiFetch<ZoteroConfig>("/api/zotero/server-key", {
+  return apiFetch<ZoteroConfig | ZoteroAccountChangeRequired>("/api/zotero/server-key", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ api_key: apiKey }),
+  });
+}
+
+export async function resolveZoteroAccountChange(
+  changeId: string,
+  action: "replace_local" | "cancel",
+): Promise<{ status: string; config?: ZoteroConfig; sync?: ZoteroSyncResult }> {
+  return apiFetch("/api/zotero/account-change", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ change_id: changeId, action }),
   });
 }
 
@@ -1376,14 +1427,33 @@ export async function probeZoteroLocal(): Promise<ZoteroProbeResult> {
   return apiFetch<ZoteroProbeResult>("/api/zotero/probe");
 }
 
-export async function backupNow(): Promise<MaybeReserved<unknown>> {
-  if (isMock()) return { reserved: true, available_in: "v0.3.0" };
-  return apiFetch("/api/backup", { method: "POST" });
+export async function backupNow(force = false): Promise<MaybeReserved<unknown>> {
+  if (isMock()) return { status: "started", force };
+  return apiFetch("/api/backup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ force }),
+  });
 }
 
-export async function restoreBackup(): Promise<MaybeReserved<unknown>> {
-  if (isMock()) return { reserved: true, available_in: "v0.3.0" };
-  return apiFetch("/api/restore", { method: "POST" });
+export async function restoreBackup(autoRestart = true): Promise<MaybeReserved<unknown>> {
+  if (isMock()) return { status: "started", auto_restart: autoRestart };
+  return apiFetch("/api/restore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ auto_restart: autoRestart }),
+  });
+}
+
+export async function getR2Status(): Promise<R2Status> {
+  if (isMock()) return { status: "ok", bucket_used_bytes: 0, plugin_used_bytes: 0 };
+  return apiFetch<R2Status>("/api/r2/status", { timeoutMs: 15_000 });
+}
+
+export async function getR2Job(): Promise<R2BackupJob | null> {
+  if (isMock()) return null;
+  const result = await apiFetch<{ job: R2BackupJob | null }>("/api/r2/job");
+  return result.job;
 }
 
 // ─────────────────────────────────────────────────────────────

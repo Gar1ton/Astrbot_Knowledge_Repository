@@ -1,5 +1,32 @@
 # TODO
 
+## v0.29.0 R2 完整备份恢复与 Zotero 换号保护 (completed)
+
+### User constraints / 约束
+
+- R2 `push` / `force push` / `pull` / `force pull` 均须可用，并正确展示 Bucket 总用量与插件备份用量。
+- 完整备份覆盖 collection、原件/制品包、主 SQLite、Milvus、LightRAG、embedding cache、索引兼容状态及非机密可移植配置；依赖、密钥与设备路径不入备份。
+- 采用内容寻址去重，仅保留最新完整快照；恢复为整体覆盖，WebUI 与 `/ka` 均提供入口。
+- Zotero 更换账号必须先提示；当前只提供“覆盖并重置本地 Zotero 库”与“取消更改”，确认后自动拉取新账号。
+- 前端沿用当前 Modal/Card/Button 与主题 token；不手工修改 `pages/`。
+- 更新 README，说明命令、备份范围、跨设备恢复步骤与排除项。
+
+### Technical implementation path
+
+- [x] **Phase 1 - R2 备份协议与存储端口**：内容寻址 blob、manifest/latest 原子提交、流式对象 I/O、双口径容量、最新快照 GC 与精确净新增配额。
+- [x] **Phase 2 - 完整 inventory 与恢复生命周期**：一致性 SQLite 快照、library/Milvus/LightRAG/cache/config 清单、staging 校验、pending restore、停机原子替换与失败回滚。
+- [x] **Phase 3 - 命令/API/后台任务**：四个现有 `/ka r2` 动作、`status`、R2 job、HTTP 状态/备份/恢复与主动结果回发。
+- [x] **Phase 4 - Zotero 换号保护**：bound identity、前端/agent 确认、仅清理 Zotero-origin 数据与索引、保存新 token 后自动 pull。
+- [x] **Phase 5 - WebUI**：容量/快照/任务/备份/强制备份/恢复确认，接通 FilePanel R2 按钮与 Zotero 换号弹窗。
+- [x] **Phase 6 - 测试、文档与发布**：覆盖去重/原子提交/恢复安全/四命令/换号/Web 路由，运行质量门禁，更新 README/CHANGELOG/版本并生成 `pages/`。
+
+### Verification
+
+- `python -m pytest tests/backend -q` → 475 passed, 2 skipped。
+- `python -m ruff check ...` / `python -m mypy` → 当前 Windows Python 环境未安装 `ruff` / `mypy`；两项未执行。
+- `cd web/frontend && npm run lint`、`tsc --noEmit --incremental false`、`next build --webpack` → passed。
+- `python tools/sync_frontend.py && python tools/sync_frontend.py --check` → passed，`pages/` 与 `web/frontend/out` 一致。
+
 ## v0.28.6 调令式 research：召回语言开关 + 去压缩 + 降本 (completed)
 
 ### User constraints / 约束

@@ -7,7 +7,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -50,6 +52,38 @@ class SyncTarget(ABC):
     async def pull_backup(self, key: str) -> bytes:
         """下载灾备对象字节。仅支持恢复的对象存储目标需要覆盖本方法。"""
         raise NotImplementedError(f"{self.kind.value} does not support backup objects")
+
+    async def upload_backup_file(
+        self,
+        key: str,
+        path: Path,
+        *,
+        content_type: str = "application/octet-stream",
+        sha256: str = "",
+    ) -> str:
+        """兼容上传备份文件；生产对象存储必须覆盖本方法实现流式传输。"""
+        payload = await asyncio.to_thread(path.read_bytes)
+        return await self.push_backup(key, payload, content_type)
+
+    async def download_backup_file(self, key: str, path: Path) -> None:
+        """兼容下载备份文件；生产对象存储必须覆盖本方法实现流式传输。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = await self.pull_backup(key)
+        await asyncio.to_thread(path.write_bytes, payload)
+
+    async def list_backup_objects(self, prefix: str = "") -> list[dict[str, object]]:
+        """列出对象；每项至少含 key/size，失败必须抛异常。"""
+        raise NotImplementedError(f"{self.kind.value} does not support object listing")
+
+    async def stat_backup_object(self, key: str) -> dict[str, object] | None:
+        """返回对象 key/size/metadata；不存在返回 None。"""
+        raise NotImplementedError(f"{self.kind.value} does not support object stat")
+
+    async def delete_backup_objects(self, keys: list[str]) -> None:
+        """批量删除备份对象；空列表为 no-op。"""
+        for key in keys:
+            if not await self.delete(key):
+                raise RuntimeError(f"failed to delete backup object: {key}")
 
     @abstractmethod
     async def check_quota(self, pending_bytes: int = 0) -> QuotaUsage:

@@ -666,13 +666,31 @@ async def handle_zotero_active(request: web.Request) -> web.Response:
 
 
 async def handle_backup(request: web.Request) -> web.Response:
-    return await _reserved(_api(request).backup_now(), "v0.3.0")
+    body = await request.json() if request.can_read_body else {}
+    force = bool(body.get("force", False)) if isinstance(body, dict) else False
+    return await _reserved(
+        _api(request).backup_now(force=force, background=True), "v0.29.0"
+    )
 
 
 async def handle_restore(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     snapshot = body.get("snapshot") if isinstance(body, dict) else None
-    return await _reserved(_api(request).restore_from_backup(snapshot), "v0.3.0")
+    auto_restart = bool(body.get("auto_restart", True)) if isinstance(body, dict) else True
+    return await _reserved(
+        _api(request).restore_from_backup(
+            snapshot, auto_restart=auto_restart, background=True
+        ),
+        "v0.29.0",
+    )
+
+
+async def handle_r2_status(request: web.Request) -> web.Response:
+    return web.json_response(await _api(request).get_r2_status())
+
+
+async def handle_r2_job(request: web.Request) -> web.Response:
+    return web.json_response({"job": _api(request).get_r2_job()})
 
 
 async def handle_graph_build_estimate(request: web.Request) -> web.Response:
@@ -695,6 +713,18 @@ async def handle_graph_build(request: web.Request) -> web.Response:
         return web.json_response(result)
     except ValueError as exc:
         _mw_logger.warning("Graph build rejected: %s", exc)
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
+async def handle_zotero_account_change(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    change_id = str(body.get("change_id") or "") if isinstance(body, dict) else ""
+    action = str(body.get("action") or "") if isinstance(body, dict) else ""
+    try:
+        return web.json_response(
+            await _api(request).resolve_zotero_account_change(change_id, action)
+        )
+    except (ValueError, RuntimeError) as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
     except NotImplementedError as exc:
         return web.json_response(
@@ -1334,11 +1364,14 @@ def build_app(
     app.router.add_get("/api/zotero/probe", handle_zotero_probe)
     app.router.add_post("/api/zotero/server-key", handle_zotero_server_key_post)
     app.router.add_delete("/api/zotero/server-key", handle_zotero_server_key_delete)
+    app.router.add_post("/api/zotero/account-change", handle_zotero_account_change)
     app.router.add_post("/api/sync/zotero/pull", handle_zotero_pull)
     app.router.add_get("/api/sync/zotero/status", handle_zotero_status)
     app.router.add_get("/api/sync/zotero/active", handle_zotero_active)
     app.router.add_post("/api/backup", handle_backup)
     app.router.add_post("/api/restore", handle_restore)
+    app.router.add_get("/api/r2/status", handle_r2_status)
+    app.router.add_get("/api/r2/job", handle_r2_job)
     app.router.add_post("/api/graph/build/estimate", handle_graph_build_estimate)
     app.router.add_post("/api/graph/build", handle_graph_build)
     app.router.add_get("/api/graph/build/active", handle_graph_build_active)

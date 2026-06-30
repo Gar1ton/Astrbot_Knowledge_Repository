@@ -11,14 +11,26 @@ import { useI18n, type I18nKey } from "@/lib/i18n";
 import { useToast } from "@/components/ui/Toast";
 import { TerminalPanel } from "@/components/ui/TerminalPanel";
 import {
-  getEffectiveConfig, getZoteroConfig, syncZoteroPull, backupNow, logout,
+  getEffectiveConfig, getZoteroConfig, syncZoteroPull, backupNow, restoreBackup, logout,
   updateConfigValue, saveZoteroServerKey, deleteZoteroServerKey,
-  EffectiveConfig, ZoteroConfig,
+  resolveZoteroAccountChange, getR2Status, getR2Job,
+  EffectiveConfig, ZoteroConfig, ZoteroAccountChangeRequired, R2Status, R2BackupJob,
 } from "@/lib/api";
 
 interface SettingModalProps {
   onClose: () => void;
   onLogout: () => void;
+}
+
+function formatBytes(value: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let amount = Math.max(0, value);
+  let index = 0;
+  while (amount >= 1024 && index < units.length - 1) {
+    amount /= 1024;
+    index += 1;
+  }
+  return `${index === 0 ? amount.toFixed(0) : amount.toFixed(2)} ${units[index]}`;
 }
 
 // ─── Shared primitives ────────────────────────────────────────
@@ -288,6 +300,11 @@ function SyncTab() {
   const [effectiveConfig, setEffectiveConfig] = useState<EffectiveConfig | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [backing, setBacking] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [restoreConfirm, setRestoreConfirm] = useState(false);
+  const [r2Status, setR2Status] = useState<R2Status | null>(null);
+  const [r2Job, setR2Job] = useState<R2BackupJob | null>(null);
+  const [accountChange, setAccountChange] = useState<ZoteroAccountChangeRequired | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
 
   // local/server mode
@@ -319,6 +336,25 @@ function SyncTab() {
     }).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    let alive = true;
+    const refresh = async () => {
+      const status = await getR2Status().catch(() => null);
+      if (alive && status) {
+        setR2Status(status);
+        setR2Job(status.job ?? null);
+      }
+    };
+    refresh();
+    const timer = window.setInterval(async () => {
+      const job = await getR2Job().catch(() => null);
+      if (!alive) return;
+      setR2Job(job);
+      if (!job || job.status !== "running") refresh();
+    }, 1500);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, []);
+
   async function save(section: string, key: string, value: string | boolean | number) {
     const id = `${section}.${key}`;
     setSaving(id);
@@ -348,15 +384,30 @@ function SyncTab() {
     }
   }
 
-  async function handleBackup() {
+  async function handleBackup(force = false) {
     setBacking(true);
     try {
-      await backupNow();
-      toast("备份任务已提交", "ok");
+      await backupNow(force);
+      toast(force ? "强制完整备份已启动" : "增量完整备份已启动", "ok");
+      setR2Job(await getR2Job().catch(() => null));
     } catch (e) {
       toast(e instanceof Error ? e.message : "备份失败", "error");
     } finally {
       setBacking(false);
+    }
+  }
+
+  async function handleRestore() {
+    setRestoreConfirm(false);
+    setRestoring(true);
+    try {
+      await restoreBackup(true);
+      toast("完整恢复已启动；校验完成后插件会自动重启", "ok");
+      setR2Job(await getR2Job().catch(() => null));
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "恢复失败", "error");
+    } finally {
+      setRestoring(false);
     }
   }
 
@@ -367,9 +418,33 @@ function SyncTab() {
     setServerKeyError("");
     try {
       const updated = await saveZoteroServerKey(key);
-      setZotero(updated);
-      setServerKeyDraft("");
-      toast("API Key 已保存", "ok");
+      if ("status" in updated && updated.status === "account_change_required") {
+        setAccountChange(updated);
+      } else {
+        setZotero(updated as ZoteroConfig);
+        setServerKeyDraft("");
+        toast("API Key 已保存", "ok");
+      }
+    } catch (err: unknown) {
+      setServerKeyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setServerKeySaving(false);
+    }
+  }
+
+  async function handleAccountChange(action: "replace_local" | "cancel") {
+    if (!accountChange) return;
+    setServerKeySaving(true);
+    try {
+      await resolveZoteroAccountChange(accountChange.change_id, action);
+      if (action === "replace_local") {
+        setServerKeyDraft("");
+        toast("本地 Zotero 镜像已重置，新账号同步已启动", "ok");
+      } else {
+        toast("已取消账号更换，旧数据保持不变", "ok");
+      }
+      setAccountChange(null);
+      setZotero(await getZoteroConfig());
     } catch (err: unknown) {
       setServerKeyError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -600,14 +675,83 @@ function SyncTab() {
       <Card
         title="Cloudflare R2 备份"
         icon="cloud"
-        badge={<Badge tone="neutral">按需触发</Badge>}
+        badge={<Badge tone={r2Status?.status === "ok" ? "ok" : "neutral"}>{r2Job?.status === "running" ? `${r2Job.stage} ${r2Job.progress}%` : "完整快照"}</Badge>}
       >
-        <Field label="对象存储备份" hint="将知识库数据备份到 R2">
-          <Button variant="outline" size="sm" loading={backing} onClick={handleBackup}>
+        <Field label="Bucket / 插件占用" hint="Bucket 总量包含同一 Bucket 中的非插件对象">
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--fg-muted)" }}>
+            {formatBytes(r2Status?.bucket_used_bytes ?? 0)} / {formatBytes(r2Status?.plugin_used_bytes ?? 0)} · {r2Status?.plugin_object_count ?? 0} objects
+          </span>
+        </Field>
+        <Field label="当前快照" hint="仅保留最新完整快照；未变化文件按内容哈希去重">
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-subtle)" }}>
+            {r2Status?.snapshot
+              ? `${r2Status.snapshot.snapshot_id} · ${r2Status.snapshot.file_count} files · ${r2Status.snapshot.updated_at}`
+              : "尚无快照"}
+          </span>
+        </Field>
+        <Field label="逻辑大小 / 去重节省" hint="逻辑大小是完整恢复所需文件总量；去重节省按当前 blob 物理量计算">
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--fg-muted)" }}>
+            {formatBytes(r2Status?.snapshot?.logical_bytes ?? 0)} / {formatBytes(r2Status?.snapshot?.deduplicated_bytes ?? 0)}
+          </span>
+        </Field>
+        {r2Job?.status === "running" && (
+          <div style={{ padding: "8px 0" }}>
+            <div style={{ height: 6, borderRadius: 99, background: "var(--surface-strong)", overflow: "hidden" }}>
+              <div style={{ width: `${r2Job.progress}%`, height: "100%", background: "var(--accent)", transition: "width .2s" }} />
+            </div>
+          </div>
+        )}
+        {r2Job?.status === "error" && (
+          <div style={{ padding: "7px 10px", borderRadius: "var(--radius-md)", background: "var(--danger-soft)", color: "var(--danger)", fontSize: 12 }}>
+            {r2Job.error || "R2 任务失败"}
+          </div>
+        )}
+        <Field label="完整备份与恢复" hint="恢复会整体覆盖本地持久化数据并自动重启；密钥和依赖不在快照内">
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Button variant="outline" size="sm" loading={backing} disabled={r2Job?.status === "running"} onClick={() => handleBackup(false)}>
             立即备份
           </Button>
+          <Button variant="outline" size="sm" disabled={backing || r2Job?.status === "running"} onClick={() => handleBackup(true)}>
+            强制备份
+          </Button>
+          <Button variant="danger" size="sm" loading={restoring} disabled={r2Job?.status === "running"} onClick={() => setRestoreConfirm(true)}>
+            一键恢复
+          </Button>
+          </div>
         </Field>
       </Card>
+
+      {accountChange && (
+        <Modal
+          title="检测到 Zotero 账号变化"
+          icon="book"
+          width={500}
+          height="auto"
+          onClose={() => handleAccountChange("cancel")}
+          footer={<><Button variant="outline" onClick={() => handleAccountChange("cancel")}>取消更改</Button><Button variant="danger" onClick={() => handleAccountChange("replace_local")}>覆盖并重置本地 Zotero 库</Button></>}
+        >
+          <div style={{ padding: 22, color: "var(--fg)", fontSize: 13, lineHeight: 1.7 }}>
+            <p>当前账号：{accountChange.current_account.account_name || accountChange.current_account.account_id}</p>
+            <p>新账号：{accountChange.new_account.account_name || accountChange.new_account.account_id}</p>
+            <p style={{ color: "var(--danger)" }}>继续会删除全部本地 Zotero 镜像及其 Milvus / LightRAG 索引；本地上传的 collection 与文件不会被删除。确认后将自动拉取新账号。</p>
+          </div>
+        </Modal>
+      )}
+
+      {restoreConfirm && (
+        <Modal
+          title="恢复 R2 完整快照"
+          icon="cloud"
+          width={500}
+          height="auto"
+          onClose={() => setRestoreConfirm(false)}
+          footer={<><Button variant="outline" onClick={() => setRestoreConfirm(false)}>取消</Button><Button variant="danger" onClick={handleRestore}>覆盖本地并恢复</Button></>}
+        >
+          <div style={{ padding: 22, color: "var(--fg)", fontSize: 13, lineHeight: 1.7 }}>
+            最新快照会先完整下载并校验，再覆盖本地数据库、原件、Milvus 与 LightRAG 数据。密钥、依赖和设备路径保持当前环境设置。
+          </div>
+        </Modal>
+      )}
 
       <Card title="Notion 镜像" icon="layers" badge={<Badge tone="warn">即将上线</Badge>}>
         <Field label="从 Notion 拉取元数据" hint="端口预留中，UI 优雅降级">

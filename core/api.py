@@ -388,6 +388,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         embedding_fingerprint: str | None = None,
         secret_store: EncryptedSecretStore | None = None,
         reload_callback: Callable[[], Any] | None = None,
+        r2_backup_manager: Any | None = None,
     ) -> None:
         self._source_store = source_store
         self._kb_reader = kb_reader
@@ -419,6 +420,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._secret_store = secret_store
         # 软重启回调（组合根注入 PluginInitializer.reload；为空表示当前环境不支持程序化重启）。
         self._reload_callback = reload_callback
+        self._r2_backup_manager = r2_backup_manager
         # Zotero 同步管线（组合根在 api 构造后注入，避免回调循环依赖）。
         self._zotero_pipeline: Any | None = None
         self._last_zotero_sync: dict[str, Any] = {}
@@ -427,6 +429,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._zotero_sync_task: asyncio.Task | None = None  # type: ignore[type-arg]
         # 文档上传/摄入：最近一次摄入的进度快照（供统一进度面板，latest-wins）。
         self._ingest_job: IngestJob | None = None
+        # Zotero 换号采用两阶段确认；待确认明文 token 只在内存保留十分钟。
+        self._pending_zotero_account_change: dict[str, Any] | None = None
 
     def attach_zotero_pipeline(self, pipeline: Any) -> None:
         """组合根注入 ZoteroSyncPipeline（其回调引用本 api 的索引/LRAG 助手）。"""
@@ -1132,7 +1136,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         deleted = await self._source_store.delete_document(doc_id)
         if deleted:
-            self._unlink_managed_document(doc.file_path)
+            self._unlink_managed_document(doc.file_path, doc.doc_id)
         return deleted
 
     async def reextract_document(self, doc_id: str) -> dict:
@@ -2032,26 +2036,28 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             usages.append(await target.check_quota())
         return usages
 
-    # ── 预留端口（Reserved）：契约先定，实现随对应版本接入 ──────────
-    #
-    # 以下方法是「接口先行」在 api 门面的体现：签名/语义现在钉死，前端与 web 路由据此预留入口，
-    # 真实实现到对应版本接入（届时本类构造器注入对应 manager，方法体改为委派，签名不变）。
-    # 现阶段统一抛 NotImplementedError，web 层捕获后回 501 + available_in，前端展示「将接入」。
+    # ── 在线同步与完整备份 ────────────────────────────────────────
 
     async def sync_documents(
         self, target: str, doc_ids: list[str] | None = None, force: bool = False
     ) -> dict:
         """把文档同步到在线目标（target=r2|notion|all）。doc_ids=None 表示全量。
 
-        force=True：跳过增量过滤，全量强制重传（覆盖云端）。
-        Reserved（v0.3.0 R2 / v0.4.0 Notion 接入）：返回逐文档同步结果汇总 + 配额预警。
+        R2 使用完整快照语义并忽略 doc_ids；Notion 保持逐文档同步。
+        force=True：R2 重传全部 blob，其他目标跳过增量过滤。
         """
+        if target == "r2" and self._r2_backup_manager is not None:
+            return await self._r2_backup_manager.backup(force=force)
         if self._sync_pipeline:
             if target == "all":
-                results = {
-                    kind.value: await self._sync_pipeline.sync(kind, doc_ids, force=force)
-                    for kind in SyncTargetKind
-                }
+                results: dict[str, dict[str, Any]] = {}
+                for kind in SyncTargetKind:
+                    if kind is SyncTargetKind.R2 and self._r2_backup_manager is not None:
+                        results[kind.value] = await self._r2_backup_manager.backup(force=force)
+                    else:
+                        results[kind.value] = await self._sync_pipeline.sync(
+                            kind, doc_ids, force=force
+                        )
                 return {
                     "status": (
                         "success"
@@ -2263,25 +2269,63 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             for r in records
         ]
 
-    async def backup_now(self) -> dict:
-        """立即触发一次 R2 全量备份（插件托管原件 + knowledge_repository.db 快照）。
-
-        Reserved（v0.3.0）：返回备份对象数与用量；接近 10GB 时含警告。
-        """
+    async def backup_now(self, force: bool = False, background: bool = False) -> dict:
+        """创建 R2 v1 完整快照；background=True 时立即返回共享 job。"""
+        if self._r2_backup_manager is not None:
+            if background:
+                return self._r2_backup_manager.start_backup(force=force)
+            return await self._r2_backup_manager.backup(force=force)
         if self._sync_pipeline:
             return await self._sync_pipeline.sync(SyncTargetKind.R2)
 
-        raise NotImplementedError("backup_now: available in v0.3.0")
+        raise NotImplementedError("R2 backup manager is unavailable")
 
-    async def restore_from_backup(self, snapshot: str | None = None) -> dict:
-        """从 R2 备份恢复本地（snapshot=None 取最新）。对应「本地崩溃可恢复」。
-
-        Reserved（v0.3.0）：返回恢复的文档数。
-        """
+    async def restore_from_backup(
+        self,
+        snapshot: str | None = None,
+        *,
+        auto_restart: bool = False,
+        background: bool = False,
+    ) -> dict:
+        """验证并暂存 latest 快照；force pull 可在完成后触发软重启应用。"""
+        if self._r2_backup_manager is not None:
+            if background:
+                return self._r2_backup_manager.start_restore(auto_restart=auto_restart)
+            result = await self._r2_backup_manager.prepare_restore(
+                auto_restart=auto_restart
+            )
+            if (
+                result.get("status") == "success"
+                and auto_restart
+                and self._reload_callback is not None
+            ):
+                value = self._reload_callback()
+                if inspect.isawaitable(value):
+                    await value
+            return result
         if self._sync_pipeline:
             return await self._sync_pipeline.restore(SyncTargetKind.R2)
 
-        raise NotImplementedError("restore_from_backup: available in v0.3.0")
+        raise NotImplementedError("R2 backup manager is unavailable")
+
+    async def get_r2_status(self) -> dict[str, Any]:
+        """返回 Bucket/插件双口径容量、latest 快照与当前任务。"""
+        if self._r2_backup_manager is None:
+            return {"status": "unavailable", "message": "R2 backup manager 未装配"}
+        try:
+            return await self._r2_backup_manager.storage_status()
+        except Exception as exc:
+            return {
+                "status": "error",
+                "message": str(exc),
+                "job": self._r2_backup_manager.active_job,
+            }
+
+    def get_r2_job(self) -> dict[str, Any] | None:
+        """返回当前/最近一次 R2 job。"""
+        if self._r2_backup_manager is None:
+            return None
+        return self._r2_backup_manager.active_job
 
     async def estimate_graph_build(self, collection: str | None = None) -> dict:
         """Dry-run LightRAG build estimate. This never calls LLM or Embedding."""
@@ -3345,7 +3389,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         return {"connection": connection, "read": read}
 
     async def save_zotero_server_key(self, api_key: str) -> dict[str, Any]:
-        """Validate and store Zotero Web API key without exposing plaintext again."""
+        """验证并保存 key；账号变化时先返回确认且不覆盖旧 token。"""
         from core.adapters.zotero.web_api import (
             ZoteroWebApiClient,
             current_key_identity,
@@ -3356,9 +3400,145 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             raise ValueError("Zotero API key is required")
         if self._secret_store is None:
             raise RuntimeError("Secret store is unavailable")
-        current_key_identity(ZoteroWebApiClient(cleaned).get_current_key())
+        identity = await asyncio.to_thread(
+            lambda: current_key_identity(ZoteroWebApiClient(cleaned).get_current_key())
+        )
+        binding = await self._source_store.get_source_account_binding("zotero_server")
+        if binding is None:
+            existing_ids = {
+                doc.library_id
+                for doc in await self._source_store.list_documents()
+                if doc.origin is DocumentOrigin.ZOTERO and doc.library_id
+            }
+            if len(existing_ids) == 1 and identity["user_id"] in existing_ids:
+                await self._source_store.set_source_account_binding(
+                    "zotero_server", identity["user_id"], identity["username"]
+                )
+                binding = {
+                    "account_id": identity["user_id"],
+                    "account_name": identity["username"],
+                }
+            elif existing_ids and identity["user_id"] not in existing_ids:
+                binding = {
+                    "account_id": ",".join(sorted(existing_ids)),
+                    "account_name": "现有 Zotero 镜像",
+                }
+        if binding and binding.get("account_id") != identity["user_id"]:
+            return self._arm_zotero_account_change(cleaned, identity, binding)
         self._secret_store.set_secret(ZOTERO_SERVER_KEY_SECRET, cleaned)
+        await self._source_store.set_source_account_binding(
+            "zotero_server", identity["user_id"], identity["username"]
+        )
         return await self.get_zotero_config()
+
+    def _arm_zotero_account_change(
+        self,
+        api_key: str,
+        identity: dict[str, Any],
+        previous: dict[str, str],
+    ) -> dict[str, Any]:
+        change_id = uuid.uuid4().hex
+        self._pending_zotero_account_change = {
+            "change_id": change_id,
+            "api_key": api_key,
+            "identity": identity,
+            "previous": previous,
+            "expires_at": time.monotonic() + 600.0,
+        }
+        return {
+            "status": "account_change_required",
+            "change_id": change_id,
+            "current_account": previous,
+            "new_account": {
+                "account_id": identity["user_id"],
+                "account_name": identity["username"],
+            },
+            "actions": ["replace_local", "cancel"],
+        }
+
+    async def resolve_zotero_account_change(
+        self, change_id: str, action: str
+    ) -> dict[str, Any]:
+        """处理换号确认；当前只允许覆盖本地镜像或取消。"""
+        pending = self._pending_zotero_account_change
+        if (
+            pending is None
+            or (change_id and pending.get("change_id") != change_id)
+            or time.monotonic() > float(pending.get("expires_at") or 0)
+        ):
+            self._pending_zotero_account_change = None
+            raise ValueError("Zotero 账号变更确认已失效，请重新保存 token")
+        if action == "cancel":
+            self._pending_zotero_account_change = None
+            return {"status": "cancelled", "config": await self.get_zotero_config()}
+        if action != "replace_local":
+            raise ValueError("action must be replace_local or cancel")
+        if self._secret_store is None:
+            raise RuntimeError("Secret store is unavailable")
+
+        identity = dict(pending["identity"])
+        api_key = str(pending["api_key"])
+        await self._preflight_zotero_snapshot(api_key, identity)
+        await self._reset_local_zotero_mirror()
+        self._secret_store.set_secret(ZOTERO_SERVER_KEY_SECRET, api_key)
+        await self._source_store.set_source_account_binding(
+            "zotero_server", str(identity["user_id"]), str(identity["username"])
+        )
+        self._pending_zotero_account_change = None
+        sync = await self.sync_zotero_pull(incremental=False, _skip_account_guard=True)
+        return {
+            "status": "replaced",
+            "account": {
+                "account_id": identity["user_id"],
+                "account_name": identity["username"],
+            },
+            "sync": sync,
+        }
+
+    async def _preflight_zotero_snapshot(
+        self, api_key: str, identity: dict[str, Any]
+    ) -> None:
+        from core.adapters.zotero.web_api import ZoteroWebApiClient, ZoteroWebApiReader
+
+        def _read() -> None:
+            ZoteroWebApiReader(
+                ZoteroWebApiClient(api_key),
+                user_id=str(identity["user_id"]),
+                username=str(identity["username"]),
+            ).read_snapshot()
+
+        await asyncio.to_thread(_read)
+
+    async def _reset_local_zotero_mirror(self) -> None:
+        docs = [
+            doc
+            for doc in await self._source_store.list_documents()
+            if doc.origin is DocumentOrigin.ZOTERO
+        ]
+        collections = {doc.collection for doc in docs if doc.collection}
+        cleanup_errors: list[str] = []
+        for doc in docs:
+            chunks = await self._source_store.list_chunks(doc.doc_id)
+            if self._vector_store is not None and chunks:
+                try:
+                    await self._vector_store.delete_chunks([item.chunk_id for item in chunks])
+                except Exception as exc:
+                    cleanup_errors.append(f"Milvus {doc.doc_id}: {exc}")
+            if self._lightrag_registry is not None:
+                try:
+                    await self._lightrag_registry.delete_doc(doc.collection, doc.doc_id)
+                except Exception as exc:
+                    cleanup_errors.append(f"LightRAG {doc.doc_id}: {exc}")
+        if cleanup_errors:
+            raise RuntimeError(
+                "Zotero 本地索引清理失败，账号未切换：" + "; ".join(cleanup_errors[:5])
+            )
+        for doc in docs:
+            self._unlink_managed_document(doc.file_path, doc.doc_id)
+        await self._source_store.purge_zotero_mirror()
+        if self._index_compatibility is not None:
+            for collection in collections:
+                self._index_compatibility.remove_lightrag_collection(collection)
 
     async def delete_zotero_server_key(self) -> dict[str, Any]:
         """Remove stored Zotero Web API key."""
@@ -3375,7 +3555,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             return ""
         return self._config.get_zotero_sync_config().cloud_api_key
 
-    async def sync_zotero_pull(self, incremental: bool = True) -> dict[str, Any]:
+    async def sync_zotero_pull(
+        self, incremental: bool = True, *, _skip_account_guard: bool = False
+    ) -> dict[str, Any]:
         """在后台启动一次 Zotero Pull 并立即返回任务快照（不再阻塞 HTTP 请求）。
 
         修复「失灵」：原实现 `await pull()` 整段阻塞（几十篇下载/清洗/embedding 数分钟易超时），
@@ -3385,6 +3567,32 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         """
         if self._zotero_pipeline is None:
             return {"status": "error", "message": "Zotero 同步未启用或未装配"}
+        if not _skip_account_guard and self._config is not None:
+            from core.config import ZOTERO_ACCESS_SERVER
+
+            cfg = self._config.get_zotero_sync_config()
+            if cfg.access_mode == ZOTERO_ACCESS_SERVER:
+                key = self._zotero_server_key()
+                if key:
+                    from core.adapters.zotero.web_api import (
+                        ZoteroWebApiClient,
+                        current_key_identity,
+                    )
+
+                    identity = await asyncio.to_thread(
+                        lambda: current_key_identity(
+                            ZoteroWebApiClient(key).get_current_key()
+                        )
+                    )
+                    binding = await self._source_store.get_source_account_binding(
+                        "zotero_server"
+                    )
+                    if binding is None:
+                        await self._source_store.set_source_account_binding(
+                            "zotero_server", identity["user_id"], identity["username"]
+                        )
+                    elif binding.get("account_id") != identity["user_id"]:
+                        return self._arm_zotero_account_change(key, identity, binding)
         current = self._zotero_sync_job
         if current is not None and current.status == ZOTERO_SYNC_RUNNING:
             return current.to_dict()
@@ -3488,17 +3696,24 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 "Embedding configuration changed; restart and rebuild Milvus/LightRAG indexes."
             )
 
-    def _unlink_managed_document(self, file_path: str) -> None:
+    def _unlink_managed_document(self, file_path: str, doc_id: str = "") -> None:
         """删除制品包：移除 library/<document_id>/ 整个目录（含 clean.md/pages.json/meta.json）。
 
-        安全边界：仅当原件路径落在 managed 根（library/）内才删除；删除其所在制品包目录，
-        而非仅删 original.pdf，避免残留派生制品。
+        安全边界：doc_id 仅允许删除 managed 根的直属子目录；linked 原件在根外不删除，
+        但其 library/<document_id>/ 派生制品仍会清理。
         """
         if self._managed_documents_dir is None:
             return
         import shutil
 
         managed_root = self._managed_documents_dir.resolve()
+        if doc_id:
+            try:
+                bundle = (managed_root / doc_id).resolve()
+                if bundle.parent == managed_root:
+                    shutil.rmtree(bundle, ignore_errors=True)
+            except OSError as exc:
+                logger.warning("Failed to remove managed bundle %s: %s", doc_id, exc)
         try:
             path = Path(file_path).resolve()
             path.relative_to(managed_root)

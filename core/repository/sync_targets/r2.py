@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from core.domain.models import QuotaUsage, SyncTargetKind
@@ -63,8 +65,9 @@ class R2SyncTarget(SyncTarget):
         key = f"{document.collection}/{document.doc_id}.pdf"
 
         try:
-            # 采用 S3 put_object 接口直接上传字节流
-            s3.put_object(
+            # 兼容旧逐文档接口；阻塞调用下放线程，完整备份改走 managed transfer。
+            await asyncio.to_thread(
+                s3.put_object,
                 Bucket=self._config.bucket,
                 Key=key,
                 Body=payload,
@@ -79,10 +82,105 @@ class R2SyncTarget(SyncTarget):
             logger.error(f"Failed to push to R2: {e}")
             raise RuntimeError(f"R2 upload failed: {e}") from e
 
+    async def upload_backup_file(
+        self,
+        key: str,
+        path: Path,
+        *,
+        content_type: str = "application/octet-stream",
+        sha256: str = "",
+    ) -> str:
+        """使用 boto3 managed transfer 流式上传，自动采用 multipart。"""
+        s3 = self._get_client()
+
+        def _upload() -> None:
+            extra = {"ContentType": content_type}
+            if sha256:
+                extra["Metadata"] = {"sha256": sha256}
+            s3.upload_file(str(path), self._config.bucket, key, ExtraArgs=extra)
+
+        try:
+            await asyncio.to_thread(_upload)
+            return key
+        except Exception as exc:
+            raise RuntimeError(f"R2 backup file upload failed: {exc}") from exc
+
+    async def download_backup_file(self, key: str, path: Path) -> None:
+        """使用 boto3 managed transfer 流式下载。"""
+        s3 = self._get_client()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            await asyncio.to_thread(
+                s3.download_file, self._config.bucket, key, str(path)
+            )
+        except Exception as exc:
+            raise RuntimeError(f"R2 backup file download failed: {exc}") from exc
+
+    async def list_backup_objects(self, prefix: str = "") -> list[dict[str, object]]:
+        """分页列出 Bucket 对象；网络错误向上抛出，配额检查不得 fail-open。"""
+        s3 = self._get_client()
+
+        def _list() -> list[dict[str, object]]:
+            rows: list[dict[str, object]] = []
+            paginator = s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self._config.bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    rows.append(
+                        {
+                            "key": str(obj.get("Key") or ""),
+                            "size": int(obj.get("Size") or 0),
+                            "last_modified": str(obj.get("LastModified") or ""),
+                        }
+                    )
+            return rows
+
+        try:
+            return await asyncio.to_thread(_list)
+        except Exception as exc:
+            raise RuntimeError(f"R2 object listing failed: {exc}") from exc
+
+    async def stat_backup_object(self, key: str) -> dict[str, object] | None:
+        s3 = self._get_client()
+        try:
+            response = await asyncio.to_thread(
+                s3.head_object, Bucket=self._config.bucket, Key=key
+            )
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            code = str(response.get("Error", {}).get("Code", ""))
+            if code in {"404", "NoSuchKey", "NotFound"}:
+                return None
+            raise RuntimeError(f"R2 object stat failed: {exc}") from exc
+        return {
+            "key": key,
+            "size": int(response.get("ContentLength") or 0),
+            "metadata": dict(response.get("Metadata") or {}),
+        }
+
+    async def delete_backup_objects(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        s3 = self._get_client()
+        try:
+            for start in range(0, len(keys), 1000):
+                batch = keys[start : start + 1000]
+                response = await asyncio.to_thread(
+                    s3.delete_objects,
+                    Bucket=self._config.bucket,
+                    Delete={"Objects": [{"Key": key} for key in batch], "Quiet": True},
+                )
+                errors = response.get("Errors") or []
+                if errors:
+                    raise RuntimeError(str(errors))
+        except Exception as exc:
+            raise RuntimeError(f"R2 object cleanup failed: {exc}") from exc
+
     async def delete(self, remote_ref: str) -> bool:
         s3 = self._get_client()
         try:
-            s3.delete_object(Bucket=self._config.bucket, Key=remote_ref)
+            await asyncio.to_thread(
+                s3.delete_object, Bucket=self._config.bucket, Key=remote_ref
+            )
             logger.info(f"Successfully deleted object {remote_ref} from R2 bucket.")
             return True
         except Exception as e:
@@ -94,7 +192,8 @@ class R2SyncTarget(SyncTarget):
         """上传灾备对象，不套用普通文档的 `.pdf` key 规则。"""
         s3 = self._get_client()
         try:
-            s3.put_object(
+            await asyncio.to_thread(
+                s3.put_object,
                 Bucket=self._config.bucket,
                 Key=key,
                 Body=payload,
@@ -108,8 +207,10 @@ class R2SyncTarget(SyncTarget):
         """读取灾备对象字节。"""
         s3 = self._get_client()
         try:
-            response = s3.get_object(Bucket=self._config.bucket, Key=key)
-            return response["Body"].read()
+            response = await asyncio.to_thread(
+                s3.get_object, Bucket=self._config.bucket, Key=key
+            )
+            return await asyncio.to_thread(response["Body"].read)
         except Exception as e:
             raise RuntimeError(f"R2 backup download failed: {e}") from e
 
@@ -124,16 +225,8 @@ class R2SyncTarget(SyncTarget):
             )
 
         try:
-            s3 = self._get_client()
-            total_used_bytes = 0
-
-            # 遍历桶内所有对象以汇总计算当前已用字节量
-            paginator = s3.get_paginator("list_objects_v2")
-            pages = paginator.paginate(Bucket=self._config.bucket)
-            for page in pages:
-                if "Contents" in page:
-                    for obj in page["Contents"]:
-                        total_used_bytes += obj["Size"]
+            objects = await self.list_backup_objects()
+            total_used_bytes = sum(int(obj.get("size") or 0) for obj in objects)
 
             detail = "Cloudflare R2 对象存储"
             if self._config.cdn_domain:
@@ -148,14 +241,7 @@ class R2SyncTarget(SyncTarget):
             )
         except Exception as e:
             logger.error(f"Failed to calculate R2 quota: {e}")
-            # 计算用量失败时，回退到 safe 0 字节，防止阻断正常流程，但给出说明
-            return QuotaUsage(
-                target=self.kind,
-                used_bytes=0,
-                limit_bytes=self._config.free_tier_bytes,
-                pending_bytes=pending_bytes,
-                detail=f"配额计算异常: {e}",
-            )
+            raise RuntimeError(f"R2 quota calculation failed: {e}") from e
 
 
 __all__ = ["R2SyncTarget"]

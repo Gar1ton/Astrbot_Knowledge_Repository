@@ -1469,6 +1469,72 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             rows = await cursor.fetchall()
             return [r[0] for r in rows]
 
+    async def get_source_account_binding(self, source: str) -> dict[str, str] | None:
+        async with self._db.execute(
+            "SELECT account_id, account_name FROM source_account_bindings WHERE source = ?",
+            (source,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {"account_id": str(row[0]), "account_name": str(row[1])}
+
+    async def set_source_account_binding(
+        self, source: str, account_id: str, account_name: str = ""
+    ) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO source_account_bindings (source, account_id, account_name, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(source) DO UPDATE SET
+                account_id = excluded.account_id,
+                account_name = excluded.account_name,
+                updated_at = excluded.updated_at
+            """,
+            (source, account_id, account_name, datetime.now(timezone.utc).isoformat()),
+        )
+        await self._db.commit()
+
+    async def purge_zotero_mirror(self) -> None:
+        """单事务删除 Zotero 镜像；documents 外键级联清理 chunks/sync 等。"""
+        try:
+            await self._db.execute(
+                "DELETE FROM graph_build_jobs WHERE collection IN "
+                "(SELECT name FROM collections WHERE origin = 'zotero')"
+            )
+            await self._db.execute(
+                """
+                DELETE FROM console_scope_state
+                WHERE selected_doc_id IN (SELECT doc_id FROM documents WHERE origin = 'zotero')
+                   OR note_doc_id IN (SELECT doc_id FROM documents WHERE origin = 'zotero')
+                   OR (scope_type = 'document' AND scope_key IN
+                       (SELECT doc_id FROM documents WHERE origin = 'zotero'))
+                   OR selected_collection IN
+                       (SELECT name FROM collections WHERE origin = 'zotero')
+                   OR (scope_type = 'collection' AND scope_key IN
+                       (SELECT coll_key FROM collections WHERE origin = 'zotero'))
+                   OR (scope_type = 'collection' AND scope_key IN
+                       (SELECT name FROM collections WHERE origin = 'zotero'))
+                """
+            )
+            await self._db.execute("DELETE FROM documents WHERE origin = 'zotero'")
+            await self._db.execute("DELETE FROM scoped_notes WHERE library_id != 'LOCAL'")
+            await self._db.execute("DELETE FROM collections WHERE origin = 'zotero'")
+            for table in (
+                "zotero_collection_items",
+                "zotero_item_tags",
+                "zotero_relations",
+                "zotero_attachments",
+                "zotero_items",
+                "zotero_collections",
+            ):
+                await self._db.execute(f"DELETE FROM {table} WHERE library_id != 'LOCAL'")
+            await self._db.execute("DELETE FROM zotero_libraries WHERE library_id != 'LOCAL'")
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
+
     # ── 页面级 provenance ────────────────────────────────────────
 
     async def replace_page_chunks(

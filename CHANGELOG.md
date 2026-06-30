@@ -21,14 +21,20 @@
 
 ---
 
-## [Unreleased]
+## [v0.29.0] — 2026-06-29
 
 ### 新增功能 (Added)
 
+- **R2 v1 完整快照协议**：新增内容寻址 `blobs/<sha256>`、完整 `manifest.json` 与最后提交的 `latest.json`，`push` 只上传新增 blob，`force push` 重传全部 blob；提交后仅保留最新 manifest 与其引用 blob。inventory 覆盖一致性主 SQLite、`library/` 制品与 linked Zotero 原件、Milvus Lite、LightRAG workspaces、embedding cache、索引兼容状态和非机密可移植配置（`core/managers/r2_backup_manager.py`、`r2_backup_manifest.py`、`core/repository/sync_targets/*.py`）。
+- **可事务回滚的跨设备恢复**：`pull` 下载 latest 到 staging 并校验 manifest、全部 SHA-256、路径安全和 SQLite integrity，登记 pending restore 等待重启；`force pull` 自动软重启。应用前释放 SQLite/Milvus/LightRAG，按目标设备路径整体替换，初始化失败恢复本地 rollback（`core/managers/r2_restore.py`、`core/plugin_initializer.py`、`core/api.py`）。
+- **统一 R2 容量与任务入口**：新增互斥后台 job 和 inventory/hash/upload/commit/download/verify/apply/restart 阶段状态，接通 `/ka r2 push|force push|pull|force pull|status`、`GET /api/r2/status`、`GET /api/r2/job`、`POST /api/backup`、`POST /api/restore`；WebUI 设置页显示 Bucket/插件双口径、逻辑大小、去重节省、对象数、进度和失败原因，FilePanel 云按钮可直接启动备份（`core/event_handler.py`、`main.py`、`web/server.py`、`web/frontend/components/modals/SettingModal.tsx`、`FilePanel.tsx`、`web/frontend/lib/api.ts`）。
+- **Zotero 换账号两阶段保护**：新增持久化 bound account identity；同账号 token 直接更新，不同账号先返回 `account_change_required`，WebUI 只提供“覆盖并重置本地 Zotero 库”与“取消更改”。确认后仅清除 Zotero-origin 镜像、制品、Milvus/LightRAG 贡献和相关持久化状态，LOCAL 数据保留，随后自动完整 pull；`/ka zotero account replace|cancel` 支持外部/env token 场景（`migrations/019_source_account_bindings.sql`、`core/repository/source_store/*.py`、`core/api.py`、`core/event_handler.py`、`web/server.py`、`ZoteroQuickConfig.tsx`、`SettingModal.tsx`）。
 - **research 召回语言开关 `/ka research_language <cn|en|cn&en>`**：新增 `ask.answer_language`（auto/zh/en）运行时配置，与前端 askAI 的中英文开关同一参数；召回恒英文，此项只决定回答语言（cn→zh、en→en、cn&en→auto，默认 auto）。命令切换即持久化、重启保留，并经 `/api/config` 暴露给 Web 控制台供 askAI 初值共享（`main.py`、`core/main.py`、`core/event_handler.py`、`core/plugin_initializer.py`、`core/config.py`、`web/frontend/components/panels/ChatPanel.tsx`、`web/frontend/lib/api.ts`）。
 
 ### 修复 (Fixed)
 
+- **R2 配额与提交不再 fail-open**：Bucket 列表失败直接阻断上传；配额按远端不存在 blob 的净新增量预检；blob、manifest、latest 任一步失败都会令任务失败，latest 提交前始终保留上一份有效快照（`core/repository/sync_targets/r2.py`、`core/managers/r2_backup_manager.py`）。
+- **Zotero 换号清理覆盖完整持久化状态**：purge 同时移除旧账号文档级 cascade、非 LOCAL notes、Zotero collections/mirror tables、相关 graph build 和 console scope 状态，账户绑定在新 token 成功预检后才切换（`core/repository/source_store/memory.py`、`sqlite.py`、`core/api.py`）。
 - **修复 deep_thinking 回答“被压缩”**：deep 合成模板 `_SYNTH_SYSTEM_DEEP` 改为要求按信息点/维度分节展开、证据支持就充分展开、勿人为缩短，保留禁臆造/禁跨源与“有据推断”硬约束；deep 与 default-fallback 两条合成入口共用此模板（`core/pipelines/answer_synthesis.py`）。
 - **收口 research breadth 的最终上下文量**：保留候选池 `narrow=5` / `normal=15` / `wide=40`，但喂给 LLM 的最终 evidence 数改为 `narrow=5` / `normal=8` / `wide=10`，降低长答案与上下文噪声风险（`core/research_skill.py`、`tests/backend/test_research_skill.py`）。
 - **修复聊天端普通 research_execute 仍可能触发 AstrBot 120s tool timeout**：`main.py` 将所有实际执行路径统一改为后台任务，tool 立即返回 `started`，完成后主动向原会话分段回发结果；同时修复后台结果格式化误用 `staticmethod+self` 导致完成回发失败的问题（`main.py`）。
@@ -36,18 +42,26 @@
 
 ### 性能优化 (Performance)
 
+- **R2 大文件 I/O 改为 managed transfer**：备份 blob 通过 boto3 `upload_file`/`download_file` 在线程中流式 multipart 传输，Bucket 清单分页读取，避免大 PDF 整体进内存或阻塞事件循环（`core/repository/sync_targets/r2.py`）。
 - **减少 Milvus 召回后本地 chunk 回填的串行 SQLite 查询**：`RetrievalOrchestrator` 将向量检索返回的 chunk_id 批量 hydrate，并按向量结果顺序恢复候选列表；缺失 chunk 自动跳过，不改变 RRF/reranker 行为（`core/pipelines/retrieval_orchestrator.py`）。
 - **research 召回省一次翻译 LLM 调用**：`research_skill.execute` 仅当 query 含 CJK 时才翻译成英文（`use_english_retrieval=_has_cjk(query)`），已是英文的 query 直接英文召回，去掉系统性浪费的翻译调用；召回恒英文不变（`core/research_skill.py`）。
 - **成本感知模式建议（Adaptive-RAG 思路）**：probe 的 `_suggest_mode` 对“有没有/是否提到 X”类查存 + 正文精确命中维持 `default`，避免因 query 偶含“综述/review”等词被升到昂贵的 deep_thinking（`core/research_skill.py`）。
 
 ### 架构健康 (Refactor)
 
+- **R2 职责拆分**：对象编排、manifest/安全校验、停机恢复分别落在 `r2_backup_manager.py`、`r2_backup_manifest.py`、`r2_restore.py`，新增对象存储端口由 R2 与 memory 实现对换，组合根只负责装配与生命周期（`core/managers/`、`core/repository/sync_targets/base.py`、`core/plugin_initializer.py`）。
 - **research 答案恒为内部 agent 纯输出（调令模型）**：`research_skill.execute` 不再从 flags 读 persona、对 default/deep 一律传 `persona_enabled=False`（移除该形参）；probe 返回 `directive_guidance`，引导主 LLM 把对话凝练成一条自包含检索指令再调 execute；`research_execute` 的 query docstring 同步澄清为“调令”（`core/research_skill.py`、`main.py`）。
 
 ### 测试 (Tests)
 
+- 新增 R2 去重、force、latest 原子提交、latest-only GC、双口径容量、流式分页对象操作、配额 fail-closed、损坏 blob/manifest、路径穿越、磁盘不足、SQLite 损坏和恢复回滚测试；补四命令生命周期与 Web 路由覆盖（`tests/backend/test_r2_backup_manager.py`、`test_r2_target.py`、`test_lifecycle_and_cli.py`、`test_web_server.py`）。
+- 新增 Zotero 同账号/不同账号取消与确认、旧 token 保留、自动 pull，以及 memory/SQLite purge 仅清除 Zotero 数据的回归测试（`tests/backend/test_web_server.py`、`test_source_store.py`、`test_sqlite_source_store.py`）。
 - 补充 research breadth plan、文档级 exact hit 摘要、Milvus 批量 hydrate、memory/sqlite ASCII 边界匹配回归测试（`tests/backend/test_research_skill.py`、`test_retrieval_orchestrator.py`、`test_source_store.py`、`test_sqlite_source_store.py`）。
 - 补充 research 语言映射（英文 query 跳翻译 / 中文翻译 / answer_language 取 flags）、persona 恒关、probe `directive_guidance`、查存+精确命中维持 default 的回归测试（`tests/backend/test_research_skill.py`）。
+
+### 构建与工程 (Build/CI)
+
+- 版本号升级到 `v0.29.0`，README 补完整备份范围、排除项、容量口径、跨设备恢复步骤与 Zotero 换号风险说明；前端静态产物通过标准 build/sync 流程生成（`metadata.yaml`、`main.py`、`README.md`、`pages/`）。
 
 ## [v0.28.3] — 2026-06-23
 

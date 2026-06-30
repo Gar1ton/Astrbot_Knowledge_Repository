@@ -4,12 +4,16 @@ import {
   getActiveZoteroSyncJob,
   getZoteroSyncStatus,
   probeZoteroLocal,
+  resolveZoteroAccountChange,
   saveZoteroServerKey,
   syncZoteroPull,
   type ZoteroProbeResult,
   type ZoteroSyncResult,
+  type ZoteroAccountChangeRequired,
 } from "@/lib/api";
 import { useToast } from "@/components/ui/Toast";
+import { Modal } from "@/components/ds/Modal";
+import { Button } from "@/components/ds/Button";
 import { DirPickerDialog } from "./DirPickerDialog";
 import {
   AdvancedSection,
@@ -103,6 +107,7 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
   const [serverKeyDraft, setServerKeyDraft] = useState("");
   const [serverKeyBusy, setServerKeyBusy] = useState(false);
   const [serverKeyError, setServerKeyError] = useState("");
+  const [accountChange, setAccountChange] = useState<ZoteroAccountChangeRequired | null>(null);
 
   const handleServerKeySave = useCallback(async () => {
     const key = serverKeyDraft.trim();
@@ -110,15 +115,37 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
     setServerKeyBusy(true);
     setServerKeyError("");
     try {
-      await saveZoteroServerKey(key);
-      setServerKeyDraft("");
-      await onRefresh?.();
+      const result = await saveZoteroServerKey(key);
+      if ("status" in result && result.status === "account_change_required") {
+        setAccountChange(result);
+      } else {
+        setServerKeyDraft("");
+        await onRefresh?.();
+      }
     } catch (err: unknown) {
       setServerKeyError(err instanceof Error ? err.message : String(err));
     } finally {
       setServerKeyBusy(false);
     }
   }, [onRefresh, serverKeyDraft]);
+
+  const handleAccountChange = useCallback(async (action: "replace_local" | "cancel") => {
+    if (!accountChange) return;
+    setServerKeyBusy(true);
+    try {
+      await resolveZoteroAccountChange(accountChange.change_id, action);
+      if (action === "replace_local") {
+        setServerKeyDraft("");
+        toast("Zotero 本地镜像已重置，新账号同步已启动", "ok");
+      }
+      setAccountChange(null);
+      await onRefresh?.();
+    } catch (err: unknown) {
+      setServerKeyError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setServerKeyBusy(false);
+    }
+  }, [accountChange, onRefresh, toast]);
 
   const handleServerKeyDelete = useCallback(async () => {
     setServerKeyBusy(true);
@@ -354,6 +381,22 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
           onSelect={handleDirSelect}
           onClose={() => setDirPickerFieldId(null)}
         />
+      )}
+      {accountChange && (
+        <Modal
+          title="检测到 Zotero 账号变化"
+          icon="book"
+          width={500}
+          height="auto"
+          onClose={() => handleAccountChange("cancel")}
+          footer={<><Button variant="outline" onClick={() => handleAccountChange("cancel")}>取消更改</Button><Button variant="danger" onClick={() => handleAccountChange("replace_local")}>覆盖并重置本地 Zotero 库</Button></>}
+        >
+          <div style={{ padding: 22, color: "var(--fg)", fontSize: 13, lineHeight: 1.7 }}>
+            <p>当前账号：{accountChange.current_account.account_name || accountChange.current_account.account_id}</p>
+            <p>新账号：{accountChange.new_account.account_name || accountChange.new_account.account_id}</p>
+            <p style={{ color: "var(--danger)" }}>继续会删除全部本地 Zotero 镜像及其 Milvus / LightRAG 索引；LOCAL 数据不受影响。确认后将自动拉取新账号。</p>
+          </div>
+        </Modal>
       )}
     </>
   );

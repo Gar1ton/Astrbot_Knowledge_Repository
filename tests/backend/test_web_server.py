@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import fitz  # type: ignore[import-untyped]
 import pytest
@@ -345,8 +346,8 @@ async def test_auth_probe_endpoint_is_public(tmp_path: Path) -> None:
     [
         ("post", "/api/sync/r2", "v0.3.0 / v0.4.0"),
         ("post", "/api/sync/all", "v0.3.0 / v0.4.0"),
-        ("post", "/api/backup", "v0.3.0"),
-        ("post", "/api/restore", "v0.3.0"),
+        ("post", "/api/backup", "v0.29.0"),
+        ("post", "/api/restore", "v0.29.0"),
         # /api/graph/build 与 /api/graph 已在 v0.15.1 移除 _reserved() 包裹，不再测 501
     ],
 )
@@ -1132,6 +1133,135 @@ async def test_zotero_server_key_routes_encrypt_and_mask(
         body2 = await removed.json()
         assert body2["server_key_present"] is False
         assert body2["server_key_masked"] == ""
+    finally:
+        await client.close()
+
+
+async def test_zotero_account_change_requires_confirmation_and_preserves_old_key_on_cancel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identities = {
+        "old-key": {"userID": 123, "username": "alice"},
+        "new-key": {"userID": 456, "username": "bob"},
+    }
+
+    class Client:
+        def __init__(self, api_key: str) -> None:
+            self.api_key = api_key
+
+        def get_current_key(self) -> dict[str, object]:
+            return {
+                **identities[self.api_key],
+                "access": {"user": {"library": True, "files": True}},
+            }
+
+    monkeypatch.setattr("core.adapters.zotero.web_api.ZoteroWebApiClient", Client)
+    api = await _make_api()
+    api._secret_store = EncryptedSecretStore(tmp_path / "secrets")
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        first = await client.post("/api/zotero/server-key", json={"api_key": "old-key"})
+        assert first.status == 200
+
+        changed = await client.post("/api/zotero/server-key", json={"api_key": "new-key"})
+        required = await changed.json()
+        assert required["status"] == "account_change_required"
+        assert required["current_account"]["account_id"] == "123"
+        assert required["new_account"]["account_id"] == "456"
+        assert api._secret_store.get_secret("zotero.server_api_key") == "old-key"
+
+        cancelled = await client.post(
+            "/api/zotero/account-change",
+            json={"change_id": required["change_id"], "action": "cancel"},
+        )
+        assert (await cancelled.json())["status"] == "cancelled"
+        assert api._secret_store.get_secret("zotero.server_api_key") == "old-key"
+
+        changed_again = await client.post(
+            "/api/zotero/server-key", json={"api_key": "new-key"}
+        )
+        required_again = await changed_again.json()
+        api._preflight_zotero_snapshot = AsyncMock()  # type: ignore[method-assign]
+        api._reset_local_zotero_mirror = AsyncMock()  # type: ignore[method-assign]
+        api.sync_zotero_pull = AsyncMock(  # type: ignore[method-assign]
+            return_value={"status": "started"}
+        )
+        replaced = await client.post(
+            "/api/zotero/account-change",
+            json={
+                "change_id": required_again["change_id"],
+                "action": "replace_local",
+            },
+        )
+        result = await replaced.json()
+        assert result["status"] == "replaced"
+        assert result["sync"]["status"] == "started"
+        assert api._secret_store.get_secret("zotero.server_api_key") == "new-key"
+        assert await api._source_store.get_source_account_binding("zotero_server") == {
+            "account_id": "456",
+            "account_name": "bob",
+        }
+        api._preflight_zotero_snapshot.assert_awaited_once()
+        api._reset_local_zotero_mirror.assert_awaited_once()
+        api.sync_zotero_pull.assert_awaited_once_with(
+            incremental=False, _skip_account_guard=True
+        )
+    finally:
+        await client.close()
+
+
+async def test_r2_backup_restore_status_and_job_routes(tmp_path: Path) -> None:
+    class Manager:
+        active_job = {"job_id": "j1", "status": "running", "stage": "upload"}
+
+        def start_backup(self, *, force: bool = False) -> dict[str, object]:
+            return {"status": "started", "force": force}
+
+        def start_restore(self, *, auto_restart: bool = False) -> dict[str, object]:
+            return {"status": "started", "auto_restart": auto_restart}
+
+        async def storage_status(self) -> dict[str, object]:
+            return {
+                "status": "ready",
+                "bucket_physical_bytes": 100,
+                "plugin_physical_bytes": 40,
+                "snapshot_logical_bytes": 55,
+            }
+
+    base = await _make_api()
+    api = KnowledgeRepositoryApi(
+        source_store=base._source_store,
+        kb_reader=base._kb_reader,
+        r2_backup_manager=Manager(),  # type: ignore[arg-type]
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        backup = await client.post("/api/backup", json={"force": True})
+        assert await backup.json() == {"status": "started", "force": True}
+
+        restore = await client.post("/api/restore", json={"auto_restart": False})
+        assert await restore.json() == {"status": "started", "auto_restart": False}
+
+        status = await client.get("/api/r2/status")
+        assert (await status.json())["bucket_physical_bytes"] == 100
+
+        job = await client.get("/api/r2/job")
+        assert (await job.json())["job"]["stage"] == "upload"
     finally:
         await client.close()
 

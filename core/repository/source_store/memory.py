@@ -55,6 +55,7 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._zcollection_items: set[tuple[str, str, str]] = set()  # (lib, coll_key, item_key)
         self._zitem_tags: dict[tuple[str, str], list[ZoteroTag]] = {}
         self._zrelations: set[tuple[str, str, str, str]] = set()
+        self._source_account_bindings: dict[str, dict[str, str]] = {}
         self._page_chunks: dict[str, list[PageChunk]] = {}
         self._notes: dict[str, ScopedNote] = {}
         self._chat_history: dict[str, list[dict]] = {}
@@ -521,6 +522,88 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
             if key[0] == library_id and any(t.tag == tag for t in tags)
         }
         return sorted(items)
+
+    async def get_source_account_binding(self, source: str) -> dict[str, str] | None:
+        value = self._source_account_bindings.get(source)
+        return copy.deepcopy(value) if value else None
+
+    async def set_source_account_binding(
+        self, source: str, account_id: str, account_name: str = ""
+    ) -> None:
+        self._source_account_bindings[source] = {
+            "account_id": account_id,
+            "account_name": account_name,
+        }
+
+    async def purge_zotero_mirror(self) -> None:
+        zotero_doc_ids = [
+            doc_id
+            for doc_id, doc in self._documents.items()
+            if getattr(doc.origin, "value", doc.origin) == "zotero"
+        ]
+        zotero_collections = [
+            value
+            for value in self._collections.values()
+            if getattr(value.origin, "value", value.origin) == "zotero"
+        ]
+        zotero_collection_keys = {value.coll_key for value in zotero_collections}
+        zotero_collection_names = {value.name for value in zotero_collections}
+        for doc_id in zotero_doc_ids:
+            await self.delete_document(doc_id)
+        self._collections = {
+            key: value
+            for key, value in self._collections.items()
+            if getattr(value.origin, "value", value.origin) != "zotero"
+        }
+        self._notes = {
+            note_id: note
+            for note_id, note in self._notes.items()
+            if note.library_id == "LOCAL"
+        }
+        self._build_jobs = {
+            job_id: job
+            for job_id, job in self._build_jobs.items()
+            if str(job.get("collection") or "") not in zotero_collection_names
+        }
+        self._console_scope_states = {
+            key: state
+            for key, state in self._console_scope_states.items()
+            if state.selected_doc_id not in zotero_doc_ids
+            and state.note_doc_id not in zotero_doc_ids
+            and state.selected_collection not in zotero_collection_names
+            and not (
+                state.scope_type == "document" and state.scope_key in zotero_doc_ids
+            )
+            and not (
+                state.scope_type == "collection"
+                and state.scope_key in zotero_collection_keys | zotero_collection_names
+            )
+        }
+        self._zlibraries = {
+            key: value for key, value in self._zlibraries.items() if key == "LOCAL"
+        }
+        self._zcollections = {
+            key: value
+            for key, value in self._zcollections.items()
+            if getattr(value.origin, "value", value.origin) != "zotero"
+        }
+        self._zitems = {
+            key: value
+            for key, value in self._zitems.items()
+            if getattr(value.origin, "value", value.origin) != "zotero"
+        }
+        self._zattachments = {
+            key: value for key, value in self._zattachments.items() if key[0] == "LOCAL"
+        }
+        self._zcollection_items = {
+            value for value in self._zcollection_items if value[0] == "LOCAL"
+        }
+        self._zitem_tags = {
+            key: value for key, value in self._zitem_tags.items() if key[0] == "LOCAL"
+        }
+        self._zrelations = {
+            value for value in self._zrelations if value[0] == "LOCAL"
+        }
 
     # ── 页面级 provenance ────────────────────────────────────────
 

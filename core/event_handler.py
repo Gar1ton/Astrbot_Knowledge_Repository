@@ -37,11 +37,22 @@ _HELP_TEXT = (
     "  /ka research_language cn|en|cn&en — research 回答语言（召回恒英文；cn&en=跟随提问，默认）\n"
     "  /ka persona on|off             — astrbot 人格 prompt（off 不污染 research）\n"
     "  /ka zotero pull                — 触发一次 Zotero 增量同步\n"
+    "  /ka zotero account replace|cancel — 确认/取消 Zotero 换号重置\n"
     "  /ka r2 push|pull|force push|force pull — R2 备份/恢复（force 与 pull 需二次确认）\n"
     "  /ka webui on|off               — 实时启停 Web 控制台\n"
     "\n内容管理（文档/集合/标签/Notion/知识图谱）请在 WebUI 操作；"
     "research 为只读检索，不会修改任何同步配置。"
 )
+
+
+def _fmt_bytes(value: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    amount = float(max(value, 0))
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            return f"{amount:.1f}{unit}" if unit != "B" else f"{int(amount)}B"
+        amount /= 1024
+    return f"{value}B"
 
 
 class EventHandler:
@@ -160,9 +171,36 @@ class EventHandler:
         except Exception as e:
             return f"Zotero 同步触发失败：{e}"
         status = res.get("status", "")
+        if status == "account_change_required":
+            old = res.get("current_account") or {}
+            new = res.get("new_account") or {}
+            return (
+                "⚠️ 检测到 Zotero 账号变化："
+                f"{old.get('account_name') or old.get('account_id')} → "
+                f"{new.get('account_name') or new.get('account_id')}。\n"
+                "继续将清空本地 Zotero 镜像（LOCAL 数据不受影响）并自动拉取新账号。\n"
+                "发送 `/ka zotero account replace` 确认，或 "
+                "`/ka zotero account cancel` 取消。"
+            )
         if status in ("error",) or res.get("message", "").startswith("Zotero 同步未启用"):
             return f"Zotero 同步未启动：{res.get('message', status)}"
         return f"Zotero 同步已在后台启动（status={status or 'running'}）。"
+
+    async def on_ka_zotero_account(self, action: str) -> str:
+        action = (action or "").strip().lower()
+        mapping = {"replace": "replace_local", "cancel": "cancel"}
+        if action not in mapping:
+            return "用法：/ka zotero account <replace|cancel>"
+        api = self._initializer.api
+        if api is None:
+            return "插件未初始化。"
+        try:
+            result = await api.resolve_zotero_account_change("", mapping[action])
+        except Exception as exc:
+            return f"Zotero 换号处理失败：{exc}"
+        if result.get("status") == "cancelled":
+            return "已取消 Zotero 账号更换；旧 token 与本地数据保持不变。"
+        return "Zotero 本地镜像已重置，新账号同步已自动启动。"
 
     async def on_ka_webui(self, action: str) -> str:
         """/ka webui <on|off> — 实时启停 Web 控制台。"""
@@ -192,8 +230,22 @@ class EventHandler:
         if api is None:
             return "插件未初始化。"
         action = " ".join((action or "").strip().lower().split())
-        if action not in ("push", "pull", "force push", "force pull"):
-            return "用法：/ka r2 <push|pull|force push|force pull>"
+        if action not in ("push", "pull", "force push", "force pull", "status"):
+            return "用法：/ka r2 <push|pull|force push|force pull|status>"
+
+        if action == "status":
+            status = await api.get_r2_status()
+            if status.get("status") != "ok":
+                return f"R2 状态读取失败：{status.get('message', status.get('status'))}"
+            snapshot = status.get("snapshot") or {}
+            job = status.get("job") or {}
+            return (
+                "R2 状态："
+                f"Bucket={_fmt_bytes(int(status.get('bucket_used_bytes') or 0))}，"
+                f"插件={_fmt_bytes(int(status.get('plugin_used_bytes') or 0))}，"
+                f"最新快照={snapshot.get('snapshot_id') or '无'}，"
+                f"任务={job.get('status') or 'idle'}"
+            )
 
         if action == "push":
             return await self._r2_push(force=False)
@@ -215,11 +267,15 @@ class EventHandler:
         api = self._initializer.api
         assert api is not None
         try:
-            res = await api.sync_documents("r2", force=force)
+            res = await api.backup_now(force=force, background=True)
         except Exception as e:
             return f"R2 上传失败：{e}"
         status = res.get("status")
         label = "强制全量上传" if force else "增量上传"
+        if status == "started":
+            return f"R2 {label}任务已启动；完成后会主动回发结果。"
+        if status == "busy":
+            return "已有 R2 任务正在运行，可用 `/ka r2 status` 查看。"
         if status == "success":
             synced = res.get("synced_count", 0)
             failed = res.get("failed_count", 0)
@@ -235,9 +291,17 @@ class EventHandler:
         api = self._initializer.api
         assert api is not None
         try:
-            res = await api.restore_from_backup()
+            res = await api.restore_from_backup(
+                auto_restart=auto_restart,
+                background=True,
+            )
         except Exception as e:
             return f"R2 恢复失败：{e}"
+        if res.get("status") == "started":
+            mode = "恢复并自动重启" if auto_restart else "恢复"
+            return f"R2 {mode}任务已启动；完成后会主动回发结果。"
+        if res.get("status") == "busy":
+            return "已有 R2 任务正在运行，可用 `/ka r2 status` 查看。"
         if res.get("status") != "success":
             return f"R2 恢复失败：{res.get('message', res.get('status'))}"
         if not auto_restart:
@@ -247,7 +311,6 @@ class EventHandler:
         except Exception as e:
             return f"R2 整库快照已恢复，但自动重启失败（请手动重启）：{e}"
         return "R2 整库快照已强制恢复，插件正在自动重启以加载数据。"
-
     # ── LLM Hook（agent 上下文注入）──────────────────────────────
 
     async def on_llm_request(self, event: Any, req: Any) -> None:

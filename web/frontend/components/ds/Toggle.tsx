@@ -52,7 +52,7 @@ export function Toggle({ checked, onChange, disabled, label, style }: ToggleProp
             width: 10,
             height: 10,
             borderRadius: "50%",
-            background: checked ? "#fff" : "var(--fg-subtle)",
+            background: checked ? "var(--accent-fg)" : "var(--fg-subtle)",
             transition: "left .15s",
           }}
         />

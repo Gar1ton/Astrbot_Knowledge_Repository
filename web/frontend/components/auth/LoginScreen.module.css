@@ -94,7 +94,7 @@
   width: 100%;
   padding: 26px 26px 24px;
   border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: rgba(18, 15, 12, 0.94);
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.6),
@@ -123,7 +123,7 @@
   inset: -1.5px;
   z-index: 4;
   padding: 1.5px;
-  border-radius: 9px;
+  border-radius: calc(var(--radius-lg) + 1.5px);
   background: conic-gradient(
     from var(--beam-angle) at 50% 50%,
     transparent 0deg,
@@ -177,7 +177,7 @@
 .input {
   width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   outline: none;
   background: rgba(255, 255, 255, 0.04);
   color: #e8e4da;
@@ -209,7 +209,7 @@
   justify-content: center;
   min-height: 44px;
   border: none;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: rgba(238, 236, 230, 0.92);
   color: #0c0b09;
   cursor: pointer;

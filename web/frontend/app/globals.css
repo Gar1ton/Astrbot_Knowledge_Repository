@@ -43,7 +43,7 @@ textarea {
   background-color: var(--bg);
   border: 1px solid var(--border);
   color: var(--fg);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 8px 12px;
   font-size: 13px;
   font-family: inherit;
@@ -72,7 +72,7 @@ select {
   background-color: var(--surface);
   border: 1px solid var(--border);
   color: var(--fg);
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   padding: 0 32px 0 11px;
   height: 32px;
   font-size: 12px;
@@ -152,7 +152,7 @@ select:focus {
   overflow: visible;
   background: var(--surface);
   border: 1px solid var(--border-strong);
-  border-radius: 16px;
+  border-radius: var(--radius-3xl);
   box-shadow: var(--shadow);
   transition: border-color 0.18s, box-shadow 0.18s;
 }
@@ -167,7 +167,7 @@ select:focus {
   content: '';
   position: absolute;
   inset: -1px;
-  border-radius: 17px;
+  border-radius: calc(var(--radius-3xl) + 1px);
   background: conic-gradient(
     from var(--ask-beam-angle) at 50% 50%,
     transparent 0deg,
@@ -205,7 +205,7 @@ select:focus {
   content: '';
   position: absolute;
   inset: -1px;
-  border-radius: 17px;
+  border-radius: calc(var(--radius-3xl) + 1px);
   background: conic-gradient(
     from var(--ask-beam-angle) at 50% 50%,
     transparent 0deg,
@@ -245,8 +245,9 @@ select:focus {
 .msg-bubble--glow::before {
   content: '';
   position: absolute;
+  /* 气泡本体圆角 10px，外扩 2px 后配套 12px */
   inset: -2px;
-  border-radius: 18px;
+  border-radius: calc(var(--radius-xl) + 2px);
   background: conic-gradient(
     from var(--msg-glow-angle) at 50% 50%,
     transparent 0deg,
@@ -289,6 +290,7 @@ svg {
   0%, 100% { box-shadow: 0 0 3px 1px rgba(168,85,247,.35); }
   50%       { box-shadow: 0 0 7px 3px rgba(168,85,247,.15); }
 }
-.wf-pulse-red    { animation: wfPulseRed    1.2s ease-in-out infinite; border-radius: var(--radius-md); }
-.wf-pulse-green  { animation: wfPulseGreen  2.4s ease-in-out infinite; border-radius: var(--radius-md); }
-.wf-pulse-purple { animation: wfPulsePurple 2.4s ease-in-out infinite; border-radius: var(--radius-md); }
+/* inline-flex 使盒子贴合内部按钮；行内 span 的盒子与按钮不重合，光晕会描出错位直角框 */
+.wf-pulse-red    { display: inline-flex; animation: wfPulseRed    1.2s ease-in-out infinite; border-radius: var(--radius-md); }
+.wf-pulse-green  { display: inline-flex; animation: wfPulseGreen  2.4s ease-in-out infinite; border-radius: var(--radius-md); }
+.wf-pulse-purple { display: inline-flex; animation: wfPulsePurple 2.4s ease-in-out infinite; border-radius: var(--radius-md); }

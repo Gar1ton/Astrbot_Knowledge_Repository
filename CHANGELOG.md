@@ -21,6 +21,35 @@
 
 ---
 
+## [Unreleased]
+
+## [v0.29.3] — 2026-07-03
+
+### 修复 (Fixed)
+
+- 顶栏「数据流」按钮的状态光晕呈错位直角框：`.wf-pulse-*` 类挂在行内 span 上，行内盒与内部 30px 按钮不重合，box-shadow 描出直角框；为其补 `display: inline-flex` 使光晕贴合按钮圆角（`web/frontend/app/globals.css`、`components/layout/TopBar.tsx` 消费处不变）。
+- 设置弹窗 R2 备份进度条轨道引用不存在的 `--surface-strong`，实际渲染为透明底 → 改用 `--bg-inset`（`web/frontend/components/modals/SettingModal.tsx`）。
+
+### 架构健康 (Refactor)
+
+- **前端圆角体系统一（只收敛不一致处，阶梯内等值 token 化留待后续）**：`styles/ds-tokens.css` 圆角阶梯新增 `--radius-3xl: 16px`；原生 `input`/`textarea`（10px）与 `select`（9px）重置基线统一为 `--radius-md`，与 DS Button/Select 对齐（`app/globals.css`）。阶梯外硬编码值按控件角色归位：数据流页按钮/输入/列表行 7px→`md`、28px 图标按钮 7px→`sm`（对齐 IconButton）、分段控件/图标底座/状态 chip/主链接 9px→`lg`、状态面板与缩放控件 9/11px→`xl`、节点卡片 14px→`2xl`（终点节点 16px→`3xl`，保留「更大圆角区分」意图）、目录对话框 14px→`2xl`（对齐 DS Modal）（`styles/tokens.css`）；Ask 输入卡 16/17px 与消息辉光环 18px 改为 token 配套关系（`3xl`/`calc(3xl+1px)`，辉光环修正为气泡 10px+外扩 2px=12px）（`app/globals.css`）；登录页输入/按钮 7px→`md`、卡片辉光环 9px→`calc(lg+1.5px)` 保持同心（`components/auth/LoginScreen.module.css`）；顶栏 logo 7px→`md`、Tooltip token 化（`components/layout/TopBar.tsx`、`ds/Tooltip.tsx`）；聊天精查确认卡与进度坞/构建卡/性能面板 14px→`3xl`、检索菜单行 7px→`md`、细进度条 2px/99→`--radius-pill`（`components/panels/ChatPanel.tsx`、`progress/ProgressDock.tsx`、`build/BuildWidget.tsx`、`ui/PerfPanel.tsx`、`modals/SettingModal.tsx`）。聊天气泡不对称角（10 10 3 10）、菱形 handle 3px、滚动条 3px、分栏拖拽条 1px 属形状特化，有意保留。
+
+## [v0.29.2] — 2026-07-03
+
+### 新增功能 (Added)
+
+- **前端 6 套完整命名主题（venus/nox/juno/augustus/selune/folio）×亮/暗双模式**：每套主题同时定义背景、正文墨色、主色与主色前景，全站（三栏控制台、/flow 拓扑、fumadocs 表面、LightRAG 模式）随主题整体换肤——替代原先「HSL 滑杆只改强调色、背景不动」的旧方案。设置弹窗外观 Tab 改为 2×3「主题预览卡片」：卡片以 `data-theme` 主题边界直接用目标主题真实 token 渲染迷你界面，并随亮/暗模式实时翻转；默认主题 `nox`，选择持久化到 `kr-theme` 并由 `app/layout.tsx` 内联脚本在首帧前写入 `html[data-theme]` 防 FOUC，旧 `kr-palette` 值自动迁移、`kr-hue/sat/light` 与残留行内 HSL 变量自动清理（`web/frontend/styles/ds-tokens.css`、`lib/theme.ts`、`app/layout.tsx`、`app/(console)/layout.tsx`、`components/modals/ThemeGallery.tsx`、`components/modals/SettingModal.tsx`、`lib/i18n.ts`）。
+
+### 架构健康 (Refactor)
+
+- **颜色 token 收敛为「种子 + 派生」单一体系**：`ds-tokens.css` 每主题每模式只声明 4 个种子变量（`--theme-bg/-ink/-primary/-primary-fg`），其余全部 token（背景三层/表面/边框/文字层级/accent 家族/反色选中/语义软底/标注底色）由挂在 `:root, [data-theme]` 与 `.dark, .dark [data-theme]` 的 `color-mix` 派生块统一生成；LightRAG 模式由整块 violet 硬编码收敛为 `--mode-tint` 两行（向当前主题 primary 偏色）；`--flow-*` 灰阶与 fumadocs `--color-fd-*` 全部改别名引用 DS token。删除 `tokens.css` 中 legacy 奶油/墨色双套 token、7 个已失效的 oklch `[data-palette]` 预设、双套 `--color-fd-*`/`--flow-*` 硬编码与重复的 `.fx-glass`/keyframes（2013→1777 行）；`ds-tokens.css` 删除 `[data-palette]` 6 预设与 `--accent-h/s/l` 组合。顺带修复既有 bug：`--ann-*-bg/-border` 暗色下无覆盖仍是浅色底；清理组件层硬编码——Modal 遮罩 → 新 token `--overlay`、Tooltip 反色浮层 → `--select-bg/fg`、Button danger 前景 → 新 token `--danger-fg`、Toggle knob → `--accent-fg`、BuildWidget/FilePanel/ProgressDock 共 14 处引用未定义 token 的 `var(--success,…)/var(--warning,…)` → `var(--ok)/var(--warn)`（`web/frontend/styles/tokens.css`、`components/ds/Modal.tsx`、`Tooltip.tsx`、`Button.tsx`、`Toggle.tsx`、`components/build/BuildWidget.tsx`、`components/panels/FilePanel.tsx`、`components/progress/ProgressDock.tsx`）。
+
+## [v0.29.1] — 2026-06-30
+
+### 修复 (Fixed)
+
+- **修复 Zotero 同步期间左下角进度弹窗忽隐忽现**：`IngestManager.process_attachment` 的文件拷贝/哈希/PDF 解析（PyMuPDF4LLM）/分块此前直接同步执行，逐篇阻塞 aiohttp 单事件循环数秒，导致前端 `/active` 轮询超时；改为 `asyncio.to_thread` 丢进线程池（`core/managers/ingest_manager.py`）。同时 `ProgressDock` 轮询改用 `Promise.allSettled`，单源请求失败时沿用上次成功值而非整体清空，避免后端短暂阻塞或网络抖动把面板闪没（`web/frontend/components/progress/ProgressDock.tsx`）。
+
 ## [v0.29.0] — 2026-06-29
 
 ### 新增功能 (Added)

@@ -36,7 +36,7 @@ export function Button({
     primary: { background: "var(--accent)", color: "var(--accent-fg)", border: "1px solid transparent", boxShadow: "0 1px 2px rgba(22,23,26,.12)" },
     outline: { background: "var(--surface)", color: "var(--fg)", border: "1px solid var(--border-strong)" },
     ghost: { background: "transparent", color: "var(--fg-muted)", border: "1px solid transparent" },
-    danger: { background: "var(--danger)", color: "#fff", border: "1px solid transparent" },
+    danger: { background: "var(--danger)", color: "var(--danger-fg)", border: "1px solid transparent" },
     tab: {
       background: "var(--surface)",
       color: active ? "var(--accent)" : "var(--fg)",

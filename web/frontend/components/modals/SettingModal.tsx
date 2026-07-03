@@ -2,6 +2,7 @@
 import React, { useEffect, useState } from "react";
 import { Modal } from "@/components/ds/Modal";
 import { Badge } from "@/components/ds/Badge";
+import { ThemeGallery } from "@/components/modals/ThemeGallery";
 import { Button } from "@/components/ds/Button";
 import { Icon } from "@/components/ds/Icon";
 import { Select } from "@/components/ds/Select";
@@ -120,60 +121,11 @@ function ConfigKV({ k, v, masked }: { k: string; v: unknown; masked?: boolean })
   );
 }
 
-function Swatch({ h, active, onClick }: { h: number; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        width: 30,
-        height: 30,
-        borderRadius: "var(--radius-md)",
-        border: active ? "2px solid var(--fg)" : "2px solid transparent",
-        boxShadow: active ? "0 0 0 1px var(--surface) inset" : "none",
-        background: `hsl(${h} 70% 56%)`,
-        cursor: "pointer",
-        padding: 0,
-        flexShrink: 0,
-      }}
-    />
-  );
-}
-
-// ─── Accent state helpers ─────────────────────────────────────
-
-function getAccentFromDOM() {
-  if (typeof document === "undefined") return { h: 225, s: 72, l: 56 };
-  const el = document.documentElement;
-  const h = parseFloat(el.style.getPropertyValue("--accent-h") || "") || 225;
-  const s = parseFloat(el.style.getPropertyValue("--accent-s") || "") || 72;
-  const l = parseFloat(el.style.getPropertyValue("--accent-l") || "") || 56;
-  return { h, s, l };
-}
-
-function applyAccent(h: number, s: number, l: number) {
-  if (typeof document === "undefined") return;
-  document.documentElement.style.setProperty("--accent-h", String(h));
-  document.documentElement.style.setProperty("--accent-s", `${s}%`);
-  document.documentElement.style.setProperty("--accent-l", `${l}%`);
-  localStorage.setItem("kr-hue", String(h));
-  localStorage.setItem("kr-sat", `${s}%`);
-  localStorage.setItem("kr-light", `${l}%`);
-}
-
 // ─── Tab: General (previously Appearance) ─────────────────────
 
 function AppearanceTab({ onLogout }: { onLogout: () => void }) {
   const { theme, setTheme } = useTheme();
   const { lang, setLang, t } = useI18n();
-  const [accent, setAccent] = useState(() => getAccentFromDOM());
-
-  function updateAccent(patch: Partial<typeof accent>) {
-    const next = { ...accent, ...patch };
-    setAccent(next);
-    applyAccent(next.h, next.s, next.l);
-  }
-
-  const PRESETS = [225, 200, 265, 160, 32, 12, 340];
 
   return (
     <>
@@ -202,67 +154,25 @@ function AppearanceTab({ onLogout }: { onLogout: () => void }) {
       </Card>
 
       <Card
-        title="全局强调色"
+        title={t("settings_theme_gallery")}
         icon="sparkle"
-        badge={<Badge tone="accent">一处生效</Badge>}
+        badge={<Badge tone="accent">{t("settings_theme_gallery_badge")}</Badge>}
       >
         <div
           style={{
             fontSize: 12,
             color: "var(--fg-muted)",
             lineHeight: 1.55,
-            marginBottom: 12,
+            marginTop: 4,
           }}
         >
-          所有控件的主题色 / 强调色统一由此驱动；调节后全站实时级联渲染并本地持久化。
+          {t("settings_theme_gallery_hint")}
         </div>
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-          {PRESETS.map((h) => (
-            <Swatch
-              key={h}
-              h={h}
-              active={Math.abs(accent.h - h) < 6}
-              onClick={() => updateAccent({ h })}
-            />
-          ))}
-        </div>
-        {(
-          [
-            ["色相 H", "h", 0, 360, "°"],
-            ["饱和度 S", "s", 0, 100, "%"],
-            ["明度 L", "l", 20, 80, "%"],
-          ] as const
-        ).map(([lbl, key, min, max, unit]) => (
-          <div
-            key={key}
-            style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}
-          >
-            <span style={{ width: 60, fontSize: 12, color: "var(--fg-muted)" }}>{lbl}</span>
-            <input
-              type="range"
-              min={min}
-              max={max}
-              value={accent[key]}
-              onChange={(e) => updateAccent({ [key]: +e.target.value })}
-              style={{ flex: 1, accentColor: "var(--accent)" }}
-            />
-            <span
-              style={{
-                width: 36,
-                fontSize: 11,
-                fontFamily: "var(--font-mono)",
-                color: "var(--fg)",
-                textAlign: "right",
-              }}
-            >
-              {accent[key]}{unit}
-            </span>
-          </div>
-        ))}
-        <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-          <Button variant="primary" size="sm">主按钮</Button>
-          <Button variant="outline" size="sm">次按钮</Button>
-          <Badge tone="accent">徽章</Badge>
+        <ThemeGallery />
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <Button variant="primary" size="sm">{t("settings_theme_preview_primary")}</Button>
+          <Button variant="outline" size="sm">{t("settings_theme_preview_outline")}</Button>
+          <Badge tone="accent">{t("settings_theme_preview_badge")}</Badge>
         </div>
       </Card>
 
@@ -696,7 +606,7 @@ function SyncTab() {
         </Field>
         {r2Job?.status === "running" && (
           <div style={{ padding: "8px 0" }}>
-            <div style={{ height: 6, borderRadius: 99, background: "var(--surface-strong)", overflow: "hidden" }}>
+            <div style={{ height: 6, borderRadius: "var(--radius-pill)", background: "var(--bg-inset)", overflow: "hidden" }}>
               <div style={{ width: `${r2Job.progress}%`, height: "100%", background: "var(--accent)", transition: "width .2s" }} />
             </div>
           </div>

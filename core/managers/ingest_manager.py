@@ -12,6 +12,7 @@ original.pdf / clean.md（无可见页码）/ pages.json（页→字符偏移）
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import secrets
@@ -189,15 +190,16 @@ class IngestManager(BaseIngestManager):
                 source_pdf = src_path  # 原件留在 Zotero storage
             else:
                 if src_path.resolve() != dest_pdf.resolve():
-                    shutil.copy2(src_path, dest_pdf)
+                    await asyncio.to_thread(shutil.copy2, src_path, dest_pdf)
                 source_pdf = dest_pdf
 
-            with open(source_pdf, "rb") as f:
-                content_bytes = f.read()
-            file_hash = hashlib.sha256(content_bytes).hexdigest()
+            # 拷贝/哈希/PDF 解析均为阻塞 CPU/IO，丢进线程避免堵塞事件循环
+            # （Zotero 同步逐篇调用本方法时，阻塞会连带卡住其余并发 HTTP 请求，
+            # 表现为前端 /active 轮询超时、进度弹窗忽隐忽现）。
+            content_bytes, file_hash = await asyncio.to_thread(self._read_and_hash, source_pdf)
 
             # 1) 抽取干净 Markdown + 页面字符偏移
-            artifact = self._extract_artifact(source_pdf, content_type)
+            artifact = await asyncio.to_thread(self._extract_artifact, source_pdf, content_type)
 
             # 2) 落盘 clean.md / pages.json / meta.json
             (bundle_dir / _ARTIFACT_MD).write_text(artifact.clean_markdown, encoding="utf-8")
@@ -227,7 +229,8 @@ class IngestManager(BaseIngestManager):
             )
 
             # 3) clean.md 上的字符区间分块（offset 不变量）
-            chunks = self._chunk_artifact(
+            chunks = await asyncio.to_thread(
+                self._chunk_artifact,
                 document_id=document_id,
                 library_id=library_id,
                 item_key=item_key,
@@ -475,6 +478,11 @@ class IngestManager(BaseIngestManager):
         return False
 
     # ── 抽取 ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _read_and_hash(path: Path) -> tuple[bytes, str]:
+        content_bytes = path.read_bytes()
+        return content_bytes, hashlib.sha256(content_bytes).hexdigest()
 
     def _extract_artifact(self, path: Path, content_type: str) -> MarkdownArtifact:
         """PDF → PyMuPDF4LLM 清洗；txt/md → 单页纯文本制品。"""

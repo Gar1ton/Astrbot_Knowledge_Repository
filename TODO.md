@@ -1,5 +1,70 @@
 # TODO
 
+## v0.29.3 前端圆角体系统一 (completed)
+
+### User constraints / 约束
+
+- 只处理不一致处（阶梯外值 7/9/11/14/17/18px 与形状错位 bug），阶梯内等值 token 化留给后续；不手工修改 `pages/`（本次也不跑 sync）；版本号仅 patch。
+- 阶梯外中间值按控件角色归位：≤32px 控件 → `--radius-md`，分段/浮层 → `--radius-lg`，面板 → `--radius-xl`；新增 `--radius-3xl: 16px` 承接 14~18px 大圆角；原生 input/select 重置基线 → `--radius-md`。
+- 不对称聊天气泡角（`10 10 3 10`）、菱形 handle 3px、滚动条/拖拽条/营销页大圆属形状特化，保留。
+
+### Technical implementation path
+
+- [x] **Phase 1 - token 与全局基线**：`styles/ds-tokens.css` 新增 `--radius-3xl: 16px`；`app/globals.css` 原生 input/textarea 10px、select 9px → `var(--radius-md)`；ask-card 16/17px → `3xl`/`calc(3xl+1px)`；消息辉光环 18px 修正为气泡 10px+外扩 2px=12px；`.wf-pulse-*` 加 `display: inline-flex` 修复顶栏「数据流」按钮方角光晕（inline span 盒子与按钮不重合）。
+- [x] **Phase 2 - 设置弹窗与顶栏**：`TopBar.tsx` logo 7px → `md`；`Tooltip.tsx` 6 → token；`SettingModal.tsx` 修不存在的 `--surface-strong` → `--bg-inset`、进度条 99 → `--radius-pill`。
+- [x] **Phase 3 - 数据流页**（`styles/tokens.css`）：阶梯外值按角色归位——按钮/输入/列表行 7px → md、28px 图标按钮 7px → sm（对齐 IconButton）、分段/图标底座/状态 chip/主链接 9px → lg、状态面板 9px 与缩放控件 11px → xl、节点卡片 14px → 2xl（终点节点 16px → 3xl 等值，保留区分意图）、目录对话框 14px → 2xl（对齐 DS Modal）。
+- [x] **Phase 4 - 其余阶梯外内联值**：ChatPanel 确认弹窗 14 → 3xl、菜单行 7 → md；LoginScreen 输入/按钮 7 → md、卡片 8 → lg、辉光环 9 → `calc(lg+1.5px)` 保持同心；BuildWidget/ProgressDock/PerfPanel 卡片 14 → 3xl、细进度条 2px → `--radius-pill`。内联引用角标 3px、分支脉冲线 2px 属形状特化保留。
+- [x] **Phase 5 - 验证收尾**：tsc/eslint/build 全绿；pytest 回归通过；CHANGELOG 追加；未跑 `sync_frontend.py`（用户自行同步 pages/）。
+
+### Verification
+
+- `cd web/frontend && npx tsc --noEmit --incremental false` → passed；`npx eslint <7 个改动 TSX>` → passed；`npm run build` → 11 页全部静态导出成功。
+- `python -m pytest -q` → 478 passed。
+- 残留扫描：`grep -rE "border-radius: (7|9|11|13...18)px"` 与 `borderRadius: (7|9|11|14|16|17|18)` 归零；仅剩有意保留的形状特化（滚动条 3px、菱形 handle 3px、分支脉冲线 2px、内联角标 3px、胶囊 999/99）。
+- 按用户要求未运行 `tools/sync_frontend.py`，`pages/` 由用户自行同步。
+
+## v0.29.2 前端主题体系重构：6 套完整命名主题 (completed)
+
+### User constraints / 约束
+
+- 6 套命名主题（venus/nox/juno/augustus/selune/folio），每套定义亮/暗双模式的背景+主色，全站级联换肤（含 flow 页、fumadocs 表面、LightRAG 模式）——现有方案只换强调色、背景不覆盖。
+- 设置面板改为「主题预览卡片」2×3 网格（迷你界面缩略图，随亮/暗实时变化）；移除 HSL 三滑杆及 `kr-hue/kr-sat/kr-light`；默认主题 `nox`；旧预设（blue/violet/teal/amber/rose/graphite/moirai）全部删除。
+- 不手工修改 `pages/`；版本号仅 patch。
+
+### Technical implementation path
+
+- [x] **Phase 1 - Token 层**：`styles/ds-tokens.css` 重写为「种子 + 派生」架构（每主题×模式 4 个种子变量 `--theme-bg/-ink/-primary/-primary-fg`，其余 token 用 `color-mix` 公式写一次，派生块选择器 `:root, [data-theme]` / `.dark, .dark [data-theme]` 使任意 `data-theme` 元素成为主题边界）；LightRAG 模式收敛为 `--mode-tint` 两行、向当前主题 primary 偏色；`--flow-*` 与 `--color-fd-*` 改别名引用 DS token；清理 `styles/tokens.css` legacy 双套 token 与死的 oklch palette 块（2013→1777 行）。
+- [x] **Phase 2 - TS/初始化层**：重写 `lib/theme.ts`（`ThemeName`/`getColorTheme`/`setColorTheme`/`initColorTheme`，属性 `data-theme`、存储键 `kr-theme`，含 `kr-palette` 迁移与旧键清理）；`app/layout.tsx` 加防 FOUC 内联脚本；`app/(console)/layout.tsx` 改调用。
+- [x] **Phase 3 - UI 层**：新建 `components/modals/ThemeGallery.tsx`（2×3 预览卡片，data-theme 主题边界渲染真实 token）；`SettingModal.tsx` 外观 Tab 删 HSL 滑杆换 ThemeGallery；`lib/i18n.ts` 换 12 键（删 settings_palette_*/settings_hue 等死键）。
+- [x] **Phase 4 - 清理**：硬编码颜色替换（Modal 遮罩/Tooltip/Button danger/Toggle knob，及 BuildWidget/FilePanel/ProgressDock 共 14 处未定义 `var(--success/--warning,…)` → `var(--ok)/var(--warn)`）；grep 验证旧变量归零。
+- [x] **Phase 5 - 验证收尾**：tsc/eslint/build 全绿；12 组合数值走查（对比度 fg/bg 9.5–17.9、fg-muted/bg ≥3.7、按钮文字 ≥4.0，据走查把 augustus/selune 浅色 primary-fg 由白改深字 4.7/5.6）；内联脚本迁移分支 node 模拟 5/5 通过；`python tools/sync_frontend.py` + `--check` 一致；CHANGELOG。
+
+### Verification
+
+- `cd web/frontend && npx tsc --noEmit --incremental false` → passed；`npx eslint <13 个改动文件>` → passed；`npm run build` → 13 页全部静态导出成功。
+- 走查（环境无浏览器，采用数值走查 + 产物检查）：12 组合（6 主题×亮暗）用 Python 精确模拟 `color-mix` 派生——surface/bg 层次全部可辨、fg/bg 对比 9.5–17.9、fg-muted/bg 3.7–6.6、按钮文字对比 ≥4.0（augustus/selune 浅色 primary-fg 据此由白改深字）；构建产物确认内联脚本进入 HTML、`[data-theme=*]` 种子块与派生块进入 CSS。
+- 内联脚本迁移分支 node 模拟：kr-theme 直读 / kr-palette∈新 6 名平移 / 废弃名→nox / 全空→nox / 非法值回退，5/5 通过。
+- `python tools/sync_frontend.py` → 362 文件同步；`--check` → pages/ 与 out/ 一致。
+
+## v0.29.1 修复进度弹窗在 Zotero 同步时忽隐忽现 (completed)
+
+### User constraints / 约束
+
+- 排查左下角 `ProgressDock` 在 Zotero 同步过程中反复出现/消失的问题，定位真实根因再修复，不做表面遮盖。
+
+### Technical implementation path
+
+- [x] 根因：`IngestManager.process_attachment` 内文件拷贝（`shutil.copy2`）、读取+哈希、PDF 解析（`extract_pdf_markdown`/PyMuPDF4LLM）、分块（`_chunk_artifact`）均为同步阻塞调用，直接挂在 `async def` 方法体内执行；Zotero 同步逐篇调用该方法时，单事件循环（aiohttp）被独占数秒，连带卡住前端 `/active` 轮询请求（`getActiveZoteroSyncJob` 等客户端超时仅 4s）。超时后 `ProgressDock` 把失败 catch 成 null，四路全空即整体 `return null`，弹窗消失；阻塞解除后下一轮轮询恢复，弹窗重新出现。
+- [x] 治本：`process_attachment` 中拷贝/哈希/`_extract_artifact`/`_chunk_artifact` 改用 `asyncio.to_thread` 丢进线程池，不再阻塞事件循环（`core/managers/ingest_manager.py`）。
+- [x] 治标：`ProgressDock` 的 `useProgressJobs` 轮询从 `Promise.all(...).catch(() => null)` 改为 `Promise.allSettled`，单源请求失败（超时/网络抖动）时沿用上一次成功值而非清空，避免短暂阻塞仍导致面板闪烁（`web/frontend/components/progress/ProgressDock.tsx`）。
+
+### Verification
+
+- `python -m pytest tests/backend -q` → 477 passed。
+- `cd web/frontend && npx tsc --noEmit --incremental false` → passed（无输出）。
+- `cd web/frontend && npx eslint components/progress/ProgressDock.tsx` → passed（无输出）。
+- `ruff check core/managers/ingest_manager.py` → All checks passed；`mypy core/managers/ingest_manager.py` → 无新增错误（既有 8 处均在未改动文件/行）。
+
 ## v0.29.0 R2 完整备份恢复与 Zotero 换号保护 (completed)
 
 ### User constraints / 约束

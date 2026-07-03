@@ -57,7 +57,7 @@ export function TopBar() {
         alt="Knowledge Arch"
         width={28}
         height={28}
-        style={{ borderRadius: 7, flexShrink: 0 }}
+        style={{ borderRadius: "var(--radius-md)", flexShrink: 0 }}
       />
       <span
         style={{

@@ -219,7 +219,7 @@ function ActiveBuildCard({ job, interrupted, onPause, onResumeJob, onResume }: A
     const pct = buildProgressPct(job);
     const waitingPause = job.status === "pause_requested" || !!job.pause_requested;
     const paused = job.status === "paused" || !!job.paused;
-    const tone = paused ? "var(--warning, #f59e0b)" : "var(--accent)";
+    const tone = paused ? "var(--warn)" : "var(--accent)";
     const stage =
       paused ? t("file_build_paused")
       : waitingPause ? t("file_build_waiting_pause")
@@ -232,10 +232,10 @@ function ActiveBuildCard({ job, interrupted, onPause, onResumeJob, onResume }: A
           margin: "4px 6px 6px",
           padding: "8px 10px",
           background: paused
-            ? "color-mix(in srgb, var(--warning, #f59e0b) 10%, transparent)"
+            ? "color-mix(in srgb, var(--warn) 10%, transparent)"
             : "var(--accent-soft)",
           border: paused
-            ? "1px solid color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent)"
+            ? "1px solid color-mix(in srgb, var(--warn) 30%, transparent)"
             : "1px solid var(--accent-border)",
           borderRadius: "var(--radius-md)",
         }}
@@ -295,7 +295,7 @@ function ActiveBuildCard({ job, interrupted, onPause, onResumeJob, onResume }: A
               width: `${pct}%`,
               height: "100%",
               borderRadius: 999,
-              background: paused ? "var(--warning, #f59e0b)" : "linear-gradient(90deg, var(--accent), var(--accent-strong))",
+              background: paused ? "var(--warn)" : "linear-gradient(90deg, var(--accent), var(--accent-strong))",
               transition: "width .4s",
             }}
           />
@@ -304,7 +304,7 @@ function ActiveBuildCard({ job, interrupted, onPause, onResumeJob, onResume }: A
           {job.processed_chunks ?? 0}/{job.total_chunks ?? "?"} {t("unit_chunks")} · {job.processed_docs ?? 0}/{job.total_docs ?? "?"} {t("file_build_docs")} · {t("file_build_elapsed")} {formatBuildDuration(job.elapsed_seconds)}
         </div>
         {waitingPause && (
-          <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.5, color: "var(--warning, #f59e0b)" }}>
+          <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.5, color: "var(--warn)" }}>
             {job.pause_message || t("file_build_waiting_pause_hint")}
           </div>
         )}
@@ -318,13 +318,13 @@ function ActiveBuildCard({ job, interrupted, onPause, onResumeJob, onResume }: A
         style={{
           margin: "4px 6px 6px",
           padding: "8px 10px",
-          background: "color-mix(in srgb, var(--warning, #f59e0b) 10%, transparent)",
-          border: "1px solid color-mix(in srgb, var(--warning, #f59e0b) 35%, transparent)",
+          background: "color-mix(in srgb, var(--warn) 10%, transparent)",
+          border: "1px solid color-mix(in srgb, var(--warn) 35%, transparent)",
           borderRadius: "var(--radius-md)",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--warning, #f59e0b)", flex: 1 }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--warn)", flex: 1 }}>
             {t("file_build_interrupted")} · {interrupted.collection}
           </span>
           <button
@@ -1151,7 +1151,7 @@ export function FilePanel() {
             label={t("file_build_continue")}
             size={12}
             side="left"
-            style={{ ...baseStyle, color: "var(--warning, #f59e0b)" }}
+            style={{ ...baseStyle, color: "var(--warn)" }}
             onClick={(e) => { e.stopPropagation(); resumeBuild(active.job_id); }}
           />
         );
@@ -1163,7 +1163,7 @@ export function FilePanel() {
           size={12}
           side="left"
           active={waitingPause}
-          style={{ ...baseStyle, color: waitingPause ? "var(--warning, #f59e0b)" : "var(--accent)" }}
+          style={{ ...baseStyle, color: waitingPause ? "var(--warn)" : "var(--accent)" }}
           onClick={(e) => {
             e.stopPropagation();
             if (!waitingPause) pauseBuild(active.job_id);

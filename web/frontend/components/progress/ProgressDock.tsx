@@ -54,14 +54,28 @@ function useProgressJobs(): DockJob[] {
   const [jobs, setJobs] = useState<DockJob[]>([]);
   const anyActiveRef = useRef(false);
   const notifiedZoteroRef = useRef<Set<string>>(new Set());
+  // 单次轮询请求超时/网络抖动不代表任务已结束：失败的那一路沿用上次成功值，
+  // 避免后端短暂阻塞（如同步期间的 PDF 解析）把整个面板闪没。
+  const lastRef = useRef<{
+    zotero: Awaited<ReturnType<typeof getActiveZoteroSyncJob>>;
+    milvus: Awaited<ReturnType<typeof getActiveMilvusBuildJob>>;
+    graph: Awaited<ReturnType<typeof getActiveBuildJob>>;
+    ingest: Awaited<ReturnType<typeof getActiveIngestJob>>;
+  }>({ zotero: null, milvus: null, graph: null, ingest: null });
 
   const poll = useCallback(async () => {
-    const [zotero, milvus, graph, ingest] = await Promise.all([
-      getActiveZoteroSyncJob().catch(() => null),
-      getActiveMilvusBuildJob().catch(() => null),
-      getActiveBuildJob().catch(() => null),
-      getActiveIngestJob().catch(() => null),
+    const [zoteroResult, milvusResult, graphResult, ingestResult] = await Promise.allSettled([
+      getActiveZoteroSyncJob(),
+      getActiveMilvusBuildJob(),
+      getActiveBuildJob(),
+      getActiveIngestJob(),
     ]);
+    const last = lastRef.current;
+    const zotero = zoteroResult.status === "fulfilled" ? zoteroResult.value : last.zotero;
+    const milvus = milvusResult.status === "fulfilled" ? milvusResult.value : last.milvus;
+    const graph = graphResult.status === "fulfilled" ? graphResult.value : last.graph;
+    const ingest = ingestResult.status === "fulfilled" ? ingestResult.value : last.ingest;
+    lastRef.current = { zotero, milvus, graph, ingest };
     const next: DockJob[] = [];
 
     if (zotero) {
@@ -197,7 +211,7 @@ export function ProgressDock() {
         left: 20,
         zIndex: Z.progressDock,
         width: 300,
-        borderRadius: 14,
+        borderRadius: "var(--radius-3xl)",
         padding: "10px 12px",
         boxShadow: "var(--shadow-pop)",
         border: "1px solid var(--border)",
@@ -254,9 +268,9 @@ function ProgressRow({
   const color = job.status === "error"
     ? "var(--danger)"
     : job.paused
-    ? "var(--warning, #f59e0b)"
+    ? "var(--warn)"
     : terminal
-    ? "var(--warning, #f59e0b)"
+    ? "var(--warn)"
     : "var(--accent)";
 
   async function handlePause() {
@@ -292,11 +306,11 @@ function ProgressRow({
         )}
       </div>
 
-      <div style={{ height: 4, borderRadius: 2, background: "var(--border)", overflow: "hidden" }}>
+      <div style={{ height: 4, borderRadius: "var(--radius-pill)", background: "var(--border)", overflow: "hidden" }}>
         <div
           style={{
             height: "100%", width: job.pct != null ? `${job.pct}%` : "30%",
-            background: color, borderRadius: 2, transition: "width 0.4s ease",
+            background: color, borderRadius: "var(--radius-pill)", transition: "width 0.4s ease",
             opacity: job.pct != null ? 1 : 0.5,
           }}
         />

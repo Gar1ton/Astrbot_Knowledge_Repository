@@ -41,8 +41,8 @@ const OP_LABELS: [string, string][] = [
 function MiniBar({ ms, max }: { ms: number; max: number }) {
   const ratio = max > 0 ? Math.min(ms / max, 1) : 0;
   return (
-    <div style={{ height: 4, borderRadius: 2, background: "var(--bg-inset)", overflow: "hidden", marginTop: 4 }}>
-      <div style={{ height: "100%", width: `${ratio * 100}%`, background: latencyColor(ms), borderRadius: 2, transition: "width 0.4s ease" }} />
+    <div style={{ height: 4, borderRadius: "var(--radius-pill)", background: "var(--bg-inset)", overflow: "hidden", marginTop: 4 }}>
+      <div style={{ height: "100%", width: `${ratio * 100}%`, background: latencyColor(ms), borderRadius: "var(--radius-pill)", transition: "width 0.4s ease" }} />
     </div>
   );
 }
@@ -149,7 +149,7 @@ export function PerfPanel({ collapsed = false }: PerfPanelProps) {
             backdropFilter: "saturate(1.3) blur(14px)",
             WebkitBackdropFilter: "saturate(1.3) blur(14px)",
             border: "1px solid var(--border)",
-            borderRadius: 14,
+            borderRadius: "var(--radius-3xl)",
             boxShadow: "var(--shadow-pop)",
             overflow: "hidden",
             zIndex: Z.panel,

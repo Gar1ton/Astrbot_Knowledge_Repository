@@ -26,12 +26,12 @@ export function Tooltip({ label, side = "bottom", children }: TooltipProps) {
           <span
             style={{
               whiteSpace: "nowrap",
-              background: "#26272b",
-              color: "#fff",
+              background: "var(--select-bg)",
+              color: "var(--select-fg)",
               fontSize: 11,
               fontWeight: 500,
               padding: "4px 8px",
-              borderRadius: 6,
+              borderRadius: "var(--radius-md)",
               pointerEvents: "none",
               boxShadow: "0 4px 14px rgba(0,0,0,.22)",
               letterSpacing: ".01em",

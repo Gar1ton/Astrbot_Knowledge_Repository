@@ -39,7 +39,7 @@ export function Modal({ title, icon, onClose, footer, children, width = 880, hei
         position: "fixed",
         inset: 0,
         zIndex: Z.dialog,
-        background: "rgba(22,23,26,.38)",
+        background: "var(--overlay)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",

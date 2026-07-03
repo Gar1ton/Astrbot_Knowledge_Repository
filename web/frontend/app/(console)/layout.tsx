@@ -3,7 +3,7 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { ToastProvider } from "@/components/ui/Toast";
 import { I18nContext, Lang, makeT } from "@/lib/i18n";
-import { initPalette } from "@/lib/theme";
+import { initColorTheme } from "@/lib/theme";
 import { getAuth } from "@/lib/api";
 import { ConsoleProvider, useConsole } from "@/lib/ConsoleContext";
 import { LoginScreen } from "@/components/auth/LoginScreen";
@@ -33,7 +33,7 @@ function I18nProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    initPalette();
+    initColorTheme();
   }, []);
 
   return (

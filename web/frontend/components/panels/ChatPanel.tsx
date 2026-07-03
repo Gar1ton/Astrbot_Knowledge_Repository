@@ -543,7 +543,7 @@ function PrecisionDialog({
         style={{
           background: "var(--surface)",
           border: "1px solid var(--border)",
-          borderRadius: 14,
+          borderRadius: "var(--radius-3xl)",
           padding: 24,
           width: 410,
           boxShadow: "var(--shadow-pop)",
@@ -1110,7 +1110,7 @@ export function ChatPanel({ width }: { width?: number }) {
                               gap: 10,
                               width: "100%",
                               padding: "7px 8px",
-                              borderRadius: 7,
+                              borderRadius: "var(--radius-md)",
                               background: selected ? "var(--accent-soft)" : "transparent",
                               border: "none",
                               cursor: disabled ? "not-allowed" : "pointer",

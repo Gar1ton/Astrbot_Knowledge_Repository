@@ -1,13 +1,15 @@
 /*
- * Knowledge Repository · Design Tokens
- * 暖色奶油 + 橙色强调 · 浅/深双主题
- * Dark mode via `.dark` class (aligned with fumadocs-ui / Tailwind v4 convention)
+ * Knowledge Repository · Flow 结构样式 + 布局变量
+ * 颜色 token 已全部迁往 ds-tokens.css（种子 + 派生架构，含 --flow-* 与 --color-fd-*）。
+ * 本文件只保留：布局变量、z-index 量表、.flow-* / .dir-picker-* 结构类与专用动画。
  */
 
-/* ─── 响应式面板宽度 ─────────────────────────────────────────── */
+/* ─── 布局变量与响应式面板宽度 ───────────────────────────────── */
 :root {
   --sidebar-left-w: 198px;
   --inspector-w: 286px;
+  --rail-w: 220px;
+  --rail-w-collapsed: 60px;
 }
 @media (max-width: 1100px) {
   :root {
@@ -32,181 +34,7 @@
   --z-toast: 1400;
 }
 
-/* ─── 浅色主题（默认 · cream） ─────────────────────────────── */
-:root {
-  /* 背景层 */
-  --bg: #f7f4ed;
-  --bg-subtle: #f1ecdf;
-  --bg-inset: #e9e3d3;
-
-  /* 面板 */
-  --surface: #fffefb;
-  --surface-hover: #f4f0e6;
-
-  /* 边框 */
-  --border: #e6dfce;
-  --border-strong: #d6cdb6;
-
-  /* 文字 */
-  --fg: #2b291f;
-  --fg-muted: #6d6755;
-  --fg-subtle: #9c9580;
-  --heading: #3a3b21;
-
-  /* 主强调色：HSL 驱动 */
-  --accent-h: 32;          /* 色相 0–360 */
-  --accent-s: 80%;         /* 饱和度 */
-  --accent-l: 48%;         /* 明度 */
-  --accent:        hsl(var(--accent-h) var(--accent-s) var(--accent-l));
-  --accent-strong: color-mix(in srgb, var(--accent) 80%, #1a1206);
-  --accent-fg: #ffffff;
-  --accent-soft:   color-mix(in srgb, var(--accent) 14%, var(--surface));
-  --accent-softer: color-mix(in srgb, var(--accent)  7%, var(--surface));
-  --accent-border: color-mix(in srgb, var(--accent) 42%, var(--border));
-  --ring:          color-mix(in srgb, var(--accent) 32%, transparent);
-  --glow:          color-mix(in srgb, var(--accent) 30%, transparent);
-
-  /* 次强调色：橄榄绿 */
-  --accent-2: #83851f;
-  --accent-2-soft: #eef0d6;
-
-  /* 语义色 */
-  --ok: #4f8a3d;
-  --ok-soft: #e7f0dd;
-  --warn: #c5851a;
-  --warn-soft: #f6ebd2;
-  --danger: #c5503b;
-  --danger-soft: #f6e3dd;
-
-  /* 阴影 */
-  --shadow: 0 1px 2px rgba(60, 50, 30, 0.05), 0 6px 22px rgba(60, 50, 30, 0.07);
-  --shadow-pop: 0 12px 36px rgba(60, 50, 30, 0.16);
-
-  /* 导航栏宽度与高度 */
-  --rail-w: 220px;
-  --rail-w-collapsed: 60px;
-  --topbar-h: 56px;
-
-
-  /* fumadocs-ui 颜色覆盖 → 暖色系对齐 */
-  --color-fd-background: #f7f4ed;
-  --color-fd-foreground: #2b291f;
-  --color-fd-muted: #f1ecdf;
-  --color-fd-muted-foreground: #6d6755;
-  --color-fd-popover: #fffefb;
-  --color-fd-popover-foreground: #2b291f;
-  --color-fd-card: #fffefb;
-  --color-fd-card-foreground: #2b291f;
-  --color-fd-border: rgba(230, 223, 206, 0.7);
-  --color-fd-primary: var(--accent);
-  --color-fd-primary-foreground: #ffffff;
-  --color-fd-secondary: #f1ecdf;
-  --color-fd-secondary-foreground: #2b291f;
-  --color-fd-accent: rgba(230, 223, 206, 0.5);
-  --color-fd-accent-foreground: #2b291f;
-  --color-fd-ring: var(--ring);
-}
-
-/* ─── 深色主题（ink） ───────────────────────────────────────── */
-.dark {
-  /* 背景层 */
-  --bg: #0b0b0c;
-  --bg-subtle: #121211;
-  --bg-inset: #1b1b18;
-
-  /* 面板 */
-  --surface: #141413;
-  --surface-hover: #1e1e1b;
-
-  /* 边框 */
-  --border: #282823;
-  --border-strong: #3a3a31;
-
-  /* 文字 */
-  --fg: #ece9e0;
-  --fg-muted: #9b978a;
-  --fg-subtle: #6b6759;
-  --heading: #f2efe6;
-
-  /* 主强调色：HSL 驱动 */
-  --accent-h: 30;
-  --accent-s: 82%;
-  --accent-l: 54%;
-  --accent-strong: color-mix(in srgb, var(--accent) 78%, #ffffff);
-  --accent-fg: #ffffff;
-
-  /* 次强调色 */
-  --accent-2: #c2cb4a;
-  --accent-2-soft: rgba(194, 203, 74, 0.14);
-
-  /* 语义色 */
-  --ok: #6abf5a;
-  --ok-soft: rgba(106, 191, 90, 0.15);
-  --warn: #e0a23b;
-  --warn-soft: rgba(224, 162, 59, 0.15);
-  --danger: #e06a55;
-  --danger-soft: rgba(224, 106, 85, 0.15);
-
-  /* 深色模式提高动态焦点环可见度 */
-  --ring: color-mix(in srgb, var(--accent) 40%, transparent);
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 22px rgba(0, 0, 0, 0.45);
-  --shadow-pop: 0 14px 40px rgba(0, 0, 0, 0.6);
-
-  /* fumadocs-ui 深色覆盖 */
-  --color-fd-background: #0b0b0c;
-  --color-fd-foreground: #ece9e0;
-  --color-fd-muted: #1b1b18;
-  --color-fd-muted-foreground: rgba(155, 151, 138, 0.8);
-  --color-fd-popover: #141413;
-  --color-fd-popover-foreground: #ece9e0;
-  --color-fd-card: #141413;
-  --color-fd-card-foreground: #ece9e0;
-  --color-fd-border: rgba(40, 40, 35, 0.4);
-  --color-fd-primary: var(--accent);
-  --color-fd-primary-foreground: #ffffff;
-  --color-fd-secondary: #1b1b18;
-  --color-fd-secondary-foreground: #ece9e0;
-  --color-fd-accent: rgba(58, 58, 49, 0.3);
-  --color-fd-accent-foreground: #ece9e0;
-  --color-fd-ring: var(--ring);
-}
-
-/* ─── 色系 swatch（由 data-palette 切换，亮/暗双模式） ─────── */
-/* Moirai — 淡薰衣草 + 古金 */
-[data-palette="moirai"]       { --accent: oklch(0.53 0.130 295); --accent-fg: #ffffff; }
-.dark [data-palette="moirai"] { --accent: oklch(0.64 0.105 295); }
-
-/* Venus — 象牙石材 + 绯红 + 金色 */
-[data-palette="venus"]       { --accent: oklch(0.52 0.205 25); --accent-fg: #ffffff; }
-.dark [data-palette="venus"] { --accent: oklch(0.62 0.22  25); }
-
-/* Nox — 黑白灰标准色 */
-[data-palette="nox"]       { --accent: oklch(0.205 0 0); --accent-fg: #ffffff; }
-.dark [data-palette="nox"] { --accent: oklch(0.922 0 0); --accent-fg: #000000; }
-
-/* Juno (Cirrus) — 云感 SaaS 蓝灰 + 橙 */
-[data-palette="juno"]       { --accent: oklch(0.56 0.08 240); --accent-fg: #ffffff; }
-.dark [data-palette="juno"] { --accent: oklch(0.65 0.09 240); }
-
-/* Augustus — 象牙白 + 靛蓝 + 金橙 */
-[data-palette="augustus"]       { --accent: oklch(0.65 0.155 80); --accent-fg: #ffffff; }
-.dark [data-palette="augustus"] { --accent: oklch(0.76 0.168 81); }
-
-/* Selune (Aether) — 暗色科技 + 钢蓝灰 + 薄荷绿 */
-[data-palette="selune"]       { --accent: oklch(0.63 0.11 175); --accent-fg: #ffffff; }
-.dark [data-palette="selune"] { --accent: oklch(0.63 0.11 175); }
-
-/* Folio — 纸浆米色 + 石墨灰 */
-[data-palette="folio"]       { --accent: oklch(0.38 0.015 265); --accent-fg: #ffffff; }
-.dark [data-palette="folio"] { --accent: oklch(0.78 0.025 86);  }
-
 /* ─── 全局视效工具类 ──────────────────────────────────────────── */
-.fx-glass {
-  background: color-mix(in srgb, var(--bg-subtle) 72%, transparent);
-  backdrop-filter: saturate(1.4) blur(12px);
-  -webkit-backdrop-filter: saturate(1.4) blur(12px);
-  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-}
 .fx-glass-edge {
   box-shadow: inset 1px 0 0 color-mix(in srgb, var(--accent) 14%, transparent);
 }
@@ -218,12 +46,6 @@
 }
 
 /* ─── 动画 keyframes ──────────────────────────────────────────── */
-@keyframes dotDrift {
-  0%, 100% { transform: translate(0, 0); }
-  25% { transform: translate(4px, -6px); }
-  50% { transform: translate(6px, -8px); }
-  75% { transform: translate(-3px, -4px); }
-}
 @keyframes dotTwinkle {
   0%, 100% { opacity: 0.10; }
   50% { opacity: 0.32; }
@@ -238,13 +60,6 @@
 @keyframes sparkleFloat {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-3px); }
-}
-@keyframes fadeUp {
-  from { transform: translateY(8px); }
-  to { transform: translateY(0); }
-}
-@keyframes spin {
-  to { transform: rotate(360deg); }
 }
 @keyframes dotPulse {
   0%, 100% { transform: scale(1);   opacity: 1; }
@@ -262,57 +77,6 @@
   100% { background-color: var(--accent-soft); }
 }
 
-
-/* ─── Flow 拓扑图：中性 token + 状态语义色 ───────────────────── */
-:root {
-  --flow-bg: #fbfbfa;
-  --flow-canvas: #f3f3f1;
-  --flow-node: #ffffff;
-  --flow-node-bd: #e7e7e4;
-  --flow-node-bd-strong: #dadad6;
-  --flow-inset: #f4f4f2;
-  --flow-inset-2: #eeeeeb;
-  --flow-ink: #1b1b19;
-  --flow-muted: #6d6d68;
-  --flow-faint: #a2a29b;
-  --flow-conn: #d2d2cc;
-  --flow-st-ready: #4f9d5b;
-  --flow-st-warn: #cc8a2e;
-  --flow-st-off: #b4b4ad;
-  --flow-st-info: #6c79c4;
-  --flow-st-optional: #7a5cd0;
-  --flow-st-dirty: #2f76d6;
-  --flow-st-restart: #c76b2c;
-  --flow-ring: color-mix(in srgb, var(--flow-ink) 16%, transparent);
-  --flow-shadow-node: 0 1px 2px rgba(28, 24, 16, 0.04), 0 4px 16px rgba(28, 24, 16, 0.06);
-  --flow-shadow-pop: 0 10px 34px rgba(28, 24, 16, 0.14);
-  --flow-shadow-dest: 0 2px 5px rgba(28, 24, 16, 0.06), 0 16px 40px rgba(28, 24, 16, 0.13);
-}
-
-.dark {
-  --flow-bg: #101010;
-  --flow-canvas: #151514;
-  --flow-node: #1d1d1b;
-  --flow-node-bd: #30302c;
-  --flow-node-bd-strong: #42423b;
-  --flow-inset: #252522;
-  --flow-inset-2: #2b2b26;
-  --flow-ink: #f1eee6;
-  --flow-muted: #aaa69b;
-  --flow-faint: #747066;
-  --flow-conn: #44443e;
-  --flow-st-ready: #6abf75;
-  --flow-st-warn: #e0a23b;
-  --flow-st-off: #686862;
-  --flow-st-info: #8c98ee;
-  --flow-st-optional: #a78bfa;
-  --flow-st-dirty: #5b9bf0;
-  --flow-st-restart: #e0913f;
-  --flow-ring: color-mix(in srgb, var(--flow-ink) 18%, transparent);
-  --flow-shadow-node: 0 1px 2px rgba(0, 0, 0, 0.38), 0 8px 24px rgba(0, 0, 0, 0.32);
-  --flow-shadow-pop: 0 14px 40px rgba(0, 0, 0, 0.55);
-  --flow-shadow-dest: 0 2px 5px rgba(0, 0, 0, 0.45), 0 16px 44px rgba(0, 0, 0, 0.55);
-}
 
 .flow-topo-page {
   display: flex;
@@ -378,7 +142,7 @@
   justify-content: flex-end;
   padding: 8px 10px;
   border: 1px solid var(--flow-node-bd);
-  border-radius: 9px;
+  border-radius: var(--radius-xl);
   background: color-mix(in srgb, var(--flow-node) 58%, transparent);
 }
 
@@ -394,7 +158,7 @@
   font-size: 12px;
   font-weight: 600;
   padding: 7px 14px;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   transition: background 0.15s, border-color 0.15s;
 }
 
@@ -424,7 +188,7 @@
   font-size: 12px;
   font-weight: 600;
   padding: 7px 14px;
-  border-radius: 9px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--flow-node-bd-strong);
   background: var(--flow-node);
   color: var(--flow-ink);
@@ -645,7 +409,7 @@
   gap: 2px;
   background: var(--flow-node);
   border: 1px solid var(--flow-node-bd);
-  border-radius: 11px;
+  border-radius: var(--radius-xl);
   padding: 4px;
   box-shadow: var(--flow-shadow-node);
 }
@@ -799,7 +563,7 @@
   overflow: hidden;
   background: var(--flow-node);
   border: 1px solid color-mix(in srgb, var(--flow-st) 42%, var(--flow-node-bd));
-  border-radius: 14px;
+  border-radius: var(--radius-2xl);
   box-shadow:
     0 0 0 1px color-mix(in srgb, var(--flow-st) 16%, transparent),
     0 0 12px color-mix(in srgb, var(--flow-st) 26%, transparent),
@@ -865,7 +629,7 @@
 /* 终点节点：稍粗边宽 + 更大圆角以区分；发光边/光晕沿用 .flow-node 基底（随 --flow-st）。 */
 .flow-node--dest {
   border-width: 1.5px;
-  border-radius: 16px;
+  border-radius: var(--radius-3xl);
 }
 
 .flow-node--dest.is-off {
@@ -897,7 +661,7 @@
   width: 31px;
   height: 31px;
   flex-shrink: 0;
-  border-radius: 9px;
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--flow-st) 9%, var(--flow-inset));
   border: 1px solid color-mix(in srgb, var(--flow-st) 22%, var(--flow-node-bd));
   display: grid;
@@ -974,7 +738,7 @@
   font-size: 11px;
   font-weight: 600;
   padding: 4px 9px;
-  border-radius: 9px;
+  border-radius: var(--radius-lg);
   border: 1px solid color-mix(in srgb, var(--flow-st) 30%, transparent);
   color: var(--flow-st);
   background: color-mix(in srgb, var(--flow-st) 9%, transparent);
@@ -1053,7 +817,7 @@
   max-width: 100%;
   background: var(--flow-inset);
   border: 1px solid var(--flow-node-bd);
-  border-radius: 9px;
+  border-radius: var(--radius-lg);
   padding: 3px;
   gap: 3px;
 }
@@ -1178,7 +942,7 @@
 
 .flow-quick-save {
   border: 1px solid color-mix(in srgb, var(--flow-st) 34%, var(--flow-node-bd));
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--flow-st) 13%, var(--flow-node));
   color: color-mix(in srgb, var(--flow-st) 72%, var(--flow-ink));
   cursor: pointer;
@@ -1387,7 +1151,7 @@
   min-width: 0;
   box-sizing: border-box;
   border: 1px solid var(--flow-node-bd);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--flow-node);
   color: var(--flow-ink);
   font-family: var(--font-geist-mono);
@@ -1417,7 +1181,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   border: 1px dashed var(--flow-node-bd-strong);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--flow-inset);
   color: var(--flow-muted);
   font-family: var(--font-geist-mono);
@@ -1452,7 +1216,7 @@
   width: 100%;
   min-height: 26px;
   border: 1px solid var(--flow-node-bd);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--flow-node);
   color: var(--flow-muted);
   cursor: pointer;
@@ -1502,7 +1266,7 @@
 
 .flow-quick-hint,
 .flow-quick-error {
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   font-size: 10.5px;
   line-height: 1.45;
   padding: 6px 7px;
@@ -1575,7 +1339,7 @@
   padding: 4px 28px 4px 7px;
   box-sizing: border-box;
   border: 1px solid var(--flow-node-bd);
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--flow-node);
   color: var(--flow-ink);
   font-family: var(--font-geist-mono);
@@ -1694,7 +1458,7 @@
   width: 28px;
   height: 28px;
   border: 1px solid var(--flow-node-bd);
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   background: var(--flow-node);
   color: var(--flow-muted);
   cursor: pointer;
@@ -1732,7 +1496,7 @@
   width: 420px;
   max-width: calc(100vw - 32px);
   max-height: 72vh;
-  border-radius: 14px;
+  border-radius: var(--radius-2xl);
   background: var(--flow-node);
   border: 1px solid var(--flow-node-bd);
   box-shadow: var(--flow-shadow-dest);
@@ -1815,7 +1579,7 @@
   width: 100%;
   padding: 7px 10px;
   border: none;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--flow-ink);
   font-family: var(--font-geist-mono);
@@ -1968,7 +1732,7 @@
   margin-top: 2px;
   background: var(--flow-ink);
   color: var(--flow-node);
-  border-radius: 9px;
+  border-radius: var(--radius-lg);
   padding: 9px 14px;
   font-size: 12.5px;
 }

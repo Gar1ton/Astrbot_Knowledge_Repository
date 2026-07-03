@@ -30,6 +30,18 @@ export const metadata: Metadata = {
   description: "AstrBot 知识库管理控制台",
 };
 
+/*
+ * 防 FOUC：首帧前同步设置 html[data-theme]（与 next-themes 注入 .dark 同类机制）。
+ * 只读迁移判断（读旧键 kr-palette 但不写），持久化迁移由 lib/theme.ts initColorTheme 完成。
+ * 兜底分支也必须设置属性——ds-tokens.css 的等特异性级联依赖「data-theme 恒存在」。
+ */
+const THEME_INIT_SCRIPT = `(function(){var d="nox";try{
+var ok=["venus","nox","juno","augustus","selune","folio"];
+var t=localStorage.getItem("kr-theme");
+if(ok.indexOf(t)<0){var p=localStorage.getItem("kr-palette");t=ok.indexOf(p)>=0?p:d;}
+document.documentElement.setAttribute("data-theme",t);
+}catch(e){document.documentElement.setAttribute("data-theme",d);}})();`;
+
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
@@ -40,6 +52,7 @@ export default function RootLayout({
       className={`${inter.variable} ${jetbrainsMono.variable} ${bitcount.variable}`}
     >
       <body>
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
         {/* fumadocs-ui RootProvider: search disabled（我们用自定义检索页）; theme 使用 .dark class */}
         <RootProvider
           search={{ enabled: false }}

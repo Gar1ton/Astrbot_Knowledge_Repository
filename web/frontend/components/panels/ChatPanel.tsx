@@ -22,7 +22,13 @@ import {
 
 // ─── Types ────────────────────────────────────────────────────
 
-type RetrievalMode = "default" | "high_precision" | "graph_only" | "fulltext" | "deep_thinking";
+type RetrievalMode =
+  | "default"
+  | "enhanced"
+  | "graph_mixed"
+  | "graph_only"
+  | "fulltext"
+  | "deep_thinking";
 
 interface Message {
   id?: number;
@@ -31,10 +37,11 @@ interface Message {
   sources?: AskSource[];
   actualRetrievalMode?: string;
   thinkingTrace?: ThinkingTrace;
+  answerNotice?: string;
   pinned?: boolean;
 }
 
-interface PrecisionDialogState {
+interface GraphBuildDialogState {
   question: string;
   collection: string;
   reason: string;
@@ -57,6 +64,8 @@ function retrievalModeLabel(
   if (mode === "none") return t("chat_retrieval_none");
   if (mode === "milvus_deep" || mode === "astrbot_deep_fallback") return t("chat_retrieval_deep_mode");
   if (mode === "deep_degraded_to_default") return t("chat_retrieval_deep_degraded");
+  if (mode === "enhanced_recall") return t("chat_retrieval_enhanced_mode");
+  if (mode === "enhanced_degraded_to_default") return t("chat_retrieval_enhanced_degraded");
   return t("chat_retrieval_milvus");
 }
 
@@ -469,6 +478,20 @@ function MessageBubble({
           </div>
         )}
         {msg.thinkingTrace && <ThinkingTraceView trace={msg.thinkingTrace} t={t} />}
+        {msg.answerNotice && (
+          <div
+            style={{
+              marginTop: 8,
+              paddingTop: 8,
+              borderTop: "1px solid var(--border)",
+              fontSize: 11,
+              lineHeight: 1.6,
+              color: "var(--warn)",
+            }}
+          >
+            ⚠️ {msg.answerNotice.replace(/\*\*/g, "")}
+          </div>
+        )}
       </div>
       <div
         style={{
@@ -497,15 +520,15 @@ function MessageBubble({
   );
 }
 
-// ─── PrecisionDialog ──────────────────────────────────────────
+// ─── GraphBuildDialog ─────────────────────────────────────────
 
-function PrecisionDialog({
+function GraphBuildDialog({
   state,
   onBuild,
   onFallback,
   onCancel,
 }: {
-  state: PrecisionDialogState;
+  state: GraphBuildDialogState;
   onBuild: () => void;
   onFallback: () => void;
   onCancel: () => void;
@@ -554,7 +577,7 @@ function PrecisionDialog({
       >
         <div>
           <h3 style={{ margin: "0 0 5px", fontSize: 15, fontWeight: 700, color: "var(--heading)" }}>
-            {t("chat_precision_title")}
+            {t("chat_graph_mixed_title")}
           </h3>
           <p style={{ margin: 0, fontSize: 11, lineHeight: 1.6, color: "var(--fg-muted)" }}>
             {state.reason}
@@ -658,7 +681,7 @@ export function ChatPanel({ width }: { width?: number }) {
   const [useEnglishRetrieval, setUseEnglishRetrieval] = useState(true);
   const [answerLanguage, setAnswerLanguage] = useState<"auto" | "zh" | "en">("auto");
   const [showSettings, setShowSettings] = useState(false);
-  const [precisionDialog, setPrecisionDialog] = useState<PrecisionDialogState | null>(null);
+  const [graphBuildDialog, setGraphBuildDialog] = useState<GraphBuildDialogState | null>(null);
   // 卸载时兜底清除轮询定时器，避免组件被销毁后仍在轮询。
   useEffect(
     () => () => {
@@ -717,7 +740,7 @@ export function ChatPanel({ width }: { width?: number }) {
 
   useEffect(() => {
     if (!selectedDocId && retrievalMode === "fulltext") setRetrievalMode("default");
-    if (!collectionName && (retrievalMode === "deep_thinking" || retrievalMode === "high_precision" || retrievalMode === "graph_only")) {
+    if (!collectionName && (retrievalMode === "deep_thinking" || retrievalMode === "graph_mixed" || retrievalMode === "graph_only")) {
       setRetrievalMode("default");
     }
   }, [selectedDocId, collectionName, retrievalMode]);
@@ -794,9 +817,9 @@ export function ChatPanel({ width }: { width?: number }) {
       (typeof crypto !== "undefined" && crypto.randomUUID
         ? crypto.randomUUID()
         : `conv-${Date.now()}`);
-    // deep thinking 才有逐轮 detail；进行中每 ~600ms 轮询，把增量 trace 渲染为实时推演视图。
+    // deep thinking / enhanced 有阶段 detail；进行中每 ~600ms 轮询，渲染实时推演视图。
     setLiveProgress(null);
-    if (mode === "deep_thinking") {
+    if (mode === "deep_thinking" || mode === "enhanced") {
       liveTimerRef.current = setInterval(async () => {
         const p = await getAskProgress(cid);
         if (p?.detail) setLiveProgress(p.detail);
@@ -830,13 +853,14 @@ export function ChatPanel({ width }: { width?: number }) {
           sources: result.sources,
           actualRetrievalMode: result.actual_retrieval_mode,
           thinkingTrace: result.thinking_trace ?? undefined,
+          answerNotice: result.answer_notice || undefined,
         },
       ]);
     } catch (err) {
       if (
-        (mode === "high_precision" || mode === "graph_only") &&
+        (mode === "graph_mixed" || mode === "graph_only") &&
         err instanceof ApiError &&
-        (err.body?.status === "lightrag_not_ready" || err.body?.status === "high_precision_failed") &&
+        (err.body?.status === "lightrag_not_ready" || err.body?.status === "graph_mixed_failed" || err.body?.status === "graph_only_failed") &&
         collectionName
       ) {
         let estimate: GraphBuildEstimate | undefined;
@@ -844,7 +868,7 @@ export function ChatPanel({ width }: { width?: number }) {
         if (canBuild) {
           try { estimate = await estimateGraphBuild(collectionName); } catch { /* ignore */ }
         }
-        setPrecisionDialog({ question, collection: collectionName, reason: err.message, estimate, canBuild });
+        setGraphBuildDialog({ question, collection: collectionName, reason: err.message, estimate, canBuild });
       } else {
         toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
       }
@@ -861,23 +885,23 @@ export function ChatPanel({ width }: { width?: number }) {
     await submitQuestion(input.trim(), retrievalMode, true);
   }
 
-  async function handlePrecisionFallback() {
-    if (!precisionDialog) return;
-    const pending = precisionDialog;
-    setPrecisionDialog(null);
+  async function handleGraphFallback() {
+    if (!graphBuildDialog) return;
+    const pending = graphBuildDialog;
+    setGraphBuildDialog(null);
     await submitQuestion(pending.question, "default", false);
   }
 
-  async function handlePrecisionBuild() {
-    if (!precisionDialog?.estimate) return;
-    const pending = precisionDialog;
-    setPrecisionDialog({ ...pending, building: true });
+  async function handleGraphBuild() {
+    if (!graphBuildDialog?.estimate) return;
+    const pending = graphBuildDialog;
+    setGraphBuildDialog({ ...pending, building: true });
     try {
       await buildGraph(pending.collection);
-      setPrecisionDialog(null);
+      setGraphBuildDialog(null);
       toast(t("chat_build_started_file_panel"), "ok");
     } catch (err) {
-      setPrecisionDialog((cur) =>
+      setGraphBuildDialog((cur) =>
         cur ? { ...cur, building: false, reason: err instanceof Error ? err.message : t("error_generic") } : cur,
       );
     }
@@ -907,12 +931,12 @@ export function ChatPanel({ width }: { width?: number }) {
         overflow: "hidden",
       }}
     >
-      {precisionDialog && (
-        <PrecisionDialog
-          state={precisionDialog}
-          onBuild={handlePrecisionBuild}
-          onFallback={handlePrecisionFallback}
-          onCancel={() => setPrecisionDialog(null)}
+      {graphBuildDialog && (
+        <GraphBuildDialog
+          state={graphBuildDialog}
+          onBuild={handleGraphBuild}
+          onFallback={handleGraphFallback}
+          onCancel={() => setGraphBuildDialog(null)}
         />
       )}
 
@@ -1092,8 +1116,9 @@ export function ChatPanel({ width }: { width?: number }) {
                       {(
                         [
                           { value: "default" as RetrievalMode,        label: t("chat_retrieval_semantic"), desc: t("chat_retrieval_semantic_desc"), disabled: false },
+                          { value: "enhanced" as RetrievalMode,       label: t("chat_retrieval_enhanced"), desc: t("chat_retrieval_enhanced_desc"), disabled: false },
                           { value: "graph_only" as RetrievalMode,     label: t("chat_retrieval_graph"),    desc: t("chat_retrieval_graph_desc"),    disabled: !isLightRAG },
-                          { value: "high_precision" as RetrievalMode, label: t("chat_retrieval_hybrid"),   desc: t("chat_retrieval_hybrid_desc"),   disabled: !isLightRAG },
+                          { value: "graph_mixed" as RetrievalMode, label: t("chat_retrieval_graph_mixed"), desc: t("chat_retrieval_graph_mixed_desc"), disabled: !isLightRAG },
                           { value: "deep_thinking" as RetrievalMode,  label: t("chat_retrieval_deep"),     desc: t("chat_retrieval_deep_desc"),     disabled: !collectionName },
                           { value: "fulltext" as RetrievalMode,       label: t("chat_retrieval_fulltext"), desc: t("chat_retrieval_fulltext_desc"), disabled: !selectedDocId },
                         ]

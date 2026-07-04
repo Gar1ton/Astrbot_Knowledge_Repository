@@ -243,6 +243,28 @@ class DeepThinkingConfig:
     llm_api_key: str = ""
 
 
+@dataclass
+class EnhancedRecallConfig:
+    """增强召回（A-RAG「2+1」形态）配置。无 enabled——手动 retrieval_mode 即开关。
+
+    介于 default 与 deep_thinking 之间的中间档：PLAN-lite 一次规划（改写+拆解）→
+    并行混合检索 + 本地 cross-encoder 重排（0 次 LLM）→ 一次综合内嵌 CRAG 式充分性
+    自检 → 不足才补一轮纠正检索 + 重合成。典型 2 次 LLM 调用、最坏 3–4 次。
+    LLM 端点复用 deep_thinking 的独立 endpoint 决策（同为研究型内部 agent，
+    对 JSON 纪律与模型档位需求一致，不重复膨胀配置面），故不设 llm_* 键。
+    """
+
+    max_sub_queries: int = 3  # PLAN-lite 拆解上限（不含改写后的主查询）。
+    wide_top_k: int = 16  # 每个查询进入融合的候选数（retrieve_with_outcome top_k）。
+    candidate_k: int = 32  # 内核宽召回池（per-engine 候选量，供重排挑选）。
+    max_final_evidence: int = 12  # 合成上下文证据上限（adaptive_cutoff keep_max）。
+    # rank_candidates 的 rrf×cross-encoder 混合权重；单轮档比 deep 更依赖重排提精度。
+    rerank_weight: float = 0.5
+    corrective_enabled: bool = True  # 首轮自检不充分时的一轮纠正检索 + 重合成。
+    max_corrective_queries: int = 3
+    json_max_retries: int = 1
+
+
 # Zotero 同步模式常量（杜绝魔法字面量散落）。
 ZOTERO_STORAGE_MANAGED = "managed_copy"
 ZOTERO_STORAGE_LINKED = "linked"
@@ -319,6 +341,7 @@ class Config:
         embedding = self.get_embedding_config()
         rerank = self.get_rerank_config()
         deep_thinking = self.get_deep_thinking_config()
+        enhanced = self.get_enhanced_recall_config()
         zotero = self.get_zotero_sync_config()
         ask = self.get_ask_agent_config()
         return {
@@ -400,6 +423,13 @@ class Config:
                 "llm_api_key": _mask(
                     _secret(deep_thinking.llm_api_key, ENV_DEEP_THINKING_LLM_API_KEY)
                 ),
+            },
+            "enhanced_recall": {
+                "max_sub_queries": enhanced.max_sub_queries,
+                "wide_top_k": enhanced.wide_top_k,
+                "max_final_evidence": enhanced.max_final_evidence,
+                "rerank_weight": enhanced.rerank_weight,
+                "corrective_enabled": enhanced.corrective_enabled,
             },
             "zotero_sync": {
                 "enabled": zotero.enabled,
@@ -736,6 +766,37 @@ class Config:
             llm_api_key=str(s.get("llm_api_key", "")),
         )
 
+    def get_enhanced_recall_config(self) -> EnhancedRecallConfig:
+        s = _section(self.raw, "enhanced_recall")
+        return EnhancedRecallConfig(
+            max_sub_queries=max(
+                1, int(s.get("max_sub_queries", EnhancedRecallConfig.max_sub_queries))
+            ),
+            wide_top_k=max(1, int(s.get("wide_top_k", EnhancedRecallConfig.wide_top_k))),
+            candidate_k=max(1, int(s.get("candidate_k", EnhancedRecallConfig.candidate_k))),
+            max_final_evidence=max(
+                1, int(s.get("max_final_evidence", EnhancedRecallConfig.max_final_evidence))
+            ),
+            rerank_weight=min(
+                1.0,
+                max(0.0, float(s.get("rerank_weight", EnhancedRecallConfig.rerank_weight))),
+            ),
+            corrective_enabled=bool(
+                s.get("corrective_enabled", EnhancedRecallConfig.corrective_enabled)
+            ),
+            max_corrective_queries=max(
+                1,
+                int(
+                    s.get(
+                        "max_corrective_queries", EnhancedRecallConfig.max_corrective_queries
+                    )
+                ),
+            ),
+            json_max_retries=max(
+                0, int(s.get("json_max_retries", EnhancedRecallConfig.json_max_retries))
+            ),
+        )
+
 
 # ── 可写配置键登记（API 写入 / 运行时持久化的唯一真相源）────────────
 #
@@ -842,6 +903,13 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
     "rerank": {
         "provider": ConfigKeyPolicy(True, True),
         "model": ConfigKeyPolicy(True, True),
+    },
+    "enhanced_recall": {
+        "max_sub_queries": ConfigKeyPolicy(True, True),
+        "wide_top_k": ConfigKeyPolicy(True, True),
+        "max_final_evidence": ConfigKeyPolicy(True, True),
+        "rerank_weight": ConfigKeyPolicy(True, True),
+        "corrective_enabled": ConfigKeyPolicy(True, True),
     },
 }
 

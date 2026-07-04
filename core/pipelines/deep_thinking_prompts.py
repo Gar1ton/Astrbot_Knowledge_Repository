@@ -1,8 +1,11 @@
 """Deep Thinking 各 LLM 步骤的 prompt 模板与严格 JSON 解析（pipelines 层）。
 
-为何独立成文件：把 PLAN / SEA / REFINE 三步的 prompt 与解析契约集中，使
+为何独立成文件：把 PLAN / SEA / VERIFY 各步的 prompt 与解析契约集中，使
 orchestrator 只关心控制流。解析失败抛 JsonContractError（与「LLM 调用异常」区分）——
 前者由 orchestrator 重试/按步降级，后者触发 baseline 回退。
+
+v0.30.0 起 REFINE 并入 SEA：SEA 在 sufficient=false 时直接给出下一轮补检
+next_sub_queries（每个未收敛轮省一次 LLM 调用），独立 REFINE 步骤已删除。
 """
 from __future__ import annotations
 
@@ -155,7 +158,11 @@ SEA_SYSTEM = (
     "比较多篇论文或多个对象时，supported 必须满足来源约束：不能用单篇/单来源证据支撑跨论文结论；"
     "若证据来源与断言对象不一致，标为 partial 或 contradicted。"
     "同时主动从已召回证据里发现 checklist 尚未覆盖、但与问题高度相关的新机制/新论点，"
-    "列入 discovered_aspects 以供深挖。只输出 JSON，不要任何额外文字。"
+    "列入 discovered_aspects 以供深挖。"
+    "若整体不足以回答（sufficient=false），必须同时在 next_sub_queries 给出下一轮补检的"
+    "精准检索子查询：query 要可检索，优先包含论文名、方法名、数据集名、模型名、表格名、"
+    "图号、章节名或 arXiv id，避免只输出「缺少定义」「缺少对比」这类泛化短语。"
+    "只输出 JSON，不要任何额外文字。"
 )
 
 
@@ -193,6 +200,8 @@ class SeaResult:
     sufficient: bool = False
     coverage: list[SeaCoverageItem] = field(default_factory=list)
     discovered: list[SeaDiscoveredItem] = field(default_factory=list)
+    # sufficient=false 时 SEA 直接给出的下一轮补检 query（REFINE 已并入 SEA）。
+    next_queries: list[str] = field(default_factory=list)
 
 
 def build_sea_prompt(
@@ -201,6 +210,7 @@ def build_sea_prompt(
     evidence: list[EvidenceItem],
     clip: int = _EVIDENCE_TEXT_CLIP,
     source_labels: dict[str, str] | None = None,
+    max_next_queries: int = 4,
 ) -> str:
     checklist_lines = "\n".join(
         f'- {item.id}{"[关键]" if item.critical else ""}: {item.text}'
@@ -224,11 +234,17 @@ def build_sea_prompt(
         '"discovered_aspects":[{"text":"证据里出现、清单未覆盖的新机制/论点",'
         '"why_relevant":"为何与问题相关","search_hints":["可检索术语"],'
         '"gap_type":"definition|comparison|section_anchor"}],'
-        '"conflicting_chunk_ids":["chunk_id"],"sufficient":false}\n'
+        '"conflicting_chunk_ids":["chunk_id"],"sufficient":false,'
+        '"next_sub_queries":[{"query":"下一轮补检的检索query",'
+        '"type":"definition|direct_quote|comparison|timeline|conflict_resolution|section_anchor"}]}\n'
         "satisfied_ids 用清单里的 id；conflicting_chunk_ids 用上面的 chunk_id；"
         "gaps 是「回答必需但仍缺」的阻塞缺口；discovered_aspects 是「证据里值得深挖的新角度」"
         "（两者不要混填，没有就给空数组）；"
         "sufficient 仅当核心信息点已 supported 且无高价值未探索 aspect 时才为 true；"
+        f"sufficient=false 时 next_sub_queries 必须给 1~{max_next_queries} 个"
+        "聚焦、含关键词或章节/图表锚点的检索 query（优先补 gaps 与 discovered_aspects，"
+        "把缺口改写成包含论文名/数据集名/模型名/方法名/表格或章节锚点的短 query）；"
+        "sufficient=true 时 next_sub_queries 给空数组；"
         "多来源对比题中，单一来源证据不得支撑跨来源结论；"
         "引用对象与来源不一致时必须标 partial 或 contradicted；"
         "不要把只有主题相关但不能支撑断言的片段标为 supported。"
@@ -299,6 +315,14 @@ def parse_sea(raw: str) -> SeaResult:
             text = str(entry).strip()
             if text:
                 discovered.append(SeaDiscoveredItem(text=text))
+    next_queries: list[str] = []
+    for entry in obj.get("next_sub_queries", []) or []:
+        if isinstance(entry, dict):
+            text = str(entry.get("query") or entry.get("text") or entry.get("q") or "").strip()
+        else:
+            text = str(entry).strip()
+        if text and text not in next_queries:
+            next_queries.append(text)
     return SeaResult(
         satisfied_ids={str(x) for x in (obj.get("satisfied_ids") or [])} | coverage_satisfied,
         gaps=gaps,
@@ -307,45 +331,8 @@ def parse_sea(raw: str) -> SeaResult:
         sufficient=bool(obj.get("sufficient", False)),
         coverage=coverage,
         discovered=discovered,
+        next_queries=next_queries,
     )
-
-
-# ── REFINE：用缺口生成补充查询 ──────────────────────────────
-REFINE_SYSTEM = (
-    "你是检索优化助手。针对仍缺失的信息点和缺口类型，生成用于补齐证据的精准检索子查询。"
-    "根据 definition、direct_quote、comparison、timeline、conflict_resolution、section_anchor "
-    "等类型选择不同关键词和锚点策略。"
-    "query 要可检索，优先包含论文名、方法名、数据集名、模型名、表格名、图号、章节名或 arXiv id；"
-    "避免只输出「缺少定义」「缺少对比」这类泛化短语。"
-    "只输出 JSON，不要任何额外文字。"
-)
-
-
-def build_refine_prompt(gaps: list[str]) -> str:
-    gap_lines = "\n".join(f"- {g}" for g in gaps)
-    return (
-        f"仍缺失的信息点：\n{gap_lines or '（空）'}\n\n"
-        '请输出 JSON：{"gap_queries":[{"query":"补充检索query",'
-        '"type":"definition|direct_quote|comparison|timeline|conflict_resolution|section_anchor"}]}\n'
-        "每个缺口给一个聚焦、含关键词或章节/图表锚点的检索 query。"
-        "优先把缺口改写成包含论文名/数据集名/模型名/方法名/表格或章节锚点的短 query。"
-    )
-
-
-def parse_refine(raw: str) -> list[str]:
-    obj = extract_json_object(raw)
-    raw_queries = obj.get("gap_queries")
-    if not isinstance(raw_queries, list):
-        raise JsonContractError("gap_queries must be a list")
-    queries: list[str] = []
-    for q in raw_queries:
-        if isinstance(q, dict):
-            text = str(q.get("query") or q.get("text") or q.get("q") or "").strip()
-        else:
-            text = str(q).strip()
-        if text:
-            queries.append(text)
-    return queries
 
 
 # ── VERIFY：答案级 verification（三档支持度 response scoring）──
@@ -455,7 +442,6 @@ __all__ = [
     "extract_json_object",
     "PLAN_SYSTEM",
     "SEA_SYSTEM",
-    "REFINE_SYSTEM",
     "VERIFY_SYSTEM",
     "SeaCoverageItem",
     "SeaDiscoveredItem",
@@ -465,8 +451,6 @@ __all__ = [
     "parse_plan",
     "build_sea_prompt",
     "parse_sea",
-    "build_refine_prompt",
-    "parse_refine",
     "build_verify_prompt",
     "parse_verify",
 ]

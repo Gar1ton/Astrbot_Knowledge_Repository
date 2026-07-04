@@ -6,7 +6,7 @@
 
 **AstrBot 知识库原件管理、同步备份与 Research Agent 插件**
 
-[![version](https://img.shields.io/badge/版本-v0.29.3-blueviolet)](metadata.yaml)
+[![version](https://img.shields.io/badge/版本-v0.30.1-blueviolet)](metadata.yaml)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-6f42c1)](https://github.com/AstrBotDevs/AstrBot)
 
@@ -25,7 +25,7 @@ Knowledge Repository 为 AstrBot 增加一个面向资料、论文和长期知�
 - **原件优先的知识库管理**：保留 PDF 原件与抽取后的 clean markdown，支持集合、标签、文档元数据、笔记和分块检查。
 - **Research Agent 问答**：在 AstrBot 对话中注入知识库召回上下文，或由独立 Ask Agent 生成带引用的研究型回答。
 - **Zotero 资料同步**：支持本地 Zotero 与 Zotero Web API 模式，把 Zotero collection 树同步为插件内集合树。
-- **LightRAG 高精度图谱**：按集合构建 LightRAG workspace，支持实体关系图谱、图谱查询和构建进度管理。
+- **LightRAG 图谱混合检索**：按集合构建 LightRAG workspace，将语义/词法证据与实体关系图谱上下文汇合，支持图谱查询和构建进度管理。
 - **同步与备份**：Cloudflare R2 保存可跨设备恢复的完整快照；Notion 提供可读元数据镜像。
 - **独立 WebUI**：默认端口 `26618`，内置登录鉴权，覆盖文档、Ask、图谱、同步、配额、设置、终端日志和数据流诊断。
 
@@ -70,7 +70,7 @@ pip install -r requirements-additional.txt
 | 能力 | 依赖说明 |
 |------|----------|
 | 本地 Embedding | `sentence-transformers`，用于向量检索和 LightRAG embedding |
-| LightRAG 图谱 | `lightrag-hku`，用于高精度图谱构建与查询 |
+| LightRAG 图谱 | `lightrag-hku`，用于图谱构建、纯图谱查询与图谱混合检索 |
 | Cloudflare R2 | `boto3`，用于原件与数据库备份 |
 | 开发验证 | `pytest`、`ruff`、`mypy` 等工具 |
 

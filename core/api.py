@@ -53,6 +53,13 @@ from core.milvus_build import (
     MilvusBuildJob,
 )
 from core.pipelines.retrieval_orchestrator import ChunkSignal, RetrievalScope
+from core.retrieval_modes import (
+    MODE_GRAPH_MIXED,
+    MODE_GRAPH_ONLY,
+    VALID_RETRIEVAL_MODES,
+    normalize_retrieval_mode,
+)
+from core.utils.text_chunks import clip_at_sentence
 from core.zotero_sync_job import (
     ZOTERO_SYNC_ERROR,
     ZOTERO_SYNC_PARTIAL,
@@ -161,14 +168,19 @@ def _deep_warning_prefix(outcome: Any, answer_language: str, question: str) -> s
     )
 
 
-def _apply_deep_answer_warning(
-    answer: str, outcome: Any | None, answer_language: str, question: str
+def _compute_answer_notice(
+    outcome: Any | None, answer_language: str, question: str
 ) -> str:
-    """deep thinking 证据不足/未验证时，把警告写进答案正文。"""
-    if outcome is None or not answer:
-        return answer
-    prefix = _deep_warning_prefix(outcome, answer_language, question)
-    return f"{prefix}{answer}" if prefix else answer
+    """deep/enhanced 证据不足/未验证时的提示文本（结构化字段，不再拼进正文开头）。
+
+    v0.30.0：由「prepend 到 answer」改为响应独立的 answer_notice 字段——正文开头保持
+    连贯（流畅性）；实时渲染端（WebUI 气泡尾注 / 聊天端引用后尾注）自行决定呈现位置。
+    存库时仍以分隔线追加到答案尾部（见 ask()），保证历史回放不丢提示——轻微双轨是
+    「实时结构化 vs 历史自包含」的有意取舍。
+    """
+    if outcome is None:
+        return ""
+    return _deep_warning_prefix(outcome, answer_language, question).strip()
 
 
 def _note_html(content: str) -> str:
@@ -253,6 +265,7 @@ if TYPE_CHECKING:
     from core.managers.base import BaseCategoryManager, BaseIngestManager, BaseQuotaManager
     from core.metrics import PerformanceTracker
     from core.pipelines.deep_thinking_orchestrator import DeepThinkingOrchestrator
+    from core.pipelines.enhanced_recall_orchestrator import EnhancedRecallOrchestrator
     from core.pipelines.retrieval_orchestrator import RetrievalOrchestrator
     from core.pipelines.sync_pipeline import SyncPipeline
     from core.repository.embedding.base import EmbeddingProvider
@@ -313,11 +326,20 @@ class LightRAGNotReadyError(RuntimeError):
         self.build_available = build_available
 
 
-class HighPrecisionQueryError(RuntimeError):
-    def __init__(self, collection: str, reason: str) -> None:
+class GraphMixedQueryError(RuntimeError):
+    """图谱混合检索已就绪但查询执行失败。"""
+
+    def __init__(
+        self, collection: str, reason: str, *, mode: str = MODE_GRAPH_MIXED
+    ) -> None:
         super().__init__(reason)
         self.collection = collection
         self.reason = reason
+        self.mode = mode
+
+
+# v0.30.1 兼容导出；v0.31.0 移除。活跃代码统一使用 GraphMixedQueryError。
+HighPrecisionQueryError = GraphMixedQueryError
 
 
 class ReadOnlyError(RuntimeError):
@@ -381,6 +403,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         embedding_provider: EmbeddingProvider | None = None,
         retrieval_orchestrator: RetrievalOrchestrator | None = None,
         deep_thinking_orchestrator: DeepThinkingOrchestrator | None = None,
+        enhanced_recall_orchestrator: EnhancedRecallOrchestrator | None = None,
         reranker: Reranker | None = None,
         metrics: PerformanceTracker | None = None,
         progress_store: ProgressStore | None = None,
@@ -396,6 +419,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._embedding_provider = embedding_provider
         self._retrieval_orchestrator = retrieval_orchestrator
         self._deep_thinking_orchestrator = deep_thinking_orchestrator
+        self._enhanced_recall_orchestrator = enhanced_recall_orchestrator
         self._reranker = reranker  # default 路径研究召回的重排器（与 deep_thinking 共享同一实例）
         self._sync_targets = sync_targets or {}
         self._ingest_manager = ingest_manager
@@ -1541,14 +1565,19 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     scope_key=_sel.coll_key,
                     library_id=_sel.library_id,
                 )
-        if retrieval_mode not in {"default", "high_precision", "graph_only", "deep_thinking"}:
-            raise ValueError(
-                "retrieval_mode must be 'default', 'high_precision', 'graph_only', "
-                "or 'deep_thinking'"
+        retrieval_mode, used_legacy_mode = normalize_retrieval_mode(retrieval_mode)
+        if used_legacy_mode:
+            logger.warning(
+                "retrieval_mode='high_precision' is deprecated; use 'graph_mixed' instead"
             )
-        # high_precision / graph_only 走图谱 workspace，必须有具体 collection；
-        # deep_thinking 允许 collection 为空（全局深挖，跨所有 active 集合的证据链）。
-        if retrieval_mode in {"high_precision", "graph_only"} and not collection:
+        if retrieval_mode not in VALID_RETRIEVAL_MODES:
+            raise ValueError(
+                "retrieval_mode must be 'default', 'enhanced', 'graph_mixed', "
+                "'graph_only', or 'deep_thinking'"
+            )
+        # graph_mixed / graph_only 走图谱 workspace，必须有具体 collection；
+        # deep_thinking / enhanced 允许 collection 为空（全局证据链，跨所有 active 集合）。
+        if retrieval_mode in {MODE_GRAPH_MIXED, MODE_GRAPH_ONLY} and not collection:
             raise ValueError(f"{retrieval_mode} retrieval requires a collection")
         if answer_language not in {"auto", "zh", "en"}:
             answer_language = "auto"
@@ -1574,9 +1603,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         _progress("embed_query", 0)
         t0 = time.monotonic()
 
-        # 翻译召回查询（当 use_english_retrieval=True 时，将用户问题翻译为英语再送入向量检索）
+        # 翻译召回查询（当 use_english_retrieval=True 时，将用户问题翻译为英语再送入向量检索）。
+        # 仅含中文才翻译：与聊天路径的 _has_cjk 门一致，英文 query 不白耗一次 LLM 调用。
         retrieval_question = question
-        if use_english_retrieval and self._llm_adapter is not None:
+        if use_english_retrieval and self._llm_adapter is not None and _uses_chinese(question):
             try:
                 prompt = (
                     "Translate the following query to English for document retrieval."
@@ -1601,7 +1631,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             except Exception as exc:
                 logger.warning("Query translation failed, using original: %s", exc)
 
-        if retrieval_mode in {"high_precision", "graph_only"}:
+        if retrieval_mode in {MODE_GRAPH_MIXED, MODE_GRAPH_ONLY}:
             readiness = await self.get_lightrag_readiness(collection or "")
             if not readiness["ready"]:
                 raise LightRAGNotReadyError(
@@ -1627,7 +1657,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 engines.append("lightrag")
             except Exception as exc:
                 logger.warning("LightRAG graph_only retrieval failed [%s]: %s", collection, exc)
-                raise HighPrecisionQueryError(collection or "", str(exc)) from exc
+                raise GraphMixedQueryError(
+                    collection or "", str(exc), mode=MODE_GRAPH_ONLY
+                ) from exc
             _progress("llm_generate", 80)
             t_llm = time.monotonic()
             if self._llm_adapter is not None and lightrag_context:
@@ -1669,9 +1701,13 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 "fallback_reason": None,
             }
 
-        deep_outcome = None  # DeepThinkingOutcome | None（仅 deep_thinking 路径非空）。
+        # DeepThinkingOutcome | None（deep_thinking / enhanced 两条编排路径非空，
+        # 共享同一下游：sources 组装、deep 风格兜底合成、告警、thinking_trace 序列化）。
+        deep_outcome = None
         if retrieval_mode == "deep_thinking" and self._deep_thinking_orchestrator is None:
             raise RuntimeError("DeepThinkingOrchestrator is not configured")
+        if retrieval_mode == "enhanced" and self._enhanced_recall_orchestrator is None:
+            raise RuntimeError("EnhancedRecallOrchestrator is not configured")
         if retrieval_mode == "deep_thinking":
             _progress("deep_thinking", 20)
             t_dt = time.monotonic()
@@ -1688,6 +1724,26 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             _record(
                 "deep_thinking_total",
                 t_dt,
+                rounds=len(deep_outcome.trace),
+                degraded=deep_outcome.degraded,
+                est_tokens=deep_outcome.est_total_tokens,
+            )
+        elif retrieval_mode == "enhanced":
+            _progress("enhanced", 15)
+            t_er = time.monotonic()
+            deep_outcome = await self._enhanced_recall_orchestrator.run(
+                collection or "",
+                retrieval_question,
+                scope,
+                progress=_progress,
+                answer_language=answer_language,
+                answer_question=question,
+            )
+            chunks = list(deep_outcome.evidence)
+            engines.append("enhanced_recall")
+            _record(
+                "enhanced_recall_total",
+                t_er,
                 rounds=len(deep_outcome.trace),
                 degraded=deep_outcome.degraded,
                 est_tokens=deep_outcome.est_total_tokens,
@@ -1747,7 +1803,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         _record("embed_query", t0)
 
         lightrag_context = ""
-        if retrieval_mode == "high_precision":
+        if retrieval_mode == MODE_GRAPH_MIXED:
             _progress("lightrag_context", 50)
             try:
                 if self._retrieval_orchestrator is None:
@@ -1757,8 +1813,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 )
                 engines.append("lightrag")
             except Exception as exc:
-                logger.warning("LightRAG high-precision retrieval failed [%s]: %s", collection, exc)
-                raise HighPrecisionQueryError(collection or "", str(exc)) from exc
+                logger.warning("LightRAG graph-mixed retrieval failed [%s]: %s", collection, exc)
+                raise GraphMixedQueryError(collection or "", str(exc)) from exc
 
         _progress("rrf_fusion", 65)
 
@@ -1866,26 +1922,38 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             )
             answer = await self._llm_adapter.generate(user_prompt, system_prompt=system_prompt)
         elif context_parts:
-            answer = f"根据知识库检索到 {len(chunks)} 个相关片段：\n\n" + "\n\n".join(
-                f"**[{s['n']}] {s['title']}**\n"
-                f"{s['text'][:300]}{'…' if len(s['text']) > 300 else ''}"
-                for s in sources
+            # LLM 不可用的降级排版：引导行说明「未合成」+ 每条摘录带标题/页码、按句边界
+            # 截断——不再把句中硬切的原文碎片直接拼成正文（流畅性）。
+            excerpts = []
+            for s in sources:
+                meta = s.get("metadata") or {}
+                page_info = f"（Page {meta['page_number']}）" if meta.get("page_number") else ""
+                excerpts.append(
+                    f"**[{s['n']}] {s['title']}**{page_info}\n"
+                    f"{clip_at_sentence(s['text'], 300)}"
+                )
+            answer = (
+                f"⚠️ LLM 暂不可用，未能合成回答。以下为检索到的 {len(sources)} 段原文摘录：\n\n"
+                + "\n\n".join(excerpts)
             )
         elif lightrag_context:
             answer = lightrag_context
         else:
             answer = "未在知识库中找到与该问题相关的内容。请尝试其他关键词或上传相关文档。"
 
-        answer = _apply_deep_answer_warning(answer, deep_outcome, answer_language, question)
+        # v0.30.0：告警改结构化 answer_notice 字段，不再前缀拼接（正文开头保持连贯）。
+        answer_notice = (
+            _compute_answer_notice(deep_outcome, answer_language, question) if answer else ""
+        )
 
         _record("llm_generate", t_llm)
         _record("ask_total", ask_start, sources=len(sources))
         _progress("done", 100)
 
         engines = list(dict.fromkeys(engines))
-        if retrieval_mode == "deep_thinking" and deep_outcome is not None:
+        if retrieval_mode in {"deep_thinking", "enhanced"} and deep_outcome is not None:
             actual_mode = deep_outcome.actual_mode
-        elif retrieval_mode == "high_precision":
+        elif retrieval_mode == MODE_GRAPH_MIXED:
             if "astrbot" in engines:
                 actual_mode = "astrbot_lightrag"
             elif "milvus" in engines:
@@ -1903,11 +1971,13 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         else:
             actual_mode = "none"
 
-        # 自动持久化聊天记录（source_store 支持时）
+        # 自动持久化聊天记录（source_store 支持时）。notice 以分隔线追加到存库答案尾部，
+        # 历史回放自包含不丢提示（实时响应用结构化 answer_notice 字段）。
+        stored_answer = f"{answer}\n\n---\n{answer_notice}" if answer_notice else answer
         try:
             await self._source_store.add_chat_message(cid, "user", question)
             await self._source_store.add_chat_message(
-                cid, "assistant", answer,
+                cid, "assistant", stored_answer,
                 sources=[s for s in sources],
                 retrieval_mode=actual_mode,
             )
@@ -1917,6 +1987,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         return {
             "conversation_id": cid,
             "answer": answer,
+            "answer_notice": answer_notice,
             "sources": sources,
             "requested_retrieval_mode": retrieval_mode,
             "actual_retrieval_mode": actual_mode,
@@ -3049,6 +3120,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._reranker = reranker
         if self._deep_thinking_orchestrator is not None:
             self._deep_thinking_orchestrator.update_reranker(reranker, rerank_cfg)
+        if self._enhanced_recall_orchestrator is not None:
+            self._enhanced_recall_orchestrator.update_reranker(reranker, rerank_cfg)
         logger.info(
             "reranker hot-swapped: provider=%s model=%s",
             rerank_cfg.provider,
@@ -3063,6 +3136,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "embedding": self._config.get_embedding_config,
             "ask": self._config.get_ask_agent_config,
             "rerank": self._config.get_rerank_config,
+            "enhanced_recall": self._config.get_enhanced_recall_config,
             "graph": self._config.get_graph_config,
             "r2_sync": self._config.get_r2_sync_config,
             "notion_sync": self._config.get_notion_sync_config,
@@ -3750,4 +3824,9 @@ def _parse_iso(value: str | None) -> datetime | None:
     return parsed
 
 
-__all__ = ["HighPrecisionQueryError", "KnowledgeRepositoryApi", "LightRAGNotReadyError"]
+__all__ = [
+    "GraphMixedQueryError",
+    "HighPrecisionQueryError",
+    "KnowledgeRepositoryApi",
+    "LightRAGNotReadyError",
+]

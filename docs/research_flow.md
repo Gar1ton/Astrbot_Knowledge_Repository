@@ -25,7 +25,7 @@ flowchart TD
   D -- "明确" --> E["research_execute(query, collection,<br/>mode, breadth)<br/>main.py · 只读"]
 
   %% ── 工具二：执行召回（chat 侧编排） ──
-  E --> F{"strict mode 且无 collection?<br/>deep_thinking / high_precision / graph_only"}
+  E --> F{"strict mode 且无 collection?<br/>deep_thinking / graph_mixed / graph_only"}
   F -- "是" --> FA["probe 自动绑定<br/>(ambiguity=low -> top collection)"]
   FA --> FB{"绑定成功?"}
   FB -- "否" --> FC["发送提示 + 返回 needs_scope<br/>(不静默改 default)"]
@@ -49,7 +49,7 @@ flowchart TD
   K --> L{"retrieval_mode"}
   L -- "graph_only" --> LG["LightRAG 图谱上下文<br/>(子作用域禁图谱)"]
   L -- "deep_thinking" --> LD["DeepThinkingOrchestrator.run<br/>collection 可为空=全局深挖<br/>见 deep_thinking_flow.md"]
-  L -- "default / high_precision" --> M["_resolve_ask_collections<br/>全局=所有 active 集合 (无 [:5] 截断)<br/>集合 scope=父+后代名"]
+  L -- "default / graph_mixed" --> M["_resolve_ask_collections<br/>全局=所有 active 集合 (无 [:5] 截断)<br/>集合 scope=父+后代名"]
 
   M --> N["逐集合 retrieve_with_outcome<br/>milvus dense + sqlite anchor/lexical"]
   N --> N1["候选文档集统一解析<br/>scope.allowed_doc_ids -> 子树/全局<br/>collection 为空 -> 全部 active 文档"]
@@ -82,5 +82,5 @@ flowchart TD
 - **正文精确命中（防假阴性）**：probe/execute 都会对查询里的 ASCII 术语调 `search_exact_mentions` 扫正文 chunk——即使标题/标签没标注，也能发现命中，杜绝「metadata 空 → 误判库里没有」。
 - **全局召回不漏**：`default` 全局覆盖所有 active 集合（移除前 5 个截断），跨集合聚合候选后按 RRF 全局排序一次截断（移除「凑满 top_k 就停」的提前退出）。
 - **作用域含后代**：选中集合 = 该集合及其全部子集合；SQLite 词法/锚点通道按 `allowed_doc_ids` 覆盖子树，`collection` 为空时走全局 active 文档。
-- **严格模式与降级边界**：`high_precision` / `graph_only` 必须有明确 collection；`deep_thinking` 在 WebUI（`api.ask`）允许全局，聊天端则先 probe 自动绑定或返回 `needs_scope`，绝不静默退化为 `default`。
+- **严格模式与降级边界**：`graph_mixed` / `graph_only` 必须有明确 collection；`deep_thinking` 在 WebUI（`api.ask`）允许全局，聊天端则先 probe 自动绑定或返回 `needs_scope`，绝不静默退化为 `default`。`high_precision` 仅作为 v0.30.1 的旧输入别名，响应统一规范化为 `graph_mixed`。
 - **诚实文案**：区分「本次检索未命中（范围：X）」与「库里没有」，并回带 `searched_scope` / `exact_hit_count` 审计字段。

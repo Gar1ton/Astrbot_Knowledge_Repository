@@ -6,6 +6,7 @@ final evidence。剥离的目的：让 orchestrator 只关心控制流，并使�
 """
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from core.repository.reranker.base import ScoredChunk
@@ -55,13 +56,17 @@ async def rank_candidates(
         return scored
 
     # 可选 rerank：按 query 分池打分，逐 chunk 取跨 query 最高 rerank 分。
+    # 各池打分互相独立 → 并发执行（纯提速；max 聚合与完成顺序无关，gather 保序）。
     id_to_chunk = {c.chunk_id: c for c in non_pinned}
-    rerank: dict[str, float] = {}
+    pools: list[tuple[str, list[DocumentChunk]]] = []
     for q, oc in query_outcomes:
         pool = [id_to_chunk[c.chunk_id] for c in oc.chunks if c.chunk_id in id_to_chunk]
-        if not pool:
-            continue
-        for sc in await reranker.rerank(q, pool):
+        if pool:
+            pools.append((q, pool))
+    rerank: dict[str, float] = {}
+    scored_pools = await asyncio.gather(*(reranker.rerank(q, pool) for q, pool in pools))
+    for scored_pool in scored_pools:
+        for sc in scored_pool:
             cid = sc.chunk.chunk_id
             if sc.score > rerank.get(cid, float("-inf")):
                 rerank[cid] = sc.score

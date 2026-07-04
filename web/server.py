@@ -1116,7 +1116,7 @@ async def handle_ask(request: web.Request) -> web.Response:
     retrieval_mode = body.get("retrieval_mode") or "default"
     use_english_retrieval = bool(body.get("use_english_retrieval") or False)
     answer_language = str(body.get("answer_language") or "auto")
-    from core.api import HighPrecisionQueryError, LightRAGNotReadyError
+    from core.api import GraphMixedQueryError, LightRAGNotReadyError
 
     try:
         result = await _api(request).ask(
@@ -1142,10 +1142,10 @@ async def handle_ask(request: web.Request) -> web.Response:
             },
             status=409,
         )
-    except HighPrecisionQueryError as exc:
+    except GraphMixedQueryError as exc:
         return web.json_response(
             {
-                "status": "high_precision_failed",
+                "status": f"{exc.mode}_failed",
                 "message": exc.reason,
                 "collection": exc.collection,
             },

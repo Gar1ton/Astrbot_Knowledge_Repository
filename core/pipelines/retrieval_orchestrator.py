@@ -1,4 +1,4 @@
-"""Unified evidence retrieval for default and high-precision Ask flows."""
+"""Default 与图谱混合 Ask 共用的统一证据召回。"""
 from __future__ import annotations
 
 import json

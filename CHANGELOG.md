@@ -23,6 +23,53 @@
 
 ## [Unreleased]
 
+## [v0.30.1] — 2026-07-04
+
+### 修复 (Fixed)
+
+- **图谱混合模式术语与公开契约收敛**：将易误解为“经过精确度阈值验证”的 `high_precision` 更名为 `graph_mixed`，明确其真实数据流是“语义/词法证据 + LightRAG 图谱上下文”；API、Research probe/execute、AstrBot 工具文案、HTTP 失败状态统一使用新值。v0.30.1 继续接受旧输入并记录弃用警告，但响应规范化为 `graph_mixed`；`actual_retrieval_mode` 的引擎组合值保持不变（`core/retrieval_modes.py`、`core/api.py`、`core/research_skill.py`、`main.py`、`web/server.py`）。
+- **前端区分图谱混合与纯图谱**：Ask 模式改为“图谱混合检索 / Graph-mixed retrieval”，说明为“语义/词法证据 + LightRAG 图谱上下文”；`graph_only` 明确为“纯图谱检索”，未就绪弹窗、错误处理、实际模式徽标与 Flow 连线同步去除“高精度”表述（`web/frontend/components/panels/ChatPanel.tsx`、`components/flow/model.ts`、`lib/api.ts`、`lib/i18n.ts`）。
+
+### 测试 (Tests)
+
+- 后端补充新模式主路径、旧值兼容规范化、图谱混合失败状态测试，全量 `tests/backend` 518 passed、2 skipped；前端 TypeScript、定向 ESLint 与 Next.js 生产构建通过，`tools/sync_frontend.py --check` 确认静态产物一致（`tests/backend/test_api.py`、`test_research_skill.py`、`test_web_server.py`、`pages/`）。
+
+### 构建与工程 (Build/CI)
+
+- 版本升至 v0.30.1，并更新 README、Research 数据流与 LightRAG 依赖说明中的当前术语（`metadata.yaml`、`README.md`、`docs/research_flow.md`、`requirements-additional.txt`）。
+
+## [v0.30.0] — 2026-07-04
+
+### 新增功能 (Added)
+
+- **新检索模式 `enhanced`（增强召回，A-RAG「2+1」形态）**：介于 `default`（1–2 次 LLM）与 `deep_thinking`（典型 6–9 次）之间的中间档——PLAN-lite 一次规划（改写 + ≤3 个互补子查询）→ 并行混合检索（复用 `RetrievalOrchestrator` 内核，全程不涉 LightRAG）+ 合并池 cross-encoder 重排 + `adaptive_cutoff` → 一次合成内嵌 CRAG 式充分性自检（尾部 `===VERDICT===` 标记契约，缺失即 fail-open 视为充分）→ 自检不足才补一轮纠正检索 + 重合成。典型 2 次 LLM 调用、最坏 3–4 次；产出复用 `DeepThinkingOutcome`，api.ask 的 deep 下游（sources/兜底合成/告警/thinking_trace）零改动直接消费；PLAN 失败降级单轮 baseline（`enhanced_degraded_to_default`）、SYNTH 失败交 api.ask 兜底合成（`core/pipelines/enhanced_recall_orchestrator.py`、`enhanced_recall_prompts.py`、`core/config.py` 新 `EnhancedRecallConfig` + `CONFIG_KEY_POLICY.enhanced_recall` + `to_public_dict`、`core/api.py` 模式白名单/分支/actual_mode/reranker 热切换、`core/plugin_initializer.py` 组合根装配）。
+- **enhanced 接入 Research 端口（三档成本路由）**：`_VALID_MODES` 放行 enhanced（非严格集合模式，允许全局证据链）；`_DEEP_SIGNALS` 收敛为重型综述信号（综述/综合/系统/review/survey/…），新增 `_ENHANCED_SIGNALS` 中型分析信号（分析/对比/比较/机制/compare/analyz/summar/…，部分自 deep 降档）；`_suggest_mode` 按「查存+精确命中→default → 重型→deep_thinking → 图谱→high_precision → 中型→enhanced → default」路由；probe 的 `available_modes`/`directive_guidance` 增加中间档与成本阶梯说明；聊天端工具 docstring 与开始/完成文案适配（`core/research_skill.py`、`main.py`）。
+- **WebUI 接入 enhanced**：ChatPanel 模式选择器新增「增强召回」（不要求先选集合），进度轮询扩展到 enhanced 阶段（enhanced_plan/retrieve/synthesize/corrective/resynthesize），答案徽标映射 `enhanced_recall`/`enhanced_degraded_to_default`；设置弹窗与数据流 QuickConfig 增加 enhanced_recall 五键编辑面（`web/frontend/components/panels/ChatPanel.tsx`、`components/modals/SettingModal.tsx`、`components/flow/QuickConfigPanel.tsx`、`lib/api.ts`、`lib/i18n.ts`）。
+- **`answer_notice` 结构化告警字段**：deep/enhanced 的证据不足/未验证提示不再 prepend 到答案正文开头，改为响应独立字段；WebUI 渲染为气泡底部 warn 色尾注、聊天端渲染为引用列表后的 `⚠️` 尾注；存库版以分隔线追加到答案尾部保证历史回放自包含（`core/api.py` `_compute_answer_notice`、`core/research_skill.py` 透传、`main.py` `_format_research_result`、`web/frontend/components/panels/ChatPanel.tsx`、`lib/api.ts`）。
+
+### 修复 (Fixed)
+
+- **聊天端长句被拦腰截断的根因**：旧句子正则 `[。！？!?\.](?=\s|$)` 要求标点后跟空白，中文句号后无空格导致整段判定不可切、落入字符硬切。切分器抽离为纯函数模块并治本：CJK 句读（含尾随右引号/括号）直接断句，超长句先按子句边界（，、；：,;）切，字符硬切仅作无标点长 token 的最后兜底（新 `core/utils/text_chunks.py`，`main.py` 四个切分方法改薄委派，573→513 行）。
+- **LLM 不可用时的降级答案是原文碎片拼接**：改为引导行（明示未合成）+ 每条 `**[n] 标题**（Page x）` + 句边界截断 300 字的摘录排版（`core/api.py`，复用 `text_chunks.clip_at_sentence`）。
+
+### 性能优化 (Performance)
+
+- **deep thinking SEA+REFINE 合并为每轮一次 LLM 调用**：SEA 契约新增 `next_sub_queries`（sufficient=false 时直接给出下一轮补检 query），删除独立 REFINE 步骤；SEA 未给时用确定性 gap 兜底链（discovered → typed coverage 缺口 → gaps → checklist 反推，0 次 LLM），全空才终止。典型总调用数 8–12 → 6–9；收敛判定与 trace shape 逐字段不变，前端零适配（`core/pipelines/deep_thinking_prompts.py`、`deep_thinking_orchestrator.py`）。
+- **per-sub_query 重排并行化**：`rank_candidates` 各查询分池的 cross-encoder 打分互相独立，串行 `await` 改 `asyncio.gather`（max 聚合与顺序无关，纯提速）（`core/pipelines/deep_thinking_evidence.py`）。
+- **document_labels 跨轮缓存**：SEA 与 verification 共享同一 run 内缓存，每篇文档只查一次库，不再每轮/每校验轮重复解析（`core/pipelines/deep_thinking_orchestrator.py` `_labels`）。
+- **Web 路径翻译门统一**：`api.ask` 的英语召回翻译改为仅 query 含中文才调用（与聊天路径 `_has_cjk` 策略一致），英文 query 不再白耗一次翻译 LLM 调用（`core/api.py`）。
+
+### 架构健康 (Refactor)
+
+- 抽公共 `llm_json_call`/`est_tokens` 到 `core/pipelines/llm_json.py`（支持自定义重试后缀），deep 与 enhanced 两条管线共享「调 LLM → 严格解析 → 重试」纪律；`DeepThinkingOrchestrator._llm_json` 改薄委派。
+- 合成模板新增 `_FLUENT_PROSE_RULE` 成段行文约束（正文成段、杜绝碎片化单行 bullet 与流水长句），deep 与 default 模板共用，无额外 LLM 调用（`core/pipelines/answer_synthesis.py`）。
+- 技术债登记：`deep_thinking_orchestrator.py` 达 616 行（>600 红线），拆分计划已登记 `TODO.md`（`_gather_round`+`_run_verification` 拟抽 `deep_thinking_rounds.py`）。
+
+### 测试 (Tests)
+
+- 新增 `tests/backend/test_enhanced_recall_orchestrator.py`（16 例：两步契约解析/fail-open、happy path 恰 2 次 LLM、纠偏路径 3 次、PLAN 降级、SYNTH 兜底、anchor pinned、去重、进度阶段序）与 `test_text_chunks.py`（10 例：中文句读切分、子句兜底、分页、句边界截断）。
+- 改造 `test_deep_thinking_orchestrator.py`（42 例：REFINE 用例迁移为 SEA 合并语义 + 新增 next_sub_queries 直用/确定性兜底/labels 缓存/并行重排等价）；`test_api.py` 增 enhanced 模式 4 例 + answer_notice/降级排版/翻译门 4 例（72 例）；`test_research_skill.py` 增三档路由与 enhanced 全局执行 3 例（26 例）。全量 `tests/backend` 517 passed。
+
 ## [v0.29.3] — 2026-07-03
 
 ### 修复 (Fixed)

@@ -1,5 +1,55 @@
 # TODO
 
+## v0.30.1 图谱混合模式术语收敛 (completed)
+
+### User constraints / 约束
+
+- 将公开召回模式 `high_precision` 更名为 `graph_mixed`，前后端与当前文档统一使用“图谱混合检索 / Graph-mixed retrieval”。
+- v0.30.1 兼容旧输入 `high_precision`：执行同一路径、记录弃用警告，响应统一规范化为 `graph_mixed`；计划在 v0.31.0 移除兼容层。
+- 保持 `actual_retrieval_mode` 的引擎组合值（`milvus_lightrag` / `astrbot_lightrag` / `lexical_lightrag` / `lightrag`）不变。
+- 区分 `graph_mixed`（语义/词法证据 + LightRAG 图谱上下文）与 `graph_only`（仅 LightRAG 图谱上下文）；不手改 `pages/`。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 后端契约与兼容层**：新增 `core/retrieval_modes.py` 统一模式常量/规范化入口；API、Research、聊天工具、错误类与 HTTP 状态改用 `graph_mixed`，保留旧输入与异常名一版兼容。
+- [x] **Phase 2 - 前端与术语**：更新类型、请求/mock、错误处理、Ask 模式文案与 Flow 图谱路径文案；`graph_only` 明确为“纯图谱检索”。
+- [x] **Phase 3 - 文档、版本与验证**：更新 README/当前数据流/依赖注释与测试，版本升至 v0.30.1；pytest、前端 tsc/eslint/build 通过后同步 `pages/` 并追加 CHANGELOG。
+
+### Verification
+
+- `python -m pytest tests/backend -q` → **518 passed, 2 skipped**；兼容测试确认旧 `high_precision` 输入执行相同链路且响应规范化为 `graph_mixed`。
+- `npx.cmd tsc --noEmit --incremental false`、定向 ESLint → passed；Next.js 生产构建 11 条路由静态导出成功。
+- `python tools/sync_frontend.py --check` → `pages/` 与 `web/frontend/out` 一致。
+- `ruff` / `mypy` 未执行：当前 Windows Python 环境未安装对应命令；`py_compile` 与 `git diff --check` 通过。
+
+## v0.30.0 增强召回模式与深挖提效 (completed)
+
+### User constraints / 约束
+
+- 在 `default` 与 `deep_thinking` 之间新增 `enhanced` 增强召回档：A-RAG「2+1」形态（一次 PLAN-lite 规划 + 并行混合检索/本地重排 + 一次综合内嵌 CRAG 式充分性自检，不足才补一轮纠正检索），典型 2 次 LLM、最坏 3–4 次；**全程不使用 LightRAG**，只复用本地 RAG 端口（`retrieve_with_outcome`/`rank_candidates`/`adaptive_cutoff`/cross-encoder reranker）。
+- deep thinking 提效：并行重排、labels 跨轮缓存、SEA+REFINE 合并为每轮一次调用（典型 8–12 → 6–9 次）、web 路径翻译门统一为仅 CJK 才翻译；收敛语义与 trace shape 不变。
+- enhanced 接入 Research 端口（`_VALID_MODES`/`_suggest_mode` 三档路由/probe `available_modes`），非严格 collection 模式（允许全局）；忽略 breadth/top_k（自身 config 管证据量）。
+- Research 输出流畅性：告警改结构化 `answer_notice` 字段（不再前缀拼接）、合成失败降级排版化、聊天端切分器修复中文句读硬切根因、合成 prompt 加成段行文约束；不加额外 LLM 润色调用。
+- 前端 ChatPanel 本期同步接入（模式选项/进度轮询/notice 渲染/设置面五键）；不手改 `pages/`。
+- 版本 bump minor 至 v0.30.0（用户已批准）；提交不加 Co-Authored-By。
+
+### Technical implementation path
+
+- [x] **Phase 1 - Deep Thinking 提效**：抽 `core/pipelines/llm_json.py` 公共 JSON 调用 helper；`deep_thinking_evidence.rank_candidates` 重排并行化；`document_labels` 跨轮缓存；SEA prompt 增 `next_sub_queries` 字段并删除 REFINE 步骤（确定性 gap 兜底链）；`api.py` 翻译门加 `_uses_chinese`；改造 `test_deep_thinking_orchestrator.py`（42 例）+ `test_api.py`（全量 482 passed）。
+- [x] **Phase 2 - enhanced 管线**：`core/config.py` 新 `EnhancedRecallConfig` + `CONFIG_KEY_POLICY`；新 `core/pipelines/enhanced_recall_prompts.py`（PLAN-lite JSON + SYNTH+CHECK 尾部 `===VERDICT===` 标记契约，fail-open）；新 `core/pipelines/enhanced_recall_orchestrator.py`（返回 `DeepThinkingOutcome` 复用 deep 下游）；组合根装配 + `api.ask` 白名单/分支/actual_mode/reranker 热切换接线；新 `test_enhanced_recall_orchestrator.py`（16 例）+ `test_api.py` 增 4 例（70 passed）。
+- [x] **Phase 3 - Research 接线**：`research_skill.py` `_VALID_MODES`+`_ENHANCED_SIGNALS`+`_suggest_mode` 三档路由 + probe available_modes/调令文案；`main.py` 工具 docstring 与开始/完成文案；`test_research_skill.py` 增 3 例（26 passed）。
+- [x] **Phase 4 - 输出流畅性**：`_apply_deep_answer_warning` → `_compute_answer_notice` + 响应 `answer_notice` 字段（存库版以分隔线追加尾部保持自包含）；降级 fallback 排版化（引导行 + `[n]` 标题 + 句边界截断）；新 `core/utils/text_chunks.py` 纯函数切分器（修中文句读硬切根因）+ `main.py` 薄委派（573→513 行）；`answer_synthesis.py` 增 `_FLUENT_PROSE_RULE`；新 `test_text_chunks.py`（10 例）；`research_skill.execute` 透传 notice、`_format_research_result` 引用后尾注。全量 517 passed。
+- 📌 技术债登记：`core/pipelines/deep_thinking_orchestrator.py` 达 616 行（>600 红线；SEA 合并删 REFINE 后新增 `_labels`/`_next_round_queries` 净增 16 行）。拆分计划：把 `_gather_round` + `_run_verification` 抽到独立 `deep_thinking_rounds.py`（约 -160 行），待下个迭代执行。
+- [x] **Phase 5 - 前端**：`ChatPanel.tsx` enhanced 选项（不要求集合）/进度轮询扩展/notice 尾注渲染；`lib/api.ts`（AskResult.answer_notice + mode union + EffectiveConfig.enhanced_recall）/`lib/i18n.ts`（zh/en 各 9 键）；`SettingModal.tsx`+`QuickConfigPanel.tsx` enhanced_recall 五键；`config.to_public_dict` 补 enhanced_recall 段；tsc/eslint/build 全绿 + `sync_frontend.py`（362 文件，--check 一致）。
+- [x] **Phase 6 - 收尾**：全量 pytest 517 passed；ruff/mypy 无新增错误（既有基线除外）；`bump_version.py minor` → v0.30.0；CHANGELOG 逐条点名文件。
+
+### Verification
+
+- `python -m pytest tests/backend` → **517 passed**；`ruff check .` 仅剩既有基线错误（web/server.py F821 ×2、event_handler/r2_backup_manager/research_skill 既有 E501/UP035/F401，均非本次引入）；`mypy` 新增文件零自身错误。
+- ScriptedLLM 计数断言通过：enhanced happy path 恰 2 次 LLM、纠偏路径 3 次（`test_enhanced_recall_orchestrator.py`）；deep SEA 合并后 PLAN+SEA×2=3 次收敛（旧流程 4 次）。
+- 前端：`npx tsc --noEmit` passed、`npx eslint <5 个改动文件>` passed、`npm run build` 11 页静态导出成功、`python tools/sync_frontend.py --check` pages/ 与 out/ 一致。
+- Research 链路（离线测试验证）：probe `available_modes == [default, enhanced, deep_thinking]`；execute(mode=enhanced, collection=None) 不返回 needs_scope 且透传 `retrieval_mode=enhanced`；answer_notice 尾注渲染。WebUI/聊天端真机端到端待用户在 AstrBot 运行环境实测。
+
 ## v0.29.3 前端圆角体系统一 (completed)
 
 ### User constraints / 约束

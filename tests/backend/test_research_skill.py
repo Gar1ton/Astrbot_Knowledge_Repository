@@ -102,7 +102,7 @@ async def test_probe_clear_winner_low_ambiguity() -> None:
     res = await _svc(api).probe("transformer attention architecture")
     assert res["ambiguity"] == "low"
     assert res["collections"][0]["name"] == "machine_learning"
-    assert res["available_modes"] == ["default", "deep_thinking"]
+    assert res["available_modes"] == ["default", "enhanced", "deep_thinking"]
 
 
 async def test_probe_competing_collections_high_ambiguity() -> None:
@@ -135,16 +135,32 @@ async def test_probe_enriches_papers_with_author_year() -> None:
     assert p["title"] == "Attention Transformer"
 
 
-async def test_probe_high_precision_only_when_lightrag_ready() -> None:
+async def test_probe_graph_mixed_only_when_lightrag_ready() -> None:
     api = FakeApi([("ml", "")], {"ml": ["Graph Networks"]}, ready={"ml": True})
     res = await _svc(api).probe("transformer")
-    assert "high_precision" in res["available_modes"]
+    assert "graph_mixed" in res["available_modes"]
 
 
 async def test_probe_suggests_deep_thinking_on_signal() -> None:
     api = FakeApi([("ml", "")], {"ml": ["X"]})
     res = await _svc(api).probe("请综合分析这些论文")
     assert res["suggested_mode"] == "deep_thinking"
+
+
+async def test_probe_suggests_enhanced_on_medium_signal() -> None:
+    """三档路由：分析/对比类中型信号 → enhanced（不再直升 deep_thinking）。"""
+    api = FakeApi([("ml", "")], {"ml": ["X"]})
+    svc = _svc(api)
+    assert (await svc.probe("对比 A 与 B 的方法"))["suggested_mode"] == "enhanced"
+    assert (await svc.probe("compare method A and B"))["suggested_mode"] == "enhanced"
+    assert (await svc.probe("解释一下 X 的机制"))["suggested_mode"] == "enhanced"
+
+
+async def test_probe_plain_lookup_stays_default() -> None:
+    """无任何信号的单点问题仍 default（enhanced 不做兜底档）。"""
+    api = FakeApi([("ml", "")], {"ml": ["X"]})
+    res = await _svc(api).probe("transformer attention")
+    assert res["suggested_mode"] == "default"
 
 
 async def test_probe_returns_directive_guidance() -> None:
@@ -270,11 +286,20 @@ async def test_execute_breadth_plan_sets_top_k_and_candidate_pool() -> None:
 
 async def test_execute_rejects_strict_mode_without_collection() -> None:
     api = FakeApi([("ml", "")], {"ml": ["X"]})
-    res = await _svc(api).execute("q", None, mode="high_precision")
+    res = await _svc(api).execute("q", None, mode="graph_mixed")
     assert api.ask_calls == []
     assert res["status"] == "needs_scope"
-    assert res["mode"] == "high_precision"
+    assert res["mode"] == "graph_mixed"
     assert "default" in res["answer"]
+
+
+async def test_execute_enhanced_allows_global_scope() -> None:
+    """enhanced 非严格集合模式：collection 为空直接全局执行，不返回 needs_scope。"""
+    api = FakeApi([("ml", "")], {"ml": ["X"]}, ask_result={"answer": "ANS", "sources": []})
+    res = await _svc(api).execute("对比 A 与 B", None, mode="enhanced")
+    assert res.get("status") != "needs_scope"
+    assert api.ask_calls[0]["retrieval_mode"] == "enhanced"
+    assert api.ask_calls[0]["collection"] is None
 
 
 async def test_execute_preserves_requested_mode_on_backend_error() -> None:
@@ -283,11 +308,20 @@ async def test_execute_preserves_requested_mode_on_backend_error() -> None:
         {"ml": ["X"]},
         ask_exception=RuntimeError("LightRAG not ready"),
     )
-    res = await _svc(api).execute("q", "ml", mode="high_precision")
-    assert api.ask_calls[0]["retrieval_mode"] == "high_precision"
+    res = await _svc(api).execute("q", "ml", mode="graph_mixed")
+    assert api.ask_calls[0]["retrieval_mode"] == "graph_mixed"
     assert res["status"] == "error"
-    assert res["mode"] == "high_precision"
+    assert res["mode"] == "graph_mixed"
     assert "LightRAG not ready" in res["error"]
+
+
+async def test_execute_normalizes_legacy_high_precision_mode(caplog) -> None:
+    """v0.30.1：旧输入兼容一版，但向 api 与响应只暴露 graph_mixed。"""
+    api = FakeApi([("ml", "")], {"ml": ["X"]}, ask_result={"answer": "ANS", "sources": []})
+    res = await _svc(api).execute("q", "ml", mode="high_precision")
+    assert api.ask_calls[0]["retrieval_mode"] == "graph_mixed"
+    assert res["requested_mode"] == "graph_mixed"
+    assert "deprecated" in caplog.text
 
 
 async def test_execute_builds_citations_author_year_title() -> None:

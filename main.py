@@ -5,7 +5,6 @@ import asyncio
 import inspect
 import json
 import logging
-import re
 import sys
 from pathlib import Path
 
@@ -43,12 +42,19 @@ from astrbot.api.star import Context, Star, StarTools, register
 
 from core.event_handler import EventHandler
 from core.plugin_initializer import PluginInitializer
+from core.retrieval_modes import (
+    MODE_GRAPH_MIXED,
+    MODE_GRAPH_ONLY,
+    STRICT_COLLECTION_MODES,
+    normalize_retrieval_mode,
+)
+from core.utils import text_chunks
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v0.29.3"
+_PLUGIN_VERSION = "v0.30.1"
 logger = logging.getLogger(__name__)
 _RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
 _RESEARCH_PARAGRAPH_LIMIT = 700
@@ -221,19 +227,26 @@ class KnowledgeRepositoryPlugin(Star):
             query(string): 凝练后的自包含检索指令（调令）——把对话意图整理成一条完整、聚焦、
                 可独立理解的问题；deep_thinking 时尤其写清要让内部检索 agent 回答的问题。
             collection(string): 召回范围集合名；留空=全局检索。
-            mode(string): default=标准召回；deep_thinking=综合分析；high_precision=图谱召回。
-            breadth(string): narrow/normal/wide——问题宽泛时用 wide 放大候选池再重排（默认 normal）。
+            mode(string): default=标准召回（查存/单点事实）；enhanced=增强召回（分析/对比/机制类，
+                一次拆解+宽召回+自检纠偏，成本远低于 deep_thinking）；deep_thinking=综合分析
+                （仅综述/系统梳理级任务）；graph_mixed=图谱混合检索（语义/词法证据 +
+                LightRAG 图谱上下文）；graph_only=纯图谱检索（仅 LightRAG 图谱上下文）。
+            breadth(string): narrow/normal/wide——问题宽泛时用 wide 放大候选池再重排
+                （默认 normal；仅 default 生效，enhanced/deep_thinking 用自身配置管证据量）。
         '''
         svc = self._initializer.research_service if self._initializer else None
         if svc is None or not self._initializer.research_enabled:
             return "research 未开启或未装配，请提示用户先发送 /ka research on。"
 
-        requested_mode = (mode or "default").strip() or "default"
+        requested_mode, used_legacy_mode = normalize_retrieval_mode(mode)
+        if used_legacy_mode:
+            logger.warning(
+                "research_execute mode='high_precision' is deprecated; use 'graph_mixed'"
+            )
         requested_breadth = (breadth or "normal").strip() or "normal"
         resolved_collection = collection or None
         scope_probe: dict[str, Any] | None = None
-        strict_collection_modes = {"deep_thinking", "high_precision", "graph_only"}
-        if requested_mode in strict_collection_modes and not resolved_collection:
+        if requested_mode in STRICT_COLLECTION_MODES and not resolved_collection:
             scope_probe = await svc.probe(query)
             resolved_collection = self._collection_from_probe(scope_probe)
             if resolved_collection is None:
@@ -304,13 +317,24 @@ class KnowledgeRepositoryPlugin(Star):
 
     @staticmethod
     def _research_start_message(scope: str, mode: str, breadth: str) -> str:
-        mode_label = "Deep Thinking" if mode == "deep_thinking" else mode
         if mode == "deep_thinking":
             return (
-                f"🔬 已开始 {mode_label}：范围「{scope}」，breadth={breadth}。"
+                f"🔬 已开始 Deep Thinking：范围「{scope}」，breadth={breadth}。"
                 "这个任务可能需要几分钟，我会完成后直接发结果。"
             )
-        return f"🔎 已开始检索：范围「{scope}」，mode={mode_label}，breadth={breadth}。"
+        if mode == "enhanced":
+            return (
+                f"🔍 已开始增强召回：范围「{scope}」。"
+                "拆解检索 + 自检纠偏中，稍后直接发结果。"
+            )
+        if mode == MODE_GRAPH_MIXED:
+            return (
+                f"🕸️ 已开始图谱混合检索：范围「{scope}」。"
+                "正在汇合语义/词法证据与 LightRAG 图谱上下文，稍后直接发结果。"
+            )
+        if mode == MODE_GRAPH_ONLY:
+            return f"🕸️ 已开始纯图谱检索：范围「{scope}」，稍后直接发结果。"
+        return f"🔎 已开始检索：范围「{scope}」，mode={mode}，breadth={breadth}。"
 
     @staticmethod
     def _collection_from_probe(probe: dict[str, Any]) -> str | None:
@@ -343,8 +367,8 @@ class KnowledgeRepositoryPlugin(Star):
             suffix = "\n候选范围：" + "、".join(candidates)
         mode_label = {
             "deep_thinking": "Deep Thinking",
-            "high_precision": "LightRAG high_precision",
-            "graph_only": "LightRAG graph_only",
+            MODE_GRAPH_MIXED: "图谱混合检索",
+            MODE_GRAPH_ONLY: "纯图谱检索",
         }.get(mode, mode)
         return (
             f"🔬 {mode_label} 需要先锁定一个具体 collection，不能用「全局」范围运行；"
@@ -419,7 +443,16 @@ class KnowledgeRepositoryPlugin(Star):
         scope = str(result.get("scope") or "全局")
         mode = str(result.get("mode") or result.get("requested_mode") or "default")
         requested_mode = str(result.get("requested_mode") or mode)
-        done_label = "Deep Thinking 完成" if requested_mode == "deep_thinking" else "检索完成"
+        if requested_mode == "deep_thinking":
+            done_label = "Deep Thinking 完成"
+        elif requested_mode == "enhanced":
+            done_label = "增强召回完成"
+        elif requested_mode == MODE_GRAPH_MIXED:
+            done_label = "图谱混合检索完成"
+        elif requested_mode == MODE_GRAPH_ONLY:
+            done_label = "纯图谱检索完成"
+        else:
+            done_label = "检索完成"
         citations = [str(item) for item in (result.get("citations") or []) if item]
 
         parts = [
@@ -430,6 +463,10 @@ class KnowledgeRepositoryPlugin(Star):
         ]
         if citations:
             parts.extend(["", "引用：", *[f"- {item}" for item in citations]])
+        # 告警尾注：置于引用之后，不打断正文开头（v0.30.0 流畅性）。
+        notice = str(result.get("answer_notice") or "").strip()
+        if notice:
+            parts.extend(["", f"⚠️ {notice}"])
         return "\n".join(parts)
 
     async def _send_plain_message_chunks(
@@ -445,92 +482,16 @@ class KnowledgeRepositoryPlugin(Star):
             ok = await self._send_plain_message(event, chunk) and ok
         return ok
 
+    # 文本切分薄委派：实现在 core/utils/text_chunks（纯函数，v0.30.0 治本修复中文句读硬切）。
     @staticmethod
     def _split_message_text(text: str, *, limit: int = _RESEARCH_MESSAGE_CHUNK_LIMIT) -> list[str]:
-        cleaned = text.strip()
-        if not cleaned:
-            return []
-        if len(cleaned) <= limit:
-            return [cleaned]
-
-        parts = KnowledgeRepositoryPlugin._split_text_by_blocks(cleaned, max_chars=limit - 24)
-        if len(parts) == 1:
-            return parts
-        total = len(parts)
-        return [f"（{idx}/{total}）\n{part}" for idx, part in enumerate(parts, start=1)]
+        return text_chunks.split_message_text(text, limit=limit)
 
     @staticmethod
     def _paragraphize_research_text(
         text: str, *, max_chars: int = _RESEARCH_PARAGRAPH_LIMIT
     ) -> str:
-        blocks = [block.strip() for block in re.split(r"\n{2,}", text) if block.strip()]
-        if not blocks:
-            return ""
-        paragraphs: list[str] = []
-        for block in blocks:
-            if len(block) <= max_chars or "\n" in block:
-                paragraphs.append(block)
-                continue
-            paragraphs.extend(
-                KnowledgeRepositoryPlugin._split_text_by_sentences(block, max_chars=max_chars)
-            )
-        return "\n\n".join(paragraphs)
-
-    @staticmethod
-    def _split_text_by_blocks(text: str, *, max_chars: int) -> list[str]:
-        chunks: list[str] = []
-        current = ""
-        for block in [b.strip() for b in re.split(r"\n{2,}", text) if b.strip()]:
-            pieces = (
-                [block]
-                if len(block) <= max_chars
-                else KnowledgeRepositoryPlugin._split_text_by_sentences(block, max_chars=max_chars)
-            )
-            for piece in pieces:
-                candidate = f"{current}\n\n{piece}" if current else piece
-                if len(candidate) <= max_chars:
-                    current = candidate
-                    continue
-                if current:
-                    chunks.append(current)
-                if len(piece) <= max_chars:
-                    current = piece
-                else:
-                    chunks.extend(
-                        piece[i : i + max_chars] for i in range(0, len(piece), max_chars)
-                    )
-                    current = ""
-        if current:
-            chunks.append(current)
-        return chunks
-
-    @staticmethod
-    def _split_text_by_sentences(text: str, *, max_chars: int) -> list[str]:
-        sentences = re.findall(r".+?(?:[。！？!?\.](?=\s|$)|$)", text, flags=re.S)
-        if not sentences:
-            sentences = [text]
-        chunks: list[str] = []
-        current = ""
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            candidate = f"{current} {sentence}" if current else sentence
-            if len(candidate) <= max_chars:
-                current = candidate
-                continue
-            if current:
-                chunks.append(current)
-            if len(sentence) <= max_chars:
-                current = sentence
-            else:
-                chunks.extend(
-                    sentence[i : i + max_chars] for i in range(0, len(sentence), max_chars)
-                )
-                current = ""
-        if current:
-            chunks.append(current)
-        return chunks
+        return text_chunks.paragraphize(text, max_chars=max_chars)
 
     async def _send_plain_message(self, event: AstrMessageEvent, text: str) -> bool:
         result = event.plain_result(text) if hasattr(event, "plain_result") else text

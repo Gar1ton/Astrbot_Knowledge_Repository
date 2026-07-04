@@ -19,6 +19,13 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
+from core.retrieval_modes import (
+    MODE_GRAPH_MIXED,
+    STRICT_COLLECTION_MODES,
+    VALID_RETRIEVAL_MODES,
+    normalize_retrieval_mode,
+)
+
 if TYPE_CHECKING:
     from core.api import KnowledgeRepositoryApi
 
@@ -30,8 +37,9 @@ _BREADTH_PLAN = {
     "normal": (15, 8),
     "wide": (40, 10),
 }
-_VALID_MODES = {"default", "high_precision", "graph_only", "deep_thinking"}
-_STRICT_COLLECTION_MODES = {"high_precision", "graph_only", "deep_thinking"}
+_VALID_MODES = VALID_RETRIEVAL_MODES
+# enhanced 不在严格集合模式内：与 default/deep 全局证据链一致，允许 collection 为空全局检索。
+_STRICT_COLLECTION_MODES = STRICT_COLLECTION_MODES
 
 # probe 结果上限，控制喂给 LLM 的 token。
 _MAX_COLLECTIONS = 8
@@ -52,11 +60,23 @@ _STOP_WORDS = frozenset(
     }
 )
 
+# 重型信号 → deep_thinking（多轮迭代，~6-9 次 LLM）：仅综述/系统梳理级任务才升档。
+# v0.30.0：分析/对比/比较/compare/relationship/summary 等中型信号降档到 enhanced。
 _DEEP_SIGNALS = frozenset(
     {
-        "分析", "综合", "系统", "全面", "对比", "比较", "梳理",
-        "综述", "review", "compare", "comprehensive", "systematic",
-        "relationship", "overview", "summary",
+        "综述", "综合", "系统", "全面", "梳理", "纵观", "这批文献", "多篇论文",
+        "review", "survey", "comprehensive", "systematic", "overview",
+    }
+)
+
+# 中型信号 → enhanced（一次拆解+宽召回+自检纠偏，典型 2 次 LLM）：
+# 分析/对比/机制类问题用中间档，成本远低于 deep_thinking。英文用词干做子串匹配
+# （analyz/analys/summar 同时覆盖 analyze/analysis/summary/summarize）。
+_ENHANCED_SIGNALS = frozenset(
+    {
+        "分析", "对比", "比较", "总结", "归纳", "解释", "异同", "机制", "为什么", "如何",
+        "compare", "comparison", "analyz", "analys", "summar", "explain",
+        "difference", "relationship", "why do", "why does", "how do", "how does",
     }
 )
 
@@ -80,6 +100,9 @@ _DIRECTIVE_GUIDANCE = (
     "范围明确(ambiguity=low)后，请把对话意图凝练成一条自包含、聚焦的检索问题作为 query 调用 "
     "research_execute（不要原样转发零碎对话）；deep_thinking 时尤其要把「想让内部检索 agent "
     "回答的问题」写完整清楚。内部 agent 会据此直接产出纯净答案并发给用户，你无需复述或二次总结。"
+    "模式成本阶梯：default（查存/单点事实，最快）< enhanced（分析/对比/机制类，"
+    "一次拆解+宽召回+自检纠偏，约 2~3 次内部调用）< deep_thinking（仅综述/系统梳理级任务，"
+    "多轮迭代最贵）。优先用满足需求的最低档。"
 )
 
 
@@ -166,7 +189,7 @@ class ResearchService:
         # 命中论文（标题 token 命中）+ author/year enrich；命中标签。
         papers, tags = await self._match_papers_and_tags(q_tokens)
 
-        # LightRAG 就绪度（决定 high_precision 是否可用）。
+        # LightRAG 就绪度（决定 graph_mixed 是否可用）。
         lightrag_ready: dict[str, bool] = {}
         for col in active:
             try:
@@ -175,9 +198,9 @@ class ResearchService:
             except Exception:
                 lightrag_ready[col.name] = False
 
-        available_modes = ["default", "deep_thinking"]
+        available_modes = ["default", "enhanced", "deep_thinking"]
         if any(lightrag_ready.values()):
-            available_modes.append("high_precision")
+            available_modes.append(MODE_GRAPH_MIXED)
 
         # 正文精确命中：防「title/tag 没标 → 误判库里没有」的假阴性。
         # 命中正文时 exact_match=True，主 LLM 不得再回答「库里没有」。
@@ -255,14 +278,17 @@ class ResearchService:
         self, query: str, lightrag_ready: dict[str, bool], exact_match: bool = False
     ) -> str:
         q = query.lower()
-        # 成本感知路由：正文已精确命中 + 像「有没有/是否提到」的查存问题 → 维持 default（1 次合成），
-        # 不因 query 里偶然出现「综述/review」等词就升到昂贵的 deep_thinking（~10+ LLM 调用）。
+        # 成本感知三档路由（Adaptive-RAG 思路）：正文已精确命中 + 像「有没有/是否提到」的
+        # 查存问题 → 维持 default（1 次合成）；重型综述信号 → deep_thinking（多轮迭代）；
+        # 中型分析/对比信号 → enhanced（2+1 中间档）；其余 default。
         if exact_match and any(sig in q for sig in _LOOKUP_SIGNALS):
             return "default"
         if any(sig in q for sig in _DEEP_SIGNALS):
             return "deep_thinking"
         if any(sig in q for sig in _GRAPH_SIGNALS) and any(lightrag_ready.values()):
-            return "high_precision"
+            return MODE_GRAPH_MIXED
+        if any(sig in q for sig in _ENHANCED_SIGNALS):
+            return "enhanced"
         return "default"
 
     # ── 工具二：执行召回 ─────────────────────────────────────────
@@ -280,6 +306,11 @@ class ResearchService:
         召回恒英文：query 含 CJK 才翻译成英文，已是英文则跳过翻译省一次 LLM 调用。
         回答语言取自 flags.research_answer_language（auto/zh/en，与前端 askAI 同一参数）。
         """
+        mode, used_legacy_mode = normalize_retrieval_mode(mode)
+        if used_legacy_mode:
+            logger.warning(
+                "research mode='high_precision' is deprecated; use 'graph_mixed' instead"
+            )
         if mode not in _VALID_MODES:
             mode = "default"
         if mode in _STRICT_COLLECTION_MODES and not collection:
@@ -350,6 +381,8 @@ class ResearchService:
         return {
             "status": "ok",
             "answer": answer,
+            # v0.30.0：告警为结构化字段（不再拼在正文开头），聊天端渲染为引用后的尾注。
+            "answer_notice": str(result.get("answer_notice") or ""),
             "citations": _build_citations(sources),
             "scope": collection or "全局",
             "searched_scope": scope_label,

@@ -1,16 +1,18 @@
 """Deep Thinking 迭代检索编排（pipelines 层，FAIR-RAG 循环）。
 
 在不重写混合召回内核的前提下，于其上层做：baseline 先行 → PLAN 分解 → 多轮
-（检索 → pinned 结构保护 → 重排截断 → SEA 审计 → REFINE 补检）→ 收敛或回退。
-verification 关闭时只产出证据/清单/轨迹，合成由 api.ask 负责；verification 开启时额外
-做「合成 draft → 校验 → 不合格则补检再合成」闭环并产出 answer。LLM 调用异常一律优雅
-回退（baseline 或退回 api.ask 合成），绝不打崩请求；JSON 不合格则按步降级。
+（检索 → pinned 结构保护 → 重排截断 → SEA 审计并给出下一轮补检 queries）→ 收敛或回退。
+v0.30.0 起 REFINE 并入 SEA（每个未收敛轮省一次 LLM 调用）；SEA 未给补检 queries 时用
+确定性 gap 链兜底，无需再调 LLM。verification 关闭时只产出证据/清单/轨迹，合成由
+api.ask 负责；verification 开启时额外做「合成 draft → 校验 → 不合格则补检再合成」闭环
+并产出 answer。LLM 调用异常一律优雅回退（baseline 或退回 api.ask 合成），绝不打崩请求；
+JSON 不合格则按步降级。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, TypeVar
 
 from core.domain.deep_thinking import (
@@ -24,22 +26,21 @@ from core.pipelines.answer_synthesis import synthesize_answer
 from core.pipelines.deep_thinking_evidence import rank_candidates, select_final_evidence
 from core.pipelines.deep_thinking_prompts import (
     PLAN_SYSTEM,
-    REFINE_SYSTEM,
     SEA_SYSTEM,
     VERIFY_SYSTEM,
     JsonContractError,
     SeaDiscoveredItem,
     SeaResult,
     build_plan_prompt,
-    build_refine_prompt,
     build_sea_prompt,
     build_verify_prompt,
     parse_plan,
-    parse_refine,
     parse_sea,
     parse_verify,
 )
 from core.pipelines.deep_thinking_view import live_detail
+from core.pipelines.llm_json import est_tokens as _est_tokens
+from core.pipelines.llm_json import llm_json_call
 from core.utils.cutoff import adaptive_cutoff
 
 if TYPE_CHECKING:
@@ -64,11 +65,6 @@ _BASELINE_FLOOR_N = 5
 MODE_MILVUS_DEEP = "milvus_deep"
 MODE_ASTRBOT_DEEP_FALLBACK = "astrbot_deep_fallback"
 MODE_DEGRADED = "deep_degraded_to_default"
-
-
-def _est_tokens(*texts: str) -> int:
-    """字符近似的 token 估算（≈ len/4）。非精确，仅用于成本可观测与安全阀。"""
-    return sum(len(t) for t in texts) // 4
 
 
 class DeepThinkingOrchestrator:
@@ -125,8 +121,11 @@ class DeepThinkingOrchestrator:
         )
 
         est_tokens = 0
-        calls_used = 0  # 全局 LLM 调用计数（PLAN+SEA+REFINE），call_budget 安全阀以此为准。
+        # 全局 LLM 调用计数（PLAN+SEA，REFINE 已并入 SEA），call_budget 安全阀以此为准。
+        calls_used = 0
         trace: list[RoundTrace] = []
+        # document_labels 跨轮缓存：同一 run 内每篇文档只查一次库（SEA 与 verify 共享）。
+        labels_cache: dict[str, str] = {}
 
         # 阶段1：PLAN（合并 checklist + sub_queries）。
         try:
@@ -173,8 +172,8 @@ class DeepThinkingOrchestrator:
 
             # 2f SEA。每条证据标注来源文档，防跨文档知识串线。
             ev_items = list(evidence.values())
-            sea_labels = await self._retrieval.document_labels(
-                it.chunk.doc_id for it in ev_items
+            sea_labels = await self._labels(
+                (it.chunk.doc_id for it in ev_items), labels_cache
             )
             try:
                 sea, round_calls, round_tokens = await self._llm_json(
@@ -184,6 +183,7 @@ class DeepThinkingOrchestrator:
                         ev_items,
                         self._cfg.sea_evidence_clip,
                         sea_labels,
+                        max_next_queries=self._cfg.max_sub_queries,
                     ),
                     SEA_SYSTEM,
                     parse_sea,
@@ -232,22 +232,11 @@ class DeepThinkingOrchestrator:
             ):
                 break
 
-            # 2h REFINE（discovered 优先驱动深挖，其次填 typed gaps）。
-            try:
-                refine_gaps = round_discovered + (
-                    self._refine_gaps(sea) or sea.gaps or fallback_refine_gaps
-                )
-                gap_queries, refine_calls, tokens = await self._llm_json(
-                    build_refine_prompt(refine_gaps), REFINE_SYSTEM, parse_refine
-                )
-                est_tokens += tokens
-                calls_used += refine_calls
-                queries = gap_queries[: self._cfg.max_sub_queries] or [query]
-            except JsonContractError:
+            # 2h 下一轮补检 queries：SEA 已合并给出（较旧 REFINE 每轮省 1 次 LLM 调用）；
+            # SEA 未给时用确定性 gap 链兜底（0 LLM），全空才终止（等价旧 REFINE 失败 break）。
+            queries = self._next_round_queries(sea, round_discovered, fallback_refine_gaps)
+            if not queries:
                 break
-            except Exception as exc:
-                logger.warning("deep_thinking REFINE llm unavailable: %s", exc)
-                return self._degraded(baseline_floor, trace, est_tokens, reason=str(exc))
 
         # 阶段3：循环后一次性过滤非 pinned 的 conflicting；只有无证据才硬降级。
         _progress("deep_finalize", 90, live_detail("finalize", checklist, trace))
@@ -290,6 +279,7 @@ class DeepThinkingOrchestrator:
                     pinned_ids,
                     conflicting_ids,
                     est_tokens,
+                    labels_cache,
                 )
                 verify_missing = self._merge_missing(hard_notes, v_hard)
                 verify_notes = self._merge_missing(soft_gaps, v_soft)
@@ -313,6 +303,41 @@ class DeepThinkingOrchestrator:
         )
 
     # ── 内部 helper ─────────────────────────────────────────
+    async def _labels(
+        self, doc_ids: Iterable[str], cache: dict[str, str]
+    ) -> dict[str, str]:
+        """document_labels 的跨轮缓存：只对缓存缺失的 doc_id 查库，返回整个缓存映射。
+
+        返回值是 doc_id → 标签的超集映射，调用方按 doc_id 查找不受多余键影响。
+        """
+        missing = [d for d in {x for x in doc_ids if x} if d not in cache]
+        if missing:
+            cache.update(await self._retrieval.document_labels(missing))
+        return cache
+
+    def _next_round_queries(
+        self,
+        sea: SeaResult,
+        round_discovered: list[str],
+        fallback_refine_gaps: list[str],
+    ) -> list[str]:
+        """SEA 合并输出的补检 query 优先；缺失时用确定性 gap 链兜底（0 次 LLM）。
+
+        兜底链与旧 REFINE 输入同源：discovered aspect 文本 → typed coverage 缺口
+        （gap_query 本身即可检索）→ SEA gaps → checklist 反推。保序去重截断；
+        全空返回空列表，由调用方终止循环（等价旧 REFINE JsonContractError break）。
+        """
+        if sea.next_queries:
+            return sea.next_queries[: self._cfg.max_sub_queries]
+        fallback = round_discovered + (
+            self._refine_gaps(sea) or sea.gaps or fallback_refine_gaps
+        )
+        out: list[str] = []
+        for q in fallback:
+            if q and q not in out:
+                out.append(q)
+        return out[: self._cfg.max_sub_queries]
+
     @staticmethod
     def _merge_missing(first: list[str], second: list[str]) -> list[str]:
         merged: list[str] = []
@@ -483,6 +508,7 @@ class DeepThinkingOrchestrator:
         pinned_ids: set[str],
         conflicting_ids: set[str],
         est_tokens: int,
+        labels_cache: dict[str, str] | None = None,
     ) -> tuple[str | None, bool, list[str], list[str], list[DocumentChunk], int]:
         """合成 draft → 校验 → 不合格则用软项当 gap 补检再合成，受 max_verify_rounds 限。
 
@@ -493,9 +519,10 @@ class DeepThinkingOrchestrator:
         answer = ""
         hard: list[str] = []
         soft: list[str] = []
+        cache = labels_cache if labels_cache is not None else {}
         for vround in range(self._cfg.max_verify_rounds + 1):
-            # 每条证据标注来源文档，合成与校验同享，防跨文档知识串线。
-            source_labels = await self._retrieval.document_labels(c.doc_id for c in final)
+            # 每条证据标注来源文档，合成与校验同享，防跨文档知识串线（跨轮缓存）。
+            source_labels = await self._labels((c.doc_id for c in final), cache)
             try:
                 draft = await synthesize_answer(
                     self._llm,
@@ -555,26 +582,15 @@ class DeepThinkingOrchestrator:
     async def _llm_json(
         self, prompt: str, system: str, parse_fn: Callable[[str], T]
     ) -> tuple[T, int, int]:
-        """调 LLM 并解析 JSON：JSON 不合格重试 json_max_retries 次后抛 JsonContractError；
-        LLM 调用异常向上抛（由 run 捕获回退）。返回 (parsed, calls, est_tokens)。"""
-        calls = 0
-        tokens = 0
-        last_err: JsonContractError | None = None
-        for attempt in range(self._cfg.json_max_retries + 1):
-            text = prompt if attempt == 0 else prompt + "\n\n只输出合法 JSON，不要任何额外文字。"
-            raw = await self._llm.generate(text, system_prompt=system, allow_mock=False)
-            calls += 1
-            tokens += _est_tokens(system, text, raw)
-            try:
-                return parse_fn(raw), calls, tokens
-            except JsonContractError as exc:
-                last_err = exc
-        raise last_err or JsonContractError("unparseable")
+        """薄委派到公共 llm_json_call（与 enhanced_recall 共用调用纪律）。"""
+        return await llm_json_call(
+            self._llm, prompt, system, parse_fn, self._cfg.json_max_retries
+        )
 
     def _over_budget(self, calls_used: int, est_tokens: int) -> bool:
-        """call_budget 以全局 calls_used（PLAN+SEA+REFINE 真实调用数）为准，替代旧的
-        「仅 trace 内 SEA 调用」口径，避免安全阀名义与实际不一致。VERIFY/合成的调用
-        另由 max_verify_rounds 限界，不计入本闸门。"""
+        """call_budget 以全局 calls_used（PLAN+SEA 真实调用数，REFINE 已并入 SEA）为准，
+        替代旧的「仅 trace 内 SEA 调用」口径，避免安全阀名义与实际不一致。VERIFY/合成
+        的调用另由 max_verify_rounds 限界，不计入本闸门。"""
         return calls_used >= self._cfg.call_budget or est_tokens >= self._cfg.token_budget
 
     def _degraded(

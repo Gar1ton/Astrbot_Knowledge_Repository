@@ -945,6 +945,19 @@ function ConfigTab() {
         )}
       </Card>
 
+      <Card title="增强召回（Enhanced）" icon="sparkle" badge={<Badge tone="accent">即时</Badge>}>
+        {numberConfigField("enhanced_recall", "max_sub_queries", "拆解子查询上限", "PLAN-lite 一次规划拆出的互补检索探针数")}
+        {numberConfigField("enhanced_recall", "wide_top_k", "每个查询的检索宽度")}
+        {numberConfigField("enhanced_recall", "max_final_evidence", "合成上下文证据上限")}
+        {numberConfigField("enhanced_recall", "rerank_weight", "重排器权重（0~1）", undefined, "float")}
+        {toggleConfigField(
+          "enhanced_recall",
+          "corrective_enabled",
+          "启用纠正检索",
+          "合成自检不充分时补一轮检索并重合成（多 1 次 LLM 调用）",
+        )}
+      </Card>
+
       {Object.entries(config)
         .filter(([k]) => k !== "diagnostics")
         .map(([k, v]) => renderSection(k, v as Record<string, unknown>))}

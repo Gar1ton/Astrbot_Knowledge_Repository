@@ -91,6 +91,7 @@ export interface EffectiveConfig {
   ask?: Record<string, unknown>;
   rerank?: Record<string, unknown>;
   deep_thinking?: Record<string, unknown>;
+  enhanced_recall?: Record<string, unknown>;
   vector_db?: Record<string, unknown>;
   embedding?: Record<string, unknown>;
   zotero_sync?: Record<string, unknown>;
@@ -366,10 +367,13 @@ export interface ThinkingTrace {
 export interface AskResult {
   conversation_id: string;
   answer: string;
+  // 证据不足/未验证提示（结构化字段，v0.30.0 起不再拼在正文开头）。
+  answer_notice?: string;
   sources: AskSource[];
   requested_retrieval_mode:
     | "default"
-    | "high_precision"
+    | "enhanced"
+    | "graph_mixed"
     | "graph_only"
     | "fulltext"
     | "deep_thinking";
@@ -1467,7 +1471,13 @@ export async function ask(opts: {
   top_k?: number;
   conversation_id?: string | null;
   persona_enabled?: boolean;
-  retrieval_mode?: "default" | "high_precision" | "graph_only" | "fulltext" | "deep_thinking";
+  retrieval_mode?:
+    | "default"
+    | "enhanced"
+    | "graph_mixed"
+    | "graph_only"
+    | "fulltext"
+    | "deep_thinking";
   use_english_retrieval?: boolean;
   answer_language?: "auto" | "zh" | "en";
 }): Promise<AskResult> {
@@ -1478,8 +1488,8 @@ export async function ask(opts: {
       ...MOCK_ASK,
       conversation_id: `conv-${Date.now()}`,
       requested_retrieval_mode: requested,
-      actual_retrieval_mode: requested === "high_precision" ? "milvus_lightrag" : requested === "graph_only" ? "lightrag_only" : requested === "fulltext" ? "sqlite_lexical" : "milvus",
-      retrieval_engines: requested === "high_precision" ? ["milvus", "sqlite_lexical", "lightrag"] : requested === "graph_only" ? ["lightrag"] : requested === "fulltext" ? ["sqlite_lexical"] : ["milvus", "sqlite_lexical"],
+      actual_retrieval_mode: requested === "graph_mixed" ? "milvus_lightrag" : requested === "graph_only" ? "lightrag_only" : requested === "fulltext" ? "sqlite_lexical" : requested === "enhanced" ? "enhanced_recall" : "milvus",
+      retrieval_engines: requested === "graph_mixed" ? ["milvus", "sqlite_lexical", "lightrag"] : requested === "graph_only" ? ["lightrag"] : requested === "fulltext" ? ["sqlite_lexical"] : ["milvus", "sqlite_lexical"],
     };
   }
   return apiFetch<AskResult>("/api/ask", {

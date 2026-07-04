@@ -447,7 +447,10 @@ async def test_default_ask_never_calls_lightrag() -> None:
     assert "lightrag" not in result["retrieval_engines"]
 
 
-async def test_high_precision_uses_context_and_one_outer_llm_call(tmp_path: Path) -> None:
+@pytest.mark.parametrize("requested_mode", ["graph_mixed", "high_precision"])
+async def test_graph_mixed_uses_context_and_one_outer_llm_call(
+    tmp_path: Path, requested_mode: str, caplog: pytest.LogCaptureFixture
+) -> None:
     from core.index_compatibility import IndexCompatibilityStore
     from core.pipelines.retrieval_orchestrator import RetrievalOutcome
 
@@ -495,15 +498,18 @@ async def test_high_precision_uses_context_and_one_outer_llm_call(tmp_path: Path
     result = await api.ask(
         question="q",
         collection="papers",
-        retrieval_mode="high_precision",
+        retrieval_mode=requested_mode,
     )
 
     assert llm.calls == 1
+    assert result["requested_retrieval_mode"] == "graph_mixed"
     assert result["actual_retrieval_mode"] == "milvus_lightrag"
     assert result["retrieval_engines"] == ["milvus", "sqlite_lexical", "lightrag"]
+    if requested_mode == "high_precision":
+        assert "deprecated" in caplog.text
 
 
-async def test_high_precision_requires_ready_lightrag() -> None:
+async def test_graph_mixed_requires_ready_lightrag() -> None:
     class Registry:
         def has_workspace(self, collection: str) -> bool:
             return False
@@ -516,7 +522,7 @@ async def test_high_precision_requires_ready_lightrag() -> None:
         lightrag_registry=Registry(),  # type: ignore[arg-type]
     )
     with pytest.raises(LightRAGNotReadyError, match="workspace"):
-        await api.ask(question="q", collection="papers", retrieval_mode="high_precision")
+        await api.ask(question="q", collection="papers", retrieval_mode="graph_mixed")
 
 
 async def test_lightrag_build_resets_incompatible_workspace(tmp_path: Path) -> None:
@@ -650,7 +656,7 @@ async def test_lightrag_build_only_indexes_pending_docs_when_workspace_is_compat
     assert api._graph_build_jobs["job"].status == "success"
 
 
-async def test_high_precision_can_answer_with_only_lightrag_context(tmp_path: Path) -> None:
+async def test_graph_mixed_can_answer_with_only_lightrag_context(tmp_path: Path) -> None:
     from core.index_compatibility import IndexCompatibilityStore
     from core.pipelines.retrieval_orchestrator import RetrievalOutcome
 
@@ -691,7 +697,7 @@ async def test_high_precision_can_answer_with_only_lightrag_context(tmp_path: Pa
         llm_adapter=llm,  # type: ignore[arg-type]
     )
 
-    result = await api.ask(question="q", collection="papers", retrieval_mode="high_precision")
+    result = await api.ask(question="q", collection="papers", retrieval_mode="graph_mixed")
 
     assert result["answer"] == "answer"
     assert result["sources"] == []
@@ -1542,9 +1548,9 @@ class _MockDeepThinking:
 
 
 async def test_strict_graph_modes_require_collection() -> None:
-    """high_precision / graph_only 走图谱 workspace，必须显式 collection。"""
+    """graph_mixed / graph_only 走图谱 workspace，必须显式 collection。"""
     api = await _make_api()
-    for mode in ("high_precision", "graph_only"):
+    for mode in ("graph_mixed", "graph_only"):
         with pytest.raises(ValueError):
             await api.ask(question="q", retrieval_mode=mode)
 
@@ -1635,8 +1641,9 @@ async def test_deep_thinking_returns_trace_and_synthesizes() -> None:
         question="综述问题", collection="papers", retrieval_mode="deep_thinking"
     )
     assert result["actual_retrieval_mode"] == "milvus_deep"
-    assert result["answer"].startswith("**提示：以下回答尚未完成证据校验。**")
-    assert result["answer"].endswith("deep answer [1]")
+    # v0.30.0：告警不再拼在正文开头，改为结构化 answer_notice 字段（正文保持连贯）。
+    assert result["answer"] == "deep answer [1]"
+    assert result["answer_notice"].startswith("**提示：以下回答尚未完成证据校验。**")
     assert len(result["sources"]) == 1
     trace = result["thinking_trace"]
     assert trace is not None
@@ -1750,6 +1757,64 @@ async def test_default_mode_has_null_thinking_trace() -> None:
     assert result["thinking_trace"] is None
 
 
+async def test_enhanced_mode_requires_orchestrator() -> None:
+    api = await _make_api()
+    with pytest.raises(RuntimeError, match="EnhancedRecallOrchestrator"):
+        await api.ask(question="q", collection="kb1", retrieval_mode="enhanced")
+
+
+async def test_invalid_mode_error_mentions_enhanced() -> None:
+    api = await _make_api()
+    with pytest.raises(ValueError, match="enhanced"):
+        await api.ask(question="q", collection="kb1", retrieval_mode="bogus")
+
+
+async def test_enhanced_mode_returns_trace_and_verified_answer() -> None:
+    """enhanced 复用 DeepThinkingOutcome：answer/sources/thinking_trace 与 deep 下游同构。"""
+    from core.domain.deep_thinking import DeepThinkingOutcome, RoundTrace
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
+        trace=[RoundTrace(round=1, queries=["rw", "sub"], llm_calls=2)],
+        answer="enhanced answer [1]",
+        verified=True,
+        actual_mode="enhanced_recall",
+    )
+    orch = _MockDeepThinking(outcome)
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({"papers": []}),
+        enhanced_recall_orchestrator=orch,  # type: ignore[arg-type]
+    )
+    result = await api.ask(question="q", collection="papers", retrieval_mode="enhanced")
+    assert result["answer"] == "enhanced answer [1]"
+    assert result["actual_retrieval_mode"] == "enhanced_recall"
+    assert "enhanced_recall" in result["retrieval_engines"]
+    assert len(result["sources"]) == 1
+    trace = result["thinking_trace"]
+    assert trace is not None and trace["verified"] is True
+    assert trace["rounds"][0]["queries"] == ["rw", "sub"]
+
+
+async def test_enhanced_mode_allows_global_scope_without_collection() -> None:
+    """enhanced 与 deep 一致：collection 为空走全局证据链，不报 requires a collection。"""
+    from core.domain.deep_thinking import DeepThinkingOutcome
+
+    outcome = DeepThinkingOutcome(
+        evidence=[], answer=None, actual_mode="enhanced_recall"
+    )
+    orch = _MockDeepThinking(outcome)
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        enhanced_recall_orchestrator=orch,  # type: ignore[arg-type]
+    )
+    result = await api.ask(question="q", collection=None, retrieval_mode="enhanced")
+    assert result["requested_retrieval_mode"] == "enhanced"
+
+
 async def test_deep_thinking_english_retrieval_keeps_original_answer_question() -> None:
     """英语召回只影响检索 query，最终回答问题仍传用户原文。"""
     from core.domain.deep_thinking import DeepThinkingOutcome
@@ -1787,6 +1852,48 @@ async def test_deep_thinking_english_retrieval_keeps_original_answer_question() 
     assert deep.answer_question == "用户原始问题"
 
 
+async def test_english_retrieval_skips_translation_for_non_cjk_question() -> None:
+    """v0.30.0：非中文问题即使开启英语召回也不再白耗一次翻译 LLM 调用（与聊天路径一致）。"""
+    from core.domain.deep_thinking import DeepThinkingOutcome
+
+    class _NoTranslateLLM:
+        def __init__(self) -> None:
+            self.translate_calls = 0
+
+        async def generate(self, prompt, system_prompt="", *, allow_mock=True):
+            if "Translate the following query to English" in prompt:
+                self.translate_calls += 1
+            return "unused"
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
+        answer="verified answer [1]",
+        verified=True,
+        actual_mode="milvus_deep",
+    )
+    deep = _MockDeepThinking(outcome)
+    llm = _NoTranslateLLM()
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({"papers": []}),
+        llm_adapter=llm,  # type: ignore[arg-type]
+        deep_thinking_orchestrator=deep,  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(
+        question="english only question",
+        collection="papers",
+        retrieval_mode="deep_thinking",
+        use_english_retrieval=True,
+    )
+
+    assert result["answer"] == "verified answer [1]"
+    assert llm.translate_calls == 0
+    assert deep.query == "english only question"  # 检索 query 保持原文。
+
+
 async def test_deep_thinking_uses_verified_answer_when_present() -> None:
     """orchestrator 产出 answer（verification 闭环）时，api.ask 直接用之，不重复合成。"""
     from core.domain.deep_thinking import DeepThinkingOutcome
@@ -1815,7 +1922,7 @@ async def test_deep_thinking_uses_verified_answer_when_present() -> None:
     assert result["thinking_trace"]["verified"] is True
 
 
-async def test_deep_thinking_degraded_answer_gets_warning_prefix() -> None:
+async def test_deep_thinking_degraded_answer_gets_notice_field() -> None:
     from core.domain.deep_thinking import DeepThinkingOutcome
 
     class _SynthLLM:
@@ -1839,12 +1946,18 @@ async def test_deep_thinking_degraded_answer_gets_warning_prefix() -> None:
 
     result = await api.ask(question="综述问题", collection="papers", retrieval_mode="deep_thinking")
 
-    assert result["answer"].startswith("**提示：深度思考证据不足")
-    assert "关键检查项未满足" in result["answer"]
-    assert result["answer"].endswith("有限回答 [1]")
+    # v0.30.0：正文不再被告警前缀打断，降级说明进结构化 answer_notice。
+    assert result["answer"] == "有限回答 [1]"
+    assert result["answer_notice"].startswith("**提示：深度思考证据不足")
+    assert "关键检查项未满足" in result["answer_notice"]
+    # 存库版自包含：notice 以分隔线追加在答案尾部，历史回放不丢提示。
+    history = await store.get_chat_messages(result["conversation_id"])
+    stored = [m for m in history if m["role"] == "assistant"][-1]["content"]
+    assert stored.startswith("有限回答 [1]")
+    assert "深度思考证据不足" in stored
 
 
-async def test_deep_thinking_unverified_missing_gets_warning_prefix() -> None:
+async def test_deep_thinking_unverified_missing_gets_notice_field() -> None:
     from core.domain.deep_thinking import DeepThinkingOutcome
 
     outcome = DeepThinkingOutcome(
@@ -1865,16 +1978,43 @@ async def test_deep_thinking_unverified_missing_gets_warning_prefix() -> None:
 
     result = await api.ask(question="综述问题", collection="papers", retrieval_mode="deep_thinking")
 
-    assert result["answer"].startswith("**提示：以下回答未完全通过证据校验。**")
-    # 告警瘦身（v0.25.9）：正文只留缺口计数 notice，不再 join 全量 missing 进正文。
-    assert "共 2 项" in result["answer"]
-    assert "缺少定义" not in result["answer"]
-    assert "缺少对比" not in result["answer"]
-    assert result["answer"].endswith("草稿回答 [1]")
+    # v0.30.0：正文纯净；notice 只留缺口计数（告警瘦身沿袭 v0.25.9），明细在 thinking_trace。
+    assert result["answer"] == "草稿回答 [1]"
+    assert result["answer_notice"].startswith("**提示：以下回答未完全通过证据校验。**")
+    assert "共 2 项" in result["answer_notice"]
+    assert "缺少定义" not in result["answer_notice"]
     assert result["actual_retrieval_mode"] == "milvus_deep"
     assert result["thinking_trace"]["degraded"] is False
     # 完整明细仍经 thinking_trace.verify_missing 暴露（前端折叠渲染）。
     assert result["thinking_trace"]["verify_missing"] == ["缺少定义", "缺少对比"]
+
+
+async def test_verified_answer_has_empty_notice() -> None:
+    from core.domain.deep_thinking import DeepThinkingOutcome
+
+    outcome = DeepThinkingOutcome(
+        evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
+        answer="verified [1]",
+        verified=True,
+        actual_mode="milvus_deep",
+    )
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({"papers": []}),
+        deep_thinking_orchestrator=_MockDeepThinking(outcome),  # type: ignore[arg-type]
+    )
+    result = await api.ask(question="q", collection="papers", retrieval_mode="deep_thinking")
+    assert result["answer_notice"] == ""
+
+
+async def test_llm_unavailable_fallback_is_formatted_excerpts() -> None:
+    """v0.30.0：合成失败降级不再是碎片拼接——引导行 + [n] 标题 + 句边界截断摘录。"""
+    api = await _make_api()  # 无 llm_adapter → 走降级排版分支。
+    result = await api.ask(question="alpha", collection="kb1")
+    assert result["answer"].startswith("⚠️ LLM 暂不可用，未能合成回答。")
+    assert "**[1] " in result["answer"]
 
 
 async def test_restart_plugin_unsupported_without_callback() -> None:

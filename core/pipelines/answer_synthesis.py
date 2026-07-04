@@ -22,6 +22,13 @@ _SOURCE_ISOLATION_RULE = (
     "comparison, never silently merged into that paper's claims. "
 )
 
+# 成段行文约束（v0.30.0 流畅性）：正文写成完整段落，杜绝碎片化单行 bullet 与流水长句。
+_FLUENT_PROSE_RULE = (
+    "Write the body in flowing, well-structured paragraphs (2-5 sentences each) separated by "
+    "blank lines; use bullet lists only for genuinely enumerable items, never as fragmented "
+    "one-line prose, and avoid run-on sentences. "
+)
+
 # 与 api.ask 一致的合成 system 基模板（answer_language 指令追加在后）。
 _SYNTH_SYSTEM_BASE = (
     "You are a helpful academic assistant. "
@@ -30,6 +37,7 @@ _SYNTH_SYSTEM_BASE = (
     "context supports. "
     "Do not fill gaps with outside knowledge. "
     "Cite sources using [n] notation (e.g. [1], [2]). "
+    + _FLUENT_PROSE_RULE
     + _SOURCE_ISOLATION_RULE
 )
 
@@ -58,6 +66,7 @@ _SYNTH_SYSTEM_DEEP = (
     "For comparison or 'shared X of A and B' questions, enumerate the concrete dimensions; under "
     "each dimension give each entity's specific mechanism with its citation, then add a synthesis "
     "line on how they align. "
+    + _FLUENT_PROSE_RULE
     + _SOURCE_ISOLATION_RULE
 )
 

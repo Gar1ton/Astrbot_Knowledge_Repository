@@ -15,7 +15,6 @@ from core.pipelines.deep_thinking_evidence import select_final_evidence
 from core.pipelines.deep_thinking_orchestrator import DeepThinkingOrchestrator
 from core.pipelines.deep_thinking_prompts import (
     build_plan_prompt,
-    build_refine_prompt,
     build_sea_prompt,
     build_verify_prompt,
     parse_plan,
@@ -65,7 +64,11 @@ SEA_CONFLICT = (
 SEA_TRUE_NO_SATISFIED = (
     '{"satisfied_ids":[],"gaps":[],"conflicting_chunk_ids":[],"sufficient":true}'
 )
-REFINE_OK = '{"gap_queries":["q2"]}'
+# v0.30.0：REFINE 并入 SEA——insufficient 时 SEA 直接携带下一轮补检 next_sub_queries。
+SEA_INSUFF_WITH_NEXT = (
+    '{"satisfied_ids":[],"gaps":["缺C"],"conflicting_chunk_ids":[],"sufficient":false,'
+    '"next_sub_queries":[{"query":"Paper X Table 3","type":"section_anchor"}]}'
+)
 
 
 # ── 测试替身 ────────────────────────────────────────────────
@@ -89,13 +92,17 @@ class MockRetrieval:
     def __init__(self, outcome: RetrievalOutcome) -> None:
         self._outcome = outcome
         self.queries: list[str] = []
+        # 记录每次 document_labels 实际请求的 doc_id（验证跨轮缓存只查缺失项）。
+        self.label_requests: list[list[str]] = []
 
     async def retrieve_with_outcome(self, collection, query, top_k, scope=None):
         self.queries.append(query)
         return self._outcome
 
     async def document_labels(self, doc_ids):
-        return {d: d for d in doc_ids if d}
+        ids = [d for d in doc_ids if d]
+        self.label_requests.append(ids)
+        return {d: d for d in ids}
 
 
 class SequenceRetrieval:
@@ -200,15 +207,18 @@ def test_prompt_contracts_include_reliability_constraints():
         "比较多篇论文",
         Checklist(items=[ChecklistItem(id="c1", text="跨论文结论")]),
         [EvidenceItem(_doc_chunk("a1", "docA"), "rerank_score")],
+        max_next_queries=3,
     )
-    refine = build_refine_prompt(["缺少 first erroneous step 数据集"])
     verify = build_verify_prompt("q", "answer [1]", [_doc_chunk("a1", "docA")])
 
     assert "arXiv id" in plan
     assert "数据集名" in plan and "模型名" in plan and "表格/图/章节锚点" in plan
     assert "单一来源证据不得支撑跨来源结论" in sea
     assert "partial 或 contradicted" in sea
-    assert all(term in refine for term in ["论文名", "方法名", "数据集名", "模型名"])
+    # REFINE 并入 SEA：补检 query 契约（关键词化、上限、sufficient=true 给空数组）在 SEA prompt 中。
+    assert "next_sub_queries" in sea
+    assert "1~3" in sea
+    assert all(term in sea for term in ["论文名", "方法名", "数据集名", "模型名"])
     assert "断言、引用编号和该编号实际来源" in verify
 
 
@@ -251,18 +261,20 @@ async def test_sea_llm_unavailable_degrades_to_baseline():
 
 
 @pytest.mark.asyncio
-async def test_refine_llm_unavailable_degrades_to_baseline():
-    """PLAN/SEA 成功但 SEA 显示 insufficient，REFINE LLM 失败 → 回退 baseline。"""
-    # SEA_INSUFF_SMALLGAP: satisfied c1+c2，gap c3，sufficient=False → 进入 REFINE。
+async def test_second_round_sea_llm_unavailable_degrades_to_baseline():
+    """round1 SEA insufficient（确定性兜底续轮），round2 SEA LLM 失败 → 回退 baseline。
+
+    REFINE 并入 SEA 后，「补检后 LLM 失败」的降级路径由第二轮 SEA 承担。
+    """
     outcome = _outcome([_chunk("c1"), _chunk("c2"), _chunk("c3")])
     orch = _make(
         outcome,
-        [PLAN_3ITEM, SEA_INSUFF_SMALLGAP, RuntimeError("refine llm down")],
+        [PLAN_3ITEM, SEA_INSUFF_SMALLGAP, RuntimeError("sea llm down in round 2")],
         max_rounds=2,
     )
     result = await orch.run("papers", "综述问题")
     assert result.degraded is True
-    assert result.degraded_reason == "refine llm down"
+    assert result.degraded_reason == "sea llm down in round 2"
 
 
 @pytest.mark.asyncio
@@ -281,9 +293,10 @@ async def test_critical_unmet_returns_partial_evidence_without_degrade():
 @pytest.mark.asyncio
 async def test_sufficient_with_unmet_critical_refines_instead_of_converging():
     outcome = _outcome([_chunk("c1"), _chunk("c2")])
-    llm = ScriptedLLM([PLAN_CRITICAL, SEA_TRUE_NO_SATISFIED, REFINE_OK, SEA_SUFFICIENT])
+    retrieval = MockRetrieval(outcome)
+    llm = ScriptedLLM([PLAN_CRITICAL, SEA_TRUE_NO_SATISFIED, SEA_SUFFICIENT])
     orch = DeepThinkingOrchestrator(
-        retrieval_orchestrator=MockRetrieval(outcome),
+        retrieval_orchestrator=retrieval,
         reranker=NoopReranker(),
         llm_adapter=llm,
         dt_config=DeepThinkingConfig(
@@ -300,7 +313,8 @@ async def test_sufficient_with_unmet_critical_refines_instead_of_converging():
 
     assert len(result.trace) == 2
     assert result.degraded is False
-    assert "必需" in llm.prompts[2]
+    # SEA 未给 next_sub_queries → 确定性兜底：未满足 critical 项反推为补检 query。
+    assert "必需" in retrieval.queries
     assert result.trace[0].gaps == ["必需"]
 
 
@@ -370,7 +384,7 @@ async def test_reaches_max_rounds_without_degrade():
     outcome = _outcome([_chunk("c1"), _chunk("c2"), _chunk("c3")])
     orch = _make(
         outcome,
-        [PLAN_3ITEM, SEA_INSUFF_SMALLGAP, REFINE_OK, SEA_INSUFF_SMALLGAP],
+        [PLAN_3ITEM, SEA_INSUFF_SMALLGAP, SEA_INSUFF_SMALLGAP],
         max_rounds=2,
     )
     result = await orch.run("papers", "综述问题")
@@ -438,11 +452,12 @@ def test_compute_final_keeps_structural_anchor_before_doc_interleaving():
 
 
 @pytest.mark.asyncio
-async def test_sea_coverage_updates_checklist_and_refine_uses_typed_gap():
+async def test_sea_coverage_updates_checklist_and_typed_gap_drives_next_round():
     outcome = _outcome([_chunk("c1"), _chunk("c2"), _chunk("c3")])
-    llm = ScriptedLLM([PLAN_3ITEM, SEA_COVERAGE_PARTIAL, REFINE_OK, SEA_SUFFICIENT])
+    retrieval = MockRetrieval(outcome)
+    llm = ScriptedLLM([PLAN_3ITEM, SEA_COVERAGE_PARTIAL, SEA_SUFFICIENT])
     orch = DeepThinkingOrchestrator(
-        retrieval_orchestrator=MockRetrieval(outcome),
+        retrieval_orchestrator=retrieval,
         reranker=NoopReranker(),
         llm_adapter=llm,
         dt_config=DeepThinkingConfig(
@@ -461,7 +476,8 @@ async def test_sea_coverage_updates_checklist_and_refine_uses_typed_gap():
     assert result.checklist.items[0].supporting_chunk_ids == ["c1"]
     assert result.checklist.items[1].status == "partial"
     assert result.checklist.items[1].why_missing == "缺少原文定义"
-    assert "direct_quote：exact definition quote" in llm.prompts[2]
+    # typed coverage 缺口（gap_type：gap_query）作为确定性兜底直接进入下一轮检索。
+    assert "direct_quote：exact definition quote" in retrieval.queries
 
 
 # ── verification 闭环 ───────────────────────────────────────
@@ -698,11 +714,12 @@ def test_parse_sea_keeps_discovered_separate_from_gaps():
 
 
 @pytest.mark.asyncio
-async def test_discovered_absorbed_into_checklist_and_drives_refine_not_warning():
+async def test_discovered_absorbed_into_checklist_and_drives_next_round_not_warning():
     outcome = _outcome([_chunk("c1"), _chunk("c2")])
-    llm = ScriptedLLM([PLAN_1ITEM, SEA_DISCOVER, REFINE_OK, SEA_SUFFICIENT])
+    retrieval = MockRetrieval(outcome)
+    llm = ScriptedLLM([PLAN_1ITEM, SEA_DISCOVER, SEA_SUFFICIENT])
     orch = DeepThinkingOrchestrator(
-        retrieval_orchestrator=MockRetrieval(outcome),
+        retrieval_orchestrator=retrieval,
         reranker=NoopReranker(),
         llm_adapter=llm,
         dt_config=DeepThinkingConfig(
@@ -715,7 +732,7 @@ async def test_discovered_absorbed_into_checklist_and_drives_refine_not_warning(
     assert [i.text for i in discovered_items] == ["新机制X"]
     assert all(not i.critical for i in discovered_items)  # 探索性 → 非 critical。
     assert result.trace[0].discovered == ["新机制X"]  # 写入 trace 供可观测。
-    assert "新机制X" in llm.prompts[2]  # discovered 驱动 REFINE。
+    assert "新机制X" in retrieval.queries  # discovered 驱动下一轮补检（确定性兜底）。
     assert "新机制X" not in result.verify_missing  # 不进告警。
 
 
@@ -783,3 +800,85 @@ async def test_call_budget_counts_plan_and_sea_not_only_sea():
     # PLAN(1)+SEA(1)=2 已达 call_budget=2 → round1 后即停（旧口径只数 SEA=1 不会停）。
     assert len(result.trace) == 1
     assert llm.calls == 2
+
+
+# ── v0.30.0：SEA+REFINE 合并 / labels 缓存 / 并行重排 ────────
+def test_parse_sea_parses_next_sub_queries():
+    sea = parse_sea(SEA_INSUFF_WITH_NEXT)
+    assert sea.sufficient is False
+    assert sea.next_queries == ["Paper X Table 3"]
+    # 旧输出无该字段 → 空列表（向后兼容，走确定性兜底）。
+    assert parse_sea(SEA_INSUFF_SMALLGAP).next_queries == []
+
+
+@pytest.mark.asyncio
+async def test_sea_next_sub_queries_drive_next_round_without_refine_call():
+    outcome = _outcome([_chunk("c1"), _chunk("c2")])
+    retrieval = MockRetrieval(outcome)
+    llm = ScriptedLLM([PLAN_1ITEM, SEA_INSUFF_WITH_NEXT, SEA_SUFFICIENT])
+    orch = DeepThinkingOrchestrator(
+        retrieval_orchestrator=retrieval,
+        reranker=NoopReranker(),
+        llm_adapter=llm,
+        dt_config=DeepThinkingConfig(
+            max_rounds=2, max_sub_queries=2, wide_top_k=5, verify_enabled=False
+        ),
+        rerank_config=RerankConfig(provider="noop", keep=5),
+    )
+    result = await orch.run("papers", "综述问题")
+    # SEA 自带补检 query → 直接进入 round2 检索，无独立 REFINE 调用。
+    assert "Paper X Table 3" in retrieval.queries
+    assert llm.calls == 3  # PLAN + SEA×2（旧流程为 PLAN+SEA+REFINE+SEA=4）。
+    assert len(result.trace) == 2
+    assert result.degraded is False
+
+
+@pytest.mark.asyncio
+async def test_document_labels_cached_across_rounds():
+    # 两轮 SEA 的证据全部来自 doc1 → 第二轮命中缓存，不再请求 document_labels。
+    outcome = _outcome([_chunk("c1"), _chunk("c2")])
+    retrieval = MockRetrieval(outcome)
+    llm = ScriptedLLM([PLAN_1ITEM, SEA_INSUFF_WITH_NEXT, SEA_SUFFICIENT])
+    orch = DeepThinkingOrchestrator(
+        retrieval_orchestrator=retrieval,
+        reranker=NoopReranker(),
+        llm_adapter=llm,
+        dt_config=DeepThinkingConfig(
+            max_rounds=2, max_sub_queries=2, wide_top_k=5, verify_enabled=False
+        ),
+        rerank_config=RerankConfig(provider="noop", keep=5),
+    )
+    await orch.run("papers", "综述问题")
+    assert retrieval.label_requests == [["doc1"]]
+
+
+@pytest.mark.asyncio
+async def test_rank_candidates_parallel_pools_match_serial_ordering():
+    """并行分池 rerank 的混合排序与按池串行时一致（max 聚合与执行顺序无关）。"""
+    from core.pipelines.deep_thinking_evidence import rank_candidates
+
+    class EchoReranker:
+        """按 chunk 文本内嵌分数打分的确定性 reranker。"""
+
+        is_passthrough = False
+
+        async def rerank(self, query, candidates, top_n=None):
+            from core.repository.reranker.base import ScoredChunk
+
+            scored = [
+                ScoredChunk(chunk=c, score=float(c.text.rsplit("=", 1)[-1]))
+                for c in candidates
+            ]
+            scored.sort(key=lambda sc: sc.score, reverse=True)
+            return scored
+
+    def _scored_chunk(cid: str, score: float) -> DocumentChunk:
+        return DocumentChunk(cid, "doc1", 0, f"score={score}", f"h-{cid}")
+
+    hi, mid, lo = _scored_chunk("hi", 0.9), _scored_chunk("mid", 0.5), _scored_chunk("lo", 0.1)
+    oc1 = _oc([(hi, 0.2), (lo, 0.1)])
+    oc2 = _oc([(mid, 0.3), (lo, 0.05)])
+    ranked = await rank_candidates(
+        [("q1", oc1), ("q2", oc2)], [hi, mid, lo], set(), EchoReranker(), rerank_weight=1.0
+    )
+    assert [sc.chunk.chunk_id for sc in ranked] == ["hi", "mid", "lo"]

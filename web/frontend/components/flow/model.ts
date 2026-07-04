@@ -135,7 +135,7 @@ export const EDGES: FlowEdge[] = [
   { from: "ingest", to: "embedding" },
   { from: "embedding", to: "vector_store" },
   { from: "vector_store", to: "retrieval", labelKey: "flow_edge_default" },
-  { from: "vector_store", to: "graph", labelKey: "flow_edge_precision" },
+  { from: "vector_store", to: "graph", labelKey: "flow_edge_graph_mixed" },
   { from: "retrieval", to: "ask" },
   { from: "graph", to: "ask" },
   { from: "ingest", to: "sync", labelKey: "flow_edge_backup", dashed: true, vertical: true },

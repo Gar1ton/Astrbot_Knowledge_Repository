@@ -5,7 +5,7 @@
 # 本地 Embedding。Linux CPU 部署建议先安装 CPU-only PyTorch，避免下载大型 CUDA 组件。
 sentence-transformers>=3,<6
 
-# LightRAG 高精度召回
+# LightRAG 图谱混合检索
 lightrag-hku>=1.5.0rc1,<2.0.0
 
 # Cloudflare R2

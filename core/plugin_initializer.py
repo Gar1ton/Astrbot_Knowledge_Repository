@@ -465,6 +465,18 @@ class PluginInitializer:
             rerank_config=rerank_cfg,
         )
 
+        # 4.8b) 增强召回编排器（A-RAG「2+1」中间档）。与 deep 共享 reranker 实例与
+        # 独立 LLM endpoint 决策（同为研究型内部 agent，不重复膨胀配置面）。
+        from core.pipelines.enhanced_recall_orchestrator import EnhancedRecallOrchestrator
+
+        self.enhanced_recall_orchestrator = EnhancedRecallOrchestrator(
+            retrieval_orchestrator=self.retrieval_orchestrator,
+            reranker=self.reranker,
+            llm_adapter=dt_llm_adapter,
+            er_config=self._config.get_enhanced_recall_config(),
+            rerank_config=rerank_cfg,
+        )
+
         # 4.9) R2 完整备份管理器：inventory/manifest 是 R2 v1 的唯一恢复真相源。
         from core.managers.r2_backup_manager import R2BackupManager
 
@@ -497,6 +509,7 @@ class PluginInitializer:
             embedding_provider=self.embedding_provider,
             retrieval_orchestrator=self.retrieval_orchestrator,
             deep_thinking_orchestrator=self.deep_thinking_orchestrator,
+            enhanced_recall_orchestrator=self.enhanced_recall_orchestrator,
             reranker=self.reranker,
             metrics=self.metrics,
             progress_store=self.progress_store,

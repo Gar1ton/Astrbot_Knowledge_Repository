@@ -20,7 +20,8 @@ export type ConfigSection =
   | "embedding"
   | "zotero_sync"
   | "rerank"
-  | "deep_thinking";
+  | "deep_thinking"
+  | "enhanced_recall";
 
 // 由各 panel 上报给 FlowNode 头部徽章的草稿态；徽章据此变「保存」。
 export type QuickConfigDirty = { count: number; canSave: boolean };
@@ -238,6 +239,12 @@ function buildQuickConfig(stage: PipelineStage, config: FlowConfigSnapshot): Qui
     advanced.push(numberField("deep_thinking", "max_verify_rounds", "flow_quick_dt_max_verify_rounds", readNumberString(config, "deep_thinking", "max_verify_rounds", 1)));
     advanced.push(textField("deep_thinking", "llm_base_url", "flow_quick_dt_llm_base_url", readString(config, "deep_thinking", "llm_base_url"), true));
     advanced.push(textField("deep_thinking", "llm_model", "flow_quick_dt_llm_model", readString(config, "deep_thinking", "llm_model"), true));
+    // 高级：增强召回（A-RAG 2+1 中间档）全部 api 可写键。
+    advanced.push(numberField("enhanced_recall", "max_sub_queries", "flow_quick_er_max_sub_queries", readNumberString(config, "enhanced_recall", "max_sub_queries", 3)));
+    advanced.push(numberField("enhanced_recall", "wide_top_k", "flow_quick_er_wide_top_k", readNumberString(config, "enhanced_recall", "wide_top_k", 16)));
+    advanced.push(numberField("enhanced_recall", "max_final_evidence", "flow_quick_er_max_final_evidence", readNumberString(config, "enhanced_recall", "max_final_evidence", 12)));
+    advanced.push(numberField("enhanced_recall", "rerank_weight", "flow_quick_er_rerank_weight", readNumberString(config, "enhanced_recall", "rerank_weight", 0.5), undefined, 0, 0.05));
+    advanced.push(booleanField("enhanced_recall", "corrective_enabled", "flow_quick_er_corrective_enabled", readBoolean(config, "enhanced_recall", "corrective_enabled", true)));
     hints.push("flow_quick_rerank_hint");
     return { required, advanced, hints };
   }

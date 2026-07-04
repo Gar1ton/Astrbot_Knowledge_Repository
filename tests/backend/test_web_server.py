@@ -1372,7 +1372,7 @@ async def test_log_event_endpoint_records_frontend_toast(tmp_path: Path) -> None
         await client.close()
 
 
-async def test_high_precision_ask_returns_structured_not_ready(tmp_path: Path) -> None:
+async def test_graph_mixed_ask_returns_structured_not_ready(tmp_path: Path) -> None:
     class Registry:
         def has_workspace(self, collection: str) -> bool:
             return False
@@ -1400,7 +1400,7 @@ async def test_high_precision_ask_returns_structured_not_ready(tmp_path: Path) -
             json={
                 "question": "q",
                 "collection": "papers",
-                "retrieval_mode": "high_precision",
+                "retrieval_mode": "graph_mixed",
             },
         )
         assert resp.status == 409
@@ -1409,6 +1409,66 @@ async def test_high_precision_ask_returns_structured_not_ready(tmp_path: Path) -
             "message": "LightRAG workspace has not been built.",
             "collection": "papers",
             "build_available": True,
+        }
+    finally:
+        await client.close()
+
+
+async def test_graph_mixed_ask_returns_renamed_failure_status(tmp_path: Path) -> None:
+    """图谱 workspace 已就绪但查询失败时，HTTP 契约使用 graph_mixed_failed。"""
+    from core.index_compatibility import IndexCompatibilityStore
+    from core.pipelines.retrieval_orchestrator import RetrievalOutcome
+
+    class Registry:
+        def has_workspace(self, collection: str) -> bool:
+            return collection == "papers"
+
+    class Orchestrator:
+        async def retrieve_with_outcome(
+            self, collection, query, top_k, scope=None, candidate_k=None, reranker=None
+        ):
+            return RetrievalOutcome([], [])
+
+        async def retrieve_lightrag_context(self, collection, query, scope=None) -> str:
+            raise RuntimeError("graph query failed")
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(
+        SourceDocument("d1", "Doc 1", "/d1.pdf", "application/pdf", 1, "h", "papers")
+    )
+    await store.set_lightrag_index_status("d1", "papers", "indexed")
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_lightrag_compatible("papers", "fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=Registry(),  # type: ignore[arg-type]
+        retrieval_orchestrator=Orchestrator(),  # type: ignore[arg-type]
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/ask",
+            json={
+                "question": "q",
+                "collection": "papers",
+                "retrieval_mode": "graph_mixed",
+            },
+        )
+        assert resp.status == 502
+        assert await resp.json() == {
+            "status": "graph_mixed_failed",
+            "message": "graph query failed",
+            "collection": "papers",
         }
     finally:
         await client.close()

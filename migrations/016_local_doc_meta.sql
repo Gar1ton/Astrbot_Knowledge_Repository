@@ -1,0 +1,1 @@
+ALTER TABLE documents ADD COLUMN local_meta TEXT NOT NULL DEFAULT '{}';

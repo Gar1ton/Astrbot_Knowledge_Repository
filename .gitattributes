@@ -1,0 +1,34 @@
+# developer 分支发布瘦身规则。
+# 正式 main 由 release/published-files.txt 生成；git archive 仍使用本文件做二次防护。
+
+# 开发期资产，发布包无需携带：
+web/frontend/   export-ignore
+tests/          export-ignore
+dev/            export-ignore
+docs/           export-ignore
+.github/        export-ignore
+data/           export-ignore
+deliverables/   export-ignore
+tools/          export-ignore
+release/        export-ignore
+AGENTS.md       export-ignore
+ARCHITECTURE.md export-ignore
+CLAUDE.md       export-ignore
+CONVENTIONS.md  export-ignore
+TODO.md         export-ignore
+bump_version.py export-ignore
+pyproject.toml  export-ignore
+rebuild.sh      export-ignore
+requirements-dev.txt export-ignore
+core/main.py    export-ignore
+core/*.README.md export-ignore
+core/**/README.md export-ignore
+migrations/README.md export-ignore
+pages/README.md export-ignore
+.gitignore      export-ignore
+.gitattributes  export-ignore
+.published-source export-ignore
+
+# 规范化文本行尾
+* text=auto
+*.sh text eol=lf

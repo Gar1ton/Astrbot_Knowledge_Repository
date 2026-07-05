@@ -1,0 +1,159 @@
+{
+  "web_console": {
+    "description": "Web 控制台",
+    "type": "object",
+    "hint": "独立端口的管理界面，支持文档上传、分类、同步、图谱和配额查看，内置登录鉴权",
+    "items": {
+      "enabled": {
+        "description": "启用 Web 控制台",
+        "type": "bool",
+        "default": false
+      },
+      "host": {
+        "description": "监听地址",
+        "type": "string",
+        "default": "0.0.0.0",
+        "hint": "0.0.0.0 监听所有网络接口；如需仅本机访问可改为 127.0.0.1"
+      },
+      "port": {
+        "description": "监听端口",
+        "type": "int",
+        "default": 26618,
+        "hint": "默认 26618，避开 AstrBot 控制台（6185/6186）。如有端口冲突在此修改"
+      },
+      "username": {
+        "description": "登录用户名",
+        "type": "string",
+        "default": "admin"
+      },
+      "password": {
+        "description": "登录密码",
+        "type": "string",
+        "default": "",
+        "hint": "机密字段。建议通过环境变量 KR_WEB_PASSWORD 注入。留空时控制台将拒绝启动"
+      }
+    }
+  },
+  "r2_sync": {
+    "description": "Cloudflare R2 备份",
+    "type": "object",
+    "hint": "可选功能。将文档和数据库增量备份到 Cloudflare R2（免费额度 10 GB）。需先安装可选依赖：requirements-additional.txt",
+    "items": {
+      "enabled": {
+        "description": "启用 R2 备份",
+        "type": "bool",
+        "default": false
+      },
+      "account_id": {
+        "description": "Cloudflare Account ID",
+        "type": "string",
+        "default": ""
+      },
+      "access_key_id": {
+        "description": "R2 Access Key ID",
+        "type": "string",
+        "default": ""
+      },
+      "secret_access_key": {
+        "description": "R2 Secret Access Key",
+        "type": "string",
+        "default": "",
+        "hint": "机密字段。建议通过环境变量 KR_R2_SECRET_ACCESS_KEY 注入，不要直接填写在配置文件中"
+      },
+      "bucket": {
+        "description": "R2 Bucket 名称",
+        "type": "string",
+        "default": ""
+      },
+      "warn_threshold": {
+        "description": "用量预警阈值（0~1）",
+        "type": "float",
+        "default": 0.8,
+        "hint": "用量达到免费额度的此比例时发出警告；接近 1.0 时强制确认后才继续上传"
+      },
+      "backup_interval_sec": {
+        "description": "自动备份间隔（秒）",
+        "type": "int",
+        "default": 86400,
+        "hint": "设为 0 则关闭定时备份，仅通过控制台手动触发。默认 86400 秒 = 每天一次"
+      }
+    }
+  },
+  "notion_sync": {
+    "description": "Notion 镜像同步",
+    "type": "object",
+    "hint": "可选功能。将文章元数据（tag/文件树）单向增量推送到 Notion Articles 库，agent/研究结论推送到 QA 库。需要在 AstrBot 中已配置 Notion MCP Server",
+    "items": {
+      "enabled": {
+        "description": "启用 Notion 同步",
+        "type": "bool",
+        "default": false
+      },
+      "mcp_server_name": {
+        "description": "Notion MCP Server 名称",
+        "type": "string",
+        "default": "notion",
+        "hint": "填写 AstrBot 中配置的 Notion MCP server 名称，默认为 notion"
+      },
+      "database_id": {
+        "description": "Articles Database ID",
+        "type": "string",
+        "default": "",
+        "hint": "文章库 ID；已有则填写，留空且填写 parent_page_id 时初始化会自动创建并回填"
+      },
+      "qa_database_id": {
+        "description": "QA Database ID",
+        "type": "string",
+        "default": "",
+        "hint": "问答库 ID；一般由初始化自动创建并回填，无需手填"
+      },
+      "parent_page_id": {
+        "description": "自动建库的父页面 ID（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "仅在自动建库时使用：指定在哪个页面下创建 Articles 与 QA 两个 Database"
+      },
+      "database_title": {
+        "description": "自动创建的 Database 标题（可选）",
+        "type": "string",
+        "default": "Knowledge Repository",
+        "hint": "仅在自动建库时生效；QA 库标题为「<标题> · QA」"
+      },
+      "auto_sync_interval_sec": {
+        "description": "周期自动推送间隔（秒）",
+        "type": "int",
+        "default": 0,
+        "hint": "0 表示关闭定时推送；>0 时每隔该秒数自动增量推送一次（改动后重启生效）"
+      }
+    }
+  },
+  "embedding": {
+    "description": "Embedding 模型",
+    "type": "object",
+    "hint": "向量检索和知识图谱共用的文本向量化模型。local 模式需安装可选依赖；external 使用兼容 OpenAI Embeddings 的 API，密钥通过环境变量 KR_EMBEDDING_API_KEY 注入",
+    "items": {
+      "provider": {
+        "description": "Embedding 来源",
+        "type": "string",
+        "default": "local",
+        "options": [
+          "local",
+          "external"
+        ],
+        "hint": "local：本地运行模型，需手动安装 requirements-additional.txt（含 PyTorch，体积较大）；external：调用外部 API，轻量但需网络和密钥"
+      },
+      "model": {
+        "description": "模型名称",
+        "type": "string",
+        "default": "intfloat/multilingual-e5-small",
+        "hint": "local 模式填写 HuggingFace 模型 ID；external 模式填写 API 端点支持的模型名。切换模型后需重建所有向量索引"
+      },
+      "base_url": {
+        "description": "API 地址（仅 external 模式）",
+        "type": "string",
+        "default": "https://api.openai.com/v1",
+        "hint": "兼容 OpenAI Embeddings 接口的端点，例如 https://api.openai.com/v1 或自建代理地址"
+      }
+    }
+  }
+}

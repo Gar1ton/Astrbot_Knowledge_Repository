@@ -882,3 +882,39 @@ async def test_rank_candidates_parallel_pools_match_serial_ordering():
         [("q1", oc1), ("q2", oc2)], [hi, mid, lo], set(), EchoReranker(), rerank_weight=1.0
     )
     assert [sc.chunk.chunk_id for sc in ranked] == ["hi", "mid", "lo"]
+
+
+# ── 部分失败降级（v1.0.0-rc.1）──────────────────────────────
+
+
+async def test_gather_round_skips_failed_subquery():
+    """单个 sub_query 检索瞬断不应废掉整轮推演，剩余结果照常累积证据。"""
+    outcome = _outcome([_chunk("c1")])
+    orch = _make(outcome, [])
+
+    async def flaky(collection, query, top_k, scope=None):
+        if query == "bad":
+            raise RuntimeError("vector store down")
+        return outcome
+
+    orch._retrieval.retrieve_with_outcome = flaky
+    evidence: dict = {}
+    kept = await orch._gather_round(
+        "col", "main q", ["good", "bad"], None, [], evidence, set(), include_baseline=None
+    )
+    assert "c1" in kept
+    assert "c1" in evidence
+
+
+async def test_gather_round_raises_when_all_subqueries_fail_without_baseline():
+    outcome = _outcome([_chunk("c1")])
+    orch = _make(outcome, [])
+
+    async def broken(collection, query, top_k, scope=None):
+        raise RuntimeError("vector store down")
+
+    orch._retrieval.retrieve_with_outcome = broken
+    with pytest.raises(RuntimeError):
+        await orch._gather_round(
+            "col", "main q", ["q1", "q2"], None, [], {}, set(), include_baseline=None
+        )

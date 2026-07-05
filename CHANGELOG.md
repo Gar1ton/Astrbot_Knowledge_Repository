@@ -21,7 +21,85 @@
 
 ---
 
-## [Unreleased]
+## [v1.0.0] — 2026-07-05
+
+> 首个正式发布版本。在 v1.0.0-rc.1 健壮性加固基础上，完成 Notion 同步机制重构：从「静默失效的
+> 逐文档单镜像」重写为「单库 filter + QA 表」的单向增量推送，并接入 agent 自然语言/WebUI 推送研究结论；
+> 同步落地 developer 源码分支 + orphan main 发布分支的发布治理（详见 docs/GIT_WORKFLOW.md）。
+
+### 新增功能 (Added)
+
+- **Notion 单库 filter 同步（Articles）**：文章一行一篇，tag 与文件树编码进可筛选属性——`Tags` multi_select、`Collections` multi_select（**含归属集合的全部祖先名**，在 Notion 里筛任一集合名即得其子树全部文章）、`Collection Path` select（primary 集合完整路径），另镜像 Origin/Lifecycle/Content Hash/Size/Updated。属性 schema 与页面载荷构造、祖先链展开、指纹计算抽为纯函数模块（core/repository/sync_targets/notion_schema.py）。
+- **Notion QA 库（agent/研究结论推送）**：新增 append-only 问答库，`Citations` relation 链回 Articles 表的被引文章、`Source` 区分 research/ask/chat。新增 `notion_push_note` llm_tool（content/title/tags/citations/keep_local）与 WebUI Ask 回答下的「同步到 Notion」按钮，两者共用同一推送通路（main.py、web/frontend/components/panels/ChatPanel.tsx）。
+- **research 推送闭环**：`research_execute` 返回体新增 `citation_doc_ids`（供 agent 透传 Citations），research 完成回发后在 Notion 启用时追加推送引导（core/research_skill.py、main.py）。
+- **QA 暂存箱（outbox）**：agent/Ask 推送默认走「中转即焚」——写 notion_outbox(pending)→立即推送→成功清正文留存根、失败保留全文等下轮补推；`keep_local="true"` 转正为本地 ScopedNote 再推（core/api.py push_note_to_notion）。
+- **聊天端 `/ka notion <push|force push|status>`**：继承 R2 的 60s 二次确认模式；status 汇总账本 synced/degraded/failed 计数、QA 待推/失败数与建库状态（core/event_handler.py、main.py）。
+- **周期自动推送**：`notion_sync.auto_sync_interval_sec`（0=关）驱动 `_periodic_notion_sync` 后台任务（每轮重读间隔以吸收前端改值），WebUI 设置页新增「Notion 同步」卡（周期间隔输入 + 初始化两库/立即同步按钮）（core/plugin_initializer.py、web/frontend/components/modals/SettingModal.tsx）。
+
+### 修复 (Fixed)
+
+- **修复 Notion 正文部分成功导致的数据丢失**：文章页面/属性成功但正文块失败时不再推进 `notion_entity_map.content_hash`，下一轮会继续重写正文；QA 建行成功但正文追加失败时，outbox 保留全文，补推按 NoteID 复用原页并清块重写，确认正文成功后才清本地存根（core/repository/sync_targets/notion.py、core/pipelines/notion_sync_pipeline.py）。
+- **补齐 Notion 元数据与引用降级一致性**：`updated_at` 纳入文章 metadata 指纹，避免仅时间变化时 Notion `Updated` 列滞后；Citations relation 降级时把已解析 DocID 写入正文尾部，避免引用随 relation 一并丢失（core/repository/sync_targets/notion_schema.py、notion.py、core/pipelines/notion_sync_pipeline.py）。
+- **Notion MCP 适配层真实调用路径**：旧实现调用无前缀旧工具名（`create_page` 等）且依赖不存在的 `context.call_mcp_tool`，拿不到即回退离线 stub 返回假 uuid——真实宿主上整条 push 链路静默空转。重写为 `get_llm_tool_manager().mcp_client_dict[server].call_tool_with_reconnect`（timedelta 超时）+ `notion_` 前缀真实工具名 + `format:"json"`，未连接显式抛 `NotionMCPError`（不再假成功）；建页/正文分两步（该 MCP server 的 create_database_item 不支持 children），归档改 `notion_delete_block`（core/adapters/notion_mcp.py）。
+- **推送幂等（防重复建页）**：旧实现每次 push 都新建页面、不查重，重复同步产生重复页。改为账本 page_id 命中→update；miss→按 DocID/NoteID 反查回填→update，仍无才 create；正文块仅 content_hash 变化时重写（core/repository/sync_targets/notion.py）。
+
+### 架构健康 (Refactor)
+
+- **Notion 推送编排下沉专职管线**：新增 `NotionSyncPipeline`（增量指纹 diff + 集合树展开 + outbox 补推 + 孤儿账本对账 + 防重入锁），`SyncPipeline` 删除 initialize/pull 特有方法回归 R2 主职责（core/pipelines/notion_sync_pipeline.py、sync_pipeline.py）。
+- **推送账本与暂存箱持久化**：新增 `notion_entity_map`（(entity_type,entity_key)→page_id + metadata/content 双指纹）与 `notion_outbox` 两表及 store CRUD（migrations/020_notion_push_ledger.sql、core/domain/models.py、core/repository/source_store/*）。
+- **移除 Notion 反向同步**：单向推表定位下删除 `pull_metadata`/`POST /api/sync/notion/pull`/`syncNotionPull`，新增 `POST /api/notion/push-note`（core/repository/sync_targets/notion.py、web/server.py、web/frontend/lib/api.ts）。
+
+### 测试 (Tests)
+
+- 新增 Notion 部分成功恢复回归：覆盖文章正文失败后账本不推进并于下轮恢复、QA 空页补推不丢 outbox 正文、`push_all` 防重入，以及 `updated_at` 指纹和 relation 降级正文兜底；全量 backend 为 591 passed、2 skipped（tests/backend/test_notion_target.py、test_notion_pipeline.py）。
+- 新增 test_notion_adapter.py（工具名前缀/format/isError/未连接显式报错/分页/节流）、test_notion_pipeline.py（首推/零变更 0 调用/改 tag 仅 1 update/集合改名联动子树/force/outbox 补推/孤儿清理）、test_notion_event_handler.py（/ka notion 三动作与二次确认）；重写 test_notion_target.py 经 tool_caller fake 驱动（幂等序列/防重复页/降级/QA NoteID 防重/两表建库对账）；store/api/web/research 相关测试同步扩充。
+
+### 构建与工程 (Build/CI)
+
+- README 补充 `@suekou/mcp-notion-server@1.2.4` 锁版要求（v2 Data Source API 与当前 v1.2.x 工具契约不兼容）；`deliverables/design-spec.md` 移除已删除的 Notion pull 端点并登记 QA push-note 端点；TODO 订正原轮文件行数、测试例数及可选依赖导致的 passed/skipped 差异。
+- `_conf_schema.json` notion_sync 节新增 `qa_database_id`/`auto_sync_interval_sec`；`ConfigKeyPolicy` 标记为 runtime 可写非机密；`to_public_dict` 暴露供前端（core/config.py）。
+- **发布治理：developer 源码分支 + orphan main 发布分支**：新增白名单生成器（tools/build_published_tree.py、release/published-files.txt）、published main 校验工作流（.github/workflows/published-verify.yml）与人工流程文档（docs/GIT_WORKFLOW.md）；CLAUDE.md/AGENTS.md 落地「远端操作单独获批」与「main 禁止手改」规则。
+- **补 AGPL-3.0 LICENSE**；运行依赖与开发依赖拆分：pytest/ruff/mypy/numpy 迁至 developer 专用 requirements-dev.txt，正式发布树只保留 requirements.txt/requirements-additional.txt。
+- **市场元数据补全**：metadata.yaml 新增 `short_desc` 与 `astrbot_version`（`>=4.5.7,<5`）；移除误跟踪的宿主 `data/` 与过期前端 ZIP `deliverables/frontend-source.zip`。
+
+## [v1.0.0-rc.1] — 2026-07-04
+
+> 首个正式版 release candidate：全插件运行风险排查（core/ 90 文件 + web/server.py 全部 handler 两轮扫描逐项核实）后的健壮性加固版。无新功能。
+
+### 修复 (Fixed)
+
+- **`handle_zotero_account_change` 死代码 except 分支**：删除引用未定义变量 `collection` 的 `except NotImplementedError` 与不可达的重复 `except RuntimeError`（均系从 graph handler 复制残留；`NotImplementedError` 本就是 `RuntimeError` 子类、永远被前置分支捕获），日志文案改回 Zotero 语义（web/server.py）。
+- **端点输入健壮性**：新增 `_parse_int`/`_query_int` helper——非法整数参数返 400（原为 500）且上下界夹取，应用于 kb_search(top_k/window)、chunk_context(window)、graph_query(top_k)、ask(top_k)；登录端点畸形 JSON 返 400、用户名/密码改 `secrets.compare_digest` 常数时间比较；下载 `Content-Disposition` 文件名清洗 CR/LF 防头注入（web/server.py）。
+
+### 性能优化 (Performance)
+
+- **上传端点流式化**：multipart 以 1MB 块流式落盘 + 增量 sha256（原为整文件进内存 + 同步 hash/写盘，大文件会冻结整个宿主事件循环），新增 200MB 上限（超限 413）、filename 取 basename 净化、临时文件 finally 清理（web/server.py）。
+- **Milvus 同步调用移出事件循环**：`MilvusLiteVectorStore` 各 async 方法的 pymilvus 阻塞调用（search/upsert/insert/delete/懒初始化开库+load）全部 `asyncio.to_thread`，懒初始化加 `asyncio.Lock` 防并发重入——此前每次向量检索都会冻结宿主 bot 的事件循环（core/repository/vector_store/milvus_lite.py）。
+- **图谱构建阻塞读**：`_lightrag_text_for_doc` 的 `read_text`（clean.md 可达数 MB）挪 `asyncio.to_thread`（core/api.py）；`fs_browse` 的 `os.scandir` 同理（web/server.py）。
+
+### 架构健康 (Refactor)
+
+- **SQLite 写事务互斥**：共享单 aiosqlite 连接上，协程 A 的多语句事务（如 `replace_chunks` 的 DELETE+N INSERT）可被并发协程 B 的 commit 连带提交半成品（崩溃窗口内持久化损坏数据）。新增 `_locked_write` 装饰器 + `asyncio.Lock`，28 个写方法全部互斥；`set_document_collections` 拆出 `_set_document_collections_unlocked` 供已持锁的归属同步内部调用（core/repository/source_store/sqlite.py）。
+- **检索子查询部分失败降级**：deep_thinking 与 enhanced_recall 的并行 sub-query 检索 `gather` 改 `return_exceptions=True`——单个子查询瞬断（embedding 超时/向量库抖动）跳过并记 warning，全部失败才上抛；原为一败全败（core/pipelines/deep_thinking_orchestrator.py、enhanced_recall_orchestrator.py）。
+- **外部调用兜底**：外部 embedding 加 `ClientTimeout(total=60, connect=10)` + 5xx/网络错误重试 1 次（原依赖 aiohttp 默认 5 分钟、无重试；4xx 不重试）（core/repository/embedding/external.py）；research execute 包 `asyncio.wait_for(1800s)` 防 LLM 挂死致后台任务永不返回，`main.py` 两处裸 `svc.probe` 补 try/except 兜底（core/research_skill.py、main.py）。
+- **杂项加固**：Milvus filter 表达式转义 collection 单引号 + metadata key 白名单校验（防表达式注入）；两处 fire-and-forget `create_task` 持引用防 GC（core/api.py、core/managers/r2_backup_manager.py）；Notion `query_database` 分页上限 200 页防无界循环（core/adapters/notion_mcp.py）；存量 ruff 报错清零（E501×3、UP035、F401），`ruff check .` 全绿。
+
+### 测试 (Tests)
+
+- `test_web_server.py` 新增 7 例回归（account-change 400/500 路径、top_k 非法 400/越界夹取、畸形 login 400、超限上传 413 + 临时文件清理、filename 路径分量净化）；两个 orchestrator 各加 2 例部分失败降级；全套 541 passed。
+
+### 构建与工程 (Build/CI)
+
+- **README 面向 v1.0 功能面重写**：新增「五档检索模式」成本阶梯表与对话式 research 工作流小节；压缩 R2 备份协议与 Zotero 换号保护的过详段落；修正配置表述（AstrBot 面板仅承载 web_console/r2/notion/embedding 四组，Zotero/LightRAG 在 WebUI 设置页配置持久化到 runtime_config.json）；修正终端日志入口（侧栏浮层而非独立路由）并补充其过滤/导出能力、数据流页依赖一键安装、200MB 上传上限等新事实（README.md）。
+
+### 新增功能 (Added)
+
+- **终端日志面向真实 debug 场景重构（显示侧）**：终端面板新增级别 chips 过滤（默认隐藏 DEBUG）、分类下拉、关键字搜索（消息/模块/位置）、暂停轮询、错误计数徽章（点击循环跳转下一条 ERROR）、复制可见日志与下载 `.log`；行显示升级为毫秒时间戳、ERROR/WARN 整行底色、`module:lineno` 代码位置列、traceback 折叠展开、metadata 内联 `key=value`；上翻阅读时显示"↓ N 条新日志"悬浮 pill；清屏改为基线语义（刷新不再复活已清内容）。原 `components/ui/TerminalPanel.tsx`（399 行）按职责拆分为 `components/ui/terminal/`（TerminalPanel/useTerminalLogs/TerminalToolbar/LogRow/format），i18n 补 zh/en 文案（web/frontend/components/ui/terminal/、lib/api.ts、lib/i18n.ts、components/rail/Rail.tsx、components/modals/SettingModal.tsx）。
+- **日志捕获结构化升级（采集侧）**：记录新增 `location`（`module:lineno`，对齐 AstrBot terminal 的代码定位）与独立 `exc` traceback 字段（与 msg 分离供前端折叠）；分类改为 logger 名前缀映射表（消息关键词仅作跨领域 logger 的 fallback），比原先的消息关键词猜测稳定；非项目 logger 的 DEBUG 记录不再入缓冲区（三方降噪，`_SKIP_PREFIXES` 扩充 sentence_transformers/grpc/filelock/PIL）；环形缓冲 500→1000 行，`/api/logs` limit 上限同步放宽，前端持有量对齐（core/log_capture.py、web/server.py）。
+
+### 测试 (Tests)
+
+- 新增 `tests/backend/test_log_capture.py`（10 例）：前缀分类映射与关键词 fallback、location 生成、traceback 分离、三方 DEBUG 降噪、`get_lines` after/limit 语义、`add_event` 结构、环形缓冲上限、级别→status 映射。
 
 ## [v0.30.1] — 2026-07-04
 
@@ -1347,7 +1425,7 @@
 
 ---
 
-## [v0.1.0] — YYYY-MM-DD
+## [v0.1.0] — 2026-05-30
 
 ### 构建与工程 (Build/CI)
 

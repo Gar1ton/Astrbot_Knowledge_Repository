@@ -1,0 +1,51 @@
+name: Published Main Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Validate published tree
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          required = {
+              "main.py", "metadata.yaml", "_conf_schema.json", "requirements.txt",
+              "requirements-additional.txt", "README.md", "CHANGELOG.md", "LICENSE",
+              "logo.png", "web/server.py", "pages/index.html", ".published-source",
+          }
+          forbidden = ("data/", "deliverables/", "dev/", "docs/", "tests/", "tools/", "web/frontend/")
+          files = {p.as_posix() for p in Path(".").rglob("*") if p.is_file() and ".git" not in p.parts}
+          missing = sorted(required - files)
+          blocked = sorted(p for p in files if p.startswith(forbidden))
+          if missing or blocked:
+              raise SystemExit(f"missing={missing}; forbidden={blocked}")
+
+          metadata = Path("metadata.yaml").read_text(encoding="utf-8")
+          main = Path("main.py").read_text(encoding="utf-8")
+          mv = re.search(r"^version:\s*(v\S+)", metadata, re.MULTILINE)
+          cv = re.search(r'^_PLUGIN_VERSION\s*=\s*"([^"]+)"', main, re.MULTILINE)
+          if not mv or not cv or mv.group(1) != cv.group(1):
+              raise SystemExit("metadata.yaml and main.py versions differ")
+
+          subprocess.run(["git", "archive", "--format=zip", "--output=published.zip", "HEAD"], check=True)
+          size = Path("published.zip").stat().st_size
+          if size > 15 * 1024 * 1024:
+              raise SystemExit(f"published.zip is {size / 1024 / 1024:.2f} MiB")
+          print(f"published tree ok: {len(files)} files, archive={size / 1024 / 1024:.2f} MiB")
+          PY
+      - name: Compile Python sources
+        run: python -m compileall -q main.py core web migrations

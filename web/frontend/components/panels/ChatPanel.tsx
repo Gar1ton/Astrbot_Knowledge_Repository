@@ -17,7 +17,7 @@ import {
   getChatHistory, clearChatHistory, lockChatAnswer,
   createDocumentNote, createCollectionNote,
   getAskProgress, type LiveProgressDetail,
-  getEffectiveConfig,
+  getEffectiveConfig, pushNotionNote,
 } from "@/lib/api";
 
 // ─── Types ────────────────────────────────────────────────────
@@ -401,11 +401,15 @@ function MessageBubble({
   onCite,
   onPin,
   onSaveNote,
+  onPushNotion,
+  notionEnabled,
 }: {
   msg: Message;
   onCite: (n: number) => void;
   onPin: () => void;
   onSaveNote: () => void;
+  onPushNotion?: () => void;
+  notionEnabled?: boolean;
 }) {
   const [hover, setHover] = useState(false);
   const { t } = useI18n();
@@ -515,6 +519,13 @@ function MessageBubble({
             <Icon name="pin" size={12} /> {msg.pinned ? t("chat_answer_locked") : t("chat_lock_answer_short")}
           </button>
         </Tooltip>
+        {notionEnabled && onPushNotion && (
+          <Tooltip label={t("chat_push_notion_tip")} side="top">
+            <button onClick={onPushNotion} style={ACTION_BTN}>
+              <Icon name="layers" size={12} /> {t("chat_push_notion")}
+            </button>
+          </Tooltip>
+        )}
       </div>
     </div>
   );
@@ -682,6 +693,7 @@ export function ChatPanel({ width }: { width?: number }) {
   const [answerLanguage, setAnswerLanguage] = useState<"auto" | "zh" | "en">("auto");
   const [showSettings, setShowSettings] = useState(false);
   const [graphBuildDialog, setGraphBuildDialog] = useState<GraphBuildDialogState | null>(null);
+  const [notionEnabled, setNotionEnabled] = useState(false);
   // 卸载时兜底清除轮询定时器，避免组件被销毁后仍在轮询。
   useEffect(
     () => () => {
@@ -704,6 +716,8 @@ export function ChatPanel({ width }: { width?: number }) {
         if (!cancelled && (lang === "auto" || lang === "zh" || lang === "en")) {
           setAnswerLanguage(lang);
         }
+        const ns = (cfg.notion_sync as { enabled?: boolean } | undefined)?.enabled;
+        if (!cancelled) setNotionEnabled(Boolean(ns));
       })
       .catch(() => {
         /* 配置不可用时保持默认 auto，不打断聊天 */
@@ -793,6 +807,32 @@ export function ChatPanel({ width }: { width?: number }) {
     const existing = JSON.parse(localStorage.getItem(key) ?? "[]") as string[];
     localStorage.setItem(key, JSON.stringify([...existing, body]));
     toast(t("chat_note_saved"), "ok");
+  }
+
+  async function handlePushNotion(msg: Message, index: number) {
+    // 取该回答对应的上一条用户提问作为标题；引用取 sources 的 doc_id（去重）。
+    const prev = messages[index - 1];
+    const title = prev && prev.role === "user" ? prev.content.slice(0, 60) : "";
+    const citations = Array.from(
+      new Set((msg.sources ?? []).map((s) => s.doc_id).filter(Boolean)),
+    );
+    try {
+      const res = await pushNotionNote({
+        content: msg.content,
+        title,
+        citations,
+        source: "ask",
+      });
+      if (res.status === "success") {
+        toast(t("chat_notion_pushed"), "ok");
+      } else if (res.status === "disabled") {
+        toast(t("chat_notion_disabled"), "error");
+      } else {
+        toast(res.message || t("chat_notion_push_failed"), "error");
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t("chat_notion_push_failed"), "error");
+    }
   }
 
   function clearChat() {
@@ -987,6 +1027,8 @@ export function ChatPanel({ width }: { width?: number }) {
               onCite={(n) => handleCite(msg, n)}
               onPin={() => handlePin(i)}
               onSaveNote={() => handleSaveNote(msg)}
+              onPushNotion={() => handlePushNotion(msg, i)}
+              notionEnabled={notionEnabled && msg.role === "assistant"}
             />
           ))
         )}

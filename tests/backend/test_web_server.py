@@ -528,7 +528,7 @@ async def test_graph_data_endpoint_returns_200(tmp_path: Path) -> None:
         await client.close()
 
 
-async def test_notion_init_and_pull_routes_return_200(tmp_path: Path) -> None:
+async def test_notion_init_and_push_note_routes_return_200(tmp_path: Path) -> None:
     class StubApi:
         async def initialize_notion_database(
             self,
@@ -538,13 +538,28 @@ async def test_notion_init_and_pull_routes_return_200(tmp_path: Path) -> None:
             return {
                 "status": "success",
                 "database_id": "db-created",
+                "qa_database_id": "qa-created",
                 "parent_page_id": parent_page_id,
                 "database_title": database_title,
                 "created": True,
             }
 
-        async def pull_notion_metadata(self) -> dict:
-            return {"status": "success", "updated_count": 1, "skipped_count": 0}
+        async def push_note_to_notion(
+            self,
+            content: str,
+            *,
+            title: str = "",
+            tags: list[str] | None = None,
+            citations: list[str] | None = None,
+            source: str = "ask",
+            keep_local: bool = False,
+        ) -> dict:
+            return {
+                "status": "success",
+                "page_id": "qa-page-1",
+                "echo_title": title,
+                "echo_citations": citations or [],
+            }
 
     app = build_app(
         api=StubApi(),  # type: ignore[arg-type]
@@ -560,11 +575,49 @@ async def test_notion_init_and_pull_routes_return_200(tmp_path: Path) -> None:
             json={"parent_page_id": "parent", "database_title": "KR"},
         )
         assert init.status == 200
-        assert (await init.json())["database_id"] == "db-created"
+        assert (await init.json())["qa_database_id"] == "qa-created"
 
-        pull = await client.post("/api/sync/notion/pull")
-        assert pull.status == 200
-        assert (await pull.json())["updated_count"] == 1
+        push = await client.post(
+            "/api/notion/push-note",
+            json={"content": "研究结论", "title": "Q1", "citations": ["d1", "d2"]},
+        )
+        assert push.status == 200
+        body = await push.json()
+        assert body["page_id"] == "qa-page-1"
+        assert body["echo_title"] == "Q1"
+        assert body["echo_citations"] == ["d1", "d2"]
+    finally:
+        await client.close()
+
+
+async def test_notion_routes_report_unavailable_instead_of_reserved(tmp_path: Path) -> None:
+    class StubApi:
+        async def initialize_notion_database(self, *_args, **_kwargs) -> dict:
+            return {"status": "unavailable", "message": "Notion 同步管线未装配"}
+
+        async def push_note_to_notion(self, *_args, **_kwargs) -> dict:
+            return {"status": "unavailable", "message": "Notion 同步管线未装配"}
+
+    app = build_app(
+        api=StubApi(),  # type: ignore[arg-type]
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        init = await client.post("/api/notion/init", json={})
+        assert init.status == 503
+        init_body = await init.json()
+        assert init_body["status"] == "unavailable"
+        assert "reserved" not in init_body
+
+        push = await client.post("/api/notion/push-note", json={"content": "x"})
+        assert push.status == 503
+        push_body = await push.json()
+        assert push_body["status"] == "unavailable"
+        assert "reserved" not in push_body
     finally:
         await client.close()
 
@@ -1616,5 +1669,134 @@ async def test_graph_stats_route(tmp_path: Path) -> None:
         assert "relations_count" in body
         assert "collections_covered" in body
         assert isinstance(body["entities_count"], int)
+    finally:
+        await client.close()
+
+
+# ── v1.0.0-rc.1 端点健壮性回归 ──────────────────────────────────
+
+
+async def test_zotero_account_change_invalid_confirm_returns_400(tmp_path: Path) -> None:
+    """无待确认变更 → ValueError → 400（而非 500）。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post(
+            "/api/zotero/account-change",
+            json={"change_id": "stale", "action": "replace_local"},
+        )
+        assert resp.status == 400
+        body = await resp.json()
+        assert body["status"] == "error"
+    finally:
+        await client.close()
+
+
+async def test_zotero_account_change_unexpected_error_returns_500_message(
+    tmp_path: Path,
+) -> None:
+    """回归：意外异常曾进入引用未定义变量 collection 的 except 分支 → NameError。"""
+    api = await _make_api()
+    api.resolve_zotero_account_change = AsyncMock(  # type: ignore[method-assign]
+        side_effect=OSError("boom")
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/zotero/account-change", json={"change_id": "x", "action": "cancel"}
+        )
+        assert resp.status == 500
+        body = await resp.json()
+        assert body["message"] == "boom"  # 透传原始异常，而非 NameError
+    finally:
+        await client.close()
+
+
+async def test_kb_search_invalid_top_k_returns_400(tmp_path: Path) -> None:
+    client = await _client(tmp_path)
+    try:
+        resp = await client.get(
+            "/api/kb/search", params={"collection": "papers", "q": "alpha", "top_k": "abc"}
+        )
+        assert resp.status == 400
+        body = await resp.json()
+        assert "top_k" in body["error"]
+    finally:
+        await client.close()
+
+
+async def test_kb_search_top_k_clamped(tmp_path: Path) -> None:
+    """越界值夹取而非透传检索层。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.get(
+            "/api/kb/search",
+            params={"collection": "papers", "q": "alpha", "top_k": "99999999"},
+        )
+        assert resp.status == 200
+    finally:
+        await client.close()
+
+
+async def test_login_malformed_json_returns_400(tmp_path: Path) -> None:
+    client = await _client(tmp_path, auth_required=True)
+    try:
+        resp = await client.post(
+            "/api/login", data=b"not-json", headers={"Content-Type": "application/json"}
+        )
+        assert resp.status == 400
+    finally:
+        await client.close()
+
+
+async def test_upload_over_size_limit_returns_413(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import web.server as server_mod
+
+    monkeypatch.setattr(server_mod, "_MAX_UPLOAD_BYTES", 16)
+    client = await _client(tmp_path)
+    try:
+        form = FormData()
+        form.add_field(
+            "file", b"x" * 64, filename="big.bin", content_type="application/octet-stream"
+        )
+        resp = await client.post("/api/documents", data=form)
+        assert resp.status == 413
+        # 流式暂存的 .part 临时文件必须被清理
+        assert not list((tmp_path / "uploads").glob("*.part"))
+    finally:
+        await client.close()
+
+
+async def test_upload_filename_is_sanitized(tmp_path: Path) -> None:
+    """multipart filename 带字面路径分量时只保留 basename，杜绝目录穿越。"""
+    client = await _client(tmp_path)
+    try:
+        boundary = "----kr-test-boundary"
+        raw = (
+            (
+                f"--{boundary}\r\n"
+                'Content-Disposition: form-data; name="file"; filename="../../evil.pdf"\r\n'
+                "Content-Type: application/pdf\r\n\r\n"
+            ).encode()
+            + b"%PDF-1.4 fake"
+            + f"\r\n--{boundary}--\r\n".encode()
+        )
+        resp = await client.post(
+            "/api/documents",
+            data=raw,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["title"] == "evil.pdf"
+        assert not (tmp_path / "evil.pdf").exists()
     finally:
         await client.close()

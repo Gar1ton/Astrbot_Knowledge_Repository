@@ -2,6 +2,12 @@
 
 将 Python logging 与前端运行事件存入同一个环形缓冲区，供 /api/logs 端点读取。
 线程安全：使用 threading.Lock 保护 deque。
+
+字段契约（每条记录）：
+- ts/level/name/msg：基础字段（向后兼容）。
+- location：产生日志的代码位置 ``module:lineno``（事件来源为空串）。
+- exc：完整 traceback 文本（无异常时为空串），与 msg 分离供前端折叠。
+- category/source/operation/status/metadata：结构化字段，供 terminal 分类筛选。
 """
 from __future__ import annotations
 
@@ -11,39 +17,125 @@ import time
 from collections import deque
 from typing import Any
 
+# ── 噪声控制 ──────────────────────────────────────────────────
+
+# 完全丢弃的三方 logger（高频且对本插件 debug 无信号）。
+_SKIP_PREFIXES = (
+    "aiohttp.access",
+    "aiohttp.server",
+    "aiohttp.web",
+    "charset_normalizer",
+    "httpx",
+    "hpack",
+    "httpcore",
+    "urllib3",
+    "asyncio",
+    "sentence_transformers",
+    "filelock",
+    "grpc",
+    "PIL",
+)
+
+# 项目自有 logger 前缀：DEBUG 级别予以保留；名单外的三方 DEBUG 直接丢弃。
+_PROJECT_PREFIXES = (
+    "astrbot_plugin_knowledge_repository",
+    "AstrBotKnowledgeBaseReader",
+    "CachedEmbeddingProvider",
+    "DeepThinking",
+    "EmbeddingProviderFactory",
+    "EnhancedRecall",
+    "EventHandler",
+    "ExternalEmbeddingProvider",
+    "IndexCompatibilityStore",
+    "KnowledgeRepositoryApi",
+    "KRWebServer",
+    "LightRAGCore",
+    "LLMAdapter",
+    "LocalEmbeddingProvider",
+    "log_capture",
+    "MilvusLiteVectorStore",
+    "NotionMCPAdapter",
+    "NotionSyncTarget",
+    "PluginInitializer",
+    "QuotaManager",
+    "R2SyncTarget",
+    "Reranker",
+    "ResearchService",
+    "RetrievalOrchestrator",
+    "RuntimeConfigStore",
+    "SyncPipeline",
+)
+
+# ── 分类映射 ──────────────────────────────────────────────────
+
+# logger 名前缀 → 分类（首选，稳定）；未命中时回退消息关键词猜测。
+_CATEGORY_BY_PREFIX: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("LightRAGCore", "lightrag"), "graph"),
+    (("LLMAdapter", "Reranker", "DeepThinking", "EnhancedRecall"), "llm"),
+    (
+        (
+            "LocalEmbeddingProvider",
+            "ExternalEmbeddingProvider",
+            "CachedEmbeddingProvider",
+            "EmbeddingProviderFactory",
+        ),
+        "embedding",
+    ),
+    (("RetrievalOrchestrator", "MilvusLiteVectorStore", "AstrBotKnowledgeBaseReader"), "retrieval"),
+    (("KRWebServer",), "web"),
+    (("SyncPipeline", "Notion", "R2", "Zotero"), "sync"),
+    (("IngestManager", "MarkdownExtractor", "CategoryManager"), "ingest"),
+    (
+        (
+            "PluginInitializer",
+            "RuntimeConfigStore",
+            "QuotaManager",
+            "IndexCompatibilityStore",
+            "MigrationRunner",
+            "log_capture",
+            "astrbot_plugin_knowledge_repository",
+        ),
+        "system",
+    ),
+)
+
+# 消息关键词 → 分类（fallback，覆盖 KnowledgeRepositoryApi 等跨领域 logger）。
+_CATEGORY_BY_KEYWORD: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("lightrag", "graph"), "graph"),
+    (("ingest", "upload", "chunk"), "ingest"),
+    (("embedding",), "embedding"),
+    (("search", "query", "rerank", "recall", "rrf", "vector", "milvus", "rebuild"), "retrieval"),
+    (("zotero", "notion", "backup", "sync"), "sync"),
+    (("llm", "lmstudio"), "llm"),
+    (("dependency", "install", "config"), "system"),
+)
+
 
 class MemoryLogHandler(logging.Handler):
     """将日志记录存入内存环形缓冲区。
 
     记录同时保留旧字段（ts/level/name/msg）与结构化字段
-    （category/source/operation/status/metadata），便于 terminal 分类筛选。
+    （location/exc/category/source/operation/status/metadata），便于 terminal 定位与筛选。
     """
 
-    def __init__(self, maxlen: int = 500) -> None:
+    def __init__(self, maxlen: int = 1000) -> None:
         super().__init__()
         self._lock = threading.Lock()
         self._records: deque[dict[str, Any]] = deque(maxlen=maxlen)
 
-    _SKIP_PREFIXES = (
-        "aiohttp.access",
-        "aiohttp.server",
-        "aiohttp.web",
-        "charset_normalizer",
-        "httpx",
-        "hpack",
-        "httpcore",
-        "urllib3",
-        "asyncio",
-    )
-
     def emit(self, record: logging.LogRecord) -> None:
-        if record.name.startswith(self._SKIP_PREFIXES):
+        if record.name.startswith(_SKIP_PREFIXES):
             return
+        # 三方 DEBUG 噪声（faiss/pymilvus 等）不进缓冲区；项目自有 DEBUG 保留。
+        if record.levelno <= logging.DEBUG and not record.name.startswith(_PROJECT_PREFIXES):
+            return
+        exc = ""
         try:
             msg = record.getMessage()
             if record.exc_info:
                 import traceback
-                msg += "\n" + "".join(traceback.format_exception(*record.exc_info)).rstrip()
+
+                exc = "".join(traceback.format_exception(*record.exc_info)).rstrip()
         except Exception:
             msg = str(record.msg)
         self._append(
@@ -52,6 +144,8 @@ class MemoryLogHandler(logging.Handler):
                 level=record.levelname,
                 name=record.name,
                 msg=msg,
+                location=f"{record.module}:{record.lineno}",
+                exc=exc,
                 source="backend",
                 category=_categorize(record.name, msg),
                 operation=_operation(record.name, msg),
@@ -78,6 +172,8 @@ class MemoryLogHandler(logging.Handler):
                 level=level,
                 name=f"{source}.{category}",
                 msg=msg,
+                location="",
+                exc="",
                 source=source,
                 category=category,
                 operation=operation,
@@ -104,6 +200,8 @@ def _make_entry(
     level: str,
     name: str,
     msg: str,
+    location: str,
+    exc: str,
     source: str,
     category: str,
     operation: str,
@@ -115,6 +213,8 @@ def _make_entry(
         "level": level,
         "name": name,
         "msg": msg,
+        "location": location,
+        "exc": exc,
         "source": source,
         "category": category,
         "operation": operation,
@@ -133,20 +233,14 @@ def _status_from_level(level: str) -> str:
 
 
 def _categorize(name: str, msg: str) -> str:
+    for prefixes, category in _CATEGORY_BY_PREFIX:
+        if name.startswith(prefixes):
+            return category
     text = f"{name} {msg}".lower()
-    if "lightrag" in text or "graph" in text:
-        return "graph"
-    if "lmstudio" in text or "llm" in text:
-        return "llm"
-    if "embedding" in text:
-        return "embedding"
-    if "retrieval" in text or "vector_search" in text or "rrf" in text:
-        return "retrieval"
-    if name.startswith("KRWebServer") or "upload" in text or "api" in text:
-        return "web"
-    if "sync" in text or "backup" in text or "notion" in text:
-        return "sync"
-    if "dependency" in text or "system" in text or "memoryloghandler" in text:
+    for keywords, category in _CATEGORY_BY_KEYWORD:
+        if any(k in text for k in keywords):
+            return category
+    if name.startswith(_PROJECT_PREFIXES):
         return "system"
     return "other"
 
@@ -166,7 +260,7 @@ def _operation(name: str, msg: str) -> str:
     return name.split(".")[-1] or "log"
 
 
-def install(maxlen: int = 500) -> MemoryLogHandler:
+def install(maxlen: int = 1000) -> MemoryLogHandler:
     """安装 MemoryLogHandler 到 root logger 并返回句柄。
 
     幂等：若 root logger 上已有同类 handler 则直接返回已有实例。

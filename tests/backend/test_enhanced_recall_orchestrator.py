@@ -285,3 +285,33 @@ async def test_progress_stages_pushed_in_order():
         "enhanced_corrective",
         "enhanced_resynthesize",
     ]
+
+
+# ── 部分失败降级（v1.0.0-rc.1）──────────────────────────────
+
+
+async def test_retrieve_many_skips_failed_subquery():
+    """单个 sub_query 检索瞬断不应废掉整次增强召回。"""
+    outcome = _outcome([_chunk("c1", "d1")])
+    orch, retrieval, _llm = _make(outcome, [])
+
+    async def flaky(collection, query, top_k, scope=None, candidate_k=None, reranker=None):
+        if query == "bad":
+            raise RuntimeError("embedding down")
+        return outcome
+
+    retrieval.retrieve_with_outcome = flaky
+    results = await orch._retrieve_many("col", ["good", "bad", "also-good"], None)
+    assert [q for q, _ in results] == ["good", "also-good"]
+
+
+async def test_retrieve_many_raises_when_all_subqueries_fail():
+    outcome = _outcome([_chunk("c1", "d1")])
+    orch, retrieval, _llm = _make(outcome, [])
+
+    async def broken(collection, query, top_k, scope=None, candidate_k=None, reranker=None):
+        raise RuntimeError("embedding down")
+
+    retrieval.retrieve_with_outcome = broken
+    with pytest.raises(RuntimeError):
+        await orch._retrieve_many("col", ["q1", "q2"], None)

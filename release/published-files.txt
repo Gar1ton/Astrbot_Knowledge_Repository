@@ -1,0 +1,26 @@
+# 正式 main 文件树白名单。语法：glob；!glob 表示排除；source => target 表示重命名复制。
+main.py
+metadata.yaml
+_conf_schema.json
+requirements.txt
+requirements-additional.txt
+README.md
+CHANGELOG.md
+LICENSE
+logo.png
+logo.svg
+.gitattributes
+.github/workflows/published-verify.yml
+release/AGENTS.published.md => AGENTS.md
+
+core/*.py
+core/**/*.py
+!core/main.py
+
+web/server.py
+
+migrations/*.py
+migrations/*.sql
+
+pages/**
+!pages/README.md

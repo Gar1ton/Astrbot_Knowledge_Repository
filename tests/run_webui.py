@@ -119,27 +119,6 @@ class _DebugSyncPipeline:
             "message": "Debug pipeline: restore preview only.",
         }
 
-    async def initialize_notion_database(
-        self,
-        parent_page_id: str | None = None,
-        database_title: str | None = None,
-    ) -> dict:
-        return {
-            "status": "success",
-            "database_id": "debug-notion-database",
-            "parent_page_id": parent_page_id or "debug-parent-page",
-            "database_title": database_title or "Knowledge Repository",
-            "created": True,
-            "message": "Debug pipeline: mocked Notion database creation.",
-        }
-
-    async def pull_notion_metadata(self) -> dict:
-        return {
-            "status": "success",
-            "updated_count": 0,
-            "skipped_count": 0,
-            "warnings": ["Debug pipeline: no Notion pages queried."],
-        }
 
 
 async def _make_app(args: argparse.Namespace) -> web.Application:

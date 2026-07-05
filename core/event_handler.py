@@ -39,8 +39,9 @@ _HELP_TEXT = (
     "  /ka zotero pull                — 触发一次 Zotero 增量同步\n"
     "  /ka zotero account replace|cancel — 确认/取消 Zotero 换号重置\n"
     "  /ka r2 push|pull|force push|force pull — R2 备份/恢复（force 与 pull 需二次确认）\n"
+    "  /ka notion push|force push|status — Notion 单向增量推送/状态（force 需二次确认）\n"
     "  /ka webui on|off               — 实时启停 Web 控制台\n"
-    "\n内容管理（文档/集合/标签/Notion/知识图谱）请在 WebUI 操作；"
+    "\n内容管理（文档/集合/标签/知识图谱）请在 WebUI 操作；"
     "research 为只读检索，不会修改任何同步配置。"
 )
 
@@ -143,7 +144,10 @@ class EventHandler:
         raw = (value or "").strip().lower()
         lang = {"cn": "zh", "zh": "zh", "en": "en", "cn&en": "auto", "auto": "auto"}.get(raw)
         if lang is None:
-            return "用法：/ka research_language <cn|en|cn&en>（cn=中文 en=英文 cn&en=跟随提问，默认 cn&en）"
+            return (
+                "用法：/ka research_language <cn|en|cn&en>"
+                "（cn=中文 en=英文 cn&en=跟随提问，默认 cn&en）"
+            )
         try:
             self._initializer.set_research_answer_language(lang)
         except Exception as e:
@@ -311,6 +315,61 @@ class EventHandler:
         except Exception as e:
             return f"R2 整库快照已恢复，但自动重启失败（请手动重启）：{e}"
         return "R2 整库快照已强制恢复，插件正在自动重启以加载数据。"
+
+    # ── /ka notion ────────────────────────────────────────────────
+
+    async def on_ka_notion(self, action: str) -> str:
+        """/ka notion <push|force push|status>
+
+        push 直接后台推送；force push 需在 60s 内重发同命令确认。返回含「任务已启动」
+        文案时由 main.py 负责后台执行并回发结果（force push 文案含「全量」以区分）。
+        """
+        api = self._initializer.api
+        if api is None:
+            return "插件未初始化。"
+        action = " ".join((action or "").strip().lower().split())
+        if action not in ("push", "force push", "status"):
+            return "用法：/ka notion <push|force push|status>"
+
+        if action == "status":
+            return await self._notion_status()
+
+        if action == "force push":
+            confirm_key = "notion:force push"
+            if not self._consume_confirm(confirm_key):
+                self._arm_confirm(confirm_key)
+                return (
+                    "⚠️ `/ka notion force push` 将忽略增量记录、全量重推所有文章到 Notion。"
+                    "\n如确认，请在 60 秒内再次发送 `/ka notion force push`。"
+                )
+            return "🔄 Notion 全量推送任务已启动；完成后会主动回发结果。"
+
+        return "🔄 Notion 增量推送任务已启动；完成后会主动回发结果。"
+
+    async def _notion_status(self) -> str:
+        api = self._initializer.api
+        assert api is not None
+        try:
+            status = await api.get_notion_push_status()
+        except Exception as e:
+            return f"Notion 状态读取失败：{e}"
+        if status.get("status") != "ok":
+            return f"Notion 状态读取失败：{status.get('message', status.get('status'))}"
+        if not status.get("enabled"):
+            return "Notion 同步未启用（请在 AstrBot 面板开启 notion_sync.enabled）。"
+        docs = status.get("documents") or {}
+        db_ok = "已建库" if status.get("database_id") and status.get("qa_database_id") else "未建库"
+        interval = int(status.get("auto_sync_interval_sec") or 0)
+        auto = f"每 {interval}s" if interval > 0 else "关闭"
+        return (
+            "Notion 推送状态："
+            f"库={db_ok}，"
+            f"文章 synced={docs.get('synced', 0)}/degraded={docs.get('degraded', 0)}"
+            f"/failed={docs.get('failed', 0)}，"
+            f"QA 待推={status.get('outbox_pending', 0)}，QA 失败={status.get('outbox_failed', 0)}，"
+            f"定时={auto}"
+        )
+
     # ── LLM Hook（agent 上下文注入）──────────────────────────────
 
     async def on_llm_request(self, event: Any, req: Any) -> None:

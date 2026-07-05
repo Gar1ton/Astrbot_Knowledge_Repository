@@ -1,4 +1,4 @@
-# 手动可选安装：一次性启用全部扩展功能与开发/测试工具。
+# 手动可选安装：一次性启用全部扩展运行功能。
 # 本文件不会被 AstrBot 插件安装器自动安装。
 -r requirements.txt
 
@@ -10,10 +10,3 @@ lightrag-hku>=1.5.0rc1,<2.0.0
 
 # Cloudflare R2
 boto3
-
-# 开发与测试
-numpy
-pytest
-pytest-asyncio
-ruff
-mypy

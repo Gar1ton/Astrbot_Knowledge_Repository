@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v0.30.1"
+_PLUGIN_VERSION = "v1.0.0"
 logger = logging.getLogger(__name__)
 _RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
 _RESEARCH_PARAGRAPH_LIMIT = 700
@@ -74,6 +74,7 @@ class KnowledgeRepositoryPlugin(Star):
         self._initializer: PluginInitializer | None = None
         self._handler: EventHandler | None = None
         self._research_tasks: set[asyncio.Task[None]] = set()
+        self._pending_notion_force = False
 
     async def initialize(self) -> None:
         data_dir: Path = StarTools.get_data_dir("astrbot_plugin_knowledge_repository")
@@ -164,6 +165,20 @@ class KnowledgeRepositoryPlugin(Star):
             task = asyncio.create_task(self._watch_r2_job(event))
             self._track_research_task(task)
 
+    @ka.command("notion")
+    async def ka_notion(self, event: AstrMessageEvent, action: str = "", target: str = ""):
+        '''/ka notion <push|force push|status> — Notion 单向增量推送/状态'''
+        if not self._handler:
+            yield event.plain_result("插件未初始化。")
+            return
+        combined = (action + " " + target).strip()
+        message = await self._handler.on_ka_notion(combined)
+        yield event.plain_result(message)
+        if "任务已启动" in message and self._initializer is not None:
+            self._pending_notion_force = "全量" in message
+            task = asyncio.create_task(self._watch_notion_job(event))
+            self._track_research_task(task)
+
     # ── /ka zotero 子组 ──────────────────────────────────────────
 
     @ka.group("zotero")
@@ -207,7 +222,13 @@ class KnowledgeRepositoryPlugin(Star):
         if svc is None or not self._initializer.research_enabled:
             return "research 未开启或未装配，请提示用户先发送 /ka research on。"
 
-        return json.dumps(await svc.probe(query), ensure_ascii=False)
+        try:
+            return json.dumps(await svc.probe(query), ensure_ascii=False)
+        except Exception as exc:  # noqa: BLE001 - llm_tool 入口需兜底，不向框架抛出
+            logger.error("research_scope_probe failed: %s", exc, exc_info=True)
+            return json.dumps(
+                {"status": "error", "message": f"范围探查失败：{exc}"}, ensure_ascii=False
+            )
 
     @filter.llm_tool(name="research_execute")
     async def research_execute(
@@ -247,7 +268,13 @@ class KnowledgeRepositoryPlugin(Star):
         resolved_collection = collection or None
         scope_probe: dict[str, Any] | None = None
         if requested_mode in STRICT_COLLECTION_MODES and not resolved_collection:
-            scope_probe = await svc.probe(query)
+            try:
+                scope_probe = await svc.probe(query)
+            except Exception as exc:  # noqa: BLE001 - llm_tool 入口需兜底，不向框架抛出
+                logger.error("research_execute scope probe failed: %s", exc, exc_info=True)
+                return json.dumps(
+                    {"status": "error", "message": f"范围探查失败：{exc}"}, ensure_ascii=False
+                )
             resolved_collection = self._collection_from_probe(scope_probe)
             if resolved_collection is None:
                 message = self._strict_mode_scope_required_message(requested_mode, scope_probe)
@@ -301,6 +328,52 @@ class KnowledgeRepositoryPlugin(Star):
             },
             ensure_ascii=False,
         )
+
+    @filter.llm_tool(name="notion_push_note")
+    async def notion_push_note(
+        self,
+        event: AstrMessageEvent,
+        content: str,
+        title: str = "",
+        tags: str = "",
+        citations: str = "",
+        keep_local: str = "false",
+    ):
+        '''把一段研究结论或笔记推送到 Notion 问答库（QA 表），每次推送新增一条记录。
+
+        用户说「把…记到/推到/同步到 Notion」「保存这次研究结果」时调用。content 必须传
+        完整正文原文（例如刚完成的 research 答案全文，不要缩写省略）。citations 传该次
+        research 返回体里的 citation_doc_ids（逗号分隔），推送后会在 Notion 里链接到对应
+        文章条目。默认直推（本地只留存根）；仅当用户明确要求「也存到本地/保存为本地笔记」时
+        传 keep_local="true"。Notion 未启用时返回提示文案，请原样转告用户。
+        本工具只新增问答记录，绝不修改文档、集合或同步配置。
+
+        Args:
+            content(string): 笔记正文全文（Markdown 纯文本）。
+            title(string): 问题/标题；留空则自动取正文首行前 60 字符。
+            tags(string): 逗号分隔标签，可空，例如 "research,LLM"。
+            citations(string): 逗号分隔的引用 DocID（来自 research 返回体），可空。
+            keep_local(string): "true"/"false"，默认 "false"。
+        '''
+        api = self._initializer.api if self._initializer else None
+        if api is None:
+            return "插件未初始化，无法推送。"
+        try:
+            result = await api.push_note_to_notion(
+                content,
+                title=title,
+                tags=[t.strip() for t in tags.split(",") if t.strip()],
+                citations=[c.strip() for c in citations.split(",") if c.strip()],
+                source="research",
+                keep_local=str(keep_local).strip().lower() in ("true", "1", "yes"),
+            )
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as exc:  # noqa: BLE001 - llm_tool 入口需兜底，不向框架抛出
+            logger.error("notion_push_note failed: %s", exc, exc_info=True)
+            return json.dumps(
+                {"status": "error", "message": f"推送到 Notion 失败：{exc}"},
+                ensure_ascii=False,
+            )
 
     # ── 生命周期 ─────────────────────────────────────────────────
 
@@ -410,6 +483,59 @@ class KnowledgeRepositoryPlugin(Star):
             return
 
         await self._send_plain_message_chunks(event, self._format_research_result(result))
+        if self._notion_push_enabled():
+            await self._send_plain_message(
+                event,
+                "💡 可以说「把这次研究推送到 Notion」，我会把结论保存到 Notion 问答库。",
+            )
+
+    def _notion_push_enabled(self) -> bool:
+        """Notion 同步是否已启用（用于 research 完成后的推送引导）。"""
+        initializer = self._initializer
+        if initializer is None or initializer.api is None:
+            return False
+        config = getattr(initializer, "_config", None)
+        if config is None:
+            return False
+        try:
+            return config.get_notion_sync_config().enabled
+        except Exception:  # noqa: BLE001 - 引导提示，读配置失败静默不提示
+            return False
+
+    async def _watch_notion_job(self, event: AstrMessageEvent) -> None:
+        """后台执行 Notion 推送（由 /ka notion push[/force] 触发）并回发汇总。
+
+        force 由 handler 返回文案中的「全量」标记推导（与 R2 的 watch 模式一致）。
+        """
+        api = self._initializer.api if self._initializer else None
+        if api is None:
+            return
+        force = getattr(self, "_pending_notion_force", False)
+        self._pending_notion_force = False
+        try:
+            result = await api.sync_documents("notion", force=force)
+        except Exception as exc:  # noqa: BLE001 - 后台任务回发失败信息
+            logger.warning("notion push failed: %s", exc, exc_info=True)
+            await self._send_plain_message(event, f"⚠️ Notion 推送失败：{exc}")
+            return
+        status = result.get("status")
+        if status in ("disabled", "error"):
+            await self._send_plain_message(
+                event, f"⚠️ Notion 推送未执行：{result.get('message', status)}"
+            )
+            return
+        if status == "already_running":
+            await self._send_plain_message(event, "已有 Notion 推送任务在执行。")
+            return
+        docs = result.get("documents") or {}
+        qa = result.get("qa") or {}
+        await self._send_plain_message(
+            event,
+            "✅ Notion 推送完成："
+            f"文章 新增 {docs.get('created', 0)}/更新 {docs.get('updated', 0)}"
+            f"/跳过 {docs.get('skipped', 0)}/失败 {docs.get('failed', 0)}，"
+            f"QA 推送 {qa.get('pushed', 0)}/失败 {qa.get('failed', 0)}。",
+        )
 
     async def _watch_r2_job(self, event: AstrMessageEvent) -> None:
         manager = self._initializer.r2_backup_manager if self._initializer else None

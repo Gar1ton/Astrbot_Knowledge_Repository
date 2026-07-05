@@ -11,5 +11,6 @@
 2. **必读顺序**：`ARCHITECTURE.md` → `CONVENTIONS.md` → `TODO.md`；
 3. **执行协议**（Plan-First，未批准不改代码）；
 4. **每轮工作闭环**（先更新 TODO → 写码 → 测试过才标完成 → 追加 CHANGELOG）。
+5. **Git 远端准则**（任何 push/tag/PR/Release 都须另行取得用户明确批准）。
 
 > 本文件不重复规范内容，只做指引。任何规范更新只改 `CLAUDE.md`，本文件保持为指针。

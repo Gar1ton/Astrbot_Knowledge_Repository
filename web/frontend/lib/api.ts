@@ -617,7 +617,7 @@ const MOCK_QUOTA: QuotaItem[] = [
 const MOCK_CONFIG: EffectiveConfig = {
   source_store: { db_filename: "knowledge_repository.db", default_collection: "default", ocr_enabled: false },
   r2_sync: { enabled: true, bucket: "kr-bucket", account_id: "ac****nt", access_key_id: "ak****id", secret_access_key: "****", free_tier_gb: 10, warn_threshold: 0.8 },
-  notion_sync: { enabled: true, database_id: "db-****", max_upload_mib: 5 },
+  notion_sync: { enabled: true, database_id: "db-****", qa_database_id: "qa-****", auto_sync_interval_sec: 0, max_upload_mib: 5 },
   web_console: { enabled: true, host: "0.0.0.0", port: 26618, username: "admin", password: "****" },
   ask: { answer_language: "auto" },
   graph: { enabled: false, query_mode: "mix", llm_max_async: 4, embedding_max_async: 8, working_dir: "lightrag_workspaces", max_doc_chars: 30000, lightrag_llm_provider: "main", lightrag_llm_base_url: "", lightrag_llm_model: "", lightrag_llm_timeout_seconds: 900 },
@@ -1298,8 +1298,10 @@ export async function resumeBuildJob(jobId: string): Promise<void> {
 export async function notionInit(
   parentPageId: string,
   databaseTitle: string
-): Promise<MaybeReserved<{ status: string; database_id?: string }>> {
-  if (isMock()) return { reserved: true, available_in: "v0.8.0" };
+): Promise<{ status: string; database_id?: string; qa_database_id?: string }> {
+  if (isMock()) {
+    return { status: "success", database_id: "mock-articles", qa_database_id: "mock-qa" };
+  }
   return apiFetch("/api/notion/init", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1307,11 +1309,20 @@ export async function notionInit(
   });
 }
 
-export async function syncNotionPull(): Promise<
-  MaybeReserved<{ status: string; updated_count?: number; warnings?: string[] }>
-> {
-  if (isMock()) return { reserved: true, available_in: "v0.8.0" };
-  return apiFetch("/api/sync/notion/pull", { method: "POST" });
+export async function pushNotionNote(payload: {
+  content: string;
+  title?: string;
+  tags?: string[];
+  citations?: string[];
+  source?: string;
+  keep_local?: boolean;
+}): Promise<{ status: string; page_id?: string; message?: string }> {
+  if (isMock()) return { status: "success", page_id: "mock-notion-page" };
+  return apiFetch("/api/notion/push-note", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function getSyncStatus(): Promise<MaybeReserved<SyncRecord[]>> {
@@ -1604,6 +1615,7 @@ export async function deleteLocalModel(name: string): Promise<void> {
 
 export interface LogLine {
   ts: number; level: string; name: string; msg: string;
+  location?: string; exc?: string;
   source?: string; category?: string; operation?: string; status?: string;
   elapsed_ms?: number | null; metadata?: Record<string, unknown>;
 }

@@ -529,3 +529,107 @@ async def test_exact_mentions_sqlite_ascii_terms_require_boundaries(
 
     hits = await sqlite_store.search_exact_mentions(["SHAP"], coll.coll_key)
     assert {hit["doc_id"] for hit in hits} == {"doc-true"}
+
+
+# ── Notion 推送账本与暂存箱契约 ─────────────────────────────────
+
+
+async def test_notion_entity_map_crud(sqlite_store: SQLiteSourceDocumentStore) -> None:
+    from core.domain.models import (
+        NOTION_ENTITY_DOCUMENT,
+        NOTION_ENTITY_NOTE,
+        NOTION_PUSH_DEGRADED,
+        NOTION_PUSH_SYNCED,
+        NotionEntityRecord,
+    )
+
+    assert await sqlite_store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1") is None
+
+    rec = NotionEntityRecord(
+        entity_type=NOTION_ENTITY_DOCUMENT,
+        entity_key="d1",
+        page_id="p1",
+        metadata_hash="m1",
+        content_hash="c1",
+        status=NOTION_PUSH_SYNCED,
+        synced_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    await sqlite_store.upsert_notion_entity(rec)
+    got = await sqlite_store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
+    assert got is not None
+    assert (got.page_id, got.metadata_hash, got.status) == ("p1", "m1", NOTION_PUSH_SYNCED)
+    assert got.synced_at is not None
+
+    # 组合键 upsert 覆盖
+    rec.metadata_hash = "m2"
+    rec.status = NOTION_PUSH_DEGRADED
+    await sqlite_store.upsert_notion_entity(rec)
+    got = await sqlite_store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
+    assert got is not None
+    assert (got.metadata_hash, got.status) == ("m2", NOTION_PUSH_DEGRADED)
+
+    # 同 key 不同 entity_type 互不冲突
+    await sqlite_store.upsert_notion_entity(
+        NotionEntityRecord(entity_type=NOTION_ENTITY_NOTE, entity_key="d1", page_id="p9")
+    )
+    assert len(await sqlite_store.list_notion_entities()) == 2
+    assert len(await sqlite_store.list_notion_entities(NOTION_ENTITY_DOCUMENT)) == 1
+
+    assert await sqlite_store.delete_notion_entity(NOTION_ENTITY_NOTE, "d1") is True
+    assert await sqlite_store.delete_notion_entity(NOTION_ENTITY_NOTE, "d1") is False
+
+
+async def test_notion_outbox_lifecycle(sqlite_store: SQLiteSourceDocumentStore) -> None:
+    from core.domain.models import (
+        NOTION_OUTBOX_PUSHED,
+        NOTION_PUSH_FAILED,
+        NOTION_PUSH_PENDING,
+        NotionOutboxItem,
+    )
+
+    await sqlite_store.add_notion_outbox(
+        NotionOutboxItem(
+            id="ob1",
+            title="Q1",
+            content="正文全文",
+            tags=["research"],
+            citations=["d1", "d2"],
+            source="research",
+        )
+    )
+    got = await sqlite_store.get_notion_outbox("ob1")
+    assert got is not None
+    assert (got.status, got.content, got.citations) == (
+        NOTION_PUSH_PENDING,
+        "正文全文",
+        ["d1", "d2"],
+    )
+    assert got.created_at is not None  # 入库自动补 created_at
+
+    # 推成 → 清正文留存根
+    got.status = NOTION_OUTBOX_PUSHED
+    got.content = ""
+    got.page_id = "page-1"
+    got.pushed_at = datetime(2026, 1, 3, tzinfo=timezone.utc)
+    assert await sqlite_store.update_notion_outbox(got) is True
+    stub = await sqlite_store.get_notion_outbox("ob1")
+    assert stub is not None
+    assert (stub.content, stub.page_id, stub.status) == ("", "page-1", NOTION_OUTBOX_PUSHED)
+
+    # 状态过滤 + created_at 升序（补推先来后到）
+    await sqlite_store.add_notion_outbox(
+        NotionOutboxItem(
+            id="ob2", title="Q2", content="x",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    await sqlite_store.add_notion_outbox(
+        NotionOutboxItem(
+            id="ob3", title="Q3", content="y", status=NOTION_PUSH_FAILED,
+            created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+    )
+    assert [i.id for i in await sqlite_store.list_notion_outbox(NOTION_PUSH_PENDING)] == ["ob2"]
+    assert [i.id for i in await sqlite_store.list_notion_outbox()] == ["ob2", "ob3", "ob1"]
+
+    assert await sqlite_store.update_notion_outbox(NotionOutboxItem(id="missing")) is False

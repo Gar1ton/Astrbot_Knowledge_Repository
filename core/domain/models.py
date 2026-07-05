@@ -355,6 +355,65 @@ class SyncRecord:
     message: str = ""
 
 
+# Notion 推送账本的实体类型与状态值（跨 repository/pipelines 比较，提为常量）
+NOTION_ENTITY_DOCUMENT = "document"
+NOTION_ENTITY_NOTE = "note"
+NOTION_PUSH_PENDING = "pending"
+NOTION_PUSH_SYNCED = "synced"
+NOTION_PUSH_DEGRADED = "degraded"
+NOTION_PUSH_FAILED = "failed"
+NOTION_OUTBOX_PUSHED = "pushed"
+
+
+@dataclass
+class NotionEntityRecord:
+    """Notion 推送账本：一条「实体 × Notion 页面」的映射与指纹。
+
+    契约：
+        - 组合键 (entity_type, entity_key) 唯一；entity_type ∈ {document, note}，
+          entity_key 为 doc_id 或笔记 id。
+        - page_id 为 Notion 页面 id（幂等 upsert 第一优先查找路径；空串=尚未建页）。
+        - metadata_hash 记上次成功推送的属性指纹（属性变更检测）；content_hash 记
+          上次成功推送的正文指纹（是否重写正文块的依据）。二者分工独立。
+        - status ∈ {pending, synced, degraded, failed}；degraded/failed 时
+          message 携带原因。
+    """
+
+    entity_type: str
+    entity_key: str
+    page_id: str = ""
+    metadata_hash: str = ""
+    content_hash: str = ""
+    status: str = NOTION_PUSH_PENDING
+    synced_at: datetime | None = None
+    message: str = ""
+
+
+@dataclass
+class NotionOutboxItem:
+    """Notion QA 推送暂存箱条目（默认「中转即焚正文」，本地不留全文）。
+
+    契约：
+        - status ∈ {pending, pushed, failed}：pending/failed 时 content 保留全文
+          （等待立即推送或下轮 push_all 补推）；pushed 后 content 置空、仅留存根
+          （title/page_id/pushed_at）供溯源与防重。
+        - id 派生 Notion 端 NoteID（"outbox:<id>"）幂等键，重试不会重复建行。
+        - citations 为引用文章 doc_id 列表，推送时解析为 Citations relation。
+    """
+
+    id: str
+    title: str = ""
+    content: str = ""
+    tags: list[str] = field(default_factory=list)
+    citations: list[str] = field(default_factory=list)
+    source: str = "chat"
+    status: str = NOTION_PUSH_PENDING
+    page_id: str = ""
+    message: str = ""
+    created_at: datetime | None = None
+    pushed_at: datetime | None = None
+
+
 @dataclass
 class QuotaUsage:
     """某在线目标的用量快照（push 前预检用）。
@@ -419,6 +478,15 @@ __all__ = [
     "ScopedNote",
     "ConsoleScopeState",
     "SyncRecord",
+    "NotionEntityRecord",
+    "NotionOutboxItem",
+    "NOTION_ENTITY_DOCUMENT",
+    "NOTION_ENTITY_NOTE",
+    "NOTION_PUSH_PENDING",
+    "NOTION_PUSH_SYNCED",
+    "NOTION_PUSH_DEGRADED",
+    "NOTION_PUSH_FAILED",
+    "NOTION_OUTBOX_PUSHED",
     "QuotaUsage",
     "QuotaWarning",
 ]

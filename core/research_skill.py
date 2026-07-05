@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import TYPE_CHECKING, Any
@@ -43,6 +44,9 @@ _STRICT_COLLECTION_MODES = STRICT_COLLECTION_MODES
 
 # probe 结果上限，控制喂给 LLM 的 token。
 _MAX_COLLECTIONS = 8
+
+# execute 兜底超时：LLM/检索链路无内建超时，30 分钟覆盖最重的 deep_thinking 多轮推演。
+_EXECUTE_TIMEOUT_SEC = 1800
 _MAX_PAPERS = 8
 _MAX_TAGS = 10
 _MAX_EXACT_CHUNK_HITS = 40
@@ -107,7 +111,10 @@ _DIRECTIVE_GUIDANCE = (
 
 
 def _has_cjk(text: str) -> bool:
-    """文本是否含 CJK 字符——决定召回前是否需把 query 翻译成英文（召回恒英文，英文 query 跳过翻译）。"""
+    """文本是否含 CJK 字符。
+
+    决定召回前是否需把 query 翻译成英文（召回恒英文，英文 query 跳过翻译）。
+    """
     return any("一" <= ch <= "鿿" for ch in text)
 
 
@@ -332,7 +339,8 @@ class ResearchService:
         )
         candidate_k = candidate_pool if (use_reranker and candidate_pool > answer_top_k) else None
 
-        # 召回恒英文：英文 query 直接召回（跳过翻译），含 CJK 才翻译成英文，省掉系统性浪费的翻译调用。
+        # 召回恒英文：英文 query 直接召回（跳过翻译），含 CJK 才翻译成英文，
+        # 省掉系统性浪费的翻译调用。
         use_english_retrieval = _has_cjk(query)
         # 回答语言：取统一配置（auto/zh/en），与前端 askAI 同一参数；非法值回退 auto。
         answer_language = str(getattr(self._flags, "research_answer_language", "auto"))
@@ -340,16 +348,35 @@ class ResearchService:
             answer_language = "auto"
 
         try:
-            result = await self._api.ask(
-                question=query,
+            # wait_for 兜底：ask 链路（LLM/检索）无内建总超时，极端挂死会让后台
+            # research 任务永不返回、用户永远收不到结果。
+            result = await asyncio.wait_for(
+                self._api.ask(
+                    question=query,
+                    collection=collection,
+                    top_k=answer_top_k,
+                    retrieval_mode=mode,
+                    use_english_retrieval=use_english_retrieval,
+                    answer_language=answer_language,
+                    persona_enabled=False,
+                    candidate_k=candidate_k,
+                    use_reranker=use_reranker,
+                ),
+                timeout=_EXECUTE_TIMEOUT_SEC,
+            )
+        except TimeoutError:
+            logger.error(
+                "ResearchService.execute timed out after %ds (mode=%s)",
+                _EXECUTE_TIMEOUT_SEC,
+                mode,
+            )
+            return _mode_failure_result(
+                query=query,
                 collection=collection,
-                top_k=answer_top_k,
-                retrieval_mode=mode,
-                use_english_retrieval=use_english_retrieval,
-                answer_language=answer_language,
-                persona_enabled=False,
-                candidate_k=candidate_k,
-                use_reranker=use_reranker,
+                mode=mode,
+                status="error",
+                error=f"timeout after {_EXECUTE_TIMEOUT_SEC}s",
+                answer=f"{mode} 执行超时（{_EXECUTE_TIMEOUT_SEC}s），请稍后重试或缩小检索范围。",
             )
         except Exception as exc:  # noqa: BLE001 - 工具入口需兜底，不向框架抛出
             logger.error("ResearchService.execute api.ask failed: %s", exc)
@@ -384,6 +411,7 @@ class ResearchService:
             # v0.30.0：告警为结构化字段（不再拼在正文开头），聊天端渲染为引用后的尾注。
             "answer_notice": str(result.get("answer_notice") or ""),
             "citations": _build_citations(sources),
+            "citation_doc_ids": _citation_doc_ids(sources),
             "scope": collection or "全局",
             "searched_scope": scope_label,
             "exact_hit_count": len(exact_doc_hits),
@@ -415,6 +443,18 @@ def _mode_failure_result(
         "error": error,
         "query": query,
     }
+
+
+def _citation_doc_ids(sources: list[dict[str, Any]]) -> list[str]:
+    """从 sources 按出现顺序提取去重的 doc_id 列表，供 Notion QA 的 Citations relation。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for src in sources:
+        doc_id = str(src.get("doc_id") or src.get("document_id") or "").strip()
+        if doc_id and doc_id not in seen:
+            seen.add(doc_id)
+            out.append(doc_id)
+    return out
 
 
 def _build_citations(sources: list[dict[str, Any]]) -> list[str]:

@@ -1,0 +1,8 @@
+# developer 分支开发与完整验证依赖；不进入正式插件发布树。
+-r requirements-additional.txt
+
+numpy
+pytest
+pytest-asyncio
+ruff
+mypy

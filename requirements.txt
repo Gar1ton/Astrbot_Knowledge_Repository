@@ -1,5 +1,6 @@
 # AstrBot 会自动安装本文件中的每一项，因此这里只保留首次安装所需的轻量依赖。
-# 本地 Embedding、LightRAG、R2 与开发依赖位于 requirements-additional.txt，
+# 本地 Embedding、LightRAG 与 R2 可选运行依赖位于 requirements-additional.txt；
+# 开发/测试工具位于仅 developer 分支使用的 requirements-dev.txt，
 # 避免自动拉取 PyTorch/CUDA 等大型 wheel；Milvus Lite 是默认向量库，作为必装依赖保留在本文件。
 
 aiosqlite                  # SQLite 事实源与分块仓储

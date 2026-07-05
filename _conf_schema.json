@@ -82,7 +82,7 @@
   "notion_sync": {
     "description": "Notion 镜像同步",
     "type": "object",
-    "hint": "可选功能。将文档单向同步到 Notion Database，每篇文档对应一个页面。需要在 AstrBot 中已配置 Notion MCP Server",
+    "hint": "可选功能。将文章元数据（tag/文件树）单向增量推送到 Notion Articles 库，agent/研究结论推送到 QA 库。需要在 AstrBot 中已配置 Notion MCP Server",
     "items": {
       "enabled": {
         "description": "启用 Notion 同步",
@@ -96,22 +96,34 @@
         "hint": "填写 AstrBot 中配置的 Notion MCP server 名称，默认为 notion"
       },
       "database_id": {
-        "description": "目标 Notion Database ID",
+        "description": "Articles Database ID",
         "type": "string",
         "default": "",
-        "hint": "已有 Database 时直接填写 ID；留空且填写 parent_page_id 时将自动创建"
+        "hint": "文章库 ID；已有则填写，留空且填写 parent_page_id 时初始化会自动创建并回填"
+      },
+      "qa_database_id": {
+        "description": "QA Database ID",
+        "type": "string",
+        "default": "",
+        "hint": "问答库 ID；一般由初始化自动创建并回填，无需手填"
       },
       "parent_page_id": {
         "description": "自动建库的父页面 ID（可选）",
         "type": "string",
         "default": "",
-        "hint": "仅在 database_id 为空时使用：指定在哪个页面下自动创建 Database"
+        "hint": "仅在自动建库时使用：指定在哪个页面下创建 Articles 与 QA 两个 Database"
       },
       "database_title": {
         "description": "自动创建的 Database 标题（可选）",
         "type": "string",
         "default": "Knowledge Repository",
-        "hint": "仅在自动建库时生效，建库后此字段不再影响已有 Database"
+        "hint": "仅在自动建库时生效；QA 库标题为「<标题> · QA」"
+      },
+      "auto_sync_interval_sec": {
+        "description": "周期自动推送间隔（秒）",
+        "type": "int",
+        "default": 0,
+        "hint": "0 表示关闭定时推送；>0 时每隔该秒数自动增量推送一次（改动后重启生效）"
       }
     }
   },

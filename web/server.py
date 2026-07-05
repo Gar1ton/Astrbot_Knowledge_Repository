@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import logging as _logging
 import secrets
 import time
@@ -24,6 +26,8 @@ if TYPE_CHECKING:
 # ── 常量 ────────────────────────────────────────────────────────
 
 SESSION_COOKIE = "kr_session"
+_MAX_UPLOAD_BYTES = 200 * 1024 * 1024  # 上传上限：超出返回 413，防内存/磁盘耗尽
+_UPLOAD_CHUNK_BYTES = 1 << 20  # 流式读块大小：内存占用 O(chunk) 而非 O(file)
 _API_PREFIX = "/api/"
 _PUBLIC_PATHS = frozenset({"/api/login", "/api/auth"})
 _API_KEY = web.AppKey("api", object)
@@ -79,6 +83,24 @@ def _api(request: web.Request) -> KnowledgeRepositoryApi:
     return cast("KnowledgeRepositoryApi", request.app[_API_KEY])
 
 
+def _parse_int(raw: object, name: str, default: int, lo: int, hi: int) -> int:
+    """解析整数参数：缺省用 default，非法值 400（JSON 体），越界夹取到 [lo, hi]。"""
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(str(raw))
+    except ValueError:
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": f"invalid {name}: expected integer"}),
+            content_type="application/json",
+        ) from None
+    return max(lo, min(value, hi))
+
+
+def _query_int(request: web.Request, name: str, default: int, lo: int, hi: int) -> int:
+    return _parse_int(request.query.get(name), name, default, lo, hi)
+
+
 async def handle_auth(request: web.Request) -> web.Response:
     """前端探测是否需要登录 / 当前是否已登录。"""
     app = request.app
@@ -91,8 +113,16 @@ async def handle_auth(request: web.Request) -> web.Response:
 
 async def handle_login(request: web.Request) -> web.Response:
     app = request.app
-    body = await request.json()
-    if body.get("username") == app[_USERNAME_KEY] and body.get("password") == app[_PASSWORD_KEY]:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    # compare_digest：常数时间比较，避免逐字符短路的定时侧信道。
+    username_ok = secrets.compare_digest(str(body.get("username") or ""), app[_USERNAME_KEY])
+    password_ok = secrets.compare_digest(str(body.get("password") or ""), app[_PASSWORD_KEY])
+    if username_ok and password_ok:
         token = secrets.token_urlsafe(24)
         app[_SESSIONS_KEY].add(token)
         resp = web.json_response({"ok": True})
@@ -197,38 +227,56 @@ async def handle_list_documents(request: web.Request) -> web.Response:
 
 
 async def handle_upload_document(request: web.Request) -> web.Response:
-    """multipart 上传：暂存 → 计算 sha256/大小 → 摄入插件托管原件库。"""
+    """multipart 上传：流式暂存（增量 sha256，内存 O(chunk)）→ 摄入插件托管原件库。"""
     reader = await request.multipart()
     collection = "default"
     tags: list[str] = []
     filename = "upload.bin"
     content_type = "application/octet-stream"
-    payload = b""
-    async for part in reader:
-        if part.name == "file":
-            filename = part.filename or filename
-            content_type = part.headers.get("Content-Type", content_type)
-            payload = await part.read(decode=False)
-        elif part.name == "collection":
-            collection = (await part.text()).strip() or "default"
-        elif part.name == "tags":
-            tags = [t.strip() for t in (await part.text()).split(",") if t.strip()]
-    if not payload:
-        return web.json_response({"error": "empty file"}, status=400)
-
-    _mw_logger.info("Upload: file=%r size=%d collection=%r", filename, len(payload), collection)
     upload_dir = request.app[_UPLOAD_DIR_KEY]
     upload_dir.mkdir(parents=True, exist_ok=True)
-    content_hash = hashlib.sha256(payload).hexdigest()
-    dest = upload_dir / f"{content_hash[:16]}_{filename}"
-    dest.write_bytes(payload)
+    tmp_path = upload_dir / f".upload_{secrets.token_hex(8)}.part"
+    hasher = hashlib.sha256()
+    size_bytes = 0
+    try:
+        async for part in reader:
+            if part.name == "file":
+                # Path().name：剥掉客户端可控的路径分量，杜绝目录穿越。
+                filename = Path(part.filename or filename).name or filename
+                content_type = part.headers.get("Content-Type", content_type)
+                with tmp_path.open("wb") as fh:
+                    while True:
+                        chunk = await part.read_chunk(_UPLOAD_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        size_bytes += len(chunk)
+                        if size_bytes > _MAX_UPLOAD_BYTES:
+                            max_mb = _MAX_UPLOAD_BYTES // (1024 * 1024)
+                            return web.json_response(
+                                {"error": f"file too large (max {max_mb} MB)"}, status=413
+                            )
+                        hasher.update(chunk)
+                        fh.write(chunk)
+            elif part.name == "collection":
+                collection = (await part.text()).strip() or "default"
+            elif part.name == "tags":
+                tags = [t.strip() for t in (await part.text()).split(",") if t.strip()]
+        if size_bytes == 0:
+            return web.json_response({"error": "empty file"}, status=400)
+
+        _mw_logger.info("Upload: file=%r size=%d collection=%r", filename, size_bytes, collection)
+        content_hash = hasher.hexdigest()
+        dest = upload_dir / f"{content_hash[:16]}_{filename}"
+        tmp_path.replace(dest)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
     try:
         doc_id = await _api(request).register_document(
             title=filename,
             file_path=str(dest),
             content_type=content_type,
-            size_bytes=len(payload),
+            size_bytes=size_bytes,
             content_hash=content_hash,
             collection=collection,
             tags=tags,
@@ -439,7 +487,8 @@ async def handle_download_document(request: web.Request) -> web.StreamResponse:
         return web.json_response({"error": "file not found on disk"}, status=404)
     disposition = request.query.get("disposition")
     disposition_type = "inline" if disposition == "inline" else "attachment"
-    filename = (doc.title or file_path.name).replace('"', "")
+    # 清洗引号与 CR/LF：title 可含任意字符，防 Content-Disposition 头注入/非法头值。
+    filename = (doc.title or file_path.name).replace('"', "").replace("\r", " ").replace("\n", " ")
     return web.FileResponse(
         file_path,
         headers={
@@ -455,8 +504,8 @@ async def handle_kb_collections(request: web.Request) -> web.Response:
 async def handle_kb_search(request: web.Request) -> web.Response:
     collection = request.query.get("collection", "")
     query = request.query.get("q", "")
-    top_k = int(request.query.get("top_k", "5"))
-    window = int(request.query.get("window", "2"))
+    top_k = _query_int(request, "top_k", 5, 1, 50)
+    window = _query_int(request, "window", 2, 0, 10)
     chunks = await _api(request).search_kb(
         collection,
         query,
@@ -478,7 +527,7 @@ async def handle_kb_search(request: web.Request) -> web.Response:
 async def handle_chunk_context(request: web.Request) -> web.Response:
     doc_id = request.query.get("doc_id", "")
     chunk_id = request.query.get("chunk_id", "")
-    window = int(request.query.get("window", "2"))
+    window = _query_int(request, "window", 2, 0, 10)
     if not doc_id or not chunk_id:
         return web.json_response({"error": "doc_id and chunk_id required"}, status=400)
     ctx = await _api(request).get_chunk_context(doc_id, chunk_id, window)
@@ -526,14 +575,28 @@ async def handle_notion_init(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     parent_page_id = body.get("parent_page_id") if isinstance(body, dict) else None
     database_title = body.get("database_title") if isinstance(body, dict) else None
-    return await _reserved(
-        _api(request).initialize_notion_database(parent_page_id, database_title),
-        "v0.8.0",
+    result = await _api(request).initialize_notion_database(parent_page_id, database_title)
+    status = 503 if result.get("status") == "unavailable" else 200
+    return web.json_response(result, status=status)
+
+
+async def handle_notion_push_note(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    if not isinstance(body, dict):
+        return web.json_response({"status": "error", "message": "无效请求体"}, status=400)
+    content = str(body.get("content", ""))
+    tags = body.get("tags") if isinstance(body.get("tags"), list) else []
+    citations = body.get("citations") if isinstance(body.get("citations"), list) else []
+    result = await _api(request).push_note_to_notion(
+        content,
+        title=str(body.get("title", "")),
+        tags=[str(t) for t in tags],
+        citations=[str(c) for c in citations],
+        source=str(body.get("source", "ask")),
+        keep_local=bool(body.get("keep_local", False)),
     )
-
-
-async def handle_notion_pull(request: web.Request) -> web.Response:
-    return await _reserved(_api(request).pull_notion_metadata(), "v0.8.0")
+    status = 503 if result.get("status") == "unavailable" else 200
+    return web.json_response(result, status=status)
 
 
 async def handle_effective_config(request: web.Request) -> web.Response:
@@ -726,30 +789,8 @@ async def handle_zotero_account_change(request: web.Request) -> web.Response:
         )
     except (ValueError, RuntimeError) as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
-    except NotImplementedError as exc:
-        return web.json_response(
-            {
-                "status": "not_ready",
-                "ready": False,
-                "message": str(exc),
-                "collection": collection,
-                "build_available": False,
-            },
-            status=409,
-        )
-    except RuntimeError as exc:
-        return web.json_response(
-            {
-                "status": "not_ready",
-                "ready": False,
-                "message": str(exc),
-                "collection": collection,
-                "build_available": False,
-            },
-            status=409,
-        )
     except Exception as exc:
-        _mw_logger.error("Graph build failed: %s", exc, exc_info=True)
+        _mw_logger.error("Zotero account change failed: %s", exc, exc_info=True)
         return web.json_response({"status": "error", "message": str(exc)}, status=500)
 
 
@@ -822,7 +863,7 @@ async def handle_graph_probe(request: web.Request) -> web.Response:
 
 async def handle_graph_query(request: web.Request) -> web.Response:
     query = request.query.get("q", "")
-    top_k = int(request.query.get("top_k", "5"))
+    top_k = _query_int(request, "top_k", 5, 1, 50)
     collection = request.query.get("collection") or None
     debug = request.query.get("debug", "").lower() in {"1", "true", "yes", "on"}
     response = await _reserved(
@@ -977,15 +1018,20 @@ async def handle_fs_browse(request: web.Request) -> web.Response:
     raw_path = request.query.get("path", "").strip()
     if not raw_path:
         raw_path = str(os.path.expanduser("~"))
+    def _list_dirs(path: str) -> list[str]:
+        entries = []
+        with os.scandir(path) as it:
+            for entry in sorted(it, key=lambda e: e.name.lower()):
+                if entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
+                    entries.append(entry.name)
+        return entries
+
     try:
         target = os.path.realpath(os.path.expanduser(raw_path))
         if not os.path.isdir(target):
             return web.json_response({"error": "not a directory"}, status=400)
-        entries = []
-        with os.scandir(target) as it:
-            for entry in sorted(it, key=lambda e: e.name.lower()):
-                if entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
-                    entries.append(entry.name)
+        # to_thread：scandir 超大目录（如网络盘）是同步 IO，不能占住事件循环。
+        entries = await asyncio.to_thread(_list_dirs, target)
         parent = str(os.path.dirname(target)) if target != os.path.dirname(target) else None
         return web.json_response({"path": target, "parent": parent, "dirs": entries})
     except PermissionError:
@@ -1093,7 +1139,7 @@ async def handle_logs(request: web.Request) -> web.Response:
         return web.json_response({"lines": [], "server_ts": time.time()})
     try:
         after_ts = float(request.query.get("after", "0"))
-        limit = min(int(request.query.get("limit", "200")), 500)
+        limit = min(int(request.query.get("limit", "200")), 1000)
     except ValueError:
         return web.json_response({"error": "invalid params"}, status=400)
     lines = handler.get_lines(after_ts=after_ts, limit=limit)
@@ -1110,7 +1156,7 @@ async def handle_ask(request: web.Request) -> web.Response:
     if not question:
         return web.json_response({"error": "question required"}, status=400)
     collection = body.get("collection") or None
-    top_k = int(body.get("top_k") or 5)
+    top_k = _parse_int(body.get("top_k"), "top_k", 5, 1, 20)
     conversation_id = body.get("conversation_id") or None
     persona_enabled = bool(body.get("persona_enabled") or False)
     retrieval_mode = body.get("retrieval_mode") or "default"
@@ -1122,7 +1168,7 @@ async def handle_ask(request: web.Request) -> web.Response:
         result = await _api(request).ask(
             question=question,
             collection=collection,
-            top_k=max(1, min(top_k, 20)),
+            top_k=top_k,
             conversation_id=conversation_id,
             persona_enabled=persona_enabled,
             retrieval_mode=retrieval_mode,
@@ -1358,7 +1404,7 @@ def build_app(
     # 预留端口（reserved，未实现回 501 + available_in）
     app.router.add_post("/api/sync/{target}", handle_sync)
     app.router.add_post("/api/notion/init", handle_notion_init)
-    app.router.add_post("/api/sync/notion/pull", handle_notion_pull)
+    app.router.add_post("/api/notion/push-note", handle_notion_push_note)
     app.router.add_get("/api/sync/status", handle_sync_status)
     app.router.add_get("/api/zotero/config", handle_zotero_config)
     app.router.add_get("/api/zotero/probe", handle_zotero_probe)

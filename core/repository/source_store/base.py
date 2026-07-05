@@ -15,6 +15,8 @@ if TYPE_CHECKING:
         Collection,
         ConsoleScopeState,
         DocumentChunk,
+        NotionEntityRecord,
+        NotionOutboxItem,
         PageChunk,
         ScopedNote,
         SourceDocument,
@@ -334,6 +336,60 @@ class SourceDocumentStore(ABC):
     @abstractmethod
     async def list_sync_records(self, target: SyncTargetKind | None = None) -> list[SyncRecord]:
         """列出同步记录，可按目标进行过滤；按 synced_at 升序。"""
+        ...
+
+    # ── Notion 推送账本与暂存箱 ───────────────────────────────────
+
+    @abstractmethod
+    async def get_notion_entity(
+        self, entity_type: str, entity_key: str
+    ) -> NotionEntityRecord | None:
+        """获取实体的 Notion 推送账目；不存在返回 None。"""
+        ...
+
+    @abstractmethod
+    async def upsert_notion_entity(self, record: NotionEntityRecord) -> None:
+        """登记/更新推送账目（组合键 (entity_type, entity_key) upsert）。"""
+        ...
+
+    @abstractmethod
+    async def list_notion_entities(
+        self, entity_type: str | None = None
+    ) -> list[NotionEntityRecord]:
+        """列出推送账目，可按 entity_type 过滤；顺序不作保证。"""
+        ...
+
+    @abstractmethod
+    async def delete_notion_entity(self, entity_type: str, entity_key: str) -> bool:
+        """删除账目行（本地实体已删除时的对账清理，不触碰远端）。
+
+        返回 False 表示该账目不存在（非异常）。
+        """
+        ...
+
+    @abstractmethod
+    async def add_notion_outbox(self, item: NotionOutboxItem) -> None:
+        """新增暂存箱条目。id 由调用方生成且必须唯一，重复 id 视为编程错误。"""
+        ...
+
+    @abstractmethod
+    async def get_notion_outbox(self, item_id: str) -> NotionOutboxItem | None:
+        """按 id 获取暂存箱条目；不存在返回 None。"""
+        ...
+
+    @abstractmethod
+    async def list_notion_outbox(
+        self, status: str | None = None
+    ) -> list[NotionOutboxItem]:
+        """列出暂存箱条目，可按 status 过滤；按 created_at 升序（补推先来后到）。"""
+        ...
+
+    @abstractmethod
+    async def update_notion_outbox(self, item: NotionOutboxItem) -> bool:
+        """整体更新暂存箱条目（含推成后清 content 留存根的状态迁移）。
+
+        返回 False 表示 id 不存在（非异常）。
+        """
         ...
 
     # ── 图谱构建任务持久化 ─────────────────────────────────────────

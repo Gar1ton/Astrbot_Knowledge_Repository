@@ -12,14 +12,14 @@ import os
 import shutil
 import tempfile
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from core.config import runtime_persistable_keys
 from core.managers.r2_backup_manifest import (
-    BackupEntry,
     check_sqlite_integrity,
     create_sqlite_snapshot_file,
     hash_inventory,
@@ -100,6 +100,7 @@ class R2BackupManager:
         self._lock = asyncio.Lock()
         self._job: R2BackupJob | None = None
         self._task: asyncio.Task[dict[str, Any]] | None = None
+        self._reload_task: asyncio.Task[None] | None = None
 
     @property
     def active_job(self) -> dict[str, Any] | None:
@@ -132,7 +133,11 @@ class R2BackupManager:
             if result.get("status") == "success":
                 self._job.finish("success")
                 if self._job.action == "force_pull" and self._reload_callback is not None:
-                    asyncio.create_task(self._delayed_reload())
+                    # 持引用防 GC 提前回收 fire-and-forget 任务；done 后自释放。
+                    self._reload_task = asyncio.create_task(self._delayed_reload())
+                    self._reload_task.add_done_callback(
+                        lambda _t: setattr(self, "_reload_task", None)
+                    )
             else:
                 self._job.finish("error", error=str(result.get("message") or "R2 task failed"))
             return result

@@ -103,8 +103,10 @@ class NotionSyncConfig:
     enabled: bool = False
     mcp_server_name: str = "notion"
     database_id: str = ""
+    qa_database_id: str = ""
     parent_page_id: str = ""
     database_title: str = "Knowledge Repository"
+    auto_sync_interval_sec: int = 0
     max_upload_mib: int = 5
     rate_limit_rps: int = _NOTION_RATE_LIMIT_RPS
 
@@ -368,8 +370,10 @@ class Config:
                 "enabled": notion.enabled,
                 "mcp_server_name": notion.mcp_server_name,
                 "database_id": notion.database_id,
+                "qa_database_id": notion.qa_database_id,
                 "parent_page_id": notion.parent_page_id,
                 "database_title": notion.database_title,
+                "auto_sync_interval_sec": notion.auto_sync_interval_sec,
             },
             "web_console": {
                 "enabled": web.enabled,
@@ -550,8 +554,12 @@ class Config:
             enabled=bool(s.get("enabled", NotionSyncConfig.enabled)),
             mcp_server_name=s.get("mcp_server_name", NotionSyncConfig.mcp_server_name),
             database_id=s.get("database_id", NotionSyncConfig.database_id),
+            qa_database_id=s.get("qa_database_id", NotionSyncConfig.qa_database_id),
             parent_page_id=s.get("parent_page_id", NotionSyncConfig.parent_page_id),
             database_title=s.get("database_title", NotionSyncConfig.database_title),
+            auto_sync_interval_sec=int(
+                s.get("auto_sync_interval_sec", NotionSyncConfig.auto_sync_interval_sec)
+            ),
             # rate_limit_rps 固定为平台上限，不从配置读取。
         )
 
@@ -869,8 +877,10 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
     "notion_sync": {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "database_id": ConfigKeyPolicy(False, True),
+        "qa_database_id": ConfigKeyPolicy(False, True),
         "parent_page_id": ConfigKeyPolicy(False, True),
         "database_title": ConfigKeyPolicy(False, True),
+        "auto_sync_interval_sec": ConfigKeyPolicy(True, True),
     },
     "r2_sync": {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),

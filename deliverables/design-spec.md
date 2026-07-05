@@ -342,14 +342,14 @@ export default function RootLayout({ children }) {
 | `GET` | `/api/graph/query` | query：`q`、`collection?` | `{ status, query, collection, chunks[], entities[], relations[], context, debug:{ vector_chunk_ids[], keyword_chunk_ids[], graph_chunk_ids[], rrf_scores:{} } }` | 图谱增强查询（含 RRF 调试分数） |
 | `POST` | `/api/graph/build` | —（或集合范围参数） | `{ reserved, result:{status,message} }` **或** `{reserved:true, available_in:"v0.6.0"}` | 构建/增量更新图谱 |
 
-### 6.8 预留端口 Reserved（同步 / 备份 / Notion）
+### 6.8 同步 / 备份 / Notion 端口
 
 > 这些功能**接口已占位、实现按版本灰度**。统一返回 `{ reserved:boolean, ... }`；当 `reserved:true` 时前端展示「即将上线（available_in 版本）」，不得当作错误。
 
 | Method | Path | 返回 | 计划版本 |
 |---|---|---|---|
-| `POST` | `/api/notion/init` | `{ reserved:false, result:{status,database_id,created} }` | 已可用 |
-| `POST` | `/api/sync/notion/pull` | `{ reserved:false, result:{status,updated_count,skipped_count,warnings[]} }` | 已可用 |
+| `POST` | `/api/notion/init` | `{ reserved:false, result:{status,database_id,qa_database_id,created} }` | 已可用 |
+| `POST` | `/api/notion/push-note` | `{ reserved:false, result:{status,page_id?,outbox_id?,message} }` | 已可用 |
 | `GET`  | `/api/sync/status` | `{ reserved:true, available_in:"v0.4.0" }` | v0.4.0 |
 | `*`    | `/api/sync/{target}` | `{ reserved:true, available_in:"v0.4.0" }` | v0.4.0 |
 | `POST` | `/api/backup` | `{ reserved:true, available_in:"v0.3.0" }` | v0.3.0 |
@@ -538,9 +538,9 @@ GET    /api/config/effective
 GET    /api/graph
 GET    /api/graph/query?q=&collection=
 POST   /api/graph/build                 (可能 reserved v0.6.0)
-# 预留：同步 / 备份 / Notion
+# 同步 / 备份 / Notion
 POST   /api/notion/init
-POST   /api/sync/notion/pull
+POST   /api/notion/push-note
 GET    /api/sync/status                 (reserved v0.4.0)
 *      /api/sync/{target}               (reserved v0.4.0)
 POST   /api/backup                      (reserved v0.3.0)

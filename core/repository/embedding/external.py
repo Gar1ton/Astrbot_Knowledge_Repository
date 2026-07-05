@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -16,6 +17,15 @@ logger = logging.getLogger("ExternalEmbeddingProvider")
 
 # API Key 仅由环境变量注入；Base URL 与模型来自顶层 embedding 配置。
 ENV_EMBEDDING_API_KEY = "KR_EMBEDDING_API_KEY"
+
+# 无超时会让一次 ask 挂满 aiohttp 默认 5 分钟；瞬断重试一次即可（对齐 adapters/llm.py）。
+_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=60, connect=10)
+_MAX_RETRIES = 1
+_RETRY_BACKOFF_SECONDS = 1.0
+
+
+class _NonRetryableEmbeddingError(RuntimeError):
+    """请求本身有问题（4xx/契约不符），重试无意义，直接失败。"""
 
 
 class ExternalEmbeddingProvider(EmbeddingProvider):
@@ -72,33 +82,53 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
         if "text-embedding-3" in self._model_name:
             payload["dimensions"] = self._dimension
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
-                    if resp.status != 200:
-                        logger.error(f"Embedding API failed with status {resp.status}")
-                        msg = f"Embedding API 响应异常，HTTP {resp.status}"
-                        raise RuntimeError(msg)
-                    
-                    data = await resp.json()
-                    
-                    # 按照 standard OpenAI 契约解析
-                    embeddings_data = data.get("data", [])
-                    # 确保按 input 数组顺序排列 (使用 index 属性)
-                    embeddings_data.sort(key=lambda x: x.get("index", 0))
-                    
-                    result = [item.get("embedding") for item in embeddings_data]
-                    if not result:
-                        raise RuntimeError(f"Embedding API 未能返回有效向量：{data}")
-                    
-                    # 动态覆写真实维度
-                    if result and result[0]:
-                        self._dimension = len(result[0])
-                        
-                    return result
-        except Exception as e:
-            logger.error("External embedding request failed: %s", type(e).__name__)
-            raise RuntimeError(f"Embedding 接口通信错误: {e}") from e
+        attempts = _MAX_RETRIES + 1
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                async with aiohttp.ClientSession(timeout=_REQUEST_TIMEOUT) as session:
+                    async with session.post(url, headers=headers, json=payload) as resp:
+                        if resp.status != 200:
+                            logger.error(f"Embedding API failed with status {resp.status}")
+                            msg = f"Embedding API 响应异常，HTTP {resp.status}"
+                            # 4xx 是请求本身的问题，重试无意义；5xx/网络错误才重试。
+                            if resp.status < 500:
+                                raise _NonRetryableEmbeddingError(msg)
+                            raise RuntimeError(msg)
+
+                        data = await resp.json()
+
+                        # 按照 standard OpenAI 契约解析
+                        embeddings_data = data.get("data", [])
+                        # 确保按 input 数组顺序排列 (使用 index 属性)
+                        embeddings_data.sort(key=lambda x: x.get("index", 0))
+
+                        result = [item.get("embedding") for item in embeddings_data]
+                        if not result:
+                            raise _NonRetryableEmbeddingError(
+                                f"Embedding API 未能返回有效向量：{data}"
+                            )
+
+                        # 动态覆写真实维度
+                        if result and result[0]:
+                            self._dimension = len(result[0])
+
+                        return result
+            except _NonRetryableEmbeddingError as e:
+                logger.error("External embedding request failed: %s", e)
+                raise RuntimeError(f"Embedding 接口通信错误: {e}") from e
+            except Exception as e:
+                last_exc = e
+                logger.warning(
+                    "External embedding attempt %d/%d failed: %s: %s",
+                    attempt,
+                    attempts,
+                    type(e).__name__,
+                    e,
+                )
+                if attempt < attempts:
+                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS * attempt)
+        raise RuntimeError(f"Embedding 接口通信错误: {last_exc}") from last_exc
 
     def get_dimension(self) -> int:
         return self._dimension

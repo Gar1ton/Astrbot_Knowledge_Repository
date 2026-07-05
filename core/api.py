@@ -29,6 +29,9 @@ from core.config import (
     structural_keys,
 )
 from core.domain.models import (
+    NOTION_ENTITY_DOCUMENT,
+    NOTION_PUSH_FAILED,
+    NOTION_PUSH_PENDING,
     Collection,
     ConsoleScopeState,
     DocumentOrigin,
@@ -433,6 +436,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         # Milvus 向量库重建：全局单任务的进度快照 + 后台任务句柄（无暂停）。
         self._milvus_build_job: MilvusBuildJob | None = None
         self._milvus_build_task: asyncio.Task | None = None  # type: ignore[type-arg]
+        self._deferred_reload_task: asyncio.Task | None = None  # type: ignore[type-arg]
         self._config = config
         self._config_persist = config_persist
         self._llm_adapter = llm_adapter
@@ -445,6 +449,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         # 软重启回调（组合根注入 PluginInitializer.reload；为空表示当前环境不支持程序化重启）。
         self._reload_callback = reload_callback
         self._r2_backup_manager = r2_backup_manager
+        # Notion 单向推送管线（组合根在 api 构造后注入）。
+        self._notion_sync_pipeline: Any | None = None
         # Zotero 同步管线（组合根在 api 构造后注入，避免回调循环依赖）。
         self._zotero_pipeline: Any | None = None
         self._last_zotero_sync: dict[str, Any] = {}
@@ -459,6 +465,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     def attach_zotero_pipeline(self, pipeline: Any) -> None:
         """组合根注入 ZoteroSyncPipeline（其回调引用本 api 的索引/LRAG 助手）。"""
         self._zotero_pipeline = pipeline
+
+    def attach_notion_sync_pipeline(self, pipeline: Any) -> None:
+        """组合根注入 NotionSyncPipeline（Notion 单向增量推送编排）。"""
+        self._notion_sync_pipeline = pipeline
 
     # ── 集合（分类）────────────────────────────────────────────
 
@@ -2119,12 +2129,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         """
         if target == "r2" and self._r2_backup_manager is not None:
             return await self._r2_backup_manager.backup(force=force)
+        if target == "notion":
+            return await self._notion_push_all(force=force)
         if self._sync_pipeline:
             if target == "all":
                 results: dict[str, dict[str, Any]] = {}
                 for kind in SyncTargetKind:
                     if kind is SyncTargetKind.R2 and self._r2_backup_manager is not None:
                         results[kind.value] = await self._r2_backup_manager.backup(force=force)
+                    elif kind is SyncTargetKind.NOTION:
+                        results[kind.value] = await self._notion_push_all(force=force)
                     else:
                         results[kind.value] = await self._sync_pipeline.sync(
                             kind, doc_ids, force=force
@@ -2145,36 +2159,170 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         raise NotImplementedError("sync_documents: available in v0.3.0 (r2) / v0.4.0 (notion)")
 
+    async def _notion_push_all(self, *, force: bool) -> dict:
+        if self._notion_sync_pipeline is None:
+            return {"status": "error", "message": "Notion 同步管线未装配。"}
+        return await self._notion_sync_pipeline.push_all(force=force)
+
     async def initialize_notion_database(
         self,
         parent_page_id: str | None = None,
         database_title: str | None = None,
     ) -> dict:
-        """自动创建 Notion 数据库，并回写生成的 database_id。"""
-        if not self._sync_pipeline:
-            raise NotImplementedError("initialize_notion_database: available in v0.8.0")
+        """自动创建 Notion 两表（Articles + QA），并回写两个 database_id。"""
+        if self._notion_sync_pipeline is None:
+            return {
+                "status": "unavailable",
+                "message": "Notion 同步管线未装配；请确认插件已加载当前版本并完成初始化。",
+            }
 
-        result = await self._sync_pipeline.initialize_notion_database(
+        result = await self._notion_sync_pipeline.initialize_databases(
             parent_page_id=parent_page_id,
             database_title=database_title,
         )
         if result.get("status") == "success":
-            database_id = result.get("database_id")
-            if isinstance(database_id, str) and database_id:
-                self._persist_config_value("notion_sync", "database_id", database_id)
-            parent = result.get("parent_page_id")
-            if isinstance(parent, str) and parent:
-                self._persist_config_value("notion_sync", "parent_page_id", parent)
-            title = result.get("database_title")
-            if isinstance(title, str) and title:
-                self._persist_config_value("notion_sync", "database_title", title)
+            for key in ("database_id", "qa_database_id", "parent_page_id", "database_title"):
+                value = result.get(key)
+                if isinstance(value, str) and value:
+                    self._persist_config_value("notion_sync", key, value)
         return result
 
-    async def pull_notion_metadata(self) -> dict:
-        """从 Notion 反向拉取 Collection/Tags 元数据。"""
-        if self._sync_pipeline:
-            return await self._sync_pipeline.pull_notion_metadata()
-        raise NotImplementedError("pull_notion_metadata: available in v0.8.0")
+    async def push_note_to_notion(
+        self,
+        content: str,
+        *,
+        title: str = "",
+        tags: list[str] | None = None,
+        citations: list[str] | None = None,
+        source: str = "chat",
+        keep_local: bool = False,
+    ) -> dict:
+        """把一段内容推送到 Notion QA 库；agent/Ask 按钮的统一入口。
+
+        keep_local=True：先落地为本地 ScopedNote（挂默认集合，source 保留），再推 QA；
+        Notion 失败时本地 note 保留、返回 status="partial"。
+        默认（暂存直推）：写 notion_outbox(pending) → 立即推送 → 成功清正文留存根、
+        失败保留全文记 failed，等下轮 push_all 补推。
+        """
+        if self._notion_sync_pipeline is None or self._config is None:
+            return {
+                "status": "unavailable",
+                "message": "Notion 同步管线未装配；请确认插件已加载当前版本并完成初始化。",
+            }
+        notion_cfg = self._config.get_notion_sync_config()
+        if not notion_cfg.enabled:
+            return {"status": "disabled", "message": "Notion 同步未启用，无法推送。"}
+
+        body = (content or "").strip()
+        if not body:
+            return {"status": "error", "message": "推送内容为空。"}
+        tag_list = [t.strip() for t in (tags or []) if t.strip()]
+        citation_list = [c.strip() for c in (citations or []) if c.strip()]
+
+        if keep_local:
+            return await self._push_note_keep_local(
+                body, title, tag_list, citation_list, source
+            )
+        return await self._push_note_outbox(body, title, tag_list, citation_list, source)
+
+    async def _push_note_keep_local(
+        self,
+        body: str,
+        title: str,
+        tags: list[str],
+        citations: list[str],
+        source: str,
+    ) -> dict:
+        default_collection = self._config.get_source_store_config().default_collection
+        note = await self.create_collection_note(
+            default_collection, body, source=source or "research"
+        )
+        if note is None:
+            return {
+                "status": "error",
+                "message": f"默认集合 {default_collection} 不存在，无法落地笔记。",
+            }
+        note_id = note.get("id", "")
+        push = await self._notion_sync_pipeline.push_qa_record(
+            note_id=f"note:{note_id}",
+            title=title,
+            content=body,
+            tags=tags,
+            citations=citations,
+            source=source or "research",
+        )
+        if push.get("status") != "success":
+            return {
+                "status": "partial",
+                "note_id": note_id,
+                "message": f"本地笔记已保存，但 Notion 推送失败：{push.get('message')}",
+            }
+        return {
+            "status": "success",
+            "note_id": note_id,
+            "page_id": push.get("page_id"),
+            "kept_local": True,
+            "message": "已保存为本地笔记并推送到 Notion。",
+        }
+
+    async def _push_note_outbox(
+        self,
+        body: str,
+        title: str,
+        tags: list[str],
+        citations: list[str],
+        source: str,
+    ) -> dict:
+        from core.domain.models import NotionOutboxItem
+
+        item_id = uuid.uuid4().hex
+        await self._source_store.add_notion_outbox(
+            NotionOutboxItem(
+                id=item_id,
+                title=title,
+                content=body,
+                tags=tags,
+                citations=citations,
+                source=source or "chat",
+            )
+        )
+        result = await self._notion_sync_pipeline.push_outbox_item(item_id)
+        if result.get("status") == "success":
+            return {
+                "status": "success",
+                "page_id": result.get("page_id"),
+                "outbox_id": item_id,
+                "message": "已推送到 Notion 问答库。",
+            }
+        return {
+            "status": "partial",
+            "outbox_id": item_id,
+            "message": f"已暂存，将在下次同步补推：{result.get('message')}",
+        }
+
+    async def get_notion_push_status(self) -> dict:
+        """汇总 Notion 推送账本状态（供 /ka notion status 与前端展示）。"""
+        if self._config is None:
+            return {"status": "error", "message": "配置未加载。"}
+        notion_cfg = self._config.get_notion_sync_config()
+        entities = await self._source_store.list_notion_entities(
+            NOTION_ENTITY_DOCUMENT
+        )
+        counts: dict[str, int] = {}
+        for rec in entities:
+            counts[rec.status] = counts.get(rec.status, 0) + 1
+        pending = await self._source_store.list_notion_outbox(NOTION_PUSH_PENDING)
+        failed_qa = await self._source_store.list_notion_outbox(NOTION_PUSH_FAILED)
+        return {
+            "status": "ok",
+            "enabled": notion_cfg.enabled,
+            "database_id": notion_cfg.database_id,
+            "qa_database_id": notion_cfg.qa_database_id,
+            "auto_sync_interval_sec": notion_cfg.auto_sync_interval_sec,
+            "documents": counts,
+            "outbox_pending": len(pending),
+            "outbox_failed": len(failed_qa),
+        }
 
     async def get_effective_config(self) -> dict:
         """返回前端可展示的有效配置。"""
@@ -2304,7 +2452,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             except Exception as exc:  # noqa: BLE001 - 后台任务需吞掉异常并记录
                 logger.error("plugin soft restart failed: %s", exc, exc_info=True)
 
-        asyncio.create_task(_deferred_reload())
+        # 持引用防 GC 提前回收 fire-and-forget 任务；done 后自释放。
+        self._deferred_reload_task = asyncio.create_task(_deferred_reload())
+        self._deferred_reload_task.add_done_callback(
+            lambda _t: setattr(self, "_deferred_reload_task", None)
+        )
         logger.info("plugin soft restart scheduled")
         return {"status": "restarting", "message": "插件正在重启，稍后将自动重连。"}
 
@@ -2858,7 +3010,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
 
     async def _lightrag_text_for_doc(self, doc: SourceDocument) -> str:
-        raw = _extract_raw_doc_text(doc)
+        # to_thread：clean.md 可达数 MB，同步读会在图谱构建循环里逐文档卡住事件循环。
+        raw = await asyncio.to_thread(_extract_raw_doc_text, doc)
         if raw is not None:
             return raw
         chunks = await self._source_store.list_chunks(doc.doc_id)

@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import sqlite3
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from core.domain.models import (
     Collection,
@@ -18,6 +21,8 @@ from core.domain.models import (
     DocumentChunk,
     DocumentLifecycle,
     DocumentOrigin,
+    NotionEntityRecord,
+    NotionOutboxItem,
     PageChunk,
     ScopedNote,
     SourceDocument,
@@ -82,6 +87,30 @@ def _loads_dict(val: str | None) -> dict:
         return parsed if isinstance(parsed, dict) else {}
     except (json.JSONDecodeError, TypeError):
         return {}
+
+
+_OUTBOX_SELECT = """
+    SELECT id, title, content, tags, citations, source,
+           status, page_id, message, created_at, pushed_at
+      FROM notion_outbox
+"""
+
+
+def _outbox_from_row(row: Any) -> NotionOutboxItem:
+    """notion_outbox 行 → NotionOutboxItem（列序与 _OUTBOX_SELECT 对齐）。"""
+    return NotionOutboxItem(
+        id=row[0],
+        title=row[1],
+        content=row[2],
+        tags=_loads_list(row[3]),
+        citations=_loads_list(row[4]),
+        source=row[5],
+        status=row[6],
+        page_id=row[7],
+        message=row[8],
+        created_at=_parse_dt(row[9]),
+        pushed_at=_parse_dt(row[10]),
+    )
 
 
 # 文档列清单（唯一真相源，杜绝多处 SELECT 列错位）。
@@ -199,11 +228,32 @@ def _row_to_chat_message(row: tuple) -> dict:
     }
 
 
+_T = TypeVar("_T")
+
+
+def _locked_write(fn: Callable[..., Awaitable[_T]]) -> Callable[..., Awaitable[_T]]:
+    """写方法互斥装饰器。
+
+    全店共享单个 aiosqlite 连接，事务按连接划分：协程 A 的多语句事务（如
+    replace_chunks 的 DELETE+INSERT）进行到一半时，协程 B 的 commit 会把 A 的
+    半成品一并持久化。所有写方法（execute+commit）必须持同一把锁；读方法不加锁。
+    注意锁不可重入——被锁方法内部只能调用 *_unlocked 变体或只读方法。
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(self: SQLiteSourceDocumentStore, *args: Any, **kwargs: Any) -> _T:
+        async with self._write_lock:
+            return await fn(self, *args, **kwargs)
+
+    return wrapper
+
+
 class SQLiteSourceDocumentStore(SourceDocumentStore):
     """基于 SQLite/aiosqlite 的生产 SourceDocumentStore 实现。"""
 
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
+        self._write_lock = asyncio.Lock()
 
     # ── 集合（树形 + 多归属）────────────────────────────────────
 
@@ -226,6 +276,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             library_id=row[8],
         )
 
+    @_locked_write
     async def upsert_collection(self, collection: Collection) -> None:
         created_at_str = _format_dt(collection.created_at or datetime.now(timezone.utc))
         coll_key = collection.coll_key
@@ -307,11 +358,13 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             rows = await cursor.fetchall()
             return [r[0] for r in rows]
 
+    @_locked_write
     async def delete_collection(self, name: str) -> bool:
         async with self._db.execute("DELETE FROM collections WHERE name = ?", (name,)) as cursor:
             await self._db.commit()
             return cursor.rowcount > 0
 
+    @_locked_write
     async def delete_collection_by_key(self, coll_key: str) -> bool:
         async with self._db.execute(
             "DELETE FROM collections WHERE coll_key = ?", (coll_key,)
@@ -319,6 +372,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             await self._db.commit()
             return cursor.rowcount > 0
 
+    @_locked_write
     async def move_documents_to_collection(self, from_name: str, to_name: str) -> int:
         now_str = _format_dt(datetime.now(timezone.utc))
         # 同步迁移多归属：把指向 from_name 对应 coll_key 的归属改为 to_name 的 coll_key。
@@ -343,7 +397,14 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     # ── 文档多归属 ──────────────────────────────────────────────
 
+    @_locked_write
     async def set_document_collections(self, doc_id: str, coll_keys: list[str]) -> None:
+        await self._set_document_collections_unlocked(doc_id, coll_keys)
+
+    async def _set_document_collections_unlocked(
+        self, doc_id: str, coll_keys: list[str]
+    ) -> None:
+        """无锁变体：仅供已持写锁的方法（add/update_document 的归属同步）内部调用。"""
         await self._db.execute(
             "DELETE FROM document_collections WHERE doc_id = ?", (doc_id,)
         )
@@ -415,10 +476,11 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             primary = await self.get_collection_by_name(document.collection)
             if primary:
                 keys = [primary.coll_key]
-        await self.set_document_collections(document.doc_id, keys)
+        await self._set_document_collections_unlocked(document.doc_id, keys)
 
     # ── 文档 ────────────────────────────────────────────────────
 
+    @_locked_write
     async def add_document(self, document: SourceDocument) -> None:
         created_at_str = _format_dt(document.created_at or datetime.now(timezone.utc))
         updated_at_str = _format_dt(document.updated_at or datetime.now(timezone.utc))
@@ -515,6 +577,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         await self._fill_collection_keys(docs)
         return docs
 
+    @_locked_write
     async def update_document(self, document: SourceDocument) -> bool:
         updated_at_str = _format_dt(document.updated_at or datetime.now(timezone.utc))
         tags_str = json.dumps(document.tags)
@@ -562,6 +625,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             await self._sync_doc_memberships(document)
         return updated
 
+    @_locked_write
     async def delete_document(self, doc_id: str) -> bool:
         # SQLite 配了外键级联删除 (ON DELETE CASCADE) 关联的 chunks 会由外键级联自动删除
         # 但遵循仓储接口约定，为了确定 doc_id 存在性，我们可以在事务里手动操作
@@ -571,6 +635,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     # ── 分块 ────────────────────────────────────────────────────
 
+    @_locked_write
     async def replace_chunks(self, doc_id: str, chunks: list[DocumentChunk]) -> None:
         # 整体替换语义：先删该 doc 旧 chunks -> 再插入新 chunks。包裹在同一个事务内。
         try:
@@ -704,6 +769,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     # ── LightRAG 索引状态 ───────────────────────────────────────
 
+    @_locked_write
     async def set_lightrag_index_status(
         self, doc_id: str, collection: str, status: str, last_error: str = ""
     ) -> None:
@@ -739,6 +805,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     # ── 图谱构建任务持久化 ─────────────────────────────────────────
 
+    @_locked_write
     async def upsert_build_job(self, job: dict) -> None:
         await self._db.execute(
             """
@@ -820,6 +887,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             row = await cursor.fetchone()
         return _row_to_build_job(row) if row is not None else None
 
+    @_locked_write
     async def mark_interrupted_build_jobs(self) -> int:
         cursor = await self._db.execute(
             "UPDATE graph_build_jobs SET status = 'interrupted', stage = 'interrupted' "
@@ -851,6 +919,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 message=row[4],
             )
 
+    @_locked_write
     async def upsert_sync_record(self, record: SyncRecord) -> None:
         synced_at_str = _format_dt(record.synced_at)
         await self._db.execute(
@@ -904,6 +973,167 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 for row in rows
             ]
 
+    # ── Notion 推送账本与暂存箱 ───────────────────────────────────
+
+    async def get_notion_entity(
+        self, entity_type: str, entity_key: str
+    ) -> NotionEntityRecord | None:
+        async with self._db.execute(
+            """
+            SELECT page_id, metadata_hash, content_hash, status, synced_at, message
+              FROM notion_entity_map WHERE entity_type = ? AND entity_key = ?
+            """,
+            (entity_type, entity_key),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            return NotionEntityRecord(
+                entity_type=entity_type,
+                entity_key=entity_key,
+                page_id=row[0],
+                metadata_hash=row[1],
+                content_hash=row[2],
+                status=row[3],
+                synced_at=_parse_dt(row[4]),
+                message=row[5],
+            )
+
+    @_locked_write
+    async def upsert_notion_entity(self, record: NotionEntityRecord) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO notion_entity_map (
+                entity_type, entity_key, page_id, metadata_hash,
+                content_hash, status, synced_at, message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                page_id = excluded.page_id,
+                metadata_hash = excluded.metadata_hash,
+                content_hash = excluded.content_hash,
+                status = excluded.status,
+                synced_at = excluded.synced_at,
+                message = excluded.message
+            """,
+            (
+                record.entity_type,
+                record.entity_key,
+                record.page_id,
+                record.metadata_hash,
+                record.content_hash,
+                record.status,
+                _format_dt(record.synced_at),
+                record.message,
+            ),
+        )
+        await self._db.commit()
+
+    async def list_notion_entities(
+        self, entity_type: str | None = None
+    ) -> list[NotionEntityRecord]:
+        query = """
+            SELECT entity_type, entity_key, page_id, metadata_hash,
+                   content_hash, status, synced_at, message
+              FROM notion_entity_map
+        """
+        params: list[str] = []
+        if entity_type is not None:
+            query += " WHERE entity_type = ?"
+            params.append(entity_type)
+        async with self._db.execute(query, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+            return [
+                NotionEntityRecord(
+                    entity_type=row[0],
+                    entity_key=row[1],
+                    page_id=row[2],
+                    metadata_hash=row[3],
+                    content_hash=row[4],
+                    status=row[5],
+                    synced_at=_parse_dt(row[6]),
+                    message=row[7],
+                )
+                for row in rows
+            ]
+
+    @_locked_write
+    async def delete_notion_entity(self, entity_type: str, entity_key: str) -> bool:
+        cursor = await self._db.execute(
+            "DELETE FROM notion_entity_map WHERE entity_type = ? AND entity_key = ?",
+            (entity_type, entity_key),
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
+
+    @_locked_write
+    async def add_notion_outbox(self, item: NotionOutboxItem) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO notion_outbox (
+                id, title, content, tags, citations, source,
+                status, page_id, message, created_at, pushed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.id,
+                item.title,
+                item.content,
+                json.dumps(item.tags, ensure_ascii=False),
+                json.dumps(item.citations, ensure_ascii=False),
+                item.source,
+                item.status,
+                item.page_id,
+                item.message,
+                _format_dt(item.created_at or datetime.now(timezone.utc)),
+                _format_dt(item.pushed_at),
+            ),
+        )
+        await self._db.commit()
+
+    async def get_notion_outbox(self, item_id: str) -> NotionOutboxItem | None:
+        async with self._db.execute(
+            f"{_OUTBOX_SELECT} WHERE id = ?", (item_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return _outbox_from_row(row) if row is not None else None
+
+    async def list_notion_outbox(
+        self, status: str | None = None
+    ) -> list[NotionOutboxItem]:
+        query = _OUTBOX_SELECT
+        params: list[str] = []
+        if status is not None:
+            query += " WHERE status = ?"
+            params.append(status)
+        query += " ORDER BY created_at ASC"
+        async with self._db.execute(query, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+            return [_outbox_from_row(row) for row in rows]
+
+    @_locked_write
+    async def update_notion_outbox(self, item: NotionOutboxItem) -> bool:
+        cursor = await self._db.execute(
+            """
+            UPDATE notion_outbox SET
+                title = ?, content = ?, tags = ?, citations = ?, source = ?,
+                status = ?, page_id = ?, message = ?, pushed_at = ?
+            WHERE id = ?
+            """,
+            (
+                item.title,
+                item.content,
+                json.dumps(item.tags, ensure_ascii=False),
+                json.dumps(item.citations, ensure_ascii=False),
+                item.source,
+                item.status,
+                item.page_id,
+                item.message,
+                _format_dt(item.pushed_at),
+                item.id,
+            ),
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
 
     # ── 文档/集合笔记 ───────────────────────────────────────────
 
@@ -920,6 +1150,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             rows = await cursor.fetchall()
             return [_row_to_scoped_note(row) for row in rows]
 
+    @_locked_write
     async def add_scoped_note(self, note: ScopedNote) -> None:
         now = datetime.now(timezone.utc)
         created_at = _format_dt(note.created_at or now)
@@ -967,6 +1198,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 raise ValueError(f"duplicate note id: {note.id}") from e
             raise
 
+    @_locked_write
     async def update_scoped_note(self, note: ScopedNote) -> bool:
         updated_at = _format_dt(note.updated_at or datetime.now(timezone.utc))
         async with self._db.execute(
@@ -1017,6 +1249,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     # ── 聊天记录 ─────────────────────────────────────────────────
 
+    @_locked_write
     async def add_chat_message(
         self,
         conversation_id: str,
@@ -1061,6 +1294,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             rows = await cursor.fetchall()
         return [_row_to_chat_message(row) for row in rows]
 
+    @_locked_write
     async def set_chat_message_locked(
         self, conversation_id: str, msg_idx: int, locked: bool
     ) -> dict | None:
@@ -1102,6 +1336,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             updated = await cursor.fetchone()
         return _row_to_chat_message(updated) if updated is not None else None
 
+    @_locked_write
     async def clear_chat_messages(
         self, conversation_id: str, preserve_locked: bool = False
     ) -> None:
@@ -1146,6 +1381,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             updated_at=_parse_dt(row[6]),
         )
 
+    @_locked_write
     async def upsert_console_scope_state(self, state: ConsoleScopeState) -> None:
         updated_at = _format_dt(state.updated_at or datetime.now(timezone.utc))
         await self._db.execute(
@@ -1180,6 +1416,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     # ── Zotero 逻辑镜像 ──────────────────────────────────────────
 
+    @_locked_write
     async def upsert_zotero_library(self, library: ZoteroLibrary) -> None:
         await self._db.execute(
             """
@@ -1198,6 +1435,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         )
         await self._db.commit()
 
+    @_locked_write
     async def upsert_zotero_collection(self, collection: ZoteroCollection) -> None:
         await self._db.execute(
             """
@@ -1219,6 +1457,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         )
         await self._db.commit()
 
+    @_locked_write
     async def upsert_zotero_item(self, item: ZoteroItem) -> None:
         await self._db.execute(
             """
@@ -1256,6 +1495,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         )
         await self._db.commit()
 
+    @_locked_write
     async def upsert_zotero_attachment(self, attachment: ZoteroAttachment) -> None:
         await self._db.execute(
             """
@@ -1285,6 +1525,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         )
         await self._db.commit()
 
+    @_locked_write
     async def set_item_collections(
         self, library_id: str, item_key: str, collection_keys: list[str]
     ) -> None:
@@ -1304,6 +1545,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             await self._db.rollback()
             raise
 
+    @_locked_write
     async def replace_item_tags(
         self, library_id: str, item_key: str, tags: list[ZoteroTag]
     ) -> None:
@@ -1323,6 +1565,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             await self._db.rollback()
             raise
 
+    @_locked_write
     async def upsert_zotero_relation(self, relation: ZoteroRelation, library_id: str) -> None:
         await self._db.execute(
             "INSERT OR IGNORE INTO zotero_relations "
@@ -1479,6 +1722,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             return None
         return {"account_id": str(row[0]), "account_name": str(row[1])}
 
+    @_locked_write
     async def set_source_account_binding(
         self, source: str, account_id: str, account_name: str = ""
     ) -> None:
@@ -1495,6 +1739,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         )
         await self._db.commit()
 
+    @_locked_write
     async def purge_zotero_mirror(self) -> None:
         """单事务删除 Zotero 镜像；documents 外键级联清理 chunks/sync 等。"""
         try:
@@ -1537,6 +1782,7 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     # ── 页面级 provenance ────────────────────────────────────────
 
+    @_locked_write
     async def replace_page_chunks(
         self, document_id: str, page_chunks: list[PageChunk]
     ) -> None:

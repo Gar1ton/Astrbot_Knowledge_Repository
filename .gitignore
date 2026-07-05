@@ -5,6 +5,8 @@ __pycache__/
 .eggs/
 build/
 dist/
+/.release-worktree/
+/published/
 # Keep exported console assets under pages/ trackable.
 !pages/_next/static/chunks/next/
 !pages/_next/static/chunks/next/dist/

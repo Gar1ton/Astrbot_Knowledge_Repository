@@ -469,9 +469,23 @@ class DeepThinkingOrchestrator:
                         collection, q, self._cfg.wide_top_k, scope
                     )
                     for q in queries
-                )
+                ),
+                # 单个 sub_query 瞬断（embedding 超时/向量库抖动）不应废掉整轮推演：
+                # 失败的跳过并降级，全军覆没且无 baseline 时才向上抛。
+                return_exceptions=True,
             )
-            query_outcomes.extend(zip(queries, outcomes))
+            for q, oc in zip(queries, outcomes):
+                if isinstance(oc, asyncio.CancelledError):
+                    raise oc
+                if isinstance(oc, BaseException):
+                    logger.warning("Sub-query retrieval failed, skipping %r: %s", q, oc)
+                else:
+                    query_outcomes.append((q, oc))
+            if not query_outcomes:
+                first_failure = next(
+                    oc for oc in outcomes if isinstance(oc, BaseException)
+                )
+                raise first_failure
         candidates: dict[str, DocumentChunk] = {}
         anchor_ids: set[str] = set()
         for _q, oc in query_outcomes:

@@ -10,11 +10,11 @@ import { Toggle } from "@/components/ds/Toggle";
 import { useTheme } from "@/lib/theme";
 import { useI18n, type I18nKey } from "@/lib/i18n";
 import { useToast } from "@/components/ui/Toast";
-import { TerminalPanel } from "@/components/ui/TerminalPanel";
+import { TerminalPanel } from "@/components/ui/terminal/TerminalPanel";
 import {
   getEffectiveConfig, getZoteroConfig, syncZoteroPull, backupNow, restoreBackup, logout,
   updateConfigValue, saveZoteroServerKey, deleteZoteroServerKey,
-  resolveZoteroAccountChange, getR2Status, getR2Job,
+  resolveZoteroAccountChange, getR2Status, getR2Job, notionInit, syncDocuments,
   EffectiveConfig, ZoteroConfig, ZoteroAccountChangeRequired, R2Status, R2BackupJob,
 } from "@/lib/api";
 
@@ -230,6 +230,12 @@ function SyncTab() {
   const [syncMode, setSyncMode] = useState("conservative");
   const [autoSync, setAutoSync] = useState(false);
   const [syncInterval, setSyncInterval] = useState("3600");
+  // Notion 同步
+  const [notionEnabled, setNotionEnabled] = useState(false);
+  const [notionReady, setNotionReady] = useState(false);
+  const [notionInterval, setNotionInterval] = useState("0");
+  const [notionPushing, setNotionPushing] = useState(false);
+  const [notionInitializing, setNotionInitializing] = useState(false);
 
   useEffect(() => {
     Promise.all([getZoteroConfig(), getEffectiveConfig()]).then(([z, cfg]) => {
@@ -243,6 +249,10 @@ function SyncTab() {
       setSyncMode(String(zs.sync_mode ?? z.sync_mode ?? "conservative"));
       setAutoSync(Boolean(zs.auto_sync_enabled ?? z.auto_sync_enabled ?? false));
       setSyncInterval(String(zs.auto_sync_interval_sec ?? z.auto_sync_interval_sec ?? 3600));
+      const ns = (cfg.notion_sync ?? {}) as Record<string, unknown>;
+      setNotionEnabled(Boolean(ns.enabled ?? false));
+      setNotionReady(Boolean(ns.database_id) && Boolean(ns.qa_database_id));
+      setNotionInterval(String(ns.auto_sync_interval_sec ?? 0));
     }).catch(() => {});
   }, []);
 
@@ -318,6 +328,41 @@ function SyncTab() {
       toast(e instanceof Error ? e.message : "恢复失败", "error");
     } finally {
       setRestoring(false);
+    }
+  }
+
+  async function handleNotionInit() {
+    setNotionInitializing(true);
+    try {
+      const res = await notionInit("", "");
+      if (res.status === "success") {
+        setNotionReady(Boolean(res.database_id) && Boolean(res.qa_database_id));
+        toast("Notion 两库初始化完成", "ok");
+      } else {
+        toast("Notion 初始化失败：请先在插件配置填写父页面 ID", "error");
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "初始化失败", "error");
+    } finally {
+      setNotionInitializing(false);
+    }
+  }
+
+  async function handleNotionPush() {
+    setNotionPushing(true);
+    try {
+      const res = await syncDocuments("notion");
+      if ("reserved" in res) {
+        toast("Notion 同步端口预留中", "error");
+      } else if (res.status === "success") {
+        toast("Notion 增量推送完成", "ok");
+      } else {
+        toast(`Notion 推送：${res.status}`, "error");
+      }
+    } catch (e) {
+      toast(e instanceof Error ? e.message : "推送失败", "error");
+    } finally {
+      setNotionPushing(false);
     }
   }
 
@@ -663,11 +708,63 @@ function SyncTab() {
         </Modal>
       )}
 
-      <Card title="Notion 镜像" icon="layers" badge={<Badge tone="warn">即将上线</Badge>}>
-        <Field label="从 Notion 拉取元数据" hint="端口预留中，UI 优雅降级">
-          <Button variant="ghost" size="sm" disabled>
-            拉取
-          </Button>
+      <Card
+        title="Notion 同步"
+        icon="layers"
+        badge={
+          <Badge tone={notionEnabled ? (notionReady ? "ok" : "warn") : "neutral"}>
+            {notionEnabled ? (notionReady ? "已就绪" : "未初始化") : "未启用"}
+          </Badge>
+        }
+      >
+        <Field
+          label="Notion 单向增量推送"
+          hint="文章（含 tag / 文件树）推到 Articles 库，研究结论推到 QA 库；启用开关在 AstrBot 插件配置面板"
+        >
+          <span style={{ fontSize: 12, color: "var(--fg-subtle)" }}>
+            {notionEnabled ? "已在插件配置中启用" : "未启用（在 AstrBot 面板开启 notion_sync.enabled）"}
+          </span>
+        </Field>
+
+        <Field
+          label="周期自动推送（秒）"
+          hint="0 表示关闭定时推送；>0 时每隔该秒数自动增量推送一次（改动后重启插件生效）"
+        >
+          <input
+            style={inputStyle}
+            type="number"
+            value={notionInterval}
+            min={0}
+            disabled={!notionEnabled || saving === "notion_sync.auto_sync_interval_sec"}
+            onChange={(e) => setNotionInterval(e.target.value)}
+            onBlur={() => {
+              const n = parseInt(notionInterval, 10);
+              if (Number.isFinite(n) && n >= 0) save("notion_sync", "auto_sync_interval_sec", n);
+            }}
+          />
+        </Field>
+
+        <Field label="初始化与推送" hint="首次使用先初始化两库（需在插件配置填父页面 ID），之后可手动增量推送">
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Button
+              variant="outline"
+              size="sm"
+              loading={notionInitializing}
+              disabled={!notionEnabled}
+              onClick={handleNotionInit}
+            >
+              初始化数据库
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              loading={notionPushing}
+              disabled={!notionEnabled || !notionReady}
+              onClick={handleNotionPush}
+            >
+              <Icon name="sync" size={13} /> 立即同步
+            </Button>
+          </div>
         </Field>
       </Card>
     </>

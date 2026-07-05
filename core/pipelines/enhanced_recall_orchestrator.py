@@ -263,9 +263,22 @@ class EnhancedRecallOrchestrator:
                     candidate_k=self._cfg.candidate_k,
                 )
                 for q in queries
-            )
+            ),
+            # 单个 sub_query 瞬断不应废掉整次增强召回：失败的跳过，全部失败才抛。
+            return_exceptions=True,
         )
-        return list(zip(queries, outcomes))
+        results: list[tuple[str, RetrievalOutcome]] = []
+        for q, oc in zip(queries, outcomes):
+            if isinstance(oc, asyncio.CancelledError):
+                raise oc
+            if isinstance(oc, BaseException):
+                logger.warning("Sub-query retrieval failed, skipping %r: %s", q, oc)
+            else:
+                results.append((q, oc))
+        if not results:
+            first_failure = next(oc for oc in outcomes if isinstance(oc, BaseException))
+            raise first_failure
+        return results
 
     async def _rank_pool(
         self, query_outcomes: list[tuple[str, RetrievalOutcome]]

@@ -331,19 +331,115 @@ async def test_sync_all_fans_out_to_each_target() -> None:
             self.calls.append((target, doc_ids))
             return {"status": "success", "synced_count": 1, "failed_count": 0}
 
+    class StubNotionPipeline:
+        calls = []
+
+        async def push_all(self, force=False):
+            self.calls.append(force)
+            return {"status": "success", "documents": {}, "qa": {}}
+
     pipeline = StubPipeline()
+    notion_pipeline = StubNotionPipeline()
     api = KnowledgeRepositoryApi(
         source_store=InMemorySourceDocumentStore(),
         kb_reader=InMemoryKnowledgeBaseReader({}),
         sync_pipeline=pipeline,  # type: ignore[arg-type]
     )
+    api.attach_notion_sync_pipeline(notion_pipeline)
     result = await api.sync_documents("all", ["d1"])
     assert result["status"] == "success"
     assert set(result["targets"]) == {"r2", "notion"}
-    assert pipeline.calls == [
-        (SyncTargetKind.NOTION, ["d1"]),
-        (SyncTargetKind.R2, ["d1"]),
-    ]
+    # Notion 走独立推送管线（push_all），R2 走 SyncPipeline.sync
+    assert pipeline.calls == [(SyncTargetKind.R2, ["d1"])]
+    assert notion_pipeline.calls == [False]
+
+
+class _StubNotionPipeline:
+    def __init__(self, push_result: dict | None = None) -> None:
+        self.push_result = push_result or {"status": "success", "page_id": "qa-1"}
+        self.qa_calls: list[dict] = []
+        self.outbox_calls: list[str] = []
+
+    async def push_qa_record(self, **kwargs) -> dict:
+        self.qa_calls.append(kwargs)
+        return self.push_result
+
+    async def push_outbox_item(self, item_id: str) -> dict:
+        self.outbox_calls.append(item_id)
+        return self.push_result
+
+
+def _notion_api(store: InMemorySourceDocumentStore, notion_pipeline) -> KnowledgeRepositoryApi:
+    from core.config import Config
+
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"notion_sync": {"enabled": True}}),
+    )
+    api.attach_notion_sync_pipeline(notion_pipeline)
+    return api
+
+
+async def test_notion_init_without_pipeline_reports_unavailable() -> None:
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+    )
+
+    result = await api.initialize_notion_database()
+
+    assert result["status"] == "unavailable"
+    assert "未装配" in result["message"]
+
+
+async def test_push_note_to_notion_outbox_path() -> None:
+    store = InMemorySourceDocumentStore()
+    pipeline = _StubNotionPipeline()
+    api = _notion_api(store, pipeline)
+
+    result = await api.push_note_to_notion(
+        "研究结论全文", title="Q1", citations=["d1", "d2"], source="research"
+    )
+
+    assert result["status"] == "success"
+    # 默认走暂存箱：先入 outbox 再立即推送该条
+    outbox = await store.list_notion_outbox()
+    assert len(outbox) == 1
+    assert pipeline.outbox_calls == [outbox[0].id]
+
+
+async def test_push_note_to_notion_keep_local_creates_note() -> None:
+    store = InMemorySourceDocumentStore()
+    await store.upsert_collection(Collection(name="default"))
+    pipeline = _StubNotionPipeline()
+    api = _notion_api(store, pipeline)
+
+    result = await api.push_note_to_notion(
+        "结论", title="Q", keep_local=True, source="research"
+    )
+
+    assert result["status"] == "success"
+    assert result["kept_local"] is True
+    # 落地为本地集合笔记（真相源保留），再推 QA
+    notes = await store.list_scoped_notes("collection", "default")
+    assert len(notes) == 1
+    assert notes[0].source == "research"
+    assert pipeline.qa_calls and pipeline.qa_calls[0]["note_id"].startswith("note:")
+
+
+async def test_push_note_to_notion_disabled_returns_hint() -> None:
+    from core.config import Config
+
+    store = InMemorySourceDocumentStore()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"notion_sync": {"enabled": False}}),
+    )
+    api.attach_notion_sync_pipeline(_StubNotionPipeline())
+    result = await api.push_note_to_notion("x")
+    assert result["status"] == "disabled"
 
 
 # ── ask() ────────────────────────────────────────────────────────

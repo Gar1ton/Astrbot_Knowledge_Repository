@@ -7,7 +7,7 @@ import { useTheme } from "next-themes";
 import { useI18n } from "@/lib/i18n";
 import { getQuota } from "@/lib/api";
 import { PerfPanel } from "@/components/ui/PerfPanel";
-import { TerminalPanel } from "@/components/ui/TerminalPanel";
+import { TerminalPanel } from "@/components/ui/terminal/TerminalPanel";
 
 // ─── 图标（内联 SVG，避免额外依赖） ──────────────────────────
 

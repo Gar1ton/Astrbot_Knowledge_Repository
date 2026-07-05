@@ -1,5 +1,131 @@
 # TODO
 
+## v1.0.0 正式发布准备：developer 源码分支 + orphan main 发布分支 (developer 侧完成，待用户远端操作)
+
+### User constraints / 约束
+
+- 当前本地 `main` 重命名为 `developer`，保留全部历史并作为唯一开发真相源；新的
+  `main` 从 orphan commit 开始，只保存正式发布文件，History 从 v1.0.0 起算。
+- 所有远端变更（push/tag/远端分支/PR/Release）必须在执行前单独取得用户明确批准；
+  本轮只做本地分支、代码、文档、验证和发布树准备。
+- 不处理现有超行数文件与模块拆分技术债；`pages/` 只经前端 build + sync 生成。
+
+### Technical implementation path
+
+- [x] **Phase 0 - 本地分支切换**：将当前工作分支从 `main` 重命名为 `developer`，
+  不重置、不覆盖工作树中的既有改动。
+- [x] **Phase 1 - 发布安全与冗余清理**：移除误跟踪宿主 `data/`、过期前端 ZIP、
+  legacy/未引用前端资源与空 mixins；补 AGPL-3.0 LICENSE，拆分运行可选依赖与开发依赖。
+- [x] **Phase 2 - 发布树生成与治理规则**：新增发布白名单/生成检查（含 `--check` 漂移检测）、
+  Git 工作流文档；在 CLAUDE/AGENTS 中落地“远端操作必须单独获批”和 published main 禁止手改规则。
+- [x] **Phase 3 - 市场元数据与错误语义**：补 `short_desc`、AstrBot 版本范围（`>=4.5.7,<5`）；把已实现的
+  Notion 初始化从陈旧 reserved 语义收敛为明确 unavailable（503）错误。
+- [x] **Phase 4 - CI 与发布校验**：developer 跑后端/前端全门禁；published tree 校验
+  必需/禁止文件、source SHA、版本一致性及 ZIP <= 15 MiB。
+- [x] **Phase 5 - v1.0.0 收尾**：修正历史治理状态与 CHANGELOG 占位，统一正式版本号为 v1.0.0；
+  本地生成 orphan main 并本地校验通过。**真机冒烟与全部远端操作留待用户执行，本轮不碰远端。**
+
+### Verification
+
+- 本地全绿：`ruff check .` 通过；`mypy`（core/domain strict）Success；`python -m pytest` **596 passed**；
+  `next build` 内含 TypeScript 检查通过（13 静态页预渲染）；定向 ESLint（本轮全部改动前端文件）exit 0；
+  `python tools/sync_frontend.py --check` 一致。
+- 发布树（`tools/build_published_tree.py`）：**481 文件、ZIP 3.87 MiB**（<= 15 MiB），必需文件齐备、
+  禁止文件（tests/tools/docs/data/dev/requirements-dev.txt/core/main.py 等）均不存在。
+- 待用户执行：远端 developer/main push、GitHub 默认分支切换、删除旧 tag、打 v1.0.0 tag、AstrBot 4.5.7+ 真机安装冒烟。
+
+## v1.0.0 内迭代：Notion 审计缺口修复（正文恢复 + 治理订正）(completed)
+
+### User constraints / 约束
+
+- 承接 Notion 单库 filter + QA 表重构的审计结果，修复已确认的数据丢失风险及低成本一致性缺口。
+- 属 v1.0.0 内部迭代，版本保持 **v1.0.0-rc.1**，不 bump；不修改工作区外的 AstrBot MCP 配置。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 正文部分成功恢复**：文章正文写成前不推进 `content_hash`；QA 建页后正文失败时保留 outbox 全文，下一轮按 NoteID 复用页面并重写正文。
+- [x] **Phase 2 - 元数据与引用降级一致性**：`updated_at` 纳入 metadata 指纹；Citations relation 降级时把已解析 DocID 保留在正文尾部。
+- [x] **Phase 3 - 回归测试**：覆盖文章/QA 部分成功后恢复与 `push_all` 防重入；复跑 Notion、API 及全量 backend 测试。
+- [x] **Phase 4 - 治理与部署文档**：订正原计划行数/测试数/环境相关测试结果，移除 design-spec 的陈旧 pull 契约，补 Notion MCP v1.2.x 锁版提示，并在 CHANGELOG `[Unreleased]` 记录修复。
+
+### Verification
+
+- `python -m pytest` 定向 Notion/API/Web/Research 回归 → **217 passed**；`python -m pytest tests/backend` → **591 passed, 2 skipped**（可选依赖缺失导致 skip）。
+- 前端 `tsc --noEmit --incremental false`、定向 ESLint、`python tools/sync_frontend.py --check` 全绿；`git diff --check` 通过。
+- 当前 Windows Python 环境未安装 ruff/mypy 命令，本轮无法复跑；新增 Python 行均未超过项目 100 字符限制，domain 层未改动。
+
+## v1.0.0 内迭代：Notion 同步重构（单库 filter + QA 表）(completed)
+
+### User constraints / 约束
+
+- 本轮属 v1.0.0 更新内，**不 bump 版本**（五处版本号均保持 v1.0.0-rc.1）；提交不加 Co-Authored-By。
+- Notion 侧两张表：Articles 单库（collection/tag 做可筛选属性，Collections multi_select 含祖先集合名 → 筛任一集合名即得子树全部文章）+ QA 库（agent 推送专用，append-only，Citations relation 链回 Articles）。
+- 同步**仅 push / force push 单向增量**，pull 反向合并整体移除。
+- 触发：`/ka notion <push|force push|status>`（继承 R2 二次确认模式）+ 可配置周期自动同步（设置项进 WebUI 前端）。
+- research/QA 落地走暂存箱（outbox）：推成清正文留存根，失败保留全文等补推；`keep_local="true"` 转正为本地 ScopedNote。
+- ScopedNote 不做批量镜像；WebUI Ask 回答下加「同步到 Notion」按钮（Notion 开启时可用）。
+- agent 工具面只加 1 个 `notion_push_note` llm_tool。
+
+### Technical implementation path
+
+- [x] **Phase 1 - MCP 适配层重写**（core/adapters/notion_mcp.py）：`get_llm_tool_manager().mcp_client_dict` + `call_tool_with_reconnect`（timedelta 超时）真实调用路径；`notion_` 前缀真实工具名；`format:"json"`；删除离线 stub 假 uuid，未连接显式抛 `NotionMCPError`；频控下沉（min-interval=1/rps）；`tool_caller` 测试注入口；新 test_notion_adapter.py。
+- [x] **Phase 2 - 账本与暂存箱**（migrations/020_notion_push_ledger.sql、domain/models.py、source_store base/sqlite/memory）：`notion_entity_map`（PK(entity_type,entity_key)，metadata_hash/content_hash 双指纹）+ `notion_outbox`（pushed 后清 content 留存根）；store 增 8 个方法（sqlite 写方法挂 `_locked_write`）。
+- [x] **Phase 3 - 两表 schema + target 幂等重构**（新 notion_schema.py、重写 sync_targets/notion.py；原轮收尾实际 462 行，超过 400 建议线但未触及 600 硬红线，后续按正文/QA 编排职责拆分）：两表属性构造纯函数 + `ancestor_collection_names` 祖先链展开 + `document_metadata_hash` + 切块函数；`initialize_databases`（Articles 对账补列 → QA 建库即带 Citations relation）；`upsert_document` 幂等序列（map 命中→hash 比对→update/skip；miss→DocID 反查→回填/create+append）；`create_qa_entry`（NoteID 反查防重试重复）；删 `pull_metadata`；重写 test_notion_target.py。
+- [x] **Phase 4 - 管线/配置/组合根 + pull 拆除**（新 pipelines/notion_sync_pipeline.py，api.py、config.py、_conf_schema.json、web/server.py、plugin_initializer.py）：`push_all(force)` 增量编排 + outbox 补推 + 孤儿清理 + 防重入锁；`push_note_to_notion` 门面（outbox 默认 / keep_local 转正）；`POST /api/notion/push-note` 路由；删 pull 端点与 `syncNotionPull`；`NotionSyncConfig` 增 `qa_database_id`/`auto_sync_interval_sec`；`_periodic_notion_sync` 定时任务。
+- [x] **Phase 5 - agent 工具与聊天端**（main.py、event_handler.py、research_skill.py）：`notion_push_note` llm_tool（content/title/tags/citations/keep_local）；research 返回体带 `citation_doc_ids` + 完成回发追加推送提示；`/ka notion <push|force push|status>`（force push 60s 二次确认）；`_HELP_TEXT` 更新。
+- [x] **Phase 6 - 前端**（SettingModal.tsx、ChatPanel、lib/api.ts、lib/i18n.ts）：「Notion 同步」设置卡（enabled Badge + 周期间隔 + 立即同步/初始化按钮）；Ask 回答下「同步到 Notion」按钮（`pushNotionNote` → /api/notion/push-note）；tsc/build + sync_frontend.py。
+- [x] **Phase 7 - 收尾**：全量 pytest/ruff/mypy 绿；CHANGELOG `[Unreleased]` 追加（点名文件，含 pull 移除说明）；版本不动。
+
+### Verification
+
+- 离线（原轮已通过，数字经后续审计订正）：`python -m pytest tests/backend` 共收集 **588** 项；可选依赖齐全环境为 588 passed，当前审计环境为 586 passed + 2 skipped。新增/重写文件当时实际为 test_notion_adapter 13 + test_notion_pipeline 11 + test_notion_event_handler 5 + test_notion_target 20（含该文件既有 KB reader 3 例），另有 store/api/web/research 扩充；`ruff check` 改动文件全绿（仓库另有 7 处存量报错在未触碰的 tests/mocks/run_dev_realtime.py）；`mypy`（domain 严格门）Success；前端 `tsc --noEmit` + `eslint` + `npm run build`（11 路由静态导出）+ `sync_frontend.py --check` pages/ 一致。
+- 真机冒烟（待用户在 AstrBot 宿主实测）：init 两库与 relation；首推后 Notion 筛集合名得子树；改 tag 仅 1 页更新；重复 push 无重复页；聊天推送 QA + Citations 跳转；Ask 按钮推送；force push 二次确认；停 MCP server 显式报错、恢复后 outbox 补推。
+
+## v1.0.0-rc.1 prerelease：bug 修复 + 全插件运行风险加固 (completed)
+
+### User constraints / 约束
+
+- 修复 `handle_zotero_account_change` NameError bug；全面排查运行风险并"全部修"（用户已选）；版本 bump 至 **v1.0.0-rc.1**（用户已明确授权 major + RC 标记）。
+- 按设计保留不修：错误详情回传（已鉴权控制台 + terminal 调试需要）、fs_browse 全盘枚举（目录选择器用途，仅 scandir 挪 to_thread）、cookie 无 Secure（本地 HTTP 部署常态）。
+- 本轮纯后端，前端与 `pages/` 不动；提交不加 Co-Authored-By。
+
+### Technical implementation path
+
+- [x] **Phase 1 - server.py 端点健壮性**：删 zotero handler 两个坏 except（NameError bug；实为死代码——NotImplementedError 是 RuntimeError 子类，永远被前置 400 分支捕获）；上传流式化（1MB chunk + 增量 sha256 + 临时文件 + 200MB 上限 413 + filename 净化）；`_parse_int`/`_query_int` helper 应用于 kb_search/chunk_context/graph_query/ask；登录 compare_digest + JSON guard；下载头 CR/LF 清洗；fs_browse scandir → to_thread。
+- [x] **Phase 2 - core 异步与外部调用健壮性**：milvus_lite 同步调用全部 to_thread + init 锁 + filter 转义；external embedding 加 ClientTimeout(60/10) + 5xx/网络错误重试 1 次（4xx 不重试）；两处 orchestrator gather `return_exceptions=True` 部分失败降级；api.py `_extract_raw_doc_text` 调用挪 to_thread；两处 fire-and-forget task 持引用；notion_mcp 分页上限 200；research execute 包 wait_for(1800) + main.py 两处 probe 兜底。
+- [x] **Phase 3 - SQLite 写事务加锁**：`_locked_write` 装饰器 + `asyncio.Lock`，28 个写方法互斥；`set_document_collections` 拆 `_set_document_collections_unlocked` 供已持锁的 `_sync_doc_memberships` 内部调用（锁不可重入）。
+- [x] **Phase 4 - 存量 ruff 清零**：E501 三处折行、UP035/F401（r2_backup_manager）、F821（随 Phase 1 消除）。
+- [x] **Phase 5 - 测试与发布闭环**：test_web_server.py 回归 7 例 + 两个 orchestrator 各 2 例降级；pytest/ruff/mypy 全绿；e2e 冒烟通过；CHANGELOG + metadata/main.py/README 徽章 → v1.0.0-rc.1。
+
+### Verification
+
+- `python -m pytest tests/backend -q` → **541 passed**（530 存量 + 11 新增）；`ruff check .` 零报错（含 7 处存量清零）；`mypy` Success。
+- e2e（run_webui --no-auth 实测）：login 畸形体 400、kb_search top_k=abc 400、上传成功 200（流式路径）、account-change 失效确认 400（结构化 error body）、fs_browse 200、/api/logs 正常（新 location 字段在线可见）。
+- 版本一致性：metadata.yaml、main.py `_PLUGIN_VERSION`、README 徽章、CHANGELOG、TODO 均为 v1.0.0-rc.1（bump_version.py 不支持 -rc 后缀，手动同步五处）。
+
+## v0.30.2 终端日志重构：面向真实 debug 场景的显示与捕获升级 (completed)
+
+### User constraints / 约束
+
+- 重新分析终端日志"该放什么内容"并重构显示，使其能辅助真实场景 debug；参考 AstrBot terminal（毫秒时间戳、级别彩色、`module:line` 代码位置、级别/关键字过滤）但不引入 WebSocket 流（保持 2.5s 轮询）。
+- 不做服务端过滤：缓冲与前端持有量对齐到 1000 行，过滤纯客户端完成（单一代码路径）。
+- 前端拆分为 `components/ui/terminal/` 目录（现 TerminalPanel.tsx 已 399 行，加功能必超 400 行红线）；保留浮层/内嵌两种形态与现有 props 契约。
+- 版本 patch bump 至 v0.30.2；不手改 `pages/`；提交不加 Co-Authored-By。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 后端捕获重构**（`core/log_capture.py`）：新增 `location`（`module:lineno`）与独立 `exc` traceback 字段；分类改为 logger 名前缀映射表（消息关键词仅 fallback）；`_PROJECT_PREFIXES` 名单外的三方 DEBUG 记录丢弃；缓冲 maxlen 500→1000。
+- [x] **Phase 2 - 端点微调**（`web/server.py`）：`/api/logs` limit 上限 500→1000，响应向后兼容。
+- [x] **Phase 3 - 前端重构**（`components/ui/terminal/` 新目录：TerminalPanel/useTerminalLogs/TerminalToolbar/LogRow/format）：级别 chips（默认隐藏 DEBUG）、分类下拉、关键字搜索、暂停轮询、错误计数跳转、复制/下载、毫秒时间戳、ERROR/WARN 行底色、traceback 折叠、metadata 内联、清屏基线（刷新不复活）、新日志 pill；`lib/api.ts` LogLine 补 `location`/`exc`；i18n zh/en 新 key；Rail/SettingModal import 路径更新。
+- [x] **Phase 4 - 测试与闭环**：新增 `tests/backend/test_log_capture.py`（前缀分类/location/exc 分离/DEBUG 降噪/get_lines 语义/add_event 结构，10 例）；pytest + ruff 全绿；前端 tsc/build + `tools/sync_frontend.py`；CHANGELOG 追加；`metadata.yaml` v0.30.2。
+
+### Verification
+
+- `python -m pytest tests/backend -q` → **530 passed**（含新 test_log_capture.py 10 例）。
+- `ruff check core/log_capture.py tests/backend/test_log_capture.py` → passed（仓库另有 7 处存量 ruff 报错，涉及 event_handler/research_skill/r2_backup_manager/server.py:735，与本次无关未动）。
+- 前端 `npx tsc --noEmit` → 零错误；`npm run build` 13 条路由静态导出成功；`python tools/sync_frontend.py` 同步 362 个文件到 `pages/`。
+- 端到端：`tests/run_webui.py --no-auth` 起本地控制台，`/api/logs` 返回新字段（`location="log_capture:284"`、`exc`、前缀分类 `system`、maxlen=1000 生效）；`POST /api/logs/events` 事件正确落缓冲（`location=""`、metadata 保留 route/toast_type）；`GET /` 200。
+
 ## v0.30.1 图谱混合模式术语收敛 (completed)
 
 ### User constraints / 约束
@@ -456,7 +582,7 @@
 - `python logo size check` → passed（`logo.png` 为 256x256 RGBA）。
 - `git diff --check` → passed（仅 Windows autocrlf 换行提示，无 whitespace error）。
 
-## v0.26.3 统一多归属集合树 (in progress)
+## v0.26.3 统一多归属集合树 (completed)
 
 ### User constraints / 约束
 
@@ -475,14 +601,14 @@
 - [x] **Phase 4 - Zotero 同步去压扁 + 树派生进统一 collections**：`_sync_documents` 写 item 全部所属集合（多归属）+ unfiled home 兜底；`_sync_zotero_tree_into_collections` 把 zotero 树整体 upsert 进统一 collections（coll_key=lib:zkey、parent_key=lib:父zkey、只读）并清理陈旧/迁移临时行。
 - [x] **Phase 5 - ask 含后代 + lightrag 合并单 workspace**：`resolve_scope` 的 SCOPE_COLLECTION 改走统一树（`list_documents_by_collection_key(descendants=True)`）→ allowed_document_ids；`_resolve_ask_collections` 在 collection scope 下扩展为「父+后代」name 列表覆盖 milvus tag；`_lightrag_docs_for_build`/`get_lightrag_readiness` 按 name→coll_key→后代合并（workspace 仍按 name，同名集合为已知限制）。
 - [x] **Phase 6 - 本地集合编辑后端 API + REST + 前端真树形**：api 新增 create_subcollection/rename_collection/move_collection(防环)/delete_collection_by_key(子集合提升+文档迁 _uncategorized)，zotero 一律 ReadOnlyError；REST 加 `PATCH/DELETE /api/collections/by-key/{coll_key}`、create 支持 parent_key、`GET /api/documents?collection_key`（本级）；FilePanel 递归树渲染（真展开）+ 本地新建子集合/重命名/删除 UI；ask 默认含后代（由选中集合 coll_key 派生 scope）。
-- [ ] **Phase 7 - 端到端集成测试 + 全量回归**：pytest 414 通过 / ruff / mypy 通过；前端 npm build + sync_frontend 待确认。
+- [x] **Phase 7 - 端到端集成测试 + 全量回归**：pytest 414、ruff、mypy 已通过；后续版本已多次完成前端 build + sync_frontend，订正陈旧待确认状态。
 - [x] **Phase 8 - bump v0.26.3 + CHANGELOG/TODO 收尾**：`metadata.yaml` 已 bump 到 `v0.26.3`，`CHANGELOG.md` 已追加 v0.26.3 条目；等待 Phase 7 前端构建/同步确认后再整体标 completed。
 
 ### Verification
 
 - `python -m pytest tests/backend/` → 414 passed。
 - `ruff check .` → All checks passed；`mypy` → Success。
-- `npm run build` + `python tools/sync_frontend.py` → 待确认。
+- `npm run build` + `python tools/sync_frontend.py` → 已由后续版本构建与同步记录覆盖验证。
 - `CHANGELOG.md` + `metadata.yaml` → v0.26.3 收尾完成。
 
 ## v0.26.2 调试端口迁移 (completed)
@@ -2304,8 +2430,8 @@
 
 ### 前端依赖、后端尚未实现的端口（需后续版本跟进）
 
-- [ ] `GET /api/documents/{id}/raw` — 文档下载；检查器下载按钮先 disabled，后端实现后接通。
-- [ ] `POST /api/logout` — 显式登出；暂用前端清除 `kr_session` cookie 降级，后端实现后替换。
+- [x] `GET /api/documents/{id}/raw` — 文档下载；已在后续版本实现并接通前端。
+- [x] `POST /api/logout` — 显式登出；已在后续版本实现并接通前端。
 - [x] `POST /api/ask` — Ask Agent 对话（v0.10.0 已实现，见 Phase 5）。
 
 ### Technical implementation path

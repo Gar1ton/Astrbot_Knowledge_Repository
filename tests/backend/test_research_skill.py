@@ -253,6 +253,19 @@ async def test_execute_chinese_query_translates_for_english_recall() -> None:
     assert api.ask_calls[0]["use_english_retrieval"] is True
 
 
+async def test_execute_exposes_citation_doc_ids_for_notion() -> None:
+    """execute 返回体带 citation_doc_ids（按序去重），供 Notion QA 的 Citations relation。"""
+    sources = [
+        {"doc_id": "d1", "text": "a"},
+        {"doc_id": "d2", "text": "b"},
+        {"doc_id": "d1", "text": "c"},  # 重复 doc → 去重
+        {"text": "no-doc"},  # 无 doc_id → 忽略
+    ]
+    api = FakeApi([("ml", "")], {"ml": ["X"]}, ask_result={"answer": "ANS", "sources": sources})
+    result = await _svc(api).execute("q", "ml", mode="default")
+    assert result["citation_doc_ids"] == ["d1", "d2"]
+
+
 async def test_execute_answer_language_from_flags() -> None:
     """回答语言取自 flags.research_answer_language（与前端 askAI 同一参数）。"""
     api = FakeApi([("ml", "")], {"ml": ["X"]}, ask_result={"answer": "ANS", "sources": []})

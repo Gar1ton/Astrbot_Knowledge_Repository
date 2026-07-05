@@ -22,6 +22,8 @@ if TYPE_CHECKING:
         Collection,
         ConsoleScopeState,
         DocumentChunk,
+        NotionEntityRecord,
+        NotionOutboxItem,
         PageChunk,
         ScopedNote,
         SourceDocument,
@@ -45,6 +47,8 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._documents: dict[str, SourceDocument] = {}
         self._chunks: dict[str, list[DocumentChunk]] = {}
         self._sync_records: dict[tuple[str, SyncTargetKind], SyncRecord] = {}
+        self._notion_entities: dict[tuple[str, str], NotionEntityRecord] = {}
+        self._notion_outbox: dict[str, NotionOutboxItem] = {}
         self._lightrag_status: dict[str, dict[str, str]] = {}
         self._build_jobs: dict[str, dict] = {}
         # Zotero 镜像 + 页面 provenance（key 均含 library_id 命名空间）
@@ -279,6 +283,60 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         ordered = sorted(recs, key=lambda r: (r.synced_at is None, r.synced_at, r.doc_id))
         return [copy.deepcopy(r) for r in ordered]
 
+    # ── Notion 推送账本与暂存箱 ───────────────────────────────────
+
+    async def get_notion_entity(
+        self, entity_type: str, entity_key: str
+    ) -> NotionEntityRecord | None:
+        rec = self._notion_entities.get((entity_type, entity_key))
+        return copy.deepcopy(rec) if rec is not None else None
+
+    async def upsert_notion_entity(self, record: NotionEntityRecord) -> None:
+        key = (record.entity_type, record.entity_key)
+        self._notion_entities[key] = copy.deepcopy(record)
+
+    async def list_notion_entities(
+        self, entity_type: str | None = None
+    ) -> list[NotionEntityRecord]:
+        recs = list(self._notion_entities.values())
+        if entity_type is not None:
+            recs = [r for r in recs if r.entity_type == entity_type]
+        return [copy.deepcopy(r) for r in recs]
+
+    async def delete_notion_entity(self, entity_type: str, entity_key: str) -> bool:
+        return self._notion_entities.pop((entity_type, entity_key), None) is not None
+
+    async def add_notion_outbox(self, item: NotionOutboxItem) -> None:
+        if item.id in self._notion_outbox:
+            raise ValueError(f"notion_outbox id 已存在：{item.id}")
+        stored = copy.deepcopy(item)
+        if stored.created_at is None:
+            stored.created_at = datetime.now(timezone.utc)
+        self._notion_outbox[item.id] = stored
+
+    async def get_notion_outbox(self, item_id: str) -> NotionOutboxItem | None:
+        item = self._notion_outbox.get(item_id)
+        return copy.deepcopy(item) if item is not None else None
+
+    async def list_notion_outbox(
+        self, status: str | None = None
+    ) -> list[NotionOutboxItem]:
+        items = list(self._notion_outbox.values())
+        if status is not None:
+            items = [i for i in items if i.status == status]
+        ordered = sorted(
+            items, key=lambda i: (i.created_at is None, i.created_at, i.id)
+        )
+        return [copy.deepcopy(i) for i in ordered]
+
+    async def update_notion_outbox(self, item: NotionOutboxItem) -> bool:
+        if item.id not in self._notion_outbox:
+            return False
+        stored = copy.deepcopy(item)
+        if stored.created_at is None:
+            stored.created_at = self._notion_outbox[item.id].created_at
+        self._notion_outbox[item.id] = stored
+        return True
 
     # ── 文档/集合笔记 ───────────────────────────────────────────
 

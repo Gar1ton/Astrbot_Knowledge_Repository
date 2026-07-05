@@ -74,7 +74,9 @@ class PluginInitializer:
         self._exit_stack: AsyncExitStack | None = None
         self._backup_task: asyncio.Task[Any] | None = None
         self._zotero_sync_task: asyncio.Task[Any] | None = None
+        self._notion_sync_task: asyncio.Task[Any] | None = None
         self.zotero_sync_pipeline: Any | None = None
+        self.notion_sync_pipeline: Any | None = None
         self._web_runner: Any | None = None
 
         # 子系统句柄 —— 在 initialize() 中按依赖顺序赋值，供 event_handler / web 引用。
@@ -537,6 +539,15 @@ class PluginInitializer:
         )
         self.api.attach_zotero_pipeline(self.zotero_sync_pipeline)
 
+        # 5.55) Notion 单向推送管线（文章两表增量 + QA 暂存箱补推）。
+        from core.pipelines.notion_sync_pipeline import NotionSyncPipeline
+
+        self.notion_sync_pipeline = NotionSyncPipeline(
+            source_store=self.source_store,
+            notion_target=notion_target,
+        )
+        self.api.attach_notion_sync_pipeline(self.notion_sync_pipeline)
+
         # 5.6) Research 服务（对话式只读检索）：probe（范围探查）+ execute（召回+引用）。
         from core.research_skill import ResearchService
 
@@ -554,6 +565,10 @@ class PluginInitializer:
             self._zotero_sync_task = asyncio.create_task(
                 self._periodic_zotero_sync(zotero_cfg.auto_sync_interval_sec)
             )
+
+        # 6.2) Notion 周期增量推送：启用且间隔>0 时注册（间隔每轮重读，吸收前端改值）。
+        if notion_cfg.enabled and notion_cfg.auto_sync_interval_sec > 0:
+            self._notion_sync_task = asyncio.create_task(self._periodic_notion_sync())
 
         # 6.5) 启动摘要——记录各关键组件激活状态，方便终端页快速诊断。
         logger.info(
@@ -723,6 +738,25 @@ class PluginInitializer:
         except Exception as e:
             logger.error(f"Error in background periodic backup: {e}")
 
+    async def _periodic_notion_sync(self) -> None:
+        """Notion 周期增量推送：每轮 sleep 当前配置间隔（重读以吸收前端改值），
+        再触发一次 push_all(force=False)；异常吞掉记日志不影响循环。"""
+        logger.info("Notion periodic push scheduled.")
+        try:
+            while True:
+                interval = self._config.get_notion_sync_config().auto_sync_interval_sec
+                if interval <= 0:
+                    logger.info("Notion 周期推送间隔置 0，任务退出。")
+                    return
+                await asyncio.sleep(interval)
+                if self.notion_sync_pipeline is not None:
+                    try:
+                        await self.notion_sync_pipeline.push_all(force=False)
+                    except Exception as exc:
+                        logger.error("Notion periodic push failed: %s", exc)
+        except asyncio.CancelledError:
+            logger.info("Notion periodic push task cancelled.")
+
     async def _periodic_zotero_sync(self, interval_sec: int) -> None:
         """Zotero 自动同步：启动即增量拉取一次，之后每 interval_sec 再增量拉取。"""
         logger.info("Zotero auto-sync scheduled (restart + every %ss).", interval_sec)
@@ -770,6 +804,14 @@ class PluginInitializer:
             except (asyncio.CancelledError, Exception):
                 pass
             self._zotero_sync_task = None
+
+        if self._notion_sync_task is not None:
+            self._notion_sync_task.cancel()
+            try:
+                await self._notion_sync_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._notion_sync_task = None
 
         if self._web_runner is not None:
             try:

@@ -9,17 +9,17 @@ from __future__ import annotations
 
 import pytest
 
-from core.config import EnhancedRecallConfig, RerankConfig
-from core.domain.models import DocumentChunk
-from core.pipelines.deep_thinking_prompts import JsonContractError
-from core.pipelines.enhanced_recall_orchestrator import EnhancedRecallOrchestrator
-from core.pipelines.enhanced_recall_prompts import (
+from knowledge_arch.config import EnhancedRecallConfig, RerankConfig
+from knowledge_arch.domain.models import DocumentChunk
+from knowledge_arch.pipelines.deep_thinking_prompts import JsonContractError
+from knowledge_arch.pipelines.enhanced_recall_orchestrator import EnhancedRecallOrchestrator
+from knowledge_arch.pipelines.enhanced_recall_prompts import (
     build_synth_check_system,
     parse_plan_lite,
     parse_synth_check,
 )
-from core.pipelines.retrieval_orchestrator import ChunkSignal, RetrievalOutcome
-from core.repository.reranker.noop import NoopReranker
+from knowledge_arch.pipelines.retrieval_orchestrator import ChunkSignal, RetrievalOutcome
+from knowledge_arch.repository.reranker.noop import NoopReranker
 
 # ── 脚本化响应 ──────────────────────────────────────────────
 PLAN_OK = '{"rewritten_query":"rewritten q","sub_queries":["sub a","sub b"]}'

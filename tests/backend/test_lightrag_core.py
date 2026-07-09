@@ -4,9 +4,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from core.config import GraphConfig
-from core.domain.models import DocumentChunk, SourceDocument
-from core.lightrag_core import (
+from knowledge_arch.config import GraphConfig
+from knowledge_arch.domain.models import DocumentChunk, SourceDocument
+from knowledge_arch.lightrag_core import (
     LightRAGCoreRegistry,
     LightRAGEmbeddingAdapter,
     LightRAGLLMAdapter,

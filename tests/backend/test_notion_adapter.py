@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-import core.adapters.notion_mcp as notion_mcp
-from core.adapters.notion_mcp import NotionMCPAdapter, NotionMCPError
+import knowledge_arch.adapters.notion_mcp as notion_mcp
+from knowledge_arch.adapters.notion_mcp import NotionMCPAdapter, NotionMCPError
 
 # ── 测试基建 ────────────────────────────────────────────────────
 

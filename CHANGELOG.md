@@ -23,6 +23,16 @@
 
 ## [Unreleased]
 
+## [v1.0.2] — 2026-07-09
+
+### 修复 (Fixed)
+
+- **修复插件在 Windows 上与 astrbot_plugin_moirai 撞名导致加载失败**：两个插件的顶层包都叫 `core`（还有 `web`/`migrations`），在 AstrBot 同一 Python 进程里共享 `sys.path`/`sys.modules`；`main.py` 的 `_purge_stale_local_modules` 会清空 `sys.modules` 里所有叫 `core` 的缓存后重新 `import core`，但两个插件各自的 `sys.path.insert(0, ...)` 只在首次加载时生效（`if str(_ROOT_DIR) not in sys.path` 短路），一旦 moirai 的目录在某次加载中排到本插件前面，之后无论怎么重装本插件，`import core` 都会稳定解析成 moirai 的 `core` 包（其 `event_handler.py`/`plugin_initializer.py` 恰好同名，直到 `core.retrieval_modes` 才因 moirai 没有这个模块而报 `ModuleNotFoundError`）。用户实测：卸载 moirai 后本插件恢复正常，反复重装本插件无效，均与上述机制吻合。
+
+### 架构健康 (Refactor)
+
+- **顶层包改用插件专属名，消除跨插件撞名风险**：`core/` → `knowledge_arch/`、`web/` → `ka_web/`、`migrations/` → `ka_migrations/`（含全部内部 import、`main.py` 的 `_OWNED_TOPS`、`_load_plugin_web_build_app` 路径、`release/published-files.txt`、`.gitattributes`、CI 编译清单、测试与工具脚本引用）。`sys.modules` 清缓存逻辑保留作为兜底防御，但不再是防撞名的主要手段。
+
 ## [v1.0.1] — 2026-07-09
 
 ### 新增功能 (Added)

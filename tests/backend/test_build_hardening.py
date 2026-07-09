@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core.lightrag_core import BuildJob
+from knowledge_arch.lightrag_core import BuildJob
 
 # ─── Concurrent build guard ────────────────────────────────────
 
@@ -25,7 +25,7 @@ class _FakeSourceStore:
 
 def _make_api():
     """Build a minimal KnowledgeRepositoryApi instance for testing build_graph()."""
-    from core.api import KnowledgeRepositoryApi
+    from knowledge_arch.api import KnowledgeRepositoryApi
 
     source_store = _FakeSourceStore()
     api = object.__new__(KnowledgeRepositoryApi)
@@ -178,7 +178,7 @@ def _job_snapshot(job_id: str, status: str, collection: str = "papers") -> dict:
 
 @pytest.mark.asyncio
 async def test_mark_interrupted_preserves_paused_jobs() -> None:
-    from core.repository.source_store.memory import InMemorySourceDocumentStore
+    from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
 
     store = InMemorySourceDocumentStore()
     for status in ["queued", "running", "pause_requested", "paused", "success"]:
@@ -199,9 +199,9 @@ async def test_mark_interrupted_preserves_paused_jobs() -> None:
 
 @pytest.mark.asyncio
 async def test_pause_requested_is_persisted_while_llm_call_is_running() -> None:
-    from core.api import KnowledgeRepositoryApi
-    from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
-    from core.repository.source_store.memory import InMemorySourceDocumentStore
+    from knowledge_arch.api import KnowledgeRepositoryApi
+    from knowledge_arch.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
+    from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
 
     store = InMemorySourceDocumentStore()
     api = KnowledgeRepositoryApi(
@@ -230,9 +230,9 @@ async def test_pause_requested_is_persisted_while_llm_call_is_running() -> None:
 
 @pytest.mark.asyncio
 async def test_pause_gate_enters_paused_and_resume_accumulates_seconds() -> None:
-    from core.api import KnowledgeRepositoryApi
-    from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
-    from core.repository.source_store.memory import InMemorySourceDocumentStore
+    from knowledge_arch.api import KnowledgeRepositoryApi
+    from knowledge_arch.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
+    from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
 
     api = KnowledgeRepositoryApi(
         source_store=InMemorySourceDocumentStore(),
@@ -267,11 +267,11 @@ async def test_pause_gate_enters_paused_and_resume_accumulates_seconds() -> None
 
 @pytest.mark.asyncio
 async def test_restore_paused_job_resumes_same_job_id_and_only_pending_docs(tmp_path) -> None:
-    from core.api import KnowledgeRepositoryApi
-    from core.domain.models import DocumentChunk, SourceDocument
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
-    from core.repository.source_store.memory import InMemorySourceDocumentStore
+    from knowledge_arch.api import KnowledgeRepositoryApi
+    from knowledge_arch.domain.models import DocumentChunk, SourceDocument
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
+    from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
 
     inserted: list[str] = []
 

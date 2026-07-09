@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from core.config import EmbeddingConfig
-from core.index_compatibility import IndexCompatibilityStore, embedding_fingerprint
+from knowledge_arch.config import EmbeddingConfig
+from knowledge_arch.index_compatibility import IndexCompatibilityStore, embedding_fingerprint
 
 
 def test_embedding_fingerprint_changes_with_runtime_dimension() -> None:

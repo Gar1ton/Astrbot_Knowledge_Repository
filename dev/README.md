@@ -14,7 +14,7 @@ dev/
 
 ## 约定
 
-- dev 脚本**可 import `core`**（把根加入 `sys.path`）以复用真实业务逻辑。
+- dev 脚本**可 import `knowledge_arch`**（把根加入 `sys.path`）以复用真实业务逻辑。
 - 本地敏感/机器相关配置走 `run_config.py`（由 `run_config.example.py` 复制而来），并在 `.gitignore` 忽略真实文件。
 - 重置/清库类脚本默认安全、需显式确认参数。
-- 前端联调流程见 `../web/frontend/README.md`（构建 → `tools/sync_frontend.py` 同步到 `../pages/`）。
+- 前端联调流程见 `../ka_web/frontend/README.md`（构建 → `tools/sync_frontend.py` 同步到 `../pages/`）。

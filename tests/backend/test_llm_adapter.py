@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.adapters.llm import LLMAdapter
+from knowledge_arch.adapters.llm import LLMAdapter
 
 
 class _ProviderMeta:

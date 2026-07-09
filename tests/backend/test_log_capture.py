@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from core.log_capture import MemoryLogHandler, _categorize
+from knowledge_arch.log_capture import MemoryLogHandler, _categorize
 
 
 def _record(

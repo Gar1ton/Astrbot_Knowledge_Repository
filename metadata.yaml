@@ -3,7 +3,7 @@ name: astrbot_plugin_knowledge_repository   # 机器名（包名/标识），sna
 display_name: Knowledge Arch                # 展示名
 short_desc: 复用默认知识库的原件管理与分类，支持 Notion/R2 同步备份与 LightRAG 图谱检索  # 市场卡片一句话简介
 desc: AstrBot 知识库应用：复用默认 KB，支持原件管理、分类、Notion/R2 同步备份与 LightRAG 知识图谱
-version: v1.0.1                              # SemVer；与 CHANGELOG.md/TODO.md 顶部版本对齐
+version: v1.0.2                              # SemVer；与 CHANGELOG.md/TODO.md 顶部版本对齐
 astrbot_version: ">=4.5.7,<5"               # 兼容的 AstrBot 版本范围（PEP 440）
 author: uceiz73
 repo: https://github.com/Gar1ton/Astrbot_Knowledge_Repository

@@ -11,7 +11,7 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
-from core.domain.models import (
+from knowledge_arch.domain.models import (
     Collection,
     ConsoleScopeState,
     DocumentChunk,
@@ -22,8 +22,8 @@ from core.domain.models import (
     SyncStatus,
     SyncTargetKind,
 )
-from core.migration_runner import run_migrations
-from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
+from knowledge_arch.migration_runner import run_migrations
+from knowledge_arch.repository.source_store.sqlite import SQLiteSourceDocumentStore
 
 
 def _doc(doc_id: str, collection: str = "default", tags: list[str] | None = None) -> SourceDocument:
@@ -535,7 +535,7 @@ async def test_exact_mentions_sqlite_ascii_terms_require_boundaries(
 
 
 async def test_notion_entity_map_crud(sqlite_store: SQLiteSourceDocumentStore) -> None:
-    from core.domain.models import (
+    from knowledge_arch.domain.models import (
         NOTION_ENTITY_DOCUMENT,
         NOTION_ENTITY_NOTE,
         NOTION_PUSH_DEGRADED,
@@ -580,7 +580,7 @@ async def test_notion_entity_map_crud(sqlite_store: SQLiteSourceDocumentStore) -
 
 
 async def test_notion_outbox_lifecycle(sqlite_store: SQLiteSourceDocumentStore) -> None:
-    from core.domain.models import (
+    from knowledge_arch.domain.models import (
         NOTION_OUTBOX_PUSHED,
         NOTION_PUSH_FAILED,
         NOTION_PUSH_PENDING,

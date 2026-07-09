@@ -1,5 +1,47 @@
 # TODO
 
+## v1.0.2：顶层包改名，修复与 astrbot_plugin_moirai 的撞名崩溃 (completed)
+
+### User constraints / 约束
+
+- 用户在 Windows 上部署本插件与 astrbot_plugin_moirai（同一作者的另一插件）时，本插件加载报
+  `ModuleNotFoundError: No module named 'core.retrieval_modes'`；反复重装本插件无效，卸载
+  moirai 后立即恢复正常。
+- 根因确认：本插件与 moirai 顶层包都叫 `core`/`web`/`migrations`，AstrBot 把所有插件加载进
+  同一 Python 进程共享 `sys.path`/`sys.modules`；`main.py` 的模块清缓存逻辑清得掉
+  `sys.modules`，但清不掉 `sys.path` 顺序——谁的目录先被插到 `sys.path` 前面，`import core`
+  就稳定解析成谁的包。moirai 的 `core` 恰好也有 `event_handler.py`/`plugin_initializer.py`
+  （撞名到能"部分工作"，直到唯本插件独有的 `retrieval_modes` 才报错）。
+- 已拍板：顶层包改用插件专属名（`core`→`knowledge_arch`、`web`→`ka_web`、
+  `migrations`→`ka_migrations`），从根源消除撞名可能，而非继续依赖清缓存这种脆弱手段；
+  `sys.modules` 清缓存逻辑保留作兜底防御。版本 patch → v1.0.2。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 目录改名**：`git mv core knowledge_arch`、`git mv web ka_web`、
+  `git mv migrations ka_migrations`。
+- [x] **Phase 2 - Python import 改写**：全仓 103+ 个文件的 `from core...`/`core.xxx` 字符串
+  引用改为 `knowledge_arch`（保护 `astrbot.core` 不被误伤）；`web`/`migrations` 因是常见英文
+  词与 aiohttp 的 `web` 模块同名，逐处人工核对后只改真正指向本插件包的引用（`main.py`
+  `_OWNED_TOPS`、`plugin_initializer.py` 的 `_load_plugin_web_build_app`、
+  `migration_runner.py` 的 `MIGRATIONS_DIR`、相关测试与 `tools/sync_frontend.py`）。
+- [x] **Phase 3 - 非 Python 配置**：`.gitattributes`、`release/published-files.txt`、
+  `.github/workflows/published-verify.yml`、`pyproject.toml`（mypy files、pythonpath 注释）、
+  `.gitignore`、`rebuild.sh`、`dev/README.md`。
+- [x] **Phase 4 - 文档同步**：`README.md`、`ARCHITECTURE.md`、`docs/PROJECT_STRUCTURE.md`、
+  `tests/README.md`、`tests/mocks/README.md`、`tools/README.md`；各层 `*.README.md`（如
+  `knowledge_arch/api.README.md`）按 `CLAUDE.md` §0 约定属于框架模板示例段落，保持通用命名不改。
+- [x] **Phase 5 - 验证**：`python -m pytest` 608 passed / 1 skipped；`ruff check .`、`mypy`
+  全绿；grep 确认无残留 `from core`/`import core`/裸 `core.` 引用（`astrbot.core` 除外）。
+- [x] **Phase 6 - 收尾**：CHANGELOG 追加；`python bump_version.py patch` → v1.0.2。
+
+### Verification
+
+- `python -m pytest` → **608 passed, 1 skipped**。
+- `ruff check .` 通过；`mypy` Success（strict 范围无新问题）。
+- 未在此轮验证前端 build（本次改动不涉及前端源码，仅涉及后端 `web/` 目录改名为
+  `ka_web/`；`ka_web/frontend/` 内容未改动）。
+
 ## v1.0.1：新增 Zotero 存储模式 zotmoov（ZotMoov 目录）(completed)
 
 ### User constraints / 约束
@@ -50,7 +92,7 @@
 - `cd web/frontend && npm run build`（含 TypeScript 检查）13 静态页预渲染成功；
   `python tools/sync_frontend.py` 同步 357 文件到 `pages/`（Phase 8 后复跑仍全绿）。
 
-## v1.0.1 正式发布准备：developer 源码分支 + orphan main 发布分支 (developer 侧完成，待用户远端操作)
+## v1.0.2 正式发布准备：developer 源码分支 + orphan main 发布分支 (developer 侧完成，待用户远端操作)
 
 ### User constraints / 约束
 

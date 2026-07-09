@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from core.event_handler import EventHandler
+from knowledge_arch.event_handler import EventHandler
 
 
 class _FakeApi:

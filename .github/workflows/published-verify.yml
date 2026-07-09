@@ -25,9 +25,9 @@ jobs:
           required = {
               "main.py", "metadata.yaml", "_conf_schema.json", "requirements.txt",
               "requirements-additional.txt", "README.md", "CHANGELOG.md", "LICENSE",
-              "logo.png", "web/server.py", "pages/index.html", ".published-source",
+              "logo.png", "ka_web/server.py", "pages/index.html", ".published-source",
           }
-          forbidden = ("data/", "deliverables/", "dev/", "docs/", "tests/", "tools/", "web/frontend/")
+          forbidden = ("data/", "deliverables/", "dev/", "docs/", "tests/", "tools/", "ka_web/frontend/")
           files = {p.as_posix() for p in Path(".").rglob("*") if p.is_file() and ".git" not in p.parts}
           missing = sorted(required - files)
           blocked = sorted(p for p in files if p.startswith(forbidden))
@@ -48,4 +48,4 @@ jobs:
           print(f"published tree ok: {len(files)} files, archive={size / 1024 / 1024:.2f} MiB")
           PY
       - name: Compile Python sources
-        run: python -m compileall -q main.py core web migrations
+        run: python -m compileall -q main.py knowledge_arch ka_web ka_migrations

@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import pytest
 
-from core.api import KnowledgeRepositoryApi, ReadOnlyError
-from core.config import Config
-from core.domain.models import Collection, DocumentOrigin, SourceDocument
-from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
-from core.repository.source_store.memory import InMemorySourceDocumentStore
+from knowledge_arch.api import KnowledgeRepositoryApi, ReadOnlyError
+from knowledge_arch.config import Config
+from knowledge_arch.domain.models import Collection, DocumentOrigin, SourceDocument
+from knowledge_arch.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
+from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
 
 
 def _zotero_doc() -> SourceDocument:

@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.domain.models import SourceDocument
-from core.managers.category_manager import CategoryManager
-from core.repository.source_store.memory import InMemorySourceDocumentStore
+from knowledge_arch.domain.models import SourceDocument
+from knowledge_arch.managers.category_manager import CategoryManager
+from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
 
 
 def _doc(doc_id: str, collection: str = "default", tags: list[str] | None = None) -> SourceDocument:

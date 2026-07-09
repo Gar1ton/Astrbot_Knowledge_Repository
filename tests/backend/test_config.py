@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from core.config import (
+from knowledge_arch.config import (
     ENV_DEEP_THINKING_LLM_API_KEY,
     ENV_EMBEDDING_API_KEY,
     ENV_R2_SECRET_ACCESS_KEY,
     ENV_WEB_PASSWORD,
     Config,
 )
-from core.runtime_config import RuntimeConfigStore
+from knowledge_arch.runtime_config import RuntimeConfigStore
 
 
 def test_astrbot_conf_schema_only_keeps_core_sections() -> None:
@@ -65,7 +65,7 @@ def test_zotero_invalid_storage_mode_falls_back_to_default() -> None:
 
 
 def test_zotero_zotmoov_root_key_policy_registered() -> None:
-    from core.config import CONFIG_KEY_POLICY, CONSEQUENCE_REBUILD
+    from knowledge_arch.config import CONFIG_KEY_POLICY, CONSEQUENCE_REBUILD
 
     policy = CONFIG_KEY_POLICY["zotero_sync"]["zotmoov_root"]
     assert policy.api_writable is True
@@ -259,7 +259,7 @@ def test_embedding_diagnostics_report_unsupported_or_unconfigured_provider(
 def test_diagnostics_report_missing_optional_feature_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("core.config._module_available", lambda name: False)
+    monkeypatch.setattr("knowledge_arch.config._module_available", lambda name: False)
     diagnostics = Config(
         {
             "r2_sync": {"enabled": True},
@@ -336,7 +336,7 @@ def test_runtime_config_store_persists_ka_toggle_keys(tmp_path: Path) -> None:
 
 # ── Deep Thinking / Rerank config ───────────────────────────
 def test_deep_thinking_and_rerank_defaults_without_st(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("core.config._module_available", lambda name: False)
+    monkeypatch.setattr("knowledge_arch.config._module_available", lambda name: False)
     cfg = Config({})
     r = cfg.get_rerank_config()
     assert r.provider == "noop"
@@ -360,7 +360,7 @@ def test_rerank_default_auto_enables_cross_encoder_with_st(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "core.config._module_available",
+        "knowledge_arch.config._module_available",
         lambda name: name == "sentence_transformers",
     )
     r = Config({}).get_rerank_config()
@@ -370,7 +370,7 @@ def test_rerank_default_auto_enables_cross_encoder_with_st(
 
 def test_explicit_rerank_noop_stays_disabled_with_st(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "core.config._module_available",
+        "knowledge_arch.config._module_available",
         lambda name: name == "sentence_transformers",
     )
     assert Config({"rerank": {"provider": "noop"}}).get_rerank_config().provider == "noop"
@@ -384,11 +384,11 @@ def test_rerank_provider_falls_back_on_invalid() -> None:
 def test_rerank_explicit_auto_resolves_like_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """显式写入的 provider:"auto" 与缺省同义：装了 ST → cross_encoder，否则 noop。"""
     monkeypatch.setattr(
-        "core.config._module_available",
+        "knowledge_arch.config._module_available",
         lambda name: name == "sentence_transformers",
     )
     assert Config({"rerank": {"provider": "auto"}}).get_rerank_config().provider == "cross_encoder"
-    monkeypatch.setattr("core.config._module_available", lambda name: False)
+    monkeypatch.setattr("knowledge_arch.config._module_available", lambda name: False)
     assert Config({"rerank": {"provider": "auto"}}).get_rerank_config().provider == "noop"
 
 

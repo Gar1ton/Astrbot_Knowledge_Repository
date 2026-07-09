@@ -10,12 +10,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from core.config import R2SyncConfig
-from core.domain.models import Collection, SyncStatus, SyncTargetKind
-from core.managers.quota_manager import QuotaManager
-from core.pipelines.sync_pipeline import SyncPipeline
-from core.repository.source_store.memory import InMemorySourceDocumentStore
-from core.repository.sync_targets.memory import InMemorySyncTarget
+from knowledge_arch.config import R2SyncConfig
+from knowledge_arch.domain.models import Collection, SyncStatus, SyncTargetKind
+from knowledge_arch.managers.quota_manager import QuotaManager
+from knowledge_arch.pipelines.sync_pipeline import SyncPipeline
+from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+from knowledge_arch.repository.sync_targets.memory import InMemorySyncTarget
 
 
 @pytest.fixture
@@ -43,7 +43,7 @@ async def pipeline(
     # 准备默认的集合与源文档
     await store.upsert_collection(Collection(name="papers"))
 
-    from core.domain.models import SourceDocument
+    from knowledge_arch.domain.models import SourceDocument
     await store.add_document(
         SourceDocument(
             doc_id="d1",
@@ -82,7 +82,7 @@ async def pipeline(
         db.execute("CREATE TABLE documents (doc_id TEXT PRIMARY KEY)")
         db.execute("INSERT INTO collections (name) VALUES ('papers')")
         db.execute("INSERT INTO documents (doc_id) VALUES ('d1')")
-        db.executescript(Path("migrations/013_scoped_notes.sql").read_text(encoding="utf-8"))
+        db.executescript(Path("ka_migrations/013_scoped_notes.sql").read_text(encoding="utf-8"))
         db.execute(
             "INSERT INTO scoped_notes "
             "(id, scope_type, scope_key, content, note_html, doc_id, created_at, updated_at, "
@@ -212,7 +212,7 @@ async def test_restore_from_backup(pipeline: SyncPipeline) -> None:
         access_key_id="x",
         secret_access_key="y",
     )
-    from core.repository.sync_targets.r2 import R2SyncTarget
+    from knowledge_arch.repository.sync_targets.r2 import R2SyncTarget
     real_target = R2SyncTarget(r2_config)
 
     # 替换 pipeline 中的 target

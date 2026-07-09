@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from core.api import KnowledgeRepositoryApi, LightRAGNotReadyError
-from core.domain.models import (
+from knowledge_arch.api import KnowledgeRepositoryApi, LightRAGNotReadyError
+from knowledge_arch.domain.models import (
     Collection,
     DocumentChunk,
     DocumentOrigin,
@@ -20,9 +20,9 @@ from core.domain.models import (
     SyncStatus,
     SyncTargetKind,
 )
-from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
-from core.repository.source_store.memory import InMemorySourceDocumentStore
-from core.repository.sync_targets.memory import InMemorySyncTarget
+from knowledge_arch.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
+from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+from knowledge_arch.repository.sync_targets.memory import InMemorySyncTarget
 
 
 def _doc(doc_id: str, collection: str = "c", tags: list[str] | None = None) -> SourceDocument:
@@ -370,7 +370,7 @@ class _StubNotionPipeline:
 
 
 def _notion_api(store: InMemorySourceDocumentStore, notion_pipeline) -> KnowledgeRepositoryApi:
-    from core.config import Config
+    from knowledge_arch.config import Config
 
     api = KnowledgeRepositoryApi(
         source_store=store,
@@ -429,7 +429,7 @@ async def test_push_note_to_notion_keep_local_creates_note() -> None:
 
 
 async def test_push_note_to_notion_disabled_returns_hint() -> None:
-    from core.config import Config
+    from knowledge_arch.config import Config
 
     store = InMemorySourceDocumentStore()
     api = KnowledgeRepositoryApi(
@@ -547,8 +547,8 @@ async def test_default_ask_never_calls_lightrag() -> None:
 async def test_graph_mixed_uses_context_and_one_outer_llm_call(
     tmp_path: Path, requested_mode: str, caplog: pytest.LogCaptureFixture
 ) -> None:
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.pipelines.retrieval_orchestrator import RetrievalOutcome
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.pipelines.retrieval_orchestrator import RetrievalOutcome
 
     class Registry:
         def has_workspace(self, collection: str) -> bool:
@@ -622,8 +622,8 @@ async def test_graph_mixed_requires_ready_lightrag() -> None:
 
 
 async def test_lightrag_build_resets_incompatible_workspace(tmp_path: Path) -> None:
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.lightrag_core import BuildJob
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.lightrag_core import BuildJob
 
     calls: list[str] = []
 
@@ -667,7 +667,7 @@ async def test_lightrag_build_resets_incompatible_workspace(tmp_path: Path) -> N
 
 
 async def test_graph_stats_skip_pending_lightrag_workspace(tmp_path: Path) -> None:
-    from core.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
 
     class Registry:
         exports = 0
@@ -707,8 +707,8 @@ async def test_graph_stats_skip_pending_lightrag_workspace(tmp_path: Path) -> No
 async def test_lightrag_build_only_indexes_pending_docs_when_workspace_is_compatible(
     tmp_path: Path,
 ) -> None:
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.lightrag_core import BuildJob
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.lightrag_core import BuildJob
 
     inserted: list[str] = []
 
@@ -753,8 +753,8 @@ async def test_lightrag_build_only_indexes_pending_docs_when_workspace_is_compat
 
 
 async def test_graph_mixed_can_answer_with_only_lightrag_context(tmp_path: Path) -> None:
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.pipelines.retrieval_orchestrator import RetrievalOutcome
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.pipelines.retrieval_orchestrator import RetrievalOutcome
 
     class Registry:
         def has_workspace(self, collection: str) -> bool:
@@ -804,9 +804,9 @@ async def test_graph_mixed_can_answer_with_only_lightrag_context(tmp_path: Path)
 async def test_embedding_change_marks_docs_pending_and_rebuilds_incompatible_milvus(
     tmp_path: Path,
 ) -> None:
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
     from tests.backend.test_embedding import MockEmbeddingProvider
 
     class CountingVectorStore(InMemoryVectorStore):
@@ -854,8 +854,8 @@ async def test_embedding_change_marks_docs_pending_and_rebuilds_incompatible_mil
 async def test_rerank_config_update_hot_swaps_deep_thinking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from core.config import Config
-    from core.repository.reranker.noop import NoopReranker
+    from knowledge_arch.config import Config
+    from knowledge_arch.repository.reranker.noop import NoopReranker
 
     class HotSwapProbe:
         def __init__(self) -> None:
@@ -870,7 +870,9 @@ async def test_rerank_config_update_hot_swaps_deep_thinking(
                 return NoopReranker().status
             return self.calls[-1][0].status
 
-    monkeypatch.setattr("core.repository.reranker._has_sentence_transformers", lambda: False)
+    monkeypatch.setattr(
+        "knowledge_arch.repository.reranker._has_sentence_transformers", lambda: False
+    )
     probe = HotSwapProbe()
     api = KnowledgeRepositoryApi(
         source_store=InMemorySourceDocumentStore(),
@@ -892,7 +894,7 @@ async def test_rerank_config_update_hot_swaps_deep_thinking(
 async def test_zotero_config_same_value_save_reports_no_consequence() -> None:
     """回归：_current_config_value 的 getters 缺 zotero_sync 曾让 changed 恒判 True——
     同值重存误报 restart/rebuild，REBUILD 键（storage_mode 等）还会误触发嵌入索引失效。"""
-    from core.config import Config
+    from knowledge_arch.config import Config
 
     store = InMemorySourceDocumentStore()
     await store.add_document(_doc("d1", "papers"))
@@ -916,9 +918,9 @@ async def test_vector_db_sync_and_rebuild(tmp_path: Path) -> None:
     """测试在 milvus 模式下
     rebuild_vector_store、delete_document 和 delete_collection 的联动一致性。
     """
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
     from tests.backend.test_embedding import MockEmbeddingProvider
 
     store = InMemorySourceDocumentStore()
@@ -977,9 +979,9 @@ async def test_vector_db_sync_and_rebuild(tmp_path: Path) -> None:
 
 
 async def test_capabilities_reports_milvus_rebuild_required(tmp_path: Path) -> None:
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
     from tests.backend.test_embedding import MockEmbeddingProvider
 
     store = InMemorySourceDocumentStore()
@@ -1011,9 +1013,9 @@ async def test_capabilities_reports_milvus_rebuild_required(tmp_path: Path) -> N
 
 
 async def test_capabilities_uses_aggregate_chunk_count(tmp_path: Path) -> None:
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
     from tests.backend.test_embedding import MockEmbeddingProvider
 
     class NoChunkScanStore(InMemorySourceDocumentStore):
@@ -1044,7 +1046,7 @@ async def test_capabilities_uses_aggregate_chunk_count(tmp_path: Path) -> None:
 
 
 async def test_zotero_active_keeps_success_briefly() -> None:
-    from core.zotero_sync_job import ZOTERO_SYNC_SUCCESS, ZoteroSyncJob
+    from knowledge_arch.zotero_sync_job import ZOTERO_SYNC_SUCCESS, ZoteroSyncJob
 
     api = await _make_api()
     job = ZoteroSyncJob()
@@ -1062,9 +1064,9 @@ async def test_zotero_active_keeps_success_briefly() -> None:
 
 
 async def test_rebuild_index_pending_retries_transient_embedding_failure(tmp_path: Path) -> None:
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
 
     class FlakyEmbedding:
         dimension = 4
@@ -1109,7 +1111,7 @@ async def test_rebuild_index_pending_retries_transient_embedding_failure(tmp_pat
 # ── Milvus 后台重建进度条 ────────────────────────────────────────────
 
 def test_milvus_build_job_progress_counts_cleaning_and_indexing() -> None:
-    from core.milvus_build import MilvusBuildJob
+    from knowledge_arch.milvus_build import MilvusBuildJob
 
     job = MilvusBuildJob(
         total_docs=2,
@@ -1128,9 +1130,9 @@ def test_milvus_build_job_progress_counts_cleaning_and_indexing() -> None:
 
 
 async def test_start_milvus_rebuild_progresses_to_success(tmp_path: Path) -> None:
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
     from tests.backend.test_embedding import MockEmbeddingProvider
 
     store = InMemorySourceDocumentStore()
@@ -1168,9 +1170,9 @@ async def test_start_milvus_rebuild_progresses_to_success(tmp_path: Path) -> Non
 async def test_start_milvus_rebuild_cleans_legacy_chunks_before_indexing(
     tmp_path: Path,
 ) -> None:
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
     from tests.backend.test_embedding import MockEmbeddingProvider
 
     store = InMemorySourceDocumentStore()
@@ -1248,10 +1250,10 @@ async def test_start_milvus_rebuild_cleans_legacy_chunks_before_indexing(
 
 
 async def test_start_milvus_rebuild_is_single_flight(tmp_path: Path) -> None:
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.milvus_build import MilvusBuildJob
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.milvus_build import MilvusBuildJob
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
     from tests.backend.test_embedding import MockEmbeddingProvider
 
     store = InMemorySourceDocumentStore()
@@ -1273,10 +1275,10 @@ async def test_start_milvus_rebuild_is_single_flight(tmp_path: Path) -> None:
 
 
 async def test_capabilities_degraded_while_milvus_building(tmp_path: Path) -> None:
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.milvus_build import MilvusBuildJob
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.milvus_build import MilvusBuildJob
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
     from tests.backend.test_embedding import MockEmbeddingProvider
 
     store = InMemorySourceDocumentStore()
@@ -1315,10 +1317,10 @@ async def test_start_milvus_rebuild_partial_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import core.api as api_module
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    import knowledge_arch.api as api_module
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
 
     monkeypatch.setattr(api_module, "MILVUS_INDEX_RETRY_DELAYS", (0.0, 0.0))
 
@@ -1362,9 +1364,9 @@ async def test_start_milvus_rebuild_partial_failure(
 async def test_start_milvus_rebuild_cleaning_failure_skips_index(
     tmp_path: Path,
 ) -> None:
-    from core.config import Config
-    from core.index_compatibility import IndexCompatibilityStore
-    from core.repository.vector_store.memory import InMemoryVectorStore
+    from knowledge_arch.config import Config
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.repository.vector_store.memory import InMemoryVectorStore
     from tests.backend.test_embedding import MockEmbeddingProvider
 
     store = InMemorySourceDocumentStore()
@@ -1422,7 +1424,7 @@ async def test_start_milvus_rebuild_cleaning_failure_skips_index(
 # ── LightRAG API 层覆盖补充 ──────────────────────────────────────────
 
 async def test_lightrag_readiness_fully_ready(tmp_path: Path) -> None:
-    from core.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
 
     class Registry:
         def has_workspace(self, collection: str) -> bool:
@@ -1448,7 +1450,7 @@ async def test_lightrag_readiness_fully_ready(tmp_path: Path) -> None:
 
 
 async def test_lightrag_readiness_partially_indexed(tmp_path: Path) -> None:
-    from core.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
 
     class Registry:
         def has_workspace(self, collection: str) -> bool:
@@ -1495,7 +1497,7 @@ async def test_build_graph_raises_when_not_confirmed() -> None:
 
 
 async def test_build_graph_partial_failure_when_insert_raises(tmp_path: Path) -> None:
-    from core.lightrag_core import BuildJob
+    from knowledge_arch.lightrag_core import BuildJob
 
     class Registry:
         def has_workspace(self, collection: str) -> bool:
@@ -1530,7 +1532,7 @@ async def test_build_graph_partial_failure_when_insert_raises(tmp_path: Path) ->
 
 
 async def test_build_graph_reports_lrag_chunk_progress() -> None:
-    from core.lightrag_core import BuildJob
+    from knowledge_arch.lightrag_core import BuildJob
 
     class Registry:
         def has_workspace(self, collection: str) -> bool:
@@ -1604,7 +1606,7 @@ async def test_probe_lightrag_core_delegates_to_registry() -> None:
 
 
 async def test_query_graph_delegates_to_registry_when_ready(tmp_path: Path) -> None:
-    from core.index_compatibility import IndexCompatibilityStore
+    from knowledge_arch.index_compatibility import IndexCompatibilityStore
 
     queries: list[str] = []
 
@@ -1726,7 +1728,7 @@ async def test_deep_thinking_requires_orchestrator() -> None:
 
 
 async def test_deep_thinking_returns_trace_and_synthesizes() -> None:
-    from core.domain.deep_thinking import (
+    from knowledge_arch.domain.deep_thinking import (
         Checklist,
         ChecklistItem,
         DeepThinkingOutcome,
@@ -1773,7 +1775,7 @@ async def test_deep_thinking_returns_trace_and_synthesizes() -> None:
 
 async def test_deep_thinking_trace_serializes_discovered_and_origin() -> None:
     """v0.25.9：开放式发现写入 trace.rounds[].discovered，checklist 暴露 origin。"""
-    from core.domain.deep_thinking import (
+    from knowledge_arch.domain.deep_thinking import (
         Checklist,
         ChecklistItem,
         DeepThinkingOutcome,
@@ -1816,7 +1818,7 @@ async def test_deep_thinking_trace_serializes_discovered_and_origin() -> None:
 
 async def test_deep_thinking_verify_disabled_uses_deep_synth_fallback() -> None:
     """v0.25.9 (P2-b)：deep 模式即便无 deep_outcome.answer 也走 deep 合成，不退回普通 prompt。"""
-    from core.domain.deep_thinking import DeepThinkingOutcome
+    from knowledge_arch.domain.deep_thinking import DeepThinkingOutcome
 
     class _RecordingLLM:
         def __init__(self) -> None:
@@ -1848,7 +1850,7 @@ async def test_deep_thinking_verify_disabled_uses_deep_synth_fallback() -> None:
 
 
 async def test_deep_thinking_degraded_reports_mode() -> None:
-    from core.domain.deep_thinking import DeepThinkingOutcome
+    from knowledge_arch.domain.deep_thinking import DeepThinkingOutcome
 
     outcome = DeepThinkingOutcome(
         evidence=[DocumentChunk("c0", "d1", 0, "baseline text", "h0")],
@@ -1890,7 +1892,7 @@ async def test_invalid_mode_error_mentions_enhanced() -> None:
 
 async def test_enhanced_mode_returns_trace_and_verified_answer() -> None:
     """enhanced 复用 DeepThinkingOutcome：answer/sources/thinking_trace 与 deep 下游同构。"""
-    from core.domain.deep_thinking import DeepThinkingOutcome, RoundTrace
+    from knowledge_arch.domain.deep_thinking import DeepThinkingOutcome, RoundTrace
 
     outcome = DeepThinkingOutcome(
         evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
@@ -1919,7 +1921,7 @@ async def test_enhanced_mode_returns_trace_and_verified_answer() -> None:
 
 async def test_enhanced_mode_allows_global_scope_without_collection() -> None:
     """enhanced 与 deep 一致：collection 为空走全局证据链，不报 requires a collection。"""
-    from core.domain.deep_thinking import DeepThinkingOutcome
+    from knowledge_arch.domain.deep_thinking import DeepThinkingOutcome
 
     outcome = DeepThinkingOutcome(
         evidence=[], answer=None, actual_mode="enhanced_recall"
@@ -1936,7 +1938,7 @@ async def test_enhanced_mode_allows_global_scope_without_collection() -> None:
 
 async def test_deep_thinking_english_retrieval_keeps_original_answer_question() -> None:
     """英语召回只影响检索 query，最终回答问题仍传用户原文。"""
-    from core.domain.deep_thinking import DeepThinkingOutcome
+    from knowledge_arch.domain.deep_thinking import DeepThinkingOutcome
 
     class _TranslateOnlyLLM:
         async def generate(self, prompt, system_prompt="", *, allow_mock=True):
@@ -1973,7 +1975,7 @@ async def test_deep_thinking_english_retrieval_keeps_original_answer_question() 
 
 async def test_english_retrieval_skips_translation_for_non_cjk_question() -> None:
     """v0.30.0：非中文问题即使开启英语召回也不再白耗一次翻译 LLM 调用（与聊天路径一致）。"""
-    from core.domain.deep_thinking import DeepThinkingOutcome
+    from knowledge_arch.domain.deep_thinking import DeepThinkingOutcome
 
     class _NoTranslateLLM:
         def __init__(self) -> None:
@@ -2015,7 +2017,7 @@ async def test_english_retrieval_skips_translation_for_non_cjk_question() -> Non
 
 async def test_deep_thinking_uses_verified_answer_when_present() -> None:
     """orchestrator 产出 answer（verification 闭环）时，api.ask 直接用之，不重复合成。"""
-    from core.domain.deep_thinking import DeepThinkingOutcome
+    from knowledge_arch.domain.deep_thinking import DeepThinkingOutcome
 
     class _ShouldNotSynth:
         async def generate(self, prompt, system_prompt="", *, allow_mock=True):
@@ -2042,7 +2044,7 @@ async def test_deep_thinking_uses_verified_answer_when_present() -> None:
 
 
 async def test_deep_thinking_degraded_answer_gets_notice_field() -> None:
-    from core.domain.deep_thinking import DeepThinkingOutcome
+    from knowledge_arch.domain.deep_thinking import DeepThinkingOutcome
 
     class _SynthLLM:
         async def generate(self, prompt, system_prompt="", *, allow_mock=True):
@@ -2077,7 +2079,7 @@ async def test_deep_thinking_degraded_answer_gets_notice_field() -> None:
 
 
 async def test_deep_thinking_unverified_missing_gets_notice_field() -> None:
-    from core.domain.deep_thinking import DeepThinkingOutcome
+    from knowledge_arch.domain.deep_thinking import DeepThinkingOutcome
 
     outcome = DeepThinkingOutcome(
         evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
@@ -2109,7 +2111,7 @@ async def test_deep_thinking_unverified_missing_gets_notice_field() -> None:
 
 
 async def test_verified_answer_has_empty_notice() -> None:
-    from core.domain.deep_thinking import DeepThinkingOutcome
+    from knowledge_arch.domain.deep_thinking import DeepThinkingOutcome
 
     outcome = DeepThinkingOutcome(
         evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],

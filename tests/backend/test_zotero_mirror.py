@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 import aiosqlite
 import pytest
 
-from core.domain.models import (
+from knowledge_arch.domain.models import (
     Collection,
     DocumentOrigin,
     PageChunk,
@@ -22,10 +22,10 @@ from core.domain.models import (
     ZoteroLibrary,
     ZoteroTag,
 )
-from core.migration_runner import run_migrations
-from core.repository.source_store.base import SourceDocumentStore
-from core.repository.source_store.memory import InMemorySourceDocumentStore
-from core.repository.source_store.sqlite import SQLiteSourceDocumentStore
+from knowledge_arch.migration_runner import run_migrations
+from knowledge_arch.repository.source_store.base import SourceDocumentStore
+from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+from knowledge_arch.repository.source_store.sqlite import SQLiteSourceDocumentStore
 
 
 @pytest.fixture(params=["sqlite", "memory"])

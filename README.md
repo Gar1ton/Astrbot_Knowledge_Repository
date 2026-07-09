@@ -6,7 +6,7 @@
 
 **AstrBot 知识库原件管理、同步备份与 Research Agent 插件**
 
-[![version](https://img.shields.io/badge/版本-v1.0.1-blueviolet)](metadata.yaml)
+[![version](https://img.shields.io/badge/版本-v1.0.2-blueviolet)](metadata.yaml)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-6f42c1)](https://github.com/AstrBotDevs/AstrBot)
 
@@ -228,10 +228,10 @@ pip install -r requirements-additional.txt
 AstrBot / Web / CLI
         |
         v
-main.py / web/server.py
+main.py / ka_web/server.py
         |
         v
-core/event_handler.py -> core/api.py
+knowledge_arch/event_handler.py -> knowledge_arch/api.py
         |
         v
 managers / pipelines -> repository -> domain
@@ -240,10 +240,10 @@ managers / pipelines -> repository -> domain
 关键约束：
 
 - 框架入口只注册和委派，不写业务逻辑。
-- 业务编排集中在 `core/api.py`、`core/managers/` 和 `core/pipelines/`。
-- 持久化通过 `core/repository/*/base.py` 的接口契约隔离。
-- `core/domain/` 保持零依赖。
-- 前端源码在 `web/frontend/`，静态产物在 `pages/`，只能通过构建和 `tools/sync_frontend.py` 同步。
+- 业务编排集中在 `knowledge_arch/api.py`、`knowledge_arch/managers/` 和 `knowledge_arch/pipelines/`。
+- 持久化通过 `knowledge_arch/repository/*/base.py` 的接口契约隔离。
+- `knowledge_arch/domain/` 保持零依赖。
+- 前端源码在 `ka_web/frontend/`，静态产物在 `pages/`，只能通过构建和 `tools/sync_frontend.py` 同步。
 
 开发与目录指引：
 

@@ -1,0 +1,514 @@
+"""Research 服务：对话式知识检索的两个无状态后端能力（见 ../ARCHITECTURE.md）。
+
+交互模型（v0.28.0 重构）：主对话 LLM 当指挥，下面挂两个工具——
+  · probe(query)：模糊检索元数据（标题/集合/标签），返回候选 + ambiguity + 建议模式 +
+    directive_guidance（指引主 LLM 把对话凝练成一条自包含「调令」），供主 LLM 判断
+    「回应范围 + 模式」并决定直接执行还是反问用户确认；
+  · execute(...)：真正的 chunk 召回 + 作答 + 确定性引用列表。调令模型：答案恒为内部 agent 的
+    纯输出（persona 一律关闭）；召回恒英文（query 含 CJK 才翻译，已是英文则跳过翻译省一次 LLM
+    调用）；回答语言取自 flags.research_answer_language（auto/zh/en，与前端 askAI 同一参数）。
+
+本模块只做编排与打分，不写召回算法、不碰任何同步配置（Zotero/Notion/R2 的 token/url）。
+范围界定与模式选择最终交给主 LLM；这里的 ambiguity/suggested_mode 只是廉价启发式提示
+（成本感知：正文已精确命中 + 「有没有/是否提到」类查存 → 维持 default，不无谓升 deep_thinking）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from typing import TYPE_CHECKING, Any
+
+from knowledge_arch.retrieval_modes import (
+    MODE_GRAPH_MIXED,
+    STRICT_COLLECTION_MODES,
+    VALID_RETRIEVAL_MODES,
+    normalize_retrieval_mode,
+)
+
+if TYPE_CHECKING:
+    from knowledge_arch.api import KnowledgeRepositoryApi
+
+logger = logging.getLogger("ResearchService")
+
+# breadth 同时控制候选池与最终召回量。无 reranker 时不放大候选池，但最终 top_k 仍生效。
+_BREADTH_PLAN = {
+    "narrow": (5, 5),
+    "normal": (15, 8),
+    "wide": (40, 10),
+}
+_VALID_MODES = VALID_RETRIEVAL_MODES
+# enhanced 不在严格集合模式内：与 default/deep 全局证据链一致，允许 collection 为空全局检索。
+_STRICT_COLLECTION_MODES = STRICT_COLLECTION_MODES
+
+# probe 结果上限，控制喂给 LLM 的 token。
+_MAX_COLLECTIONS = 8
+
+# execute 兜底超时：LLM/检索链路无内建超时，30 分钟覆盖最重的 deep_thinking 多轮推演。
+_EXECUTE_TIMEOUT_SEC = 1800
+_MAX_PAPERS = 8
+_MAX_TAGS = 10
+_MAX_EXACT_CHUNK_HITS = 40
+
+# ambiguity 判定阈值（与旧 KeywordScopeResolver 对齐）。
+_MIN_COVERAGE = 0.25
+_DOMINANCE_RATIO = 2.0
+
+_STOP_WORDS = frozenset(
+    {
+        "a", "an", "the", "of", "in", "on", "at", "to", "for", "with",
+        "by", "from", "and", "or", "is", "are", "was", "this", "that",
+        "it", "what", "how", "when", "where", "about", "using", "based",
+        "can", "does", "will", "has", "have", "between", "through",
+    }
+)
+
+# 重型信号 → deep_thinking（多轮迭代，~6-9 次 LLM）：仅综述/系统梳理级任务才升档。
+# v0.30.0：分析/对比/比较/compare/relationship/summary 等中型信号降档到 enhanced。
+_DEEP_SIGNALS = frozenset(
+    {
+        "综述", "综合", "系统", "全面", "梳理", "纵观", "这批文献", "多篇论文",
+        "review", "survey", "comprehensive", "systematic", "overview",
+    }
+)
+
+# 中型信号 → enhanced（一次拆解+宽召回+自检纠偏，典型 2 次 LLM）：
+# 分析/对比/机制类问题用中间档，成本远低于 deep_thinking。英文用词干做子串匹配
+# （analyz/analys/summar 同时覆盖 analyze/analysis/summary/summarize）。
+_ENHANCED_SIGNALS = frozenset(
+    {
+        "分析", "对比", "比较", "总结", "归纳", "解释", "异同", "机制", "为什么", "如何",
+        "compare", "comparison", "analyz", "analys", "summar", "explain",
+        "difference", "relationship", "why do", "why does", "how do", "how does",
+    }
+)
+
+_GRAPH_SIGNALS = frozenset(
+    {
+        "关系", "关联", "网络", "图谱", "连接",
+        "network", "relation", "graph", "link", "between",
+    }
+)
+
+# 「查存」类信号：偏向「有没有/是否提到 X」的事实存在性查询，配合正文精确命中即可走 default。
+_LOOKUP_SIGNALS = frozenset(
+    {
+        "有没有", "是否有", "有无", "有哪些", "提到", "提及", "包含", "查一下", "找找",
+        "is there", "are there", "does", "do you", "mention", "any paper", "any papers",
+    }
+)
+
+# probe 回传给主 LLM 的「调令」指引：把对话意图凝练成一条自包含检索问题再调 execute。
+_DIRECTIVE_GUIDANCE = (
+    "范围明确(ambiguity=low)后，请把对话意图凝练成一条自包含、聚焦的检索问题作为 query 调用 "
+    "research_execute（不要原样转发零碎对话）；deep_thinking 时尤其要把「想让内部检索 agent "
+    "回答的问题」写完整清楚。内部 agent 会据此直接产出纯净答案并发给用户，你无需复述或二次总结。"
+    "模式成本阶梯：default（查存/单点事实，最快）< enhanced（分析/对比/机制类，"
+    "一次拆解+宽召回+自检纠偏，约 2~3 次内部调用）< deep_thinking（仅综述/系统梳理级任务，"
+    "多轮迭代最贵）。优先用满足需求的最低档。"
+)
+
+
+def _has_cjk(text: str) -> bool:
+    """文本是否含 CJK 字符。
+
+    决定召回前是否需把 query 翻译成英文（召回恒英文，英文 query 跳过翻译）。
+    """
+    return any("一" <= ch <= "鿿" for ch in text)
+
+
+def _tokenize(text: str) -> set[str]:
+    """中英双语分词：英文取 3+ 字母词（去停用词），中文取 CJK 连续段的 2-gram。
+
+    中文无空格分隔，字粒度噪声大、整段过严，故用滑窗 2-gram 折中——既能让中文集合名/
+    标题在 probe 里被中文 query 命中，又不至于像单字那样过度误配。
+    """
+    tokens = {t for t in re.findall(r"[a-z]{3,}", text.lower()) if t not in _STOP_WORDS}
+    for run in re.findall(r"[一-鿿]+", text):
+        if len(run) == 1:
+            tokens.add(run)
+        else:
+            tokens.update(run[i : i + 2] for i in range(len(run) - 1))
+    return tokens
+
+
+def _coverage(query_tokens: set[str], corpus_tokens: set[str]) -> float:
+    if not query_tokens or not corpus_tokens:
+        return 0.0
+    return len(query_tokens & corpus_tokens) / len(query_tokens)
+
+
+def _exact_terms(query: str) -> list[str]:
+    """抽取适合正文精确命中的 ASCII 术语（如 SHAP/LIME/XGBoost），去停用词、去重保序。
+
+    只取 ASCII 字母数字串，刻意不含中文 2-gram——正文子串里中文碎片噪声大，
+    精确召回靠英文术语/缩写更可靠（probe 的中文覆盖率走 metadata token 那一路）。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in re.findall(r"[A-Za-z][A-Za-z0-9]+", query):
+        lowered = match.lower()
+        if lowered in _STOP_WORDS or lowered in seen:
+            continue
+        seen.add(lowered)
+        out.append(match)
+    return out
+
+
+class ResearchService:
+    """probe + execute 两个无状态能力的后端实现。
+
+    flags：暴露 .research_enabled / .research_answer_language 的对象（运行态即 PluginInitializer）；
+    persona 不再从 flags 读取——research 答案恒为内部 agent 纯输出（调令模型），persona 一律关闭。
+    """
+
+    def __init__(self, api: KnowledgeRepositoryApi, flags: Any) -> None:
+        self._api = api
+        self._flags = flags
+
+    # ── 工具一：范围探查 ─────────────────────────────────────────
+
+    async def probe(self, query: str) -> dict[str, Any]:
+        """模糊检索元数据，返回候选 + ambiguity + 建议/可用模式，供主 LLM 判断回应范围。"""
+        collections = await self._api.list_collections()
+        active = [c for c in collections if not c.name.startswith("_")]
+        titles_by_col = await self._api.list_titles_by_collection()
+        q_tokens = _tokenize(query)
+
+        # 集合打分（名 + 描述 + 标题语料的 token 覆盖率）。
+        scored_cols: list[dict[str, Any]] = []
+        for col in active:
+            corpus = _tokenize(col.name) | _tokenize(col.description)
+            for title in titles_by_col.get(col.name, []):
+                corpus |= _tokenize(title)
+            score = _coverage(q_tokens, corpus)
+            scored_cols.append(
+                {
+                    "name": col.name,
+                    "description": col.description,
+                    "doc_count": len(titles_by_col.get(col.name, [])),
+                    "match_score": round(score, 3),
+                }
+            )
+        scored_cols.sort(key=lambda c: c["match_score"], reverse=True)
+
+        # 命中论文（标题 token 命中）+ author/year enrich；命中标签。
+        papers, tags = await self._match_papers_and_tags(q_tokens)
+
+        # LightRAG 就绪度（决定 graph_mixed 是否可用）。
+        lightrag_ready: dict[str, bool] = {}
+        for col in active:
+            try:
+                readiness = await self._api.get_lightrag_readiness(col.name)
+                lightrag_ready[col.name] = bool(readiness.get("ready", False))
+            except Exception:
+                lightrag_ready[col.name] = False
+
+        available_modes = ["default", "enhanced", "deep_thinking"]
+        if any(lightrag_ready.values()):
+            available_modes.append(MODE_GRAPH_MIXED)
+
+        # 正文精确命中：防「title/tag 没标 → 误判库里没有」的假阴性。
+        # 命中正文时 exact_match=True，主 LLM 不得再回答「库里没有」。
+        exact_terms = _exact_terms(query)
+        exact_hits = (
+            await self._api.search_exact_mentions(exact_terms, None, _MAX_EXACT_CHUNK_HITS)
+            if exact_terms
+            else []
+        )
+        exact_doc_hits = _dedupe_exact_hits_by_doc(exact_hits)
+
+        return {
+            "query": query,
+            "collections": scored_cols[:_MAX_COLLECTIONS],
+            "papers": papers[:_MAX_PAPERS],
+            "tags": tags[:_MAX_TAGS],
+            "ambiguity": self._assess_ambiguity(scored_cols),
+            "suggested_mode": self._suggest_mode(query, lightrag_ready, bool(exact_hits)),
+            "directive_guidance": _DIRECTIVE_GUIDANCE,
+            "available_modes": available_modes,
+            "lightrag_ready": lightrag_ready,
+            "exact_terms": exact_terms,
+            "exact_match": bool(exact_hits),
+            "exact_hits_top5": exact_hits[:5],
+            "exact_doc_hit_count": len(exact_doc_hits),
+            "exact_doc_hits_top5": exact_doc_hits[:5],
+        }
+
+    async def _match_papers_and_tags(
+        self, q_tokens: set[str]
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        docs = await self._api.list_documents()
+        ranked: list[tuple[int, dict[str, Any]]] = []
+        tag_hits: set[str] = set()
+        for doc in docs:
+            for tag in doc.tags:
+                if _tokenize(tag) & q_tokens or tag.lower() in {t for t in q_tokens}:
+                    tag_hits.add(tag)
+            overlap = len(_tokenize(doc.title) & q_tokens)
+            if overlap == 0:
+                continue
+            entry: dict[str, Any] = {
+                "title": doc.title,
+                "collection": doc.collection,
+                "author": "",
+                "year": "",
+            }
+            if getattr(doc, "zotero_item_key", "") and getattr(doc, "library_id", ""):
+                try:
+                    zmeta = await self._api.get_zotero_item_meta(
+                        doc.library_id, doc.zotero_item_key
+                    )
+                    if zmeta:
+                        creators = zmeta.get("creators") or []
+                        entry["author"] = creators[0].split(",")[0] if creators else ""
+                        entry["year"] = zmeta.get("year", "")
+                except Exception:
+                    pass
+            ranked.append((overlap, entry))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        return [e for _, e in ranked], sorted(tag_hits)
+
+    def _assess_ambiguity(self, scored_cols: list[dict[str, Any]]) -> str:
+        """low=单一集合明确胜出（主 LLM 可直接执行）；high=多集合竞争（宜反问）；medium=信号弱。"""
+        ranked = [c for c in scored_cols if c["match_score"] >= _MIN_COVERAGE]
+        if not ranked:
+            return "medium"
+        top = ranked[0]["match_score"]
+        second = ranked[1]["match_score"] if len(ranked) > 1 else 0.0
+        if second >= _MIN_COVERAGE and top < _DOMINANCE_RATIO * second:
+            return "high"
+        return "low"
+
+    def _suggest_mode(
+        self, query: str, lightrag_ready: dict[str, bool], exact_match: bool = False
+    ) -> str:
+        q = query.lower()
+        # 成本感知三档路由（Adaptive-RAG 思路）：正文已精确命中 + 像「有没有/是否提到」的
+        # 查存问题 → 维持 default（1 次合成）；重型综述信号 → deep_thinking（多轮迭代）；
+        # 中型分析/对比信号 → enhanced（2+1 中间档）；其余 default。
+        if exact_match and any(sig in q for sig in _LOOKUP_SIGNALS):
+            return "default"
+        if any(sig in q for sig in _DEEP_SIGNALS):
+            return "deep_thinking"
+        if any(sig in q for sig in _GRAPH_SIGNALS) and any(lightrag_ready.values()):
+            return MODE_GRAPH_MIXED
+        if any(sig in q for sig in _ENHANCED_SIGNALS):
+            return "enhanced"
+        return "default"
+
+    # ── 工具二：执行召回 ─────────────────────────────────────────
+
+    async def execute(
+        self,
+        query: str,
+        collection: str | None = None,
+        mode: str = "default",
+        breadth: str = "normal",
+    ) -> dict[str, Any]:
+        """真正召回并作答：英文召回 + 按配置语言作答 + reranker/wide + 确定性引用列表。
+
+        调令模型：答案恒为内部 agent 的纯输出——persona 一律关闭（deep 本就不套，default 也强制关）。
+        召回恒英文：query 含 CJK 才翻译成英文，已是英文则跳过翻译省一次 LLM 调用。
+        回答语言取自 flags.research_answer_language（auto/zh/en，与前端 askAI 同一参数）。
+        """
+        mode, used_legacy_mode = normalize_retrieval_mode(mode)
+        if used_legacy_mode:
+            logger.warning(
+                "research mode='high_precision' is deprecated; use 'graph_mixed' instead"
+            )
+        if mode not in _VALID_MODES:
+            mode = "default"
+        if mode in _STRICT_COLLECTION_MODES and not collection:
+            return _mode_failure_result(
+                query=query,
+                collection=collection,
+                mode=mode,
+                status="needs_scope",
+                error=f"{mode} requires a concrete collection",
+                answer=(
+                    f"{mode} 需要先确认一个具体 collection；"
+                    "不能在全局范围静默改用 default 检索。"
+                ),
+            )
+
+        use_reranker = self._api.is_reranker_active()
+        candidate_pool, answer_top_k = _BREADTH_PLAN.get(
+            breadth, _BREADTH_PLAN["normal"]
+        )
+        candidate_k = candidate_pool if (use_reranker and candidate_pool > answer_top_k) else None
+
+        # 召回恒英文：英文 query 直接召回（跳过翻译），含 CJK 才翻译成英文，
+        # 省掉系统性浪费的翻译调用。
+        use_english_retrieval = _has_cjk(query)
+        # 回答语言：取统一配置（auto/zh/en），与前端 askAI 同一参数；非法值回退 auto。
+        answer_language = str(getattr(self._flags, "research_answer_language", "auto"))
+        if answer_language not in {"auto", "zh", "en"}:
+            answer_language = "auto"
+
+        try:
+            # wait_for 兜底：ask 链路（LLM/检索）无内建总超时，极端挂死会让后台
+            # research 任务永不返回、用户永远收不到结果。
+            result = await asyncio.wait_for(
+                self._api.ask(
+                    question=query,
+                    collection=collection,
+                    top_k=answer_top_k,
+                    retrieval_mode=mode,
+                    use_english_retrieval=use_english_retrieval,
+                    answer_language=answer_language,
+                    persona_enabled=False,
+                    candidate_k=candidate_k,
+                    use_reranker=use_reranker,
+                ),
+                timeout=_EXECUTE_TIMEOUT_SEC,
+            )
+        except TimeoutError:
+            logger.error(
+                "ResearchService.execute timed out after %ds (mode=%s)",
+                _EXECUTE_TIMEOUT_SEC,
+                mode,
+            )
+            return _mode_failure_result(
+                query=query,
+                collection=collection,
+                mode=mode,
+                status="error",
+                error=f"timeout after {_EXECUTE_TIMEOUT_SEC}s",
+                answer=f"{mode} 执行超时（{_EXECUTE_TIMEOUT_SEC}s），请稍后重试或缩小检索范围。",
+            )
+        except Exception as exc:  # noqa: BLE001 - 工具入口需兜底，不向框架抛出
+            logger.error("ResearchService.execute api.ask failed: %s", exc)
+            return _mode_failure_result(
+                query=query,
+                collection=collection,
+                mode=mode,
+                status="error",
+                error=str(exc),
+                answer=f"{mode} 执行失败：{exc}",
+            )
+
+        sources = result.get("sources") or []
+        scope_label = collection or "全局（所有 active 集合及子目录）"
+
+        # 审计：实际范围内的正文精确命中数，区分「本次未命中」与「库里没有」。
+        exact_terms = _exact_terms(query)
+        exact_hits = (
+            await self._api.search_exact_mentions(exact_terms, collection, _MAX_EXACT_CHUNK_HITS)
+            if exact_terms
+            else []
+        )
+        exact_doc_hits = _dedupe_exact_hits_by_doc(exact_hits)
+
+        answer = result.get("answer")
+        if not answer:
+            answer = f"本次检索未命中（范围：{scope_label}）。"
+
+        return {
+            "status": "ok",
+            "answer": answer,
+            # v0.30.0：告警为结构化字段（不再拼在正文开头），聊天端渲染为引用后的尾注。
+            "answer_notice": str(result.get("answer_notice") or ""),
+            "citations": _build_citations(sources),
+            "citation_doc_ids": _citation_doc_ids(sources),
+            "scope": collection or "全局",
+            "searched_scope": scope_label,
+            "exact_hit_count": len(exact_doc_hits),
+            "exact_chunk_hit_count": len(exact_hits),
+            "exact_doc_hits_top5": exact_doc_hits[:5],
+            "mode": result.get("actual_retrieval_mode") or mode,
+            "requested_mode": mode,
+            "sources": sources,
+        }
+
+
+def _mode_failure_result(
+    *,
+    query: str,
+    collection: str | None,
+    mode: str,
+    status: str,
+    error: str,
+    answer: str,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "answer": answer,
+        "citations": [],
+        "scope": collection or "全局",
+        "mode": mode,
+        "requested_mode": mode,
+        "sources": [],
+        "error": error,
+        "query": query,
+    }
+
+
+def _citation_doc_ids(sources: list[dict[str, Any]]) -> list[str]:
+    """从 sources 按出现顺序提取去重的 doc_id 列表，供 Notion QA 的 Citations relation。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for src in sources:
+        doc_id = str(src.get("doc_id") or src.get("document_id") or "").strip()
+        if doc_id and doc_id not in seen:
+            seen.add(doc_id)
+            out.append(doc_id)
+    return out
+
+
+def _build_citations(sources: list[dict[str, Any]]) -> list[str]:
+    """从 sources 确定性拼装 `Author - Year - Title`（按文档去重，缺字段则退化）。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for src in sources:
+        doc_id = str(src.get("doc_id") or src.get("document_id") or "")
+        if doc_id and doc_id in seen:
+            continue
+        if doc_id:
+            seen.add(doc_id)
+        parts = [
+            str(src.get("author") or "").strip(),
+            str(src.get("year") or "").strip(),
+            str(src.get("title") or "").strip(),
+        ]
+        line = " - ".join(p for p in parts if p)
+        if line:
+            out.append(line)
+    return out
+
+
+def _dedupe_exact_hits_by_doc(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把 chunk 级精确命中折叠为文档级摘要，保留每篇最早出现的 snippet。"""
+    docs: dict[str, dict[str, Any]] = {}
+    for hit in hits:
+        doc_id = str(hit.get("doc_id") or "")
+        if not doc_id:
+            continue
+        current = docs.get(doc_id)
+        ordinal = int(hit.get("ordinal") or 0)
+        if current is None:
+            docs[doc_id] = {
+                "doc_id": doc_id,
+                "title": hit.get("title") or doc_id,
+                "collection": hit.get("collection") or "",
+                "matched_terms": list(hit.get("matched_terms") or []),
+                "first_ordinal": ordinal,
+                "snippet": hit.get("snippet") or "",
+                "chunk_hit_count": 1,
+            }
+            continue
+        current["chunk_hit_count"] = int(current.get("chunk_hit_count") or 0) + 1
+        merged = set(current.get("matched_terms") or [])
+        merged.update(hit.get("matched_terms") or [])
+        current["matched_terms"] = sorted(merged)
+        if ordinal < int(current.get("first_ordinal") or 0):
+            current["first_ordinal"] = ordinal
+            current["snippet"] = hit.get("snippet") or current.get("snippet") or ""
+    return sorted(
+        docs.values(),
+        key=lambda item: (-int(item.get("chunk_hit_count") or 0), item.get("title") or ""),
+    )
+
+
+__all__ = ["ResearchService"]

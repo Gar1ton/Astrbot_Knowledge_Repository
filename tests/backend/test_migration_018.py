@@ -9,7 +9,7 @@ from pathlib import Path
 
 import aiosqlite
 
-MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "ka_migrations"
 
 
 async def _apply(conn: aiosqlite.Connection, *names: str) -> None:

@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from core.domain.models import QuotaUsage, SourceDocument, SyncTargetKind
-from core.repository.sync_targets.memory import InMemorySyncTarget
+from knowledge_arch.domain.models import QuotaUsage, SourceDocument, SyncTargetKind
+from knowledge_arch.repository.sync_targets.memory import InMemorySyncTarget
 
 
 def _doc(doc_id: str, collection: str = "c") -> SourceDocument:

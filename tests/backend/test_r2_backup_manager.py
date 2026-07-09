@@ -9,16 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from core.config import Config
-from core.domain.models import SourceDocument, SyncTargetKind
-from core.managers.r2_backup_manager import (
+from knowledge_arch.config import Config
+from knowledge_arch.domain.models import SourceDocument, SyncTargetKind
+from knowledge_arch.managers.r2_backup_manager import (
     R2BackupManager,
     apply_pending_restore,
     commit_applied_restore,
     rollback_applied_restore,
 )
-from core.repository.source_store.memory import InMemorySourceDocumentStore
-from core.repository.sync_targets.memory import InMemorySyncTarget
+from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+from knowledge_arch.repository.sync_targets.memory import InMemorySyncTarget
 
 
 def _db(path: Path, marker: str = "original") -> None:
@@ -236,7 +236,9 @@ async def test_restore_blocks_when_local_disk_is_insufficient(
     class Usage:
         free = 0
 
-    monkeypatch.setattr("core.managers.r2_backup_manager.shutil.disk_usage", lambda _: Usage())
+    monkeypatch.setattr(
+        "knowledge_arch.managers.r2_backup_manager.shutil.disk_usage", lambda _: Usage()
+    )
     with pytest.raises(RuntimeError, match="本地空间不足"):
         await manager.prepare_restore()
 

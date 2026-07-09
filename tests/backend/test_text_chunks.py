@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from core.utils.text_chunks import (
+from knowledge_arch.utils.text_chunks import (
     clip_at_sentence,
     paragraphize,
     split_by_sentences,

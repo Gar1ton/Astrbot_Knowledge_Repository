@@ -42,7 +42,7 @@
 
 ## 2. 薄壳原则（Thin Shell）
 
-框架入口（`core/main.example.py` 所示）**只做两件事**：
+框架入口（`knowledge_arch/main.example.py` 所示）**只做两件事**：
 
 1. 向框架**注册** hooks / commands / tools / 路由；
 2. 把每个回调**委派**给 `event_handler` 或对应 manager。
@@ -56,7 +56,7 @@
 
 ## 3. 组合根模式（Composition Root）
 
-**所有对象的创建与装配集中在一个地方**：`core/plugin_initializer.example.py`（组合根）。
+**所有对象的创建与装配集中在一个地方**：`knowledge_arch/plugin_initializer.example.py`（组合根）。
 
 - 按**依赖顺序**构造：先建无依赖的（config、repository），再建依赖它们的（managers、pipelines），最后建薄壳引用。
 - **构造器注入**：每个组件通过构造参数接收依赖，**自己绝不 new 依赖**、绝不读全局单例。
@@ -94,7 +94,7 @@ managers/
 原始配置（dict / JSON / 环境变量）**只在一个地方**被解析成结构化对象：
 
 ```
-原始 dict ──► Config（core/config）──► get_xxx_config() ──► XxxConfig (dataclass)
+原始 dict ──► Config（knowledge_arch/config）──► get_xxx_config() ──► XxxConfig (dataclass)
                                                               ▲
                                           各子系统只接收自己的 XxxConfig
 ```
@@ -107,9 +107,9 @@ managers/
 
 ## 6. 持久化与迁移
 
-- 数据库 schema 用**编号迁移**演进：`migrations/NNN_描述.sql`（`001`, `002`, …）。
+- 数据库 schema 用**编号迁移**演进：`ka_migrations/NNN_描述.sql`（`001`, `002`, …）。
 - 一个**幂等 runner**：每次启动按文件名顺序应用未执行的迁移，用 `_migrations` 跟踪表去重。
-- 详见 `migrations/README.md`。
+- 详见 `ka_migrations/README.md`。
 
 ---
 
@@ -117,12 +117,12 @@ managers/
 
 带 WebUI 的项目遵循「**业务门面 + 路由委派**」：
 
-- `core/api.py`：**框架无关**的纯业务函数（不含 HTTP 概念）。
-- `web/`：HTTP 层，把请求参数翻译后**委派给 `core/api`**，再把结果包装成响应。
-- `web/registry.py`：可选的面板/扩展注册中心（供第三方挂载）。
-- `web/frontend/`：前端源码；构建产物同步到 `pages/`（运行时静态资源）。
+- `knowledge_arch/api.py`：**框架无关**的纯业务函数（不含 HTTP 概念）。
+- `ka_web/`：HTTP 层，把请求参数翻译后**委派给 `knowledge_arch/api`**，再把结果包装成响应。
+- `ka_web/registry.py`：可选的面板/扩展注册中心（供第三方挂载）。
+- `ka_web/frontend/`：前端源码；构建产物同步到 `pages/`（运行时静态资源）。
 
-详见 `web/README.md`。
+详见 `ka_web/README.md`。
 
 ---
 
@@ -133,7 +133,7 @@ managers/
 1. **定位层级**：它是编排逻辑（→ `managers/` 或 `pipelines/`）、持久化（→ `repository/`）还是纯模型（→ `domain/`）？
 2. **先定接口**：在该层 `base.py` 增加 ABC / 抽象方法，**用 docstring 写清契约**（输入、输出、副作用、错误语义）。
 3. **写实现**：生产实现 + （若涉及 I/O）内存/桩实现各一份，满足同一接口。
-4. **加配置**：若需配置，在 `core/config` 增加 `XxxConfig` dataclass 与 `get_xxx_config()`，并在 `_conf_schema.json` 登记字段。
+4. **加配置**：若需配置，在 `knowledge_arch/config` 增加 `XxxConfig` dataclass 与 `get_xxx_config()`，并在 `_conf_schema.json` 登记字段。
 5. **在组合根注入**：在 `plugin_initializer` 按依赖顺序构造它、传入依赖、注册生命周期/定时任务。
 6. **接薄壳**（若需框架触发）：在 `main`/`event_handler` 注册回调并委派，**不在薄壳写业务**。
 7. **写测试**：用内存实现做接口对换测试，覆盖契约。

@@ -1,6 +1,6 @@
 """单元测试：PerformanceTracker（core/metrics.py）。"""
 
-from core.metrics import PerformanceTracker
+from knowledge_arch.metrics import PerformanceTracker
 
 
 def test_record_and_summary_empty():

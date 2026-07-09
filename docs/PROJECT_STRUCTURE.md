@@ -7,7 +7,7 @@
 
 Knowledge Repository 是一个 AstrBot 知识库插件，同时保留了“结构与约定先行”的工程治理框架：
 
-- 插件功能代码按 `core/` 单向分层组织；
+- 插件功能代码按 `knowledge_arch/` 单向分层组织；
 - WebUI 源码和构建产物分离；
 - 版本计划、变更记录和 agent 行为契约保持可追溯。
 
@@ -35,7 +35,7 @@ Knowledge Repository 是一个 AstrBot 知识库插件，同时保留了“结�
 ├── requirements.txt                   # AstrBot 自动安装的基础依赖
 ├── requirements-additional.txt        # 手动可选依赖：Embedding / LightRAG / R2 / 开发工具
 ├── logo.svg / logo.png                # 发布展示 logo；logo.png 由 AstrBot 识别
-├── core/                              # 插件后端业务逻辑
+├── knowledge_arch/                    # 插件后端业务逻辑
 │   ├── domain/                        # 纯数据模型，零依赖
 │   ├── repository/                    # 持久化接口和实现
 │   ├── managers/                      # 用例编排
@@ -43,8 +43,8 @@ Knowledge Repository 是一个 AstrBot 知识库插件，同时保留了“结�
 │   ├── adapters/                      # 外部系统与 domain 翻译
 │   ├── api.py                         # Web / 命令共享的业务门面
 │   └── plugin_initializer.py          # 组合根与生命周期管理
-├── migrations/                        # SQLite 编号迁移与幂等 runner
-├── web/
+├── ka_migrations/                     # SQLite 编号迁移与幂等 runner
+├── ka_web/
 │   ├── server.py                      # aiohttp Web 控制台后端
 │   └── frontend/                      # Next.js 前端源码
 ├── pages/                             # 前端静态产物，由 tools/sync_frontend.py 生成，禁止手改
@@ -60,12 +60,12 @@ Knowledge Repository 是一个 AstrBot 知识库插件，同时保留了“结�
 | 层 | 职责 | 依赖规则 |
 |----|------|----------|
 | `main.py` | AstrBot 薄壳：注册 hook / command 并委派 | 可依赖框架；不写业务 |
-| `web/server.py` | HTTP 层：请求参数翻译、鉴权、路由注册 | 委派给 `core/api.py` |
-| `core/api.py` | 框架无关业务门面 | 组合 managers / pipelines / repository |
-| `core/managers` / `core/pipelines` | 业务编排和多步骤流水线 | 依赖 repository 接口与 domain |
-| `core/repository` | 持久化抽象与生产/内存实现 | 只依赖 domain |
-| `core/domain` | 纯数据模型 | 零依赖 |
-| `core/adapters` | 外部系统数据翻译 | 可依赖外部 SDK 与 domain |
+| `ka_web/server.py` | HTTP 层：请求参数翻译、鉴权、路由注册 | 委派给 `knowledge_arch/api.py` |
+| `knowledge_arch/api.py` | 框架无关业务门面 | 组合 managers / pipelines / repository |
+| `knowledge_arch/managers` / `knowledge_arch/pipelines` | 业务编排和多步骤流水线 | 依赖 repository 接口与 domain |
+| `knowledge_arch/repository` | 持久化抽象与生产/内存实现 | 只依赖 domain |
+| `knowledge_arch/domain` | 纯数据模型 | 零依赖 |
+| `knowledge_arch/adapters` | 外部系统数据翻译 | 可依赖外部 SDK 与 domain |
 
 ## 发布前检查
 
@@ -75,7 +75,7 @@ Knowledge Repository 是一个 AstrBot 知识库插件，同时保留了“结�
 python -m pytest
 ruff check .
 mypy
-cd web/frontend && npm run build
+cd ka_web/frontend && npm run build
 python tools/sync_frontend.py --check
 git diff --check
 ```
@@ -83,7 +83,7 @@ git diff --check
 `pages/` 只能通过以下流程更新：
 
 ```bash
-cd web/frontend
+cd ka_web/frontend
 npm run build
 cd ../..
 python tools/sync_frontend.py

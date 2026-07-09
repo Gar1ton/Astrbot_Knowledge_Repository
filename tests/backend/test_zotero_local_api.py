@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.adapters.zotero.local_api import (
+from knowledge_arch.adapters.zotero.local_api import (
     ZoteroLocalApiClient,
     normalize_zotero_annotation,
 )

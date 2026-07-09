@@ -14,17 +14,21 @@ if str(_ROOT_DIR) not in sys.path:
 
 
 def _purge_stale_local_modules() -> None:
-    """Evict ALL cached core/web/migrations modules on every load.
+    """Evict ALL cached knowledge_arch/ka_web/ka_migrations modules on every load.
 
     Two reasons:
-    1. Other plugins (e.g. astrbot_plugin_moirai) expose a top-level ``core``
-       package — without eviction we'd import their PluginInitializer.
+    1. Defense in depth against another plugin claiming the same top-level
+       name. This plugin used to be named ``core``/``web``/``migrations`` and
+       collided with astrbot_plugin_moirai's identically-named packages —
+       sys.path ordering made ``core.retrieval_modes`` resolve to moirai's
+       ``core`` package instead of ours (see CHANGELOG). Renaming to unique
+       names removes the actual risk; eviction here is now just a backstop.
     2. On plugin reload AstrBot re-imports main.py but Python's module cache
        keeps the *old* EventHandler/etc. alive, so new methods added between
        installs are invisible.  Unconditional eviction forces a fresh import
        every time, fixing AttributeError on hot-reload.
     """
-    _OWNED_TOPS = frozenset(("core", "web", "migrations"))
+    _OWNED_TOPS = frozenset(("knowledge_arch", "ka_web", "ka_migrations"))
 
     for name in list(sys.modules.keys()):
         if name == __name__:
@@ -40,21 +44,21 @@ from typing import TYPE_CHECKING, Any
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from core.event_handler import EventHandler
-from core.plugin_initializer import PluginInitializer
-from core.retrieval_modes import (
+from knowledge_arch.event_handler import EventHandler
+from knowledge_arch.plugin_initializer import PluginInitializer
+from knowledge_arch.retrieval_modes import (
     MODE_GRAPH_MIXED,
     MODE_GRAPH_ONLY,
     STRICT_COLLECTION_MODES,
     normalize_retrieval_mode,
 )
-from core.utils import text_chunks
+from knowledge_arch.utils import text_chunks
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v1.0.1"
+_PLUGIN_VERSION = "v1.0.2"
 logger = logging.getLogger(__name__)
 _RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
 _RESEARCH_PARAGRAPH_LIMIT = 700

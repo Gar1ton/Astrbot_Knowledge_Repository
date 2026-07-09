@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""一键启动 Web 控制台用于审阅/调试（见 ../web/README.md）。
+"""一键启动 Web 控制台用于审阅/调试（见 ../ka_web/README.md）。
 
-用现有的内存实现（core/repository/*/memory.py）并播种示例数据装配 KnowledgeRepositoryApi，
+用现有的内存实现（knowledge_arch/repository/*/memory.py）并播种示例数据装配 KnowledgeRepositoryApi，
 直接拉起独立端口的 aiohttp 服务，无需 SQLite/R2/Notion 等真实后端——纯前端审阅用。
 真实后端（v0.3.0/v0.4.0）就绪后，组合根换注入即可，前端与本脚本逻辑不变。
 
@@ -26,20 +26,20 @@ if str(_ROOT) not in sys.path:
 
 from aiohttp import web  # noqa: E402
 
-from core.api import KnowledgeRepositoryApi  # noqa: E402
-from core.ask_progress import ProgressStore  # noqa: E402
-from core.config import Config  # noqa: E402
-from core.domain.models import (  # noqa: E402
+from ka_web.server import build_app  # noqa: E402
+from knowledge_arch.api import KnowledgeRepositoryApi  # noqa: E402
+from knowledge_arch.ask_progress import ProgressStore  # noqa: E402
+from knowledge_arch.config import Config  # noqa: E402
+from knowledge_arch.domain.models import (  # noqa: E402
     Collection,
     DocumentChunk,
     SourceDocument,
     SyncTargetKind,
 )
-from core.metrics import PerformanceTracker  # noqa: E402
-from core.repository.kb_reader.memory import InMemoryKnowledgeBaseReader  # noqa: E402
-from core.repository.source_store.memory import InMemorySourceDocumentStore  # noqa: E402
-from core.repository.sync_targets.memory import InMemorySyncTarget  # noqa: E402
-from web.server import build_app  # noqa: E402
+from knowledge_arch.metrics import PerformanceTracker  # noqa: E402
+from knowledge_arch.repository.kb_reader.memory import InMemoryKnowledgeBaseReader  # noqa: E402
+from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore  # noqa: E402
+from knowledge_arch.repository.sync_targets.memory import InMemorySyncTarget  # noqa: E402
 
 _DEFAULT_PASSWORD = "111111"
 _GB = 1024 * 1024 * 1024
@@ -123,7 +123,7 @@ class _DebugSyncPipeline:
 
 async def _make_app(args: argparse.Namespace) -> web.Application:
     # 提前安装日志 handler，确保后续所有日志（含种子数据构造）可被终端页捕获。
-    from core.log_capture import install as _install_log_capture
+    from knowledge_arch.log_capture import install as _install_log_capture
     _install_log_capture()
 
     store = InMemorySourceDocumentStore() if args.empty else await _seed_store()
@@ -151,7 +151,7 @@ async def _make_app(args: argparse.Namespace) -> web.Application:
         progress_store=ProgressStore(),
     )
     upload_dir = Path(tempfile.gettempdir()) / "kr_webui_uploads"
-    static_dir = _ROOT / "web" / "frontend" / "out"
+    static_dir = _ROOT / "ka_web" / "frontend" / "out"
     if not static_dir.exists():
         static_dir = _ROOT / "pages"
     return build_app(

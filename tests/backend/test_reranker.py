@@ -7,15 +7,15 @@ from __future__ import annotations
 
 import pytest
 
-from core.domain.models import DocumentChunk
-from core.repository.reranker import (
+from knowledge_arch.domain.models import DocumentChunk
+from knowledge_arch.repository.reranker import (
     PROVIDER_CROSS_ENCODER,
     PROVIDER_NOOP,
     NoopReranker,
     build_reranker,
 )
-from core.repository.reranker.base import ScoredChunk
-from core.utils.cutoff import adaptive_cutoff
+from knowledge_arch.repository.reranker.base import ScoredChunk
+from knowledge_arch.utils.cutoff import adaptive_cutoff
 
 
 def _chunk(cid: str, text: str = "x") -> DocumentChunk:
@@ -91,14 +91,18 @@ def test_build_noop_returns_noop():
 
 def test_build_cross_encoder_falls_back_when_dep_missing(monkeypatch):
     """显式 cross_encoder 但 sentence-transformers 缺失时回退 Noop。"""
-    monkeypatch.setattr("core.repository.reranker._has_sentence_transformers", lambda: False)
+    monkeypatch.setattr(
+        "knowledge_arch.repository.reranker._has_sentence_transformers", lambda: False
+    )
     assert isinstance(build_reranker(provider=PROVIDER_CROSS_ENCODER), NoopReranker)
 
 
 def test_build_cross_encoder_lazy_when_dep_present(monkeypatch):
     """显式 cross_encoder + 有依赖 → 懒加载 CrossEncoderReranker（构造不加载模型）。"""
-    monkeypatch.setattr("core.repository.reranker._has_sentence_transformers", lambda: True)
-    from core.repository.reranker.bge_local import CrossEncoderReranker
+    monkeypatch.setattr(
+        "knowledge_arch.repository.reranker._has_sentence_transformers", lambda: True
+    )
+    from knowledge_arch.repository.reranker.bge_local import CrossEncoderReranker
 
     reranker = build_reranker(provider=PROVIDER_CROSS_ENCODER)
     assert isinstance(reranker, CrossEncoderReranker)
@@ -109,7 +113,7 @@ def test_build_cross_encoder_lazy_when_dep_present(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cross_encoder_failure_sets_failed_status(monkeypatch):
-    from core.repository.reranker.bge_local import CrossEncoderReranker
+    from knowledge_arch.repository.reranker.bge_local import CrossEncoderReranker
 
     reranker = CrossEncoderReranker(model="missing-model")
     monkeypatch.setattr(

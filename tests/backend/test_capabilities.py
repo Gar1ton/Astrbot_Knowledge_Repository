@@ -1,13 +1,13 @@
 """能力注册表单测：环节状态机、依赖清单、安装白名单。
 
 只构造 Config 即可断言各环节状态——detect_pipeline 是纯函数，无 I/O。
-通过 monkeypatch `core.capabilities.module_available` 模拟可选依赖的安装与缺失。
+通过 monkeypatch `knowledge_arch.capabilities.module_available` 模拟可选依赖的安装与缺失。
 """
 from __future__ import annotations
 
 import pytest
 
-from core.capabilities import (
+from knowledge_arch.capabilities import (
     OPTIONAL_DEPENDENCIES,
     STATUS_DEGRADED,
     STATUS_OFF,
@@ -16,7 +16,7 @@ from core.capabilities import (
     detect_pipeline,
     resolve_install_spec,
 )
-from core.config import Config
+from knowledge_arch.config import Config
 
 
 def _cfg(raw: dict | None = None, dim: int | None = None) -> Config:
@@ -31,8 +31,10 @@ def _stage(pipeline: list[dict], stage_id: str) -> dict:
 
 
 def _patch_modules(monkeypatch: pytest.MonkeyPatch, available: set[str]) -> None:
-    monkeypatch.setattr("core.capabilities.module_available", lambda name: name in available)
-    monkeypatch.setattr("core.config._module_available", lambda name: name in available)
+    monkeypatch.setattr(
+        "knowledge_arch.capabilities.module_available", lambda name: name in available
+    )
+    monkeypatch.setattr("knowledge_arch.config._module_available", lambda name: name in available)
 
 
 # ── 安装白名单 ────────────────────────────────────────────────────

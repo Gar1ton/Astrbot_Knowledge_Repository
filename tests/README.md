@@ -23,7 +23,7 @@ assert await mgr.recall("q") == [...]
 
 ## 约定
 
-- 测试文件 `test_<被测模块>.py`，与 `core/` 结构对应。
+- 测试文件 `test_<被测模块>.py`，与 `knowledge_arch/` 结构对应。
 - 每条公开契约都有测试；**改接口必须同步改测试**。
 - `TODO.md` 里把条目标 `[x]` 的前提是相关测试**已过**。
 - pytest 配置在根 `pyproject.toml`（`asyncio_mode = "auto"`、`pythonpath`、`testpaths`）。

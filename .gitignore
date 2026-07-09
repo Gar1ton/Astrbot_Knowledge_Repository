@@ -37,12 +37,12 @@ run_config.py          # 由 dev/run_config.example.py 复制而来，含本地�
 *.log
 /data/                 # 运行态数据/原件目录（含知识内容，不入库）
 
-# ── 前端（仅当存在 web/frontend/）───────────────────────
-web/frontend/node_modules/
-web/frontend/.next/
-web/frontend/out/
-web/frontend/public/pdfjs/
-web/frontend/next-env.d.ts
+# ── 前端（仅当存在 ka_web/frontend/）───────────────────────
+ka_web/frontend/node_modules/
+ka_web/frontend/.next/
+ka_web/frontend/out/
+ka_web/frontend/public/pdfjs/
+ka_web/frontend/next-env.d.ts
 
 # ── 编辑器 / 系统 ───────────────────────────────────────
 .DS_Store

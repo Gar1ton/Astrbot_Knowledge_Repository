@@ -164,6 +164,7 @@ const BACKEND_LABEL_ZH: Record<string, string> = {
   archive: "归档堆栈",
   managed_copy: "副本托管",
   linked: "链接 Zotero",
+  zotmoov: "ZotMoov 目录",
 };
 
 const BACKEND_LABEL_EN: Record<string, string> = {
@@ -189,6 +190,7 @@ const BACKEND_LABEL_EN: Record<string, string> = {
   archive: "Archive",
   managed_copy: "Managed copy",
   linked: "Linked",
+  zotmoov: "ZotMoov folder",
 };
 
 export function isFlowStageId(id: string): id is FlowStageId {

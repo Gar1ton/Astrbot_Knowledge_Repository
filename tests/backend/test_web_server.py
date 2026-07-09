@@ -1135,6 +1135,7 @@ async def test_zotero_routes_respond(tmp_path: Path) -> None:
         assert cfg["enabled"] is False
         assert cfg["sync_mode"] == "conservative"
         assert cfg["storage_mode"] == "managed_copy"
+        assert cfg["zotmoov_root"] == ""
 
         pull = await (await client.post("/api/sync/zotero/pull", json={})).json()
         assert pull["status"] == "error"  # 未启用/未装配

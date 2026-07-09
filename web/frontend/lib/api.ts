@@ -104,8 +104,9 @@ export interface ZoteroConfig {
   zotero_data_dir: string;
   resolved_data_dir?: string;
   api_port: number;
-  storage_mode: "managed_copy" | "linked";
+  storage_mode: "managed_copy" | "linked" | "zotmoov";
   linked_root: string;
+  zotmoov_root: string;
   sync_mode: "strict_mirror" | "conservative" | "archive";
   auto_sync_enabled: boolean;
   auto_sync_interval_sec: number;
@@ -125,6 +126,7 @@ export interface ZoteroConfig {
     server_access?: Record<string, unknown>;
   };
   linked_probe?: { valid: boolean; reason: string; resolved: string };
+  zotmoov_probe?: { valid: boolean; reason: string; resolved: string };
 }
 
 export interface ZoteroAccountChangeRequired {
@@ -635,7 +637,7 @@ const MOCK_CONFIG: EffectiveConfig = {
   },
   vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true },
   embedding: { provider: "local", model: "intfloat/multilingual-e5-small", base_url: "https://api.openai.com/v1", max_token_size: 512, actual_dimension: 384, api_key: "" },
-  zotero_sync: { enabled: false, access_mode: "local", zotero_data_dir: "", resolved_data_dir: "", api_port: 23119, storage_mode: "managed_copy", linked_root: "", sync_mode: "conservative", auto_sync_enabled: false, auto_sync_interval_sec: 3600, server_key_present: false, server_key_masked: "" },
+  zotero_sync: { enabled: false, access_mode: "local", zotero_data_dir: "", resolved_data_dir: "", api_port: 23119, storage_mode: "managed_copy", linked_root: "", zotmoov_root: "", sync_mode: "conservative", auto_sync_enabled: false, auto_sync_interval_sec: 3600, server_key_present: false, server_key_masked: "" },
 };
 
 const MOCK_ASK: AskResult = {
@@ -889,6 +891,7 @@ const MOCK_REBUILD_KEYS = new Set([
   "graph.max_doc_chars",
   "zotero_sync.storage_mode",
   "zotero_sync.linked_root",
+  "zotero_sync.zotmoov_root",
   "zotero_sync.sync_mode",
 ]);
 
@@ -1355,8 +1358,9 @@ export async function getZoteroConfig(timeoutMs = 8_000): Promise<ZoteroConfig> 
       zotero_data_dir: String(z.zotero_data_dir ?? ""),
       resolved_data_dir: String(z.resolved_data_dir ?? ""),
       api_port: Number(z.api_port ?? 23119),
-      storage_mode: z.storage_mode === "linked" ? "linked" : "managed_copy",
+      storage_mode: z.storage_mode === "linked" || z.storage_mode === "zotmoov" ? z.storage_mode : "managed_copy",
       linked_root: String(z.linked_root ?? ""),
+      zotmoov_root: String(z.zotmoov_root ?? ""),
       sync_mode: z.sync_mode === "strict_mirror" || z.sync_mode === "archive" ? z.sync_mode : "conservative",
       auto_sync_enabled: Boolean(z.auto_sync_enabled),
       auto_sync_interval_sec: Number(z.auto_sync_interval_sec ?? 3600),

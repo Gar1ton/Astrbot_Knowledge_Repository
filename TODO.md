@@ -1,6 +1,56 @@
 # TODO
 
-## v1.0.0 正式发布准备：developer 源码分支 + orphan main 发布分支 (developer 侧完成，待用户远端操作)
+## v1.0.1：新增 Zotero 存储模式 zotmoov（ZotMoov 目录）(completed)
+
+### User constraints / 约束
+
+- 用户装有 ZotMoov 插件：附件移出 Zotero storage、转为 linked_file，DB 路径为
+  `attachments:rel`（配了基础目录）或宿主机绝对路径（Docker 容器内失效）。
+- 已拍板：新增第三种 `storage_mode="zotmoov"`（与 access_mode 正交）；文件匹配 =
+  相对路径拼配置目录 + 绝对路径失效时文件名递归索引兜底（每次 pull 至多建一次索引）；
+  元数据沿用 access_mode 开关；版本 patch → v1.0.1。
+- 前端只加在 Flow 快捷面板（沿袭 linked_root 先例），保持 Flow 审美；`pages/` 只经 build+sync 生成。
+- 顺手修复两个 linked_file 路径 bug：reader 把 `attachments:rel` 当绝对路径；
+  linked 模式兜底只拼 basename 丢子目录。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 配置层**：`config.py` 加 `ZOTERO_STORAGE_ZOTMOOV` 常量与
+  `zotmoov_root` 字段（解析允许集合、to_public_dict、CONFIG_KEY_POLICY=rebuild）；
+  `r2_backup_manager._portable_config` 排除 `zotmoov_root`（宿主机专属路径）。
+- [x] **Phase 2 - 适配器层**：新建 `core/adapters/zotero/zotmoov.py`
+  （ZotmoovResolver：attachments: 相对拼接 → 绝对路径 → 文件名索引消歧，重名歧义上报）；
+  `paths.py` 抽 `_probe_dir` 并加 `probe_zotmoov_root`；`sqlite_reader.py` 修
+  `attachments:` 前缀误当绝对路径的 bug（resolved 留空交 pipeline 解析）。
+- [x] **Phase 3 - 管线层**：`zotero_sync_pipeline.py` 注入 ZotmoovResolver、
+  `link_only` 涵盖 zotmoov、`_resolve_source_path` 返回 `(src, via_web)` 且
+  web 下载件强制 copy（`link_original=link_only and not via_web`）；
+  linked 兜底先拼相对子路径；is_available 输出 `zotmoov_probe`。
+- [x] **Phase 4 - API 层**：`api.get_zotero_config` 输出 `zotmoov_root` 与
+  `zotmoov_probe`（storage_mode==zotmoov 时）。无新路由。
+- [x] **Phase 5 - 后端测试**：pipeline 用例（相对路径/索引兜底/重名歧义与消歧/
+  混合库/server+zotmoov/linked 子路径回归/reader 回归）+ config 解析 + web_server
+  默认值 + probe 三分支。
+- [x] **Phase 6 - 前端**：`api.ts` 类型与 mock、`ZOTERO_STORAGE_MODES` 加项、
+  `model.ts` backendLabel zh/en、`ZoteroQuickConfig` 条件字段（browseDir）与
+  探针状态行（顺手补渲染 linked_probe）、`i18n.ts` zh+en 文案。
+- [x] **Phase 7 - 收尾**：pytest / ruff+mypy / 前端 build+sync 全绿；CHANGELOG
+  追加；`python bump_version.py patch` → v1.0.1。
+- [x] **Phase 8 - 发布后修复（两处）**：① Flow 面板切换 PDF 存储后 root 字段不立即
+  出现——`linked_root`/`zotmoov_root` 常驻 draft 模型、按 draft 的 storage_mode 即时
+  显隐，隐藏字段残留草稿不参与保存/计数，探针仍按已保存配置显示
+  （ZoteroQuickConfig.tsx）；② `_current_config_value()` getters 缺 `zotero_sync`
+  致同值重存误报 restart/rebuild 并误触发嵌入索引失效——补 `zotero_sync` 与
+  `deep_thinking` getter + 同值重存回归测试（core/api.py、tests/backend/test_api.py）。
+
+### Verification
+
+- `python -m pytest` → **609 passed**（含 zotmoov/linked 回归 13 例 + 同值重存回归 1 例）。
+- `ruff check .` 通过；`mypy` Success（strict 范围无新问题）。
+- `cd web/frontend && npm run build`（含 TypeScript 检查）13 静态页预渲染成功；
+  `python tools/sync_frontend.py` 同步 357 文件到 `pages/`（Phase 8 后复跑仍全绿）。
+
+## v1.0.1 正式发布准备：developer 源码分支 + orphan main 发布分支 (developer 侧完成，待用户远端操作)
 
 ### User constraints / 约束
 

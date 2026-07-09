@@ -51,6 +51,28 @@ def test_section_overrides() -> None:
     assert r2.free_tier_gb == 10
 
 
+def test_zotero_zotmoov_storage_mode_roundtrip() -> None:
+    cfg = Config({"zotero_sync": {"storage_mode": "zotmoov", "zotmoov_root": "/data/zotmoov"}})
+    z = cfg.get_zotero_sync_config()
+    assert z.storage_mode == "zotmoov"
+    assert z.zotmoov_root == "/data/zotmoov"
+    assert cfg.to_public_dict()["zotero_sync"]["zotmoov_root"] == "/data/zotmoov"
+
+
+def test_zotero_invalid_storage_mode_falls_back_to_default() -> None:
+    z = Config({"zotero_sync": {"storage_mode": "bogus"}}).get_zotero_sync_config()
+    assert z.storage_mode == "managed_copy"
+
+
+def test_zotero_zotmoov_root_key_policy_registered() -> None:
+    from core.config import CONFIG_KEY_POLICY, CONSEQUENCE_REBUILD
+
+    policy = CONFIG_KEY_POLICY["zotero_sync"]["zotmoov_root"]
+    assert policy.api_writable is True
+    assert policy.runtime_persistable is True
+    assert policy.consequence == CONSEQUENCE_REBUILD
+
+
 def test_r2_endpoint_and_free_tier_bytes() -> None:
     assert Config({}).get_r2_sync_config().endpoint == ""  # 无 account_id
     r2 = Config({"r2_sync": {"account_id": "abc"}}).get_r2_sync_config()

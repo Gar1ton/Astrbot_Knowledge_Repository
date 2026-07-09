@@ -2,7 +2,7 @@
 
 构造最小 Zotero schema 子集 + storage/<key>/paper.pdf，验证：
 镜像表、制品包生成、incremental 跳过、conservative 硬删除、strict 脱管(detached)、archive 只增不删、
-linked 存储模式（原件留外部）。
+linked 存储模式（原件留外部）、zotmoov 存储模式（ZotMoov 目录解析 + 文件名索引兜底）。
 """
 from __future__ import annotations
 
@@ -39,8 +39,15 @@ def _make_pdf(path: Path, text: str = "Zotero synced paper content. Value ecolog
     doc.close()
 
 
-def _build_zotero_db(data_dir: Path, *, with_attachment: bool = True, version: int = 5) -> None:
-    """构造最小 Zotero schema 子集。"""
+def _build_zotero_db(
+    data_dir: Path,
+    *,
+    with_attachment: bool = True,
+    version: int = 5,
+    linked_attachments: list[tuple[str, str]] | None = None,
+) -> None:
+    """构造最小 Zotero schema 子集。linked_attachments 为 (attachment_key, db_path) 的
+    linkMode=2 附件行（模拟 ZotMoov 移动后的 linked_file），挂在同一文献条目下。"""
     db = sqlite3.connect(data_dir / "zotero.sqlite")
     db.executescript(
         """
@@ -104,23 +111,40 @@ def _build_zotero_db(data_dir: Path, *, with_attachment: bool = True, version: i
             "'storage:paper.pdf', 'md5hash')"
         )
         _make_pdf(data_dir / "storage" / ATT / "paper.pdf")
+    for i, (att_key, db_path) in enumerate(linked_attachments or []):
+        item_id = 20 + i
+        db.execute(
+            "INSERT INTO items VALUES (?, 2, 1, ?, ?, '2026-06-01 10:00:00', "
+            "'2026-06-02 10:00:00')",
+            (item_id, att_key, version),
+        )
+        db.execute(
+            "INSERT INTO itemAttachments VALUES (?, 10, 2, 'application/pdf', ?, NULL)",
+            (item_id, db_path),
+        )
     db.commit()
     db.close()
 
 
-def _pipeline(tmp_path: Path, data_dir: Path, sync_mode: str, storage_mode: str = "managed_copy"):
+def _pipeline(
+    tmp_path: Path,
+    data_dir: Path,
+    sync_mode: str,
+    storage_mode: str = "managed_copy",
+    extra: dict | None = None,
+):
     store = InMemorySourceDocumentStore()
     ingest = IngestManager(
         source_store=store, config=SourceStoreConfig(), data_dir=tmp_path / "plugin"
     )
-    cfg = Config({
-        "zotero_sync": {
-            "enabled": True,
-            "zotero_data_dir": str(data_dir),
-            "sync_mode": sync_mode,
-            "storage_mode": storage_mode,
-        }
-    })
+    section: dict = {
+        "enabled": True,
+        "zotero_data_dir": str(data_dir),
+        "sync_mode": sync_mode,
+        "storage_mode": storage_mode,
+    }
+    section.update(extra or {})
+    cfg = Config({"zotero_sync": section})
     indexed: list[str] = []
 
     async def index_cb(doc_id: str, collection: str) -> None:
@@ -365,6 +389,262 @@ async def test_pull_linked_keeps_original_external(tmp_path: Path) -> None:
     assert not (tmp_path / "plugin" / "library" / DOC_ID / "original.pdf").exists()
     # 但派生制品 clean.md 仍在插件内
     assert (tmp_path / "plugin" / "library" / DOC_ID / "clean.md").exists()
+
+
+# ── reader: linked_file 路径解析回归 ─────────────────────────────
+
+
+def test_reader_linked_relative_leaves_resolved_empty(tmp_path: Path) -> None:
+    """回归：'attachments:rel' 不得按 CWD 相对路径误判，resolved 留空交 pipeline 解析。"""
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    _build_zotero_db(
+        data_dir,
+        with_attachment=False,
+        linked_attachments=[("ATTLNK01", "attachments:sub/a.pdf")],
+    )
+    snap = ZoteroSqliteReader(data_dir).read_snapshot()
+    assert len(snap.attachments) == 1
+    att = snap.attachments[0]
+    assert att.link_mode == "linked_file"
+    assert att.filename == "a.pdf"
+    assert att.resolved_path == ""
+
+
+# ── pipeline: zotmoov 存储模式 ───────────────────────────────────
+
+
+async def test_pull_zotmoov_resolves_attachments_relative(tmp_path: Path) -> None:
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    zroot = tmp_path / "zotmoov"
+    _make_pdf(zroot / "sub" / "dir" / "paper2.pdf")
+    _build_zotero_db(
+        data_dir,
+        with_attachment=False,
+        linked_attachments=[("ATTLNK01", "attachments:sub/dir/paper2.pdf")],
+    )
+    store, pipeline, _, _ = _pipeline(
+        tmp_path, data_dir, "conservative",
+        storage_mode="zotmoov", extra={"zotmoov_root": str(zroot)},
+    )
+
+    avail = pipeline.is_available()
+    assert avail["zotmoov_probe"]["valid"] is True  # type: ignore[index]
+
+    doc_id = make_document_id(LIB, ITEM, "ATTLNK01")
+    result = await pipeline.pull()
+    assert result.new_document_ids == [doc_id]
+    doc = await store.get_document(doc_id)
+    assert doc is not None
+    # zotmoov：file_path 指向 ZotMoov 目录内原件，原件不复制进插件制品包
+    assert doc.file_path == str(zroot / "sub" / "dir" / "paper2.pdf")
+    assert not (tmp_path / "plugin" / "library" / doc_id / "original.pdf").exists()
+    assert (tmp_path / "plugin" / "library" / doc_id / "clean.md").exists()
+
+
+async def test_pull_zotmoov_absolute_miss_falls_back_to_index(tmp_path: Path) -> None:
+    """DB 存宿主机绝对路径（容器内失效）→ 按文件名递归索引兜底命中。"""
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    zroot = tmp_path / "zotmoov"
+    _make_pdf(zroot / "x" / "paper3.pdf")
+    _build_zotero_db(
+        data_dir,
+        with_attachment=False,
+        linked_attachments=[("ATTLNK02", "/host/only/paper3.pdf")],
+    )
+    store, pipeline, _, _ = _pipeline(
+        tmp_path, data_dir, "conservative",
+        storage_mode="zotmoov", extra={"zotmoov_root": str(zroot)},
+    )
+    result = await pipeline.pull()
+    doc_id = make_document_id(LIB, ITEM, "ATTLNK02")
+    assert result.new_document_ids == [doc_id]
+    doc = await store.get_document(doc_id)
+    assert doc is not None
+    assert doc.file_path == str(zroot / "x" / "paper3.pdf")
+
+
+async def test_pull_zotmoov_duplicate_filename_skipped_with_error(tmp_path: Path) -> None:
+    """重名且无法消歧：绝不静默挑一个，跳过并把原因写进 result.errors。"""
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    zroot = tmp_path / "zotmoov"
+    _make_pdf(zroot / "a" / "paper.pdf")
+    _make_pdf(zroot / "b" / "paper.pdf")
+    _build_zotero_db(
+        data_dir,
+        with_attachment=False,
+        linked_attachments=[("ATTLNK03", "/gone/paper.pdf")],
+    )
+    store, pipeline, _, _ = _pipeline(
+        tmp_path, data_dir, "conservative",
+        storage_mode="zotmoov", extra={"zotmoov_root": str(zroot)},
+    )
+    result = await pipeline.pull()
+    assert result.new_document_ids == []
+    assert await store.get_document(make_document_id(LIB, ITEM, "ATTLNK03")) is None
+    assert any("同名" in e for e in result.errors)
+
+
+async def test_pull_zotmoov_duplicate_disambiguated_by_parent_dir(tmp_path: Path) -> None:
+    """重名但 DB 路径父目录名尾段可消歧 → 正常命中。"""
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    zroot = tmp_path / "zotmoov"
+    _make_pdf(zroot / "a" / "paper.pdf")
+    _make_pdf(zroot / "b" / "paper.pdf")
+    _build_zotero_db(
+        data_dir,
+        with_attachment=False,
+        linked_attachments=[("ATTLNK03", "/gone/b/paper.pdf")],
+    )
+    store, pipeline, _, _ = _pipeline(
+        tmp_path, data_dir, "conservative",
+        storage_mode="zotmoov", extra={"zotmoov_root": str(zroot)},
+    )
+    result = await pipeline.pull()
+    doc_id = make_document_id(LIB, ITEM, "ATTLNK03")
+    assert result.new_document_ids == [doc_id]
+    doc = await store.get_document(doc_id)
+    assert doc is not None
+    assert doc.file_path == str(zroot / "b" / "paper.pdf")
+    assert result.errors == []
+
+
+async def test_pull_zotmoov_mixed_imported_and_moved(tmp_path: Path) -> None:
+    """混合库：仍在 storage/ 的 imported 件与已被 ZotMoov 移走的 linked 件都入库。"""
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    zroot = tmp_path / "zotmoov"
+    _make_pdf(zroot / "moved.pdf")
+    _build_zotero_db(
+        data_dir,
+        linked_attachments=[("ATTLNK04", "attachments:moved.pdf")],
+    )
+    store, pipeline, _, _ = _pipeline(
+        tmp_path, data_dir, "conservative",
+        storage_mode="zotmoov", extra={"zotmoov_root": str(zroot)},
+    )
+    result = await pipeline.pull()
+    moved_id = make_document_id(LIB, ITEM, "ATTLNK04")
+    assert set(result.new_document_ids) == {DOC_ID, moved_id}
+    imported = await store.get_document(DOC_ID)
+    moved = await store.get_document(moved_id)
+    assert imported is not None and moved is not None
+    assert moved.file_path == str(zroot / "moved.pdf")
+
+
+async def test_pull_server_zotmoov_local_dir_wins_web_fallback(tmp_path: Path) -> None:
+    """server+zotmoov：linked 件从本地目录解析（不下载），imported 件惰性下载且复制进制品包。"""
+    cloud_pdf = tmp_path / "cloud" / "paper.pdf"
+    _make_pdf(cloud_pdf)
+    zroot = tmp_path / "zotmoov"
+    _make_pdf(zroot / "sub" / "moved.pdf")
+    downloads: list[str] = []
+
+    class FakeClient:
+        def get_current_key(self) -> dict:
+            return {
+                "userID": 123,
+                "username": "alice",
+                "access": {"user": {"library": True, "files": True}},
+            }
+
+        def list_user_collections(self, user_id: str) -> list[dict]:
+            return []
+
+        def list_user_items(self, user_id: str) -> list[dict]:
+            return [
+                {"key": "ITEM1", "version": 7, "data": {
+                    "key": "ITEM1", "itemType": "journalArticle", "title": "Server Paper"}},
+                {"key": "ATT1", "version": 7, "data": {
+                    "key": "ATT1", "itemType": "attachment", "parentItem": "ITEM1",
+                    "contentType": "application/pdf", "filename": "paper.pdf",
+                    "linkMode": "imported_file"}},
+                {"key": "ATTL", "version": 7, "data": {
+                    "key": "ATTL", "itemType": "attachment", "parentItem": "ITEM1",
+                    "contentType": "application/pdf", "linkMode": "linked_file",
+                    "path": "attachments:sub/moved.pdf"}},
+            ]
+
+        def download_user_file(self, user_id: str, item_key: str, target_path: Path) -> Path:
+            downloads.append(item_key)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(cloud_pdf.read_bytes())
+            return target_path
+
+    store = InMemorySourceDocumentStore()
+    ingest = IngestManager(
+        source_store=store, config=SourceStoreConfig(), data_dir=tmp_path / "plugin"
+    )
+    cfg = Config({"zotero_sync": {
+        "enabled": True, "access_mode": "server",
+        "storage_mode": "zotmoov", "zotmoov_root": str(zroot),
+    }})
+    pipeline = ZoteroSyncPipeline(
+        source_store=store,
+        ingest_manager=ingest,
+        config=cfg,
+        web_client_factory=lambda key: FakeClient(),  # type: ignore[arg-type,return-value]
+        zotero_api_key_provider=lambda: "k",
+        web_cache_dir=tmp_path / "webcache",
+    )
+
+    result = await pipeline.pull()
+    imported_id = make_document_id("123", "ITEM1", "ATT1")
+    moved_id = make_document_id("123", "ITEM1", "ATTL")
+    assert set(result.new_document_ids) == {imported_id, moved_id}
+    assert downloads == ["ATT1"]  # linked 件不触发下载
+
+    moved = await store.get_document(moved_id)
+    assert moved is not None
+    assert moved.file_path == str(zroot / "sub" / "moved.pdf")
+    # web 下载件强制复制进制品包（缓存目录不可作为 link 归宿）
+    imported = await store.get_document(imported_id)
+    assert imported is not None
+    assert str(tmp_path / "plugin") in imported.file_path
+
+
+# ── pipeline: linked 模式 'attachments:' 子路径兜底回归 ──────────
+
+
+async def test_pull_linked_resolves_attachments_subpath(tmp_path: Path) -> None:
+    """回归：linked 兜底须先按相对子路径拼 linked_root，不能只拼 basename 丢子目录。"""
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    lroot = tmp_path / "linkedroot"
+    _make_pdf(lroot / "sub" / "p.pdf")
+    _build_zotero_db(
+        data_dir,
+        with_attachment=False,
+        linked_attachments=[("ATTLNK05", "attachments:sub/p.pdf")],
+    )
+    store, pipeline, _, _ = _pipeline(
+        tmp_path, data_dir, "conservative",
+        storage_mode="linked", extra={"linked_root": str(lroot)},
+    )
+    result = await pipeline.pull()
+    doc_id = make_document_id(LIB, ITEM, "ATTLNK05")
+    assert result.new_document_ids == [doc_id]
+    doc = await store.get_document(doc_id)
+    assert doc is not None
+    assert doc.file_path == str(lroot / "sub" / "p.pdf")
+
+
+# ── 目录探针 ─────────────────────────────────────────────────────
+
+
+def test_probe_zotmoov_root_branches(tmp_path: Path) -> None:
+    from core.adapters.zotero import paths as zpaths
+
+    unset = zpaths.probe_zotmoov_root("")
+    assert unset["valid"] is False and "未配置" in str(unset["reason"])
+    missing = zpaths.probe_zotmoov_root(str(tmp_path / "nope"))
+    assert missing["valid"] is False and "不存在" in str(missing["reason"])
+    ok = zpaths.probe_zotmoov_root(str(tmp_path))
+    assert ok["valid"] is True and ok["resolved"] == str(tmp_path)
 
 
 # ── pipeline: 本地干跑探针 ───────────────────────────────────────

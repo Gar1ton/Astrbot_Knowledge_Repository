@@ -29,7 +29,7 @@ export type QuickConfigDirty = { count: number; canSave: boolean };
 export type QuickConfigHandle = { save: () => void };
 
 export const ZOTERO_SYNC_MODES = ["strict_mirror", "conservative", "archive"];
-export const ZOTERO_STORAGE_MODES = ["managed_copy", "linked"];
+export const ZOTERO_STORAGE_MODES = ["managed_copy", "linked", "zotmoov"];
 
 type QuickConfigFieldBase = {
   id: string;

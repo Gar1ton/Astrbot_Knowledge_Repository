@@ -889,6 +889,29 @@ async def test_rerank_config_update_hot_swaps_deep_thinking(
     assert rerank_cfg.provider == "cross_encoder"
 
 
+async def test_zotero_config_same_value_save_reports_no_consequence() -> None:
+    """回归：_current_config_value 的 getters 缺 zotero_sync 曾让 changed 恒判 True——
+    同值重存误报 restart/rebuild，REBUILD 键（storage_mode 等）还会误触发嵌入索引失效。"""
+    from core.config import Config
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"zotero_sync": {"storage_mode": "zotmoov", "zotmoov_root": "/data/z"}}),
+    )
+
+    same = await api.update_config_value("zotero_sync", "storage_mode", "zotmoov")
+    assert same["restart_required"] is False
+    assert same["rebuild_required"] is False
+    assert await store.list_pending_reindex_documents() == []  # 同值：不得触发索引失效
+
+    changed = await api.update_config_value("zotero_sync", "storage_mode", "linked")
+    assert changed["rebuild_required"] is True
+    assert [d.doc_id for d in await store.list_pending_reindex_documents()] == ["d1"]
+
+
 async def test_vector_db_sync_and_rebuild(tmp_path: Path) -> None:
     """测试在 milvus 模式下
     rebuild_vector_store、delete_document 和 delete_collection 的联动一致性。

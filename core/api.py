@@ -3294,6 +3294,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "r2_sync": self._config.get_r2_sync_config,
             "notion_sync": self._config.get_notion_sync_config,
             "source_store": self._config.get_source_store_config,
+            # 缺 getter 会让 update_config_value 的 changed 恒判 True：同值重存也误报
+            # restart/rebuild，REBUILD 键还会误触发嵌入索引失效。可写 section 必须齐全。
+            "zotero_sync": self._config.get_zotero_sync_config,
+            "deep_thinking": self._config.get_deep_thinking_config,
         }
         getter = getters.get(section)
         return getattr(getter(), key, None) if getter else None
@@ -3548,10 +3552,14 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     # ── Zotero 同步公开门面 ──────────────────────────────────────
 
     async def get_zotero_config(self) -> dict[str, Any]:
-        """返回 Zotero 同步配置 + 连接/数据目录/linked 探针状态（供设置与 sync 页）。"""
+        """返回 Zotero 同步配置 + 连接/数据目录/linked/zotmoov 探针状态（供设置与 sync 页）。"""
         from core.adapters.zotero import local_api
         from core.adapters.zotero import paths as zpaths
-        from core.config import ZOTERO_ACCESS_SERVER, ZOTERO_STORAGE_LINKED
+        from core.config import (
+            ZOTERO_ACCESS_SERVER,
+            ZOTERO_STORAGE_LINKED,
+            ZOTERO_STORAGE_ZOTMOOV,
+        )
 
         if self._config is None:
             return {"enabled": False, "available": False}
@@ -3565,6 +3573,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "api_port": cfg.api_port,
             "storage_mode": cfg.storage_mode,
             "linked_root": cfg.linked_root,
+            "zotmoov_root": cfg.zotmoov_root,
             "sync_mode": cfg.sync_mode,
             "auto_sync_enabled": cfg.auto_sync_enabled,
             "auto_sync_interval_sec": cfg.auto_sync_interval_sec,
@@ -3596,6 +3605,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 out["server_access"] = access if isinstance(access, dict) else {}
         if cfg.storage_mode == ZOTERO_STORAGE_LINKED:
             out["linked_probe"] = zpaths.probe_linked_root(cfg.linked_root)
+        if cfg.storage_mode == ZOTERO_STORAGE_ZOTMOOV:
+            out["zotmoov_probe"] = zpaths.probe_zotmoov_root(cfg.zotmoov_root)
         return out
 
     async def probe_zotero_local(self) -> dict[str, Any]:

@@ -47,9 +47,9 @@ function editableFields(config: QuickConfigPanelProps["config"], tab: AccessMode
   fields.push(selectField("zotero_sync", "sync_mode", "flow_quick_zotero_sync_mode", readString(config, "zotero_sync", "sync_mode", "conservative"), ZOTERO_SYNC_MODES, false, "flow_help_zotero_sync_mode"));
   const storageMode = readString(config, "zotero_sync", "storage_mode", "managed_copy");
   fields.push(selectField("zotero_sync", "storage_mode", "flow_quick_zotero_storage_mode", storageMode, ZOTERO_STORAGE_MODES));
-  if (storageMode === "linked") {
-    fields.push(textField("zotero_sync", "linked_root", "flow_quick_zotero_linked_root", readString(config, "zotero_sync", "linked_root"), true, false, "flow_help_zotero_linked_storage"));
-  }
+  // root 字段常驻 draft 模型；显示与否由组件按 draft 的 storage_mode 决定（切换后立即出现，无需先保存）。
+  fields.push(textField("zotero_sync", "linked_root", "flow_quick_zotero_linked_root", readString(config, "zotero_sync", "linked_root"), true, false, "flow_help_zotero_linked_storage"));
+  fields.push(textField("zotero_sync", "zotmoov_root", "flow_quick_zotero_zotmoov_root", readString(config, "zotero_sync", "zotmoov_root"), true, true, "flow_help_zotero_zotmoov"));
   fields.push(booleanField("zotero_sync", "auto_sync_enabled", "flow_quick_zotero_auto_sync", readBoolean(config, "zotero_sync", "auto_sync_enabled", false)));
   if (readBoolean(config, "zotero_sync", "auto_sync_enabled", false)) {
     fields.push(numberField("zotero_sync", "auto_sync_interval_sec", "flow_quick_zotero_interval", readNumberString(config, "zotero_sync", "auto_sync_interval_sec", 3600)));
@@ -57,7 +57,7 @@ function editableFields(config: QuickConfigPanelProps["config"], tab: AccessMode
   return fields;
 }
 
-const ADVANCED_KEYS = new Set(["sync_mode", "storage_mode", "linked_root", "auto_sync_enabled", "auto_sync_interval_sec"]);
+const ADVANCED_KEYS = new Set(["sync_mode", "storage_mode", "linked_root", "zotmoov_root", "auto_sync_enabled", "auto_sync_interval_sec"]);
 
 export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelProps>(function ZoteroQuickConfig(
   { config, lang, t, saving, onSave, onRefresh, onDirtyChange, advancedOpen, onToggleAdvanced, advancedSlot },
@@ -77,22 +77,35 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
     setDirPickerFieldId(null);
   }, [dirPickerFieldId, setDraft]);
 
-  const canSave = updates.length > 0 && !hasInvalidNumber && !saving;
+  // 按 draft 的 storage_mode 决定哪个 root 字段生效：隐藏字段的残留草稿不参与保存与计数。
+  const draftStorageMode = String(
+    draft["zotero_sync.storage_mode"] ?? readString(config, "zotero_sync", "storage_mode", "managed_copy"),
+  );
+  const rootFieldHidden = useCallback((key: string) => (
+    (key === "linked_root" && draftStorageMode !== "linked")
+    || (key === "zotmoov_root" && draftStorageMode !== "zotmoov")
+  ), [draftStorageMode]);
+  const visibleUpdates = useMemo(
+    () => updates.filter((u) => !rootFieldHidden(u.key)),
+    [updates, rootFieldHidden],
+  );
+
+  const canSave = visibleUpdates.length > 0 && !hasInvalidNumber && !saving;
 
   // 头部徽章充当唯一保存入口：上报草稿态 + 暴露 save。access_mode 标签切换/服务器 Key/立即同步仍各自保留按钮。
   useImperativeHandle(
     ref,
     () => ({
       save: () => {
-        if (updates.length > 0 && !hasInvalidNumber && !saving) onSave("zotero", updates);
+        if (visibleUpdates.length > 0 && !hasInvalidNumber && !saving) onSave("zotero", visibleUpdates);
       },
     }),
-    [updates, hasInvalidNumber, saving, onSave],
+    [visibleUpdates, hasInvalidNumber, saving, onSave],
   );
 
   useEffect(() => {
-    onDirtyChange?.({ count: updates.length, canSave });
-  }, [updates.length, canSave, onDirtyChange]);
+    onDirtyChange?.({ count: visibleUpdates.length, canSave });
+  }, [visibleUpdates.length, canSave, onDirtyChange]);
 
   // ── 标签切换：即时持久化 access_mode ───────────────────────────
   const switchTab = useCallback((mode: AccessMode) => {
@@ -255,7 +268,16 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
   );
 
   const coreFields = fields.filter((f) => !ADVANCED_KEYS.has(f.key));
-  const advancedFields = fields.filter((f) => ADVANCED_KEYS.has(f.key));
+  const advancedFields = fields.filter((f) => ADVANCED_KEYS.has(f.key) && !rootFieldHidden(f.key));
+
+  // ── 目录探针（linked / zotmoov 存储模式；后端随 config 返回,已保存值）────
+  const zoteroSection = (config.zotero_sync ?? {}) as Record<string, unknown>;
+  const savedStorageMode = readString(config, "zotero_sync", "storage_mode", "managed_copy");
+  const dirProbe = (savedStorageMode === "zotmoov"
+    ? zoteroSection.zotmoov_probe
+    : savedStorageMode === "linked"
+      ? zoteroSection.linked_probe
+      : null) as { valid?: boolean; reason?: string; resolved?: string } | null;
 
   return (
     <>
@@ -359,6 +381,20 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
         {/* 高级（折叠浮层；Portal 到节点底部槽位，不影响节点测量高度） */}
         <AdvancedSection open={advancedOpen} onToggle={onToggleAdvanced} label={t("flow_quick_zotero_advanced")} slot={advancedSlot}>
           <div className="flow-quick-grid">{advancedFields.map(renderField)}</div>
+          {dirProbe && (
+            <div className="flow-quick-diag">
+              <span className={`flow-quick-dot ${dirProbe.valid ? "is-ok" : "is-off"}`} />
+              <span className="flow-quick-diag-label">
+                {dirProbe.valid ? t("flow_quick_zotero_dir_ok") : t("flow_quick_zotero_dir_invalid")}
+              </span>
+              <span
+                className="flow-quick-diag-counts"
+                title={(dirProbe.valid ? dirProbe.resolved : dirProbe.reason) || undefined}
+              >
+                {(dirProbe.valid ? dirProbe.resolved : dirProbe.reason) || t("flow_value_empty")}
+              </span>
+            </div>
+          )}
         </AdvancedSection>
 
         {hasInvalidNumber && <div className="flow-quick-error">{t("flow_quick_number_invalid")}</div>}

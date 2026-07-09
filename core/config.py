@@ -270,6 +270,7 @@ class EnhancedRecallConfig:
 # Zotero 同步模式常量（杜绝魔法字面量散落）。
 ZOTERO_STORAGE_MANAGED = "managed_copy"
 ZOTERO_STORAGE_LINKED = "linked"
+ZOTERO_STORAGE_ZOTMOOV = "zotmoov"
 ZOTERO_SYNC_STRICT = "strict_mirror"
 ZOTERO_SYNC_CONSERVATIVE = "conservative"
 ZOTERO_SYNC_ARCHIVE = "archive"
@@ -283,7 +284,9 @@ class ZoteroSyncConfig:
 
     storage_mode 与 sync_mode 正交：
         - storage_mode: managed_copy（PDF 进插件制品包）/ linked（PDF 留 Zotero storage 根，
-          仅 clean.md/pages.json 在插件内）。linked 模式须配 linked_root 并通过探针校验。
+          仅 clean.md/pages.json 在插件内）/ zotmoov（PDF 留 ZotMoov 移动后的目录：
+          `attachments:` 相对路径拼 zotmoov_root，绝对路径失效时按文件名索引兜底）。
+          linked 模式须配 linked_root、zotmoov 模式须配 zotmoov_root，均经探针校验。
         - sync_mode: strict_mirror（强制覆盖 + collection 增删 + Milvus rebuild + 禁用 LRAG）
           / conservative（默认；删本地 doc 但 collection 只增不减 + 轻量 LRAG 重建）
           / archive（只增不删，最不触发 rebuild）。
@@ -296,6 +299,7 @@ class ZoteroSyncConfig:
     api_port: int = 23119
     storage_mode: str = ZOTERO_STORAGE_MANAGED
     linked_root: str = ""  # storage_mode=linked 时的 Zotero storage 根目录
+    zotmoov_root: str = ""  # storage_mode=zotmoov 时 ZotMoov 已移动附件的目录根
     sync_mode: str = ZOTERO_SYNC_CONSERVATIVE
     auto_sync_enabled: bool = False
     auto_sync_interval_sec: int = 3600
@@ -442,6 +446,7 @@ class Config:
                 "api_port": zotero.api_port,
                 "storage_mode": zotero.storage_mode,
                 "linked_root": zotero.linked_root,
+                "zotmoov_root": zotero.zotmoov_root,
                 "sync_mode": zotero.sync_mode,
                 "auto_sync_enabled": zotero.auto_sync_enabled,
                 "auto_sync_interval_sec": zotero.auto_sync_interval_sec,
@@ -617,7 +622,11 @@ class Config:
         if access_mode not in {ZOTERO_ACCESS_LOCAL, ZOTERO_ACCESS_SERVER}:
             access_mode = ZoteroSyncConfig.access_mode
         storage_mode = str(s.get("storage_mode", ZoteroSyncConfig.storage_mode))
-        if storage_mode not in {ZOTERO_STORAGE_MANAGED, ZOTERO_STORAGE_LINKED}:
+        if storage_mode not in {
+            ZOTERO_STORAGE_MANAGED,
+            ZOTERO_STORAGE_LINKED,
+            ZOTERO_STORAGE_ZOTMOOV,
+        }:
             storage_mode = ZoteroSyncConfig.storage_mode
         sync_mode = str(s.get("sync_mode", ZoteroSyncConfig.sync_mode))
         if sync_mode not in {ZOTERO_SYNC_STRICT, ZOTERO_SYNC_CONSERVATIVE, ZOTERO_SYNC_ARCHIVE}:
@@ -629,6 +638,7 @@ class Config:
             api_port=int(s.get("api_port", ZoteroSyncConfig.api_port)),
             storage_mode=storage_mode,
             linked_root=str(s.get("linked_root", ZoteroSyncConfig.linked_root)),
+            zotmoov_root=str(s.get("zotmoov_root", ZoteroSyncConfig.zotmoov_root)),
             sync_mode=sync_mode,
             auto_sync_enabled=bool(s.get("auto_sync_enabled", ZoteroSyncConfig.auto_sync_enabled)),
             auto_sync_interval_sec=max(
@@ -896,6 +906,7 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "api_port": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "storage_mode": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "linked_root": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
+        "zotmoov_root": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "sync_mode": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "auto_sync_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "auto_sync_interval_sec": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),

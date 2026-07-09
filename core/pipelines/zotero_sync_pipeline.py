@@ -9,7 +9,8 @@ sync_mode 语义（用户确认）：
     conservative（默认）—— 覆盖；Zotero 删除的文档→硬删除；collection 只增不减；LRAG 轻量重建。
     archive —— 只增不删；Zotero 删除的文档保留（Milvus 仍会召回）；最不触发 rebuild。
 
-storage_mode：managed_copy（复制原件进制品包）/ linked（原件留 Zotero，仅派生制品入插件）。
+storage_mode：managed_copy（复制原件进制品包）/ linked（原件留 Zotero，仅派生制品入插件）
+/ zotmoov（原件留 ZotMoov 移动后的目录，经 ZotmoovResolver 解析；web 下载件仍复制进制品包）。
 """
 from __future__ import annotations
 
@@ -29,9 +30,15 @@ from core.adapters.zotero.web_api import (
     ZoteroWebApiReader,
     current_key_identity,
 )
+from core.adapters.zotero.zotmoov import (
+    LINK_MODE_LINKED_FILE,
+    ZotmoovResolver,
+    attachments_relative,
+)
 from core.config import (
     ZOTERO_ACCESS_SERVER,
     ZOTERO_STORAGE_LINKED,
+    ZOTERO_STORAGE_ZOTMOOV,
     ZOTERO_SYNC_ARCHIVE,
     ZOTERO_SYNC_STRICT,
 )
@@ -163,13 +170,17 @@ class ZoteroSyncPipeline:
                 }
             try:
                 identity = current_key_identity(self._web_client_factory(key).get_current_key())
-                return {
+                out: dict[str, object] = {
                     "available": True,
                     "access_mode": cfg.access_mode,
                     "server_user_id": identity["user_id"],
                     "server_username": identity["username"],
                     "server_access": identity["access"],
                 }
+                # server + zotmoov 合法组合：元数据走云端、文件走本地目录（目录须进程可见）。
+                if cfg.storage_mode == ZOTERO_STORAGE_ZOTMOOV:
+                    out["zotmoov_probe"] = zpaths.probe_zotmoov_root(cfg.zotmoov_root)
+                return out
             except ZoteroWebApiError as exc:
                 return {
                     "available": False,
@@ -191,6 +202,8 @@ class ZoteroSyncPipeline:
         }
         if cfg.storage_mode == ZOTERO_STORAGE_LINKED:
             result["linked_probe"] = zpaths.probe_linked_root(cfg.linked_root)
+        if cfg.storage_mode == ZOTERO_STORAGE_ZOTMOOV:
+            result["zotmoov_probe"] = zpaths.probe_zotmoov_root(cfg.zotmoov_root)
         return result
 
     def probe_local_read(self) -> dict[str, object]:
@@ -394,9 +407,17 @@ class ZoteroSyncPipeline:
             primary_coll.setdefault(item_key, coll_name_by_key.get(coll_key, ""))
             item_coll_keys.setdefault(item_key, []).append(_zotero_coll_key(lib, coll_key))
 
-        link_only = cfg.storage_mode == ZOTERO_STORAGE_LINKED
+        link_only = cfg.storage_mode in (ZOTERO_STORAGE_LINKED, ZOTERO_STORAGE_ZOTMOOV)
         link_root_override = (
-            Path(cfg.linked_root).expanduser() if (link_only and cfg.linked_root) else None
+            Path(cfg.linked_root).expanduser()
+            if (cfg.storage_mode == ZOTERO_STORAGE_LINKED and cfg.linked_root)
+            else None
+        )
+        # 每次 pull 新建实例 = 文件名索引至多构建一次、不跨同步复用。
+        zotmoov_resolver = (
+            ZotmoovResolver(Path(cfg.zotmoov_root).expanduser())
+            if (cfg.storage_mode == ZOTERO_STORAGE_ZOTMOOV and cfg.zotmoov_root)
+            else None
         )
 
         for att in snapshot.attachments:
@@ -433,7 +454,13 @@ class ZoteroSyncPipeline:
                 continue
 
             # 确认需要摄入后才解析/下载原件：web 模式在此惰性单篇下载（串行，逐篇推进进度条）。
-            src = await self._resolve_source_path(att, link_root_override, web_fetch)
+            src, via_web = await self._resolve_source_path(
+                att,
+                link_root_override,
+                web_fetch,
+                zotmoov_resolver=zotmoov_resolver,
+                result=result,
+            )
             if src is None or not src.exists():
                 continue  # linked_url / 文件缺失 / 下载失败：仅镜像元数据，不清洗。
 
@@ -457,7 +484,8 @@ class ZoteroSyncPipeline:
                     tags=tags,
                     zotero_version=version,
                     last_synced_at=datetime.now(timezone.utc),
-                    link_original=link_only,
+                    # web 下载件落在缓存目录，link 会成悬空引用隐患，强制复制进制品包。
+                    link_original=link_only and not via_web,
                 )
             except Exception as exc:  # 单文档失败不阻断整库。
                 result.errors.append(f"{document_id}: {exc}")
@@ -488,17 +516,35 @@ class ZoteroSyncPipeline:
         att,
         link_root_override: Path | None,
         web_fetch: WebFileFetcher | None = None,
-    ) -> Path | None:
+        *,
+        zotmoov_resolver: ZotmoovResolver | None = None,
+        result: ZoteroSyncResult | None = None,
+    ) -> tuple[Path | None, bool]:
+        """解析附件原件路径，返回 (src, via_web)；via_web=True 表示文件来自 web 惰性下载。"""
         if att.resolved_path:
-            return Path(att.resolved_path)
+            return Path(att.resolved_path), False
+        # zotmoov 模式：linked_file 从 ZotMoov 目录解析（索引构建为阻塞 I/O，丢进线程）。
+        if zotmoov_resolver is not None and att.link_mode == LINK_MODE_LINKED_FILE:
+            resolved, reason = await asyncio.to_thread(
+                zotmoov_resolver.resolve, att.path, att.filename
+            )
+            if resolved is not None:
+                return resolved, False
+            if reason and result is not None:
+                result.errors.append(f"{att.attachment_key}: {reason}")
         # web 模式：惰性下载该附件原件（阻塞 I/O 丢进线程，避免堵塞事件循环）。
         if web_fetch is not None and _is_pdf(att.content_type, att.filename):
-            return await asyncio.to_thread(web_fetch, att.attachment_key, att.filename)
-        # linked 覆盖根：用 linked_root + filename 兜底。
+            fetched = await asyncio.to_thread(web_fetch, att.attachment_key, att.filename)
+            return fetched, True
+        # linked 覆盖根：优先按 'attachments:' 相对子路径拼接，退回 filename 兜底。
         if link_root_override and att.filename:
-            cand = link_root_override / att.filename
-            return cand
-        return None
+            rel = attachments_relative(att.path)
+            if rel:
+                cand = link_root_override / rel
+                if cand.exists():
+                    return cand, False
+            return link_root_override / att.filename, False
+        return None, False
 
     async def _index_and_mark(
         self,

@@ -21,6 +21,27 @@
 
 ---
 
+## [Unreleased]
+
+## [v1.0.1] — 2026-07-09
+
+### 新增功能 (Added)
+
+- **Zotero 第三种存储模式 `zotmoov`（ZotMoov 目录）**：用户手动指定 ZotMoov 插件移动附件后的目录（`zotero_sync.zotmoov_root`，进程可见路径），linked_file 附件按「`attachments:` 相对路径拼接 → 绝对路径 → 文件名递归索引（重名先按 DB 路径父目录名消歧，仍歧义则跳过并计入同步错误，绝不静默挑选）」顺序解析；元数据来源沿用 access_mode（本地 sqlite / Web API）开关，server+zotmoov 组合下 linked 件从本地目录取、imported 件仍惰性下载并强制复制进制品包。新增解析适配器与目录探针（core/adapters/zotero/zotmoov.py 新建、paths.py `probe_zotmoov_root`、core/pipelines/zotero_sync_pipeline.py、core/config.py `ZOTERO_STORAGE_ZOTMOOV`/`zotmoov_root`、core/api.py `get_zotero_config` 输出 `zotmoov_root`/`zotmoov_probe`、core/managers/r2_backup_manager.py 便携配置排除）。
+- **Flow 面板 ZotMoov 配置 UI**：Zotero 节点高级区「PDF 存储」新增 `zotmoov` 选项，选中后出现目录字段（接目录选择器）与探针状态行（绿/红点 + resolved/reason），并顺手补渲染此前 typed 未渲染的 `linked_probe`（web/frontend/components/flow/ZoteroQuickConfig.tsx、QuickConfigPanel.tsx、model.ts、lib/api.ts、lib/i18n.ts）。
+
+### 修复 (Fixed)
+
+- **修复 linked_file `attachments:` 相对路径被当绝对路径解析**：原实现剥前缀后按进程 CWD 判断存在性，几乎恒失败导致附件静默跳过；现 resolved 留空交由 pipeline 结合 linked_root / zotmoov_root 拼接（core/adapters/zotero/sqlite_reader.py）。
+- **修复 linked 模式兜底丢失子目录**：`linked_root` 兜底原来只拼 basename，`attachments:sub/p.pdf` 类附件找不到；现优先按相对子路径拼接、退回 basename（core/pipelines/zotero_sync_pipeline.py `_resolve_source_path`）。
+- **修复 Flow 面板切换 PDF 存储后 root 字段不立即出现**：`linked_root`/`zotmoov_root` 条件字段原按已保存 config 的 storage_mode 决定，改选后须先保存一次字段才出现（需保存两次）。现两字段常驻 draft 模型、按 draft 的 storage_mode 即时显隐，隐藏字段的残留草稿不参与保存与徽章计数；目录探针仍按已保存配置显示（web/frontend/components/flow/ZoteroQuickConfig.tsx）。
+- **修复 Zotero 配置同值重存误报重启/重建**：`_current_config_value()` 的 getters 表缺 `zotero_sync`，changed 恒判 True——同值保存也返回 `restart_required`/`rebuild_required=True`，REBUILD 键（storage_mode 等）还会误触发嵌入索引失效。补上 `zotero_sync` 与 `deep_thinking` getter（core/api.py）。
+
+### 测试 (Tests)
+
+- Zotero 同步新增 9 个用例：reader `attachments:` 回归、zotmoov 相对路径/索引兜底/重名歧义与父目录消歧/混合库/server+zotmoov、linked 子路径回归、`probe_zotmoov_root` 三分支；config 解析/回落/KEY_POLICY 注册；web_server 默认 `zotmoov_root` 断言（tests/backend/test_zotero_sync.py、test_config.py、test_web_server.py）。
+- 新增同值重存回归：保存相同 `zotero_sync.storage_mode` 时 `restart_required`/`rebuild_required` 均为 False 且不触发 needs_reindex；真实变更仍正确上报 rebuild 并标记待重建（tests/backend/test_api.py `test_zotero_config_same_value_save_reports_no_consequence`）。
+
 ## [v1.0.0] — 2026-07-05
 
 > 首个正式发布版本。在 v1.0.0-rc.1 健壮性加固基础上，完成 Notion 同步机制重构：从「静默失效的

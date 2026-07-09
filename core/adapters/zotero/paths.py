@@ -45,19 +45,26 @@ def storage_dir(data_dir: Path) -> Path:
     return data_dir / STORAGE_DIRNAME
 
 
-def probe_linked_root(root: str) -> dict[str, object]:
-    """校验 linked 模式的 Zotero storage 根目录是否 valid。
-
-    valid 判据：路径存在且为目录。返回 {valid, reason, resolved}，供前端在设置后即时反馈。
-    """
+def _probe_dir(root: str, unset_reason: str) -> dict[str, object]:
+    """目录探针公共实现：valid 判据 = 路径存在且为目录。返回 {valid, reason, resolved}。"""
     if not root:
-        return {"valid": False, "reason": "linked_root 未配置", "resolved": ""}
+        return {"valid": False, "reason": unset_reason, "resolved": ""}
     p = Path(root).expanduser()
     if not p.exists():
         return {"valid": False, "reason": f"目录不存在: {p}", "resolved": str(p)}
     if not p.is_dir():
         return {"valid": False, "reason": f"不是目录: {p}", "resolved": str(p)}
     return {"valid": True, "reason": "", "resolved": str(p)}
+
+
+def probe_linked_root(root: str) -> dict[str, object]:
+    """校验 linked 模式的 Zotero storage 根目录是否 valid，供前端在设置后即时反馈。"""
+    return _probe_dir(root, "linked_root 未配置")
+
+
+def probe_zotmoov_root(root: str) -> dict[str, object]:
+    """校验 zotmoov 模式的 ZotMoov 附件目录是否 valid，供前端在设置后即时反馈。"""
+    return _probe_dir(root, "zotmoov_root 未配置")
 
 
 __all__ = [
@@ -68,4 +75,5 @@ __all__ = [
     "zotero_sqlite_path",
     "storage_dir",
     "probe_linked_root",
+    "probe_zotmoov_root",
 ]

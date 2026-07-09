@@ -5,7 +5,8 @@ Relation）。**只读、不加锁**（immutable URI），即使 Zotero 正在�
 
 附件路径解析（linkMode）：
     0/1 imported → storage/<attachment_key>/<filename>（path 形如 storage:xxx.pdf）
-    2 linked_file → 绝对路径或 attachments: 相对（取绝对路径）
+    2 linked_file → 绝对路径存在即解析；'attachments:' 基目录相对路径不在 reader 内解析
+      （resolved 留空，由 pipeline 结合 linked_root / zotmoov_root 拼接）
     3 linked_url → 无本地文件（resolved_path 为空）
 
 依赖方向：仅 stdlib。
@@ -19,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.adapters.zotero import paths as zpaths
+from core.adapters.zotero.zotmoov import attachments_relative
 from core.domain.models import (
     DocumentOrigin,
     ZoteroAttachment,
@@ -301,9 +303,12 @@ class ZoteroSqliteReader:
             resolved = self._storage / attachment_key / filename
             return filename, str(resolved) if resolved.exists() else ""
         if link_mode == LINK_LINKED_FILE:
-            # path 可能是绝对路径或 'attachments:rel'；取绝对路径。
-            raw = path.split(":", 1)[1] if path.startswith("attachments:") else path
-            p = Path(raw).expanduser()
+            rel = attachments_relative(path)
+            if rel:
+                # 基目录相对路径：reader 不持有基目录，resolved 留空，
+                # 由 pipeline 结合 linked_root / zotmoov_root 解析。
+                return rel.rsplit("/", 1)[-1], ""
+            p = Path(path).expanduser()
             return p.name, str(p) if p.exists() else ""
         # linked_url：无本地文件。
         return "", ""

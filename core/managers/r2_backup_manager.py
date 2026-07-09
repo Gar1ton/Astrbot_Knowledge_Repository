@@ -485,6 +485,7 @@ def _portable_config(config: Config) -> dict[str, Any]:
         ("zotero_sync", "zotero_data_dir"),
         ("zotero_sync", "api_port"),
         ("zotero_sync", "linked_root"),
+        ("zotero_sync", "zotmoov_root"),
     }
     for section, keys in allowed.items():
         values = public.get(section)

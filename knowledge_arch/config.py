@@ -105,7 +105,7 @@ class NotionSyncConfig:
     database_id: str = ""
     qa_database_id: str = ""
     parent_page_id: str = ""
-    database_title: str = "Knowledge Repository"
+    database_title: str = "Knowledge Arch"
     auto_sync_interval_sec: int = 0
     max_upload_mib: int = 5
     rate_limit_rps: int = _NOTION_RATE_LIMIT_RPS

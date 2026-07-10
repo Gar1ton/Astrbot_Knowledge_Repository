@@ -19,7 +19,7 @@ const zh = {
   nav_logout: "退出登录",
 
   // 认证
-  login_title: "Knowledge Repository",
+  login_title: "Knowledge Arch",
   login_subtitle: "控制台登录",
   login_username: "用户名",
   login_password: "密码",
@@ -661,7 +661,7 @@ const en: Record<keyof typeof zh, string> = {
   nav_settings: "Settings",
   nav_logout: "Logout",
 
-  login_title: "Knowledge Repository",
+  login_title: "Knowledge Arch",
   login_subtitle: "Console Login",
   login_username: "Username",
   login_password: "Password",

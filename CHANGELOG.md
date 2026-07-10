@@ -23,6 +23,16 @@
 
 ## [Unreleased]
 
+## [v1.0.3] — 2026-07-10
+
+### 修复 (Fixed)
+
+- **Zotero 同步进度展示与实际进度不符**：增量同步（断点续连）时大部分文档因未变化被 `ZoteroSyncPipeline` 判定为 `skipped_unchanged` 而跳过，后端 `ZoteroSyncJob.progress_percent()` 早已把这类跳过计入完成度推进百分比，但前端 `ProgressDock.tsx` 的 "X/Y docs" 计数只读了 `docs_processed`，导致界面长期停在低计数却显示较高百分比的矛盾状态，看起来像卡死。修复为计数分子同口径纳入 `docs_failed`/`skipped_unchanged`，并在明细行追加 skipped 计数（`knowledge_arch/zotero_sync_job.py`、`ka_web/frontend/components/progress/ProgressDock.tsx`）。
+
+### 架构健康 (Refactor)
+
+- **补齐 Knowledge Arch 展示名残留**：此前的 "Knowledge Repository → Knowledge Arch" 改名遗漏了几处真正用户可见的位置——`README.md` 标题/介绍/配置指引、`docs/PROJECT_STRUCTURE.md`、登录页 i18n 的 `login_title`、Notion 自动建库标题默认值（`knowledge_arch/config.py`、`_conf_schema.json`）——统一改为 Knowledge Arch；机器名/技术 id（`metadata.yaml` 的 `name`、`main.py` 的 legacy `@register` 参数）不动（`README.md`, `docs/PROJECT_STRUCTURE.md`, `ka_web/frontend/lib/i18n.ts`, `ka_web/frontend/public/logo-tile.svg`, `knowledge_arch/config.py`, `_conf_schema.json`）。
+
 ## [v1.0.2] — 2026-07-09
 
 ### 修复 (Fixed)

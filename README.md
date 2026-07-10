@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="./logo.svg" width="96" alt="Knowledge Repository Logo" />
+<img src="./logo.svg" width="96" alt="Knowledge Arch Logo" />
 
-# Knowledge Repository
+# Knowledge Arch
 
 **AstrBot 知识库原件管理、同步备份与 Research Agent 插件**
 
-[![version](https://img.shields.io/badge/版本-v1.0.2-blueviolet)](metadata.yaml)
+[![version](https://img.shields.io/badge/版本-v1.0.3-blueviolet)](metadata.yaml)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-6f42c1)](https://github.com/AstrBotDevs/AstrBot)
 
@@ -18,7 +18,7 @@
 
 ## 这是什么
 
-Knowledge Repository 为 AstrBot 增加一个面向资料、论文和长期知识沉淀的独立知识库应用。它以 PDF 等原件为中心，提供文档上传、集合分类、Zotero 镜像、Notion / R2 同步备份、多档检索问答和 LightRAG 知识图谱能力，并通过独立 Web 控制台完成日常管理。
+Knowledge Arch 为 AstrBot 增加一个面向资料、论文和长期知识沉淀的独立知识库应用。它以 PDF 等原件为中心，提供文档上传、集合分类、Zotero 镜像、Notion / R2 同步备份、多档检索问答和 LightRAG 知识图谱能力，并通过独立 Web 控制台完成日常管理。
 
 核心亮点：
 
@@ -54,7 +54,7 @@ git clone https://github.com/Gar1ton/Astrbot_Knowledge_Repository astrbot_plugin
 
 ### 基础配置
 
-在 AstrBot 管理面板 -> 插件配置 -> Knowledge Repository 中至少配置：
+在 AstrBot 管理面板 -> 插件配置 -> Knowledge Arch 中至少配置：
 
 | 配置键 | 说明 |
 |--------|------|

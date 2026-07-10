@@ -1,5 +1,37 @@
 # TODO
 
+## v1.0.3：Zotero 同步进度展示修正 + Knowledge Arch 展示名清理 (completed)
+
+### User constraints / 约束
+
+- 用户实测发现 Web 控制台的 Zotero 同步进度条有误导性：增量同步（断点续连）时大部分文档因未变化
+  被跳过，后端 `ZoteroSyncJob.progress_percent()`（`knowledge_arch/zotero_sync_job.py`）把这些
+  跳过的文档计入完成度推进百分比，但前端 `ProgressDock.tsx` 的 "X/Y docs" 计数只读了
+  `docs_processed`，没有把 `skipped_unchanged` 算进去，导致界面长期停在 "0/464 docs" 却显示 54%
+  的矛盾状态，看起来像卡死，实际上后台在正常跳过大量未变化文档。
+- 插件展示名此前已启动 "Knowledge Repository → Knowledge Arch" 改名（`metadata.yaml` 的
+  `display_name`、`TopBar.tsx`、`LoginScreen.tsx`、`app/layout.tsx` 均已是 Knowledge Arch），但
+  仍有少数真正用户可见的残留未跟上（README、i18n 的 `login_title`、Notion 同步数据库标题默认值
+  等）。本轮只清理真正用户可见的位置，跳过纯代码注释/docstring/开发调试脚本/历史设计稿/
+  `.release-worktree` 构建产物树；本轮不重新构建前端、不同步到已安装插件目录。
+
+### Technical implementation path
+
+- [x] **Part A - 进度展示修正**：`ProgressDock.tsx` 构造 Zotero `DockJob` 时，`done` 计算改为
+  `docs_processed + docs_failed + skipped_unchanged`（与后端 `progress_percent()` 口径一致），
+  `detail` 展示串追加 skipped 计数。不改动后端（数据本就是对的，只是没展示）。
+- [x] **Part B - 展示名残留清理**：`README.md`、`docs/PROJECT_STRUCTURE.md`、
+  `ka_web/frontend/lib/i18n.ts`（`login_title` zh/en）、`ka_web/frontend/public/logo-tile.svg`、
+  `knowledge_arch/config.py`（`database_title` 默认值）、`_conf_schema.json`（同一默认值）中的
+  "Knowledge Repository" 替换为 "Knowledge Arch"。
+- [x] **Part C - 版本号**：`CHANGELOG.md` 追加 `[Unreleased]` 条目，`python bump_version.py
+  --version v1.0.3` 统一推进版本号。
+
+### Verification
+
+- `python -m pytest` 全绿；`ruff check . && mypy` 无新增问题；
+  `cd ka_web/frontend && npm run lint` 无新增问题（本轮不做完整 `next build`）。
+
 ## v1.0.2：顶层包改名，修复与 astrbot_plugin_moirai 的撞名崩溃 (completed)
 
 ### User constraints / 约束

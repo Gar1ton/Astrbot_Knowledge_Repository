@@ -5,7 +5,7 @@
 
 ## 一句话定位
 
-Knowledge Repository 是一个 AstrBot 知识库插件，同时保留了“结构与约定先行”的工程治理框架：
+Knowledge Arch 是一个 AstrBot 知识库插件，同时保留了“结构与约定先行”的工程治理框架：
 
 - 插件功能代码按 `knowledge_arch/` 单向分层组织；
 - WebUI 源码和构建产物分离；

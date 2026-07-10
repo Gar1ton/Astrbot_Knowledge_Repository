@@ -116,7 +116,7 @@
       "database_title": {
         "description": "自动创建的 Database 标题（可选）",
         "type": "string",
-        "default": "Knowledge Repository",
+        "default": "Knowledge Arch",
         "hint": "仅在自动建库时生效；QA 库标题为「<标题> · QA」"
       },
       "auto_sync_interval_sec": {

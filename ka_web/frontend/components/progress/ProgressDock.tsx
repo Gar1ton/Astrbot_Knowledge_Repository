@@ -91,6 +91,10 @@ function useProgressJobs(): DockJob[] {
           }
         }
       }
+      // 增量同步里，未变化文档会被跳过（skipped_unchanged），后端 progress_percent() 已把它计入完成度；
+      // 这里的分子同口径纳入 skipped/failed，否则百分比条前进但计数不动，看起来像卡死。
+      const zoteroDone =
+        (zotero.docs_processed ?? 0) + (zotero.docs_failed ?? 0) + (zotero.skipped_unchanged ?? 0);
       next.push({
         key: `zotero_sync:${zotero.job_id}`,
         kind: "zotero_sync",
@@ -98,7 +102,7 @@ function useProgressJobs(): DockJob[] {
         label: t("progress_dock_zotero"),
         sub: zotero.stage_label || zotero.stage || "",
         pct: pctOf(zotero.progress_percent),
-        detail: `${zotero.docs_processed ?? 0}/${zotero.docs_total ?? 0} docs · +${zotero.new ?? 0} ~${zotero.changed ?? 0}`,
+        detail: `${zoteroDone}/${zotero.docs_total ?? 0} docs · +${zotero.new ?? 0} ~${zotero.changed ?? 0} · ${zotero.skipped_unchanged ?? 0} skipped`,
         status: zotero.status,
         active: zotero.status === "running",
         paused: false,

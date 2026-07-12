@@ -40,6 +40,10 @@
 - **移除误提交的 AstrBot 宿主运行数据**：从版本树删除 `data/cmd_config.json` 与
   `data/t2i_templates/*.html`；这些路径已由 `.gitignore` 的 `/data/` 规则覆盖，本机副本保存在
   `.dev_data/recovered-runtime-data-2026-07-12/`，不会进入提交或发布包。
+- **修复顶层包改名后发布生成器仍要求旧路径**：`REQUIRED`/`FORBIDDEN_PREFIXES`/
+  `FORBIDDEN_FILES` 从 `web`/`core` 同步到 `ka_web`/`knowledge_arch`，恢复 v1.0.3 发布树与 ZIP
+  生成，并增加布局契约测试防止回退（`tools/build_published_tree.py`、
+  `tests/backend/test_published_tree.py`）。
 
 ## [v1.0.3] — 2026-07-10
 

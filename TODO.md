@@ -1,5 +1,24 @@
 # TODO
 
+## v1.0.3 发布生成器路径修复 (in progress)
+
+### User constraints / 约束
+
+- 按双分支发布制度把已验证更新提交到 `developer`，再由指定 developer commit 生成并发布到 `main`。
+- `main` 不直接手改、不与 `developer` merge；所有远端 push/PR 在报告精确范围后另行批准。
+
+### Technical implementation path
+
+- [ ] **Part A - 发布路径契约**：修正 `tools/build_published_tree.py` 在顶层包改名后残留的
+  `web/server.py`、`web/frontend/`、`core/main.py` 路径，并用测试锁定当前发布布局。
+- [ ] **Part B - 发布生成与校验**：从最终 developer commit 生成 v1.0.3 发布树和 ZIP，创建本地
+  `publish/v1.0.3` 提交并通过 published tree 校验。
+- [ ] **Part C - 远端发布**：获用户单独批准后 push developer 与 publish 分支，并创建到 main 的 PR。
+
+### Verification
+
+- 待执行：发布生成器定向测试、全量 pytest、ruff/mypy、发布树/ZIP 校验。
+
 ## v1.0.3 内迭代：审查问题修复（运行数据、品牌残留、测试依赖检测） (completed)
 
 ### User constraints / 约束

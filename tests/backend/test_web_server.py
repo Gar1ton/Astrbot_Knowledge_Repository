@@ -479,6 +479,30 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         await client.close()
 
 
+async def test_graph_probe_default_text_uses_knowledge_arch(tmp_path: Path) -> None:
+    api = await _make_api()
+    api.probe_lightrag_core = AsyncMock(return_value={"status": "success"})  # type: ignore[method-assign]
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        response = await client.post("/api/graph/probe", json={"confirmed": True})
+        assert response.status == 200
+        api.probe_lightrag_core.assert_awaited_once_with(
+            "default",
+            "LightRAG probe document for Knowledge Arch.",
+            "kr-lightrag-probe-doc",
+            "What is this probe document about?",
+        )
+    finally:
+        await client.close()
+
+
 async def test_graph_data_endpoint_returns_200(tmp_path: Path) -> None:
     class StubLightRAGRegistry:
         def has_workspace(self, collection: str) -> bool:

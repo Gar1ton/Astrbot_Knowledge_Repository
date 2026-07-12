@@ -1,5 +1,28 @@
 # TODO
 
+## v1.0.3 内迭代：审查问题修复（运行数据、品牌残留、测试依赖检测） (completed)
+
+### User constraints / 约束
+
+- 修复审查发现的 P1/P2：移除误提交的宿主 `data/` 运行配置，同时保留本机忽略副本；
+  LightRAG probe 默认文本统一为 Knowledge Arch。
+- 修复全量测试在只安装 `pymilvus`、缺少 `milvus_lite` 时错误执行本地数据库集成测试的问题。
+- 不改写 Git 历史、不操作远端；已进入历史的密码哈希仍需用户后续轮换对应密码。
+
+### Technical implementation path
+
+- [x] **Part A - 运行数据清理**：从版本树移除 `data/cmd_config.json` 与两个 `data/t2i_templates/*.html`，
+  本机副本移入 `.dev_data/` 忽略目录。
+- [x] **Part B - 品牌残留**：`ka_web/server.py` 的 LightRAG probe 默认文本改为 Knowledge Arch，
+  并补 HTTP 路由回归测试。
+- [x] **Part C - 测试依赖检测**：Milvus Lite 生命周期测试同时检测 `pymilvus` 与 `milvus_lite`，
+  依赖不完整时明确 skip。
+
+### Verification
+
+- 定向 pytest：1 passed / 1 skipped；全量 pytest：608 passed / 2 skipped。
+- `ruff check .` 通过；`mypy` Success。
+
 ## v1.0.3：Zotero 同步进度展示修正 + Knowledge Arch 展示名清理 (completed)
 
 ### User constraints / 约束

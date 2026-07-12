@@ -840,9 +840,9 @@ async def handle_graph_probe(request: web.Request) -> web.Response:
         )
     collection = body.get("collection") or "default"
     text = (
-        (body.get("text") or "LightRAG probe document for Knowledge Repository.")
+        (body.get("text") or "LightRAG probe document for Knowledge Arch.")
         if isinstance(body, dict)
-        else "LightRAG probe document for Knowledge Repository."
+        else "LightRAG probe document for Knowledge Arch."
     )
     doc_id = (
         (body.get("doc_id") or "kr-lightrag-probe-doc")

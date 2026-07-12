@@ -23,6 +23,24 @@
 
 ## [Unreleased]
 
+### 修复 (Fixed)
+
+- **LightRAG probe 默认文档品牌名统一**：默认探针文本由 `Knowledge Repository` 改为
+  `Knowledge Arch`，并增加 HTTP 路由回归测试锁定默认参数（`ka_web/server.py`、
+  `tests/backend/test_web_server.py`）。
+
+### 测试 (Tests)
+
+- **Milvus Lite 生命周期测试正确识别不完整依赖**：测试启动前同时探测 `pymilvus` 与
+  `milvus_lite`；只安装前者时明确 skip，避免把环境缺包误报为代码失败
+  （`tests/backend/test_retrieval_orchestrator.py`）。
+
+### 构建与工程 (Build/CI)
+
+- **移除误提交的 AstrBot 宿主运行数据**：从版本树删除 `data/cmd_config.json` 与
+  `data/t2i_templates/*.html`；这些路径已由 `.gitignore` 的 `/data/` 规则覆盖，本机副本保存在
+  `.dev_data/recovered-runtime-data-2026-07-12/`，不会进入提交或发布包。
+
 ## [v1.0.3] — 2026-07-10
 
 ### 修复 (Fixed)

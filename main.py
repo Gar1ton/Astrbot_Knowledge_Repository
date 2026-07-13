@@ -14,17 +14,23 @@ if str(_ROOT_DIR) not in sys.path:
 
 
 def _purge_stale_local_modules() -> None:
-    """Evict ALL cached core/web/migrations modules on every load.
+    """Evict cached modules owned by this plugin's unique Python package.
 
     Two reasons:
-    1. Other plugins (e.g. astrbot_plugin_moirai) expose a top-level ``core``
-       package — without eviction we'd import their PluginInitializer.
+    1. Defense in depth against another plugin claiming the same top-level
+       name. This plugin used to be named ``core``/``web``/``migrations`` and
+       collided with astrbot_plugin_moirai's identically-named packages —
+       sys.path ordering made ``core.retrieval_modes`` resolve to moirai's
+       ``core`` package instead of ours (see CHANGELOG). Renaming to unique
+       names removes the actual risk; eviction here is now just a backstop.
     2. On plugin reload AstrBot re-imports main.py but Python's module cache
        keeps the *old* EventHandler/etc. alive, so new methods added between
        installs are invisible.  Unconditional eviction forces a fresh import
        every time, fixing AttributeError on hot-reload.
     """
-    _OWNED_TOPS = frozenset(("core", "web", "migrations"))
+    # ``web`` 与 ``migrations`` 是通用目录名：生产代码分别按文件路径加载 server/SQL，
+    # 不得从共享进程的 sys.modules 清理同名顶层包，否则会误伤其他插件。
+    _OWNED_TOPS = frozenset(("kacore",))
 
     for name in list(sys.modules.keys()):
         if name == __name__:
@@ -40,21 +46,21 @@ from typing import TYPE_CHECKING, Any
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from core.event_handler import EventHandler
-from core.plugin_initializer import PluginInitializer
-from core.retrieval_modes import (
+from kacore.event_handler import EventHandler
+from kacore.plugin_initializer import PluginInitializer
+from kacore.retrieval_modes import (
     MODE_GRAPH_MIXED,
     MODE_GRAPH_ONLY,
     STRICT_COLLECTION_MODES,
     normalize_retrieval_mode,
 )
-from core.utils import text_chunks
+from kacore.utils import text_chunks
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v1.0.1"
+_PLUGIN_VERSION = "v1.0.4"
 logger = logging.getLogger(__name__)
 _RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
 _RESEARCH_PARAGRAPH_LIMIT = 700
@@ -145,12 +151,12 @@ class KnowledgeRepositoryPlugin(Star):
         yield event.plain_result(await self._handler.on_ka_persona(action))
 
     @ka.command("webui")
-    async def ka_webui(self, event: AstrMessageEvent, action: str = ""):
+    async def webui(self, event: AstrMessageEvent, action: str = ""):
         '''/ka webui <on|off> — 实时启停 Web 控制台'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
             return
-        yield event.plain_result(await self._handler.on_ka_webui(action))
+        yield event.plain_result(await self._handler.on_webui(action))
 
     @ka.command("r2")
     async def ka_r2(self, event: AstrMessageEvent, action: str = "", target: str = ""):
@@ -608,7 +614,7 @@ class KnowledgeRepositoryPlugin(Star):
             ok = await self._send_plain_message(event, chunk) and ok
         return ok
 
-    # 文本切分薄委派：实现在 core/utils/text_chunks（纯函数，v0.30.0 治本修复中文句读硬切）。
+    # 文本切分薄委派：实现在 kacore/utils/text_chunks（纯函数，v0.30.0 治本修复中文句读硬切）。
     @staticmethod
     def _split_message_text(text: str, *, limit: int = _RESEARCH_MESSAGE_CHUNK_LIMIT) -> list[str]:
         return text_chunks.split_message_text(text, limit=limit)

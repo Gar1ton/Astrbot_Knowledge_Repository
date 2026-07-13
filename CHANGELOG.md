@@ -23,6 +23,61 @@
 
 ## [Unreleased]
 
+## [v1.0.4] — 2026-07-13
+
+### 修复 (Fixed)
+
+- **LightRAG probe 默认文档品牌名统一**：默认探针文本由 `Knowledge Repository` 改为
+  `Knowledge Arch`，并增加 HTTP 路由回归测试锁定默认参数（`web/server.py`、
+  `tests/backend/test_web_server.py`）。
+
+### 架构健康 (Refactor)
+
+- **顶层目录按 v1.0.4 布局收敛**：`knowledge_arch/` 改为唯一业务包 `kacore/`，
+  `ka_web/`/`ka_migrations/` 恢复为 `web/`/`migrations/`；生产模块缓存只清理
+  `kacore`，Web server 与迁移 SQL 均按插件内绝对文件路径加载，避免通用顶层名污染 AstrBot
+  共享进程。插件机器名、数据目录键、数据库/索引/LightRAG 路径及 HTTP/config 契约保持不变
+  （`main.py`、`kacore/plugin_initializer.py`、`kacore/migration_runner.py`）。
+
+### 测试 (Tests)
+
+- **Milvus Lite 生命周期测试正确识别不完整依赖**：测试启动前同时探测 `pymilvus` 与
+  `milvus_lite`；只安装前者时明确 skip，避免把环境缺包误报为代码失败
+  （`tests/backend/test_retrieval_orchestrator.py`）。
+- **锁定 v1.0.4 目录与防撞名契约**：覆盖迁移目录、唯一 runner 模块、冲突 `web` 模块下的
+  文件路径加载及发布树必需/禁止路径（`tests/backend/test_lifecycle_and_cli.py`、
+  `tests/backend/test_published_tree.py`）。
+
+### 构建与工程 (Build/CI)
+
+- **移除误提交的 AstrBot 宿主运行数据**：从版本树删除 `data/cmd_config.json` 与
+  `data/t2i_templates/*.html`；这些路径已由 `.gitignore` 的 `/data/` 规则覆盖，本机副本保存在
+  `.dev_data/recovered-runtime-data-2026-07-12/`，不会进入提交或发布包。
+- **发布生成器同步最终目录布局**：`REQUIRED`/`FORBIDDEN_PREFIXES`/`FORBIDDEN_FILES`
+  使用 `web/server.py`、`web/frontend/` 与 `kacore/main.py`，并增加布局契约测试防止路径漂移
+  （`tools/build_published_tree.py`、
+  `tests/backend/test_published_tree.py`）。
+
+## [v1.0.3] — 2026-07-10
+
+### 修复 (Fixed)
+
+- **Zotero 同步进度展示与实际进度不符**：增量同步（断点续连）时大部分文档因未变化被 `ZoteroSyncPipeline` 判定为 `skipped_unchanged` 而跳过，后端 `ZoteroSyncJob.progress_percent()` 早已把这类跳过计入完成度推进百分比，但前端 `ProgressDock.tsx` 的 "X/Y docs" 计数只读了 `docs_processed`，导致界面长期停在低计数却显示较高百分比的矛盾状态，看起来像卡死。修复为计数分子同口径纳入 `docs_failed`/`skipped_unchanged`，并在明细行追加 skipped 计数（`knowledge_arch/zotero_sync_job.py`、`ka_web/frontend/components/progress/ProgressDock.tsx`）。
+
+### 架构健康 (Refactor)
+
+- **补齐 Knowledge Arch 展示名残留**：此前的 "Knowledge Repository → Knowledge Arch" 改名遗漏了几处真正用户可见的位置——`README.md` 标题/介绍/配置指引、`docs/PROJECT_STRUCTURE.md`、登录页 i18n 的 `login_title`、Notion 自动建库标题默认值（`knowledge_arch/config.py`、`_conf_schema.json`）——统一改为 Knowledge Arch；机器名/技术 id（`metadata.yaml` 的 `name`、`main.py` 的 legacy `@register` 参数）不动（`README.md`, `docs/PROJECT_STRUCTURE.md`, `ka_web/frontend/lib/i18n.ts`, `ka_web/frontend/public/logo-tile.svg`, `knowledge_arch/config.py`, `_conf_schema.json`）。
+
+## [v1.0.2] — 2026-07-09
+
+### 修复 (Fixed)
+
+- **修复插件在 Windows 上与 astrbot_plugin_moirai 撞名导致加载失败**：两个插件的顶层包都叫 `core`（还有 `web`/`migrations`），在 AstrBot 同一 Python 进程里共享 `sys.path`/`sys.modules`；`main.py` 的 `_purge_stale_local_modules` 会清空 `sys.modules` 里所有叫 `core` 的缓存后重新 `import core`，但两个插件各自的 `sys.path.insert(0, ...)` 只在首次加载时生效（`if str(_ROOT_DIR) not in sys.path` 短路），一旦 moirai 的目录在某次加载中排到本插件前面，之后无论怎么重装本插件，`import core` 都会稳定解析成 moirai 的 `core` 包（其 `event_handler.py`/`plugin_initializer.py` 恰好同名，直到 `core.retrieval_modes` 才因 moirai 没有这个模块而报 `ModuleNotFoundError`）。用户实测：卸载 moirai 后本插件恢复正常，反复重装本插件无效，均与上述机制吻合。
+
+### 架构健康 (Refactor)
+
+- **顶层包改用插件专属名，消除跨插件撞名风险**：`core/` → `knowledge_arch/`、`web/` → `ka_web/`、`migrations/` → `ka_migrations/`（含全部内部 import、`main.py` 的 `_OWNED_TOPS`、`_load_plugin_web_build_app` 路径、`release/published-files.txt`、`.gitattributes`、CI 编译清单、测试与工具脚本引用）。`sys.modules` 清缓存逻辑保留作为兜底防御，但不再是防撞名的主要手段。
+
 ## [v1.0.1] — 2026-07-09
 
 ### 新增功能 (Added)

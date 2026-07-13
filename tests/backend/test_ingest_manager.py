@@ -13,17 +13,17 @@ from pathlib import Path
 import fitz  # PyMuPDF（仅用于动态生成测试 PDF）
 import pytest
 
-from knowledge_arch.config import SourceStoreConfig
-from knowledge_arch.domain.models import DocumentChunk, SourceDocument
-from knowledge_arch.managers.chunking import parse_markdown_blocks
-from knowledge_arch.managers.ingest_manager import LOCAL_LIBRARY_ID, IngestManager
-from knowledge_arch.managers.markdown_extractor import (
+from kacore.config import SourceStoreConfig
+from kacore.domain.models import DocumentChunk, SourceDocument
+from kacore.managers.chunking import parse_markdown_blocks
+from kacore.managers.ingest_manager import LOCAL_LIBRARY_ID, IngestManager
+from kacore.managers.markdown_extractor import (
     MarkdownArtifact,
     PageSpan,
     join_cleaned_markdown_pages,
     post_clean_markdown_pages,
 )
-from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+from kacore.repository.source_store.memory import InMemorySourceDocumentStore
 
 _pdf_extract_available = importlib.util.find_spec("pymupdf4llm") is not None
 pytestmark = pytest.mark.skipif(

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""把前端构建产物（ka_web/frontend/out/）同步到运行时静态目录（pages/）。
+"""把前端构建产物（web/frontend/out/）同步到运行时静态目录（pages/）。
 
-v0.10.0 起前端改用 Next.js App Router，构建产物在 ka_web/frontend/out/。
-本脚本检测 out/ 目录是否存在：存在则同步 out/，不存在时回退同步 ka_web/frontend/（兼容旧版）。
+v0.10.0 起前端改用 Next.js App Router，构建产物在 web/frontend/out/。
+本脚本检测 out/ 目录是否存在：存在则同步 out/，不存在时回退同步 web/frontend/（兼容旧版）。
 
 构建流程：
-    cd ka_web/frontend && npm run build   # Next.js export → out/
+    cd web/frontend && npm run build   # Next.js export → out/
     python tools/sync_frontend.py      # 同步 out/ → pages/
 
 用法：
@@ -22,8 +22,8 @@ import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
-_NEXT_OUT = _ROOT / "ka_web" / "frontend" / "out"
-_LEGACY_SRC = _ROOT / "ka_web" / "frontend"
+_NEXT_OUT = _ROOT / "web" / "frontend" / "out"
+_LEGACY_SRC = _ROOT / "web" / "frontend"
 _DST = _ROOT / "pages"
 
 _SKIP_NAMES = {"README.md", ".DS_Store"}

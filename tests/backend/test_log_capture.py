@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from knowledge_arch.log_capture import MemoryLogHandler, _categorize
+from kacore.log_capture import MemoryLogHandler, _categorize
 
 
 def _record(

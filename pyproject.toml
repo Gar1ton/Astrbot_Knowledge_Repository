@@ -2,7 +2,7 @@
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"               # 异步测试免写事件循环样板
-pythonpath = [".", "tests/mocks"]   # 让测试可 import knowledge_arch 与测试替身
+pythonpath = [".", "tests/mocks"]   # 让测试可 import kacore 与测试替身
 testpaths = ["tests"]
 
 [tool.ruff]
@@ -15,4 +15,4 @@ select = ["E", "F", "I", "UP"]      # 基础错误 + 未用 + import 排序 + �
 [tool.mypy]
 python_version = "3.10"
 strict = true
-files = ["knowledge_arch/domain/"]            # 至少对零依赖的 domain 层严格把关
+files = ["kacore/domain/"]            # 至少对零依赖的 domain 层严格把关

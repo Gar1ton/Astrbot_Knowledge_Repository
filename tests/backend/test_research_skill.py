@@ -5,7 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from knowledge_arch.research_skill import ResearchService, _build_citations
+from kacore.research_skill import ResearchService, _build_citations
 
 
 class FakeApi:

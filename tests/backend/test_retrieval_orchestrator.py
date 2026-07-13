@@ -6,13 +6,13 @@ import tempfile
 import aiosqlite
 import pytest
 
-from knowledge_arch.config import Config
-from knowledge_arch.domain.models import Collection, DocumentChunk, SourceDocument
-from knowledge_arch.migration_runner import run_migrations
-from knowledge_arch.pipelines.retrieval_orchestrator import RetrievalOrchestrator
-from knowledge_arch.repository.kb_reader.base import KnowledgeBaseReader
-from knowledge_arch.repository.source_store.sqlite import SQLiteSourceDocumentStore
-from knowledge_arch.repository.vector_store.milvus_lite import MilvusLiteVectorStore
+from kacore.config import Config
+from kacore.domain.models import Collection, DocumentChunk, SourceDocument
+from kacore.migration_runner import run_migrations
+from kacore.pipelines.retrieval_orchestrator import RetrievalOrchestrator
+from kacore.repository.kb_reader.base import KnowledgeBaseReader
+from kacore.repository.source_store.sqlite import SQLiteSourceDocumentStore
+from kacore.repository.vector_store.milvus_lite import MilvusLiteVectorStore
 
 _pymilvus_available = importlib.util.find_spec("pymilvus") is not None
 _milvus_lite_available = importlib.util.find_spec("milvus_lite") is not None
@@ -583,8 +583,8 @@ async def test_retrieval_orchestrator_matches_appendix_anchor(sqlite_store):
 @pytest.mark.asyncio
 async def test_lightrag_context_queries_workspace_regardless_of_doc_status(tmp_path):
     """构建完成（含部分失败）后查询不应因单文档状态而阻断。"""
-    from knowledge_arch.index_compatibility import IndexCompatibilityStore
-    from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+    from kacore.index_compatibility import IndexCompatibilityStore
+    from kacore.repository.source_store.memory import InMemorySourceDocumentStore
 
     class Registry:
         calls = 0
@@ -629,8 +629,8 @@ async def test_lightrag_context_queries_workspace_regardless_of_doc_status(tmp_p
 @pytest.mark.asyncio
 async def test_lightrag_context_rejects_missing_workspace(tmp_path):
     """workspace 不存在时应拒绝查询。"""
-    from knowledge_arch.index_compatibility import IndexCompatibilityStore
-    from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+    from kacore.index_compatibility import IndexCompatibilityStore
+    from kacore.repository.source_store.memory import InMemorySourceDocumentStore
 
     class Registry:
         def has_workspace(self, collection: str) -> bool:
@@ -662,7 +662,7 @@ async def test_lightrag_context_rejects_missing_workspace(tmp_path):
 @pytest.mark.asyncio
 async def test_retrieval_global_and_subtree_lexical(sqlite_store):
     """collection 为空=全局召回；指定父集合时词法通道覆盖子树（中性占位词，正文命中）。"""
-    from knowledge_arch.pipelines.retrieval_orchestrator import SCOPE_COLLECTION, RetrievalScope
+    from kacore.pipelines.retrieval_orchestrator import SCOPE_COLLECTION, RetrievalScope
 
     root = Collection(name="ROOT_SCOPE_A")
     await sqlite_store.upsert_collection(root)

@@ -224,7 +224,7 @@ sleep 1
 
 # ── 2. 检查依赖是否需要更新 ──────────────────────────────────────────────────
 info "2. 检查前端依赖..."
-cd "$ROOT_DIR/ka_web/frontend"
+cd "$ROOT_DIR/web/frontend"
 NODE_STAMP="node_modules/.kr-node-version"
 NEED_INSTALL=0
 if [ ! -d node_modules ]; then
@@ -277,7 +277,7 @@ info "   后端日志: dev_backend.log"
 
 # ── 6. 后台启动前端 dev server ───────────────────────────────────────────────
 info "6. 后台拉起前端开发服务器 (npm run dev on ${FRONTEND_HOST}:${FRONTEND_PORT})..."
-cd "$ROOT_DIR/ka_web/frontend"
+cd "$ROOT_DIR/web/frontend"
 # dev server 不强制 NEXT_TEST_WASM：Node 20/Linux 容器下该变量会导致 .next/dev manifest 缺失并返回 500。
 # （npm run dev 自带 `rm -rf .next tsconfig.tsbuildinfo`，无需再手动清缓存。）
 KR_API_HOST=127.0.0.1 KR_API_PORT="$BACKEND_PORT" NEXT_TELEMETRY_DISABLED=1 nohup npm run dev -- --hostname "$FRONTEND_HOST" --port "$FRONTEND_PORT" > "$ROOT_DIR/dev_frontend.log" 2>&1 &

@@ -23,26 +23,39 @@
 
 ## [Unreleased]
 
+## [v1.0.4] — 2026-07-13
+
 ### 修复 (Fixed)
 
 - **LightRAG probe 默认文档品牌名统一**：默认探针文本由 `Knowledge Repository` 改为
-  `Knowledge Arch`，并增加 HTTP 路由回归测试锁定默认参数（`ka_web/server.py`、
+  `Knowledge Arch`，并增加 HTTP 路由回归测试锁定默认参数（`web/server.py`、
   `tests/backend/test_web_server.py`）。
+
+### 架构健康 (Refactor)
+
+- **顶层目录按 v1.0.4 布局收敛**：`knowledge_arch/` 改为唯一业务包 `kacore/`，
+  `ka_web/`/`ka_migrations/` 恢复为 `web/`/`migrations/`；生产模块缓存只清理
+  `kacore`，Web server 与迁移 SQL 均按插件内绝对文件路径加载，避免通用顶层名污染 AstrBot
+  共享进程。插件机器名、数据目录键、数据库/索引/LightRAG 路径及 HTTP/config 契约保持不变
+  （`main.py`、`kacore/plugin_initializer.py`、`kacore/migration_runner.py`）。
 
 ### 测试 (Tests)
 
 - **Milvus Lite 生命周期测试正确识别不完整依赖**：测试启动前同时探测 `pymilvus` 与
   `milvus_lite`；只安装前者时明确 skip，避免把环境缺包误报为代码失败
   （`tests/backend/test_retrieval_orchestrator.py`）。
+- **锁定 v1.0.4 目录与防撞名契约**：覆盖迁移目录、唯一 runner 模块、冲突 `web` 模块下的
+  文件路径加载及发布树必需/禁止路径（`tests/backend/test_lifecycle_and_cli.py`、
+  `tests/backend/test_published_tree.py`）。
 
 ### 构建与工程 (Build/CI)
 
 - **移除误提交的 AstrBot 宿主运行数据**：从版本树删除 `data/cmd_config.json` 与
   `data/t2i_templates/*.html`；这些路径已由 `.gitignore` 的 `/data/` 规则覆盖，本机副本保存在
   `.dev_data/recovered-runtime-data-2026-07-12/`，不会进入提交或发布包。
-- **修复顶层包改名后发布生成器仍要求旧路径**：`REQUIRED`/`FORBIDDEN_PREFIXES`/
-  `FORBIDDEN_FILES` 从 `web`/`core` 同步到 `ka_web`/`knowledge_arch`，恢复 v1.0.3 发布树与 ZIP
-  生成，并增加布局契约测试防止回退（`tools/build_published_tree.py`、
+- **发布生成器同步最终目录布局**：`REQUIRED`/`FORBIDDEN_PREFIXES`/`FORBIDDEN_FILES`
+  使用 `web/server.py`、`web/frontend/` 与 `kacore/main.py`，并增加布局契约测试防止路径漂移
+  （`tools/build_published_tree.py`、
   `tests/backend/test_published_tree.py`）。
 
 ## [v1.0.3] — 2026-07-10

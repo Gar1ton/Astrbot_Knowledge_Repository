@@ -13,14 +13,14 @@ logo.svg
 .github/workflows/published-verify.yml
 release/AGENTS.published.md => AGENTS.md
 
-knowledge_arch/*.py
-knowledge_arch/**/*.py
-!knowledge_arch/main.py
+kacore/*.py
+kacore/**/*.py
+!kacore/main.py
 
-ka_web/server.py
+web/server.py
 
-ka_migrations/*.py
-ka_migrations/*.sql
+migrations/*.py
+migrations/*.sql
 
 pages/**
 !pages/README.md

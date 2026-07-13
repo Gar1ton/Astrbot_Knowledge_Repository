@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from knowledge_arch.config import EmbeddingConfig
-from knowledge_arch.index_compatibility import IndexCompatibilityStore, embedding_fingerprint
+from kacore.config import EmbeddingConfig
+from kacore.index_compatibility import IndexCompatibilityStore, embedding_fingerprint
 
 
 def test_embedding_fingerprint_changes_with_runtime_dimension() -> None:

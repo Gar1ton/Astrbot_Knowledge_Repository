@@ -2,7 +2,7 @@
 # 正式 main 由 release/published-files.txt 生成；git archive 仍使用本文件做二次防护。
 
 # 开发期资产，发布包无需携带：
-ka_web/frontend/   export-ignore
+web/frontend/   export-ignore
 tests/          export-ignore
 dev/            export-ignore
 docs/           export-ignore
@@ -20,10 +20,10 @@ bump_version.py export-ignore
 pyproject.toml  export-ignore
 rebuild.sh      export-ignore
 requirements-dev.txt export-ignore
-knowledge_arch/main.py    export-ignore
-knowledge_arch/*.README.md export-ignore
-knowledge_arch/**/README.md export-ignore
-ka_migrations/README.md export-ignore
+kacore/main.py    export-ignore
+kacore/*.README.md export-ignore
+kacore/**/README.md export-ignore
+migrations/README.md export-ignore
 pages/README.md export-ignore
 .gitignore      export-ignore
 .gitattributes  export-ignore

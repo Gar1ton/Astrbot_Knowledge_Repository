@@ -1,6 +1,6 @@
-"""ka_web/server.py 路由 smoke 测试（aiohttp TestServer + 内存 api）。
+"""web/server.py 路由 smoke 测试（aiohttp TestServer + 内存 api）。
 
-验证 HTTP↔knowledge_arch/api 的翻译与认证中间件，不连真实后端。
+验证 HTTP↔kacore/api 的翻译与认证中间件，不连真实后端。
 """
 from __future__ import annotations
 
@@ -13,22 +13,22 @@ from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 from yarl import URL
 
-from ka_web.server import SESSION_COOKIE, build_app
-from knowledge_arch.api import KnowledgeRepositoryApi
-from knowledge_arch.config import Config
-from knowledge_arch.domain.models import (
+from kacore.api import KnowledgeRepositoryApi
+from kacore.config import Config
+from kacore.domain.models import (
     Collection,
     DocumentChunk,
     DocumentOrigin,
     SourceDocument,
     SyncTargetKind,
 )
-from knowledge_arch.index_compatibility import IndexCompatibilityStore
-from knowledge_arch.plugin_initializer import PluginInitializer
-from knowledge_arch.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
-from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
-from knowledge_arch.repository.sync_targets.memory import InMemorySyncTarget
-from knowledge_arch.secret_store import EncryptedSecretStore
+from kacore.index_compatibility import IndexCompatibilityStore
+from kacore.plugin_initializer import PluginInitializer
+from kacore.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
+from kacore.repository.source_store.memory import InMemorySourceDocumentStore
+from kacore.repository.sync_targets.memory import InMemorySyncTarget
+from kacore.secret_store import EncryptedSecretStore
+from web.server import SESSION_COOKIE, build_app
 
 _GB = 1024 * 1024 * 1024
 
@@ -479,7 +479,7 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         await client.close()
 
 
-async def test_graph_probe_default_text_uses_knowledge_arch(tmp_path: Path) -> None:
+async def test_graph_probe_default_text_uses_kacore(tmp_path: Path) -> None:
     api = await _make_api()
     api.probe_lightrag_core = AsyncMock(return_value={"status": "success"})  # type: ignore[method-assign]
     app = build_app(
@@ -916,7 +916,7 @@ async def test_document_annotations_route_uses_zotero_readonly_client(
                 },
             ]
 
-    from knowledge_arch.adapters.zotero import local_api
+    from kacore.adapters.zotero import local_api
 
     monkeypatch.setattr(local_api, "ZoteroLocalApiClient", FakeZoteroClient)
 
@@ -1187,7 +1187,7 @@ async def test_zotero_server_key_routes_encrypt_and_mask(
                 "access": {"user": {"library": True, "files": True}},
             }
 
-    monkeypatch.setattr("knowledge_arch.adapters.zotero.web_api.ZoteroWebApiClient", Client)
+    monkeypatch.setattr("kacore.adapters.zotero.web_api.ZoteroWebApiClient", Client)
     api = await _make_api()
     api._secret_store = EncryptedSecretStore(tmp_path / "secrets")
     app = build_app(
@@ -1234,7 +1234,7 @@ async def test_zotero_account_change_requires_confirmation_and_preserves_old_key
                 "access": {"user": {"library": True, "files": True}},
             }
 
-    monkeypatch.setattr("knowledge_arch.adapters.zotero.web_api.ZoteroWebApiClient", Client)
+    monkeypatch.setattr("kacore.adapters.zotero.web_api.ZoteroWebApiClient", Client)
     api = await _make_api()
     api._secret_store = EncryptedSecretStore(tmp_path / "secrets")
     app = build_app(
@@ -1494,8 +1494,8 @@ async def test_graph_mixed_ask_returns_structured_not_ready(tmp_path: Path) -> N
 
 async def test_graph_mixed_ask_returns_renamed_failure_status(tmp_path: Path) -> None:
     """图谱 workspace 已就绪但查询失败时，HTTP 契约使用 graph_mixed_failed。"""
-    from knowledge_arch.index_compatibility import IndexCompatibilityStore
-    from knowledge_arch.pipelines.retrieval_orchestrator import RetrievalOutcome
+    from kacore.index_compatibility import IndexCompatibilityStore
+    from kacore.pipelines.retrieval_orchestrator import RetrievalOutcome
 
     class Registry:
         def has_workspace(self, collection: str) -> bool:
@@ -1554,8 +1554,8 @@ async def test_graph_mixed_ask_returns_renamed_failure_status(tmp_path: Path) ->
 
 async def test_metrics_route(tmp_path: Path) -> None:
     """GET /api/metrics 应返回 ops + total_records 结构。"""
-    from knowledge_arch.ask_progress import ProgressStore
-    from knowledge_arch.metrics import PerformanceTracker
+    from kacore.ask_progress import ProgressStore
+    from kacore.metrics import PerformanceTracker
 
     tracker = PerformanceTracker()
     tracker.record("embed_query", 100.0)
@@ -1590,8 +1590,8 @@ async def test_metrics_route(tmp_path: Path) -> None:
 
 async def test_ask_progress_route_not_found(tmp_path: Path) -> None:
     """GET /api/ask/progress/{cid} — 不存在的 cid 应返回 404。"""
-    from knowledge_arch.ask_progress import ProgressStore
-    from knowledge_arch.metrics import PerformanceTracker
+    from kacore.ask_progress import ProgressStore
+    from kacore.metrics import PerformanceTracker
 
     api = KnowledgeRepositoryApi(
         source_store=InMemorySourceDocumentStore(),
@@ -1616,8 +1616,8 @@ async def test_ask_progress_route_not_found(tmp_path: Path) -> None:
 
 async def test_ask_progress_route_found(tmp_path: Path) -> None:
     """GET /api/ask/progress/{cid} — 已设置进度时应返回 stage + pct。"""
-    from knowledge_arch.ask_progress import ProgressStore
-    from knowledge_arch.metrics import PerformanceTracker
+    from kacore.ask_progress import ProgressStore
+    from kacore.metrics import PerformanceTracker
 
     progress_store = ProgressStore()
     progress_store.set("test-cid-123", "vector_search", 20)
@@ -1783,7 +1783,7 @@ async def test_login_malformed_json_returns_400(tmp_path: Path) -> None:
 async def test_upload_over_size_limit_returns_413(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import ka_web.server as server_mod
+    import web.server as server_mod
 
     monkeypatch.setattr(server_mod, "_MAX_UPLOAD_BYTES", 16)
     client = await _client(tmp_path)

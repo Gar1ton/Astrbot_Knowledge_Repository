@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from knowledge_arch.config import Config
-from knowledge_arch.domain.models import (
+from kacore.config import Config
+from kacore.domain.models import (
     Collection,
     DocumentChunk,
     DocumentLifecycle,
@@ -13,7 +13,7 @@ from knowledge_arch.domain.models import (
     ZoteroCollection,
     ZoteroTag,
 )
-from knowledge_arch.pipelines.retrieval_orchestrator import (
+from kacore.pipelines.retrieval_orchestrator import (
     SCOPE_COLLECTION,
     SCOPE_ITEM,
     SCOPE_LIBRARY,
@@ -21,8 +21,8 @@ from knowledge_arch.pipelines.retrieval_orchestrator import (
     RetrievalOrchestrator,
     RetrievalScope,
 )
-from knowledge_arch.repository.kb_reader.base import KnowledgeBaseReader
-from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+from kacore.repository.kb_reader.base import KnowledgeBaseReader
+from kacore.repository.source_store.memory import InMemorySourceDocumentStore
 
 LIB = "1"
 

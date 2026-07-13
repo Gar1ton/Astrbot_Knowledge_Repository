@@ -5,10 +5,10 @@ import time
 
 import pytest
 
-from knowledge_arch.repository.embedding.base import EmbeddingProvider
-from knowledge_arch.repository.embedding.cached import CachedEmbeddingProvider
-from knowledge_arch.repository.embedding.external import ExternalEmbeddingProvider
-from knowledge_arch.repository.embedding.local import LocalEmbeddingProvider
+from kacore.repository.embedding.base import EmbeddingProvider
+from kacore.repository.embedding.cached import CachedEmbeddingProvider
+from kacore.repository.embedding.external import ExternalEmbeddingProvider
+from kacore.repository.embedding.local import LocalEmbeddingProvider
 
 
 class MockEmbeddingProvider(EmbeddingProvider):

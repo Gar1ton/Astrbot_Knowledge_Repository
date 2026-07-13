@@ -11,9 +11,9 @@ from unittest.mock import MagicMock, patch
 import fitz  # type: ignore[import-untyped]
 import pytest
 
-from knowledge_arch.main import KnowledgeRepositoryPlugin
-from knowledge_arch.migration_runner import run_migrations
-from knowledge_arch.plugin_initializer import PluginInitializer, _load_plugin_web_build_app
+from kacore.main import KnowledgeRepositoryPlugin
+from kacore.migration_runner import MIGRATIONS_DIR, run_migrations
+from kacore.plugin_initializer import PluginInitializer, _load_plugin_web_build_app
 
 
 @pytest.fixture
@@ -81,17 +81,19 @@ async def test_plugin_initializer_lifecycle(
 
 
 def test_initializer_uses_plugin_owned_migration_runner() -> None:
-    assert run_migrations.__module__ == "knowledge_arch.migration_runner"
+    assert run_migrations.__module__ == "kacore.migration_runner"
+    assert MIGRATIONS_DIR.name == "migrations"
+    assert (MIGRATIONS_DIR / "001_source_store.sql").is_file()
 
 
 def test_web_server_loader_ignores_conflicting_top_level_web_module(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    conflicting_web = ModuleType("ka_web")
-    conflicting_server = ModuleType("ka_web.server")
+    conflicting_web = ModuleType("web")
+    conflicting_server = ModuleType("web.server")
     conflicting_server.build_app = object()  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "ka_web", conflicting_web)
-    monkeypatch.setitem(sys.modules, "ka_web.server", conflicting_server)
+    monkeypatch.setitem(sys.modules, "web", conflicting_web)
+    monkeypatch.setitem(sys.modules, "web.server", conflicting_server)
 
     build_app = _load_plugin_web_build_app()
 
@@ -115,7 +117,7 @@ async def test_plugin_initializer_lifecycle_periodic_disabled(
 async def test_initializer_creates_default_collection_without_overwriting_it(
     temp_dir: Path, mock_context: object
 ) -> None:
-    from knowledge_arch.domain.models import Collection
+    from kacore.domain.models import Collection
 
     config = {"vector_db": {"backend": "astr"}}
     first = PluginInitializer(mock_context, config, temp_dir)
@@ -175,12 +177,12 @@ async def test_initializer_passes_probed_dimension_to_milvus_and_lightrag(
     }
     with (
         patch(
-            "knowledge_arch.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            "kacore.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
             return_value=Provider(),
         ),
-        patch("knowledge_arch.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
-        patch("knowledge_arch.lightrag_core.LightRAGCoreRegistry", Registry),
-        patch("knowledge_arch.plugin_initializer._module_available", return_value=True),
+        patch("kacore.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
+        patch("kacore.lightrag_core.LightRAGCoreRegistry", Registry),
+        patch("kacore.plugin_initializer._module_available", return_value=True),
     ):
         initializer = PluginInitializer(mock_context, config, temp_dir)
         await initializer.initialize()
@@ -233,10 +235,10 @@ async def test_initializer_probe_failure_disables_embedding_indexes(
     }
     with (
         patch(
-            "knowledge_arch.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            "kacore.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
             return_value=Provider(),
         ),
-        patch("knowledge_arch.plugin_initializer._module_available", return_value=True),
+        patch("kacore.plugin_initializer._module_available", return_value=True),
     ):
         initializer = PluginInitializer(mock_context, config, temp_dir)
         await initializer.initialize()
@@ -269,10 +271,10 @@ async def test_fresh_install_uploads_and_lexically_retrieves_when_embedding_prob
 
     with (
         patch(
-            "knowledge_arch.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            "kacore.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
             return_value=Provider(),
         ),
-        patch("knowledge_arch.plugin_initializer._module_available", return_value=True),
+        patch("kacore.plugin_initializer._module_available", return_value=True),
     ):
         initializer = PluginInitializer(mock_context, {}, temp_dir)
         await initializer.initialize()
@@ -309,7 +311,7 @@ async def test_fresh_install_uploads_and_lexically_retrieves_when_embedding_prob
 async def test_initializer_keeps_mismatched_milvus_available_for_manual_rebuild(
     temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
 ) -> None:
-    from knowledge_arch.repository.vector_store.milvus_lite import MilvusSchemaMismatchError
+    from kacore.repository.vector_store.milvus_lite import MilvusSchemaMismatchError
 
     class Provider:
         async def embed_query(self, text: str) -> list[float]:
@@ -332,11 +334,11 @@ async def test_initializer_keeps_mismatched_milvus_available_for_manual_rebuild(
     }
     with (
         patch(
-            "knowledge_arch.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            "kacore.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
             return_value=Provider(),
         ),
-        patch("knowledge_arch.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
-        patch("knowledge_arch.plugin_initializer._module_available", return_value=True),
+        patch("kacore.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
+        patch("kacore.plugin_initializer._module_available", return_value=True),
     ):
         initializer = PluginInitializer(mock_context, config, temp_dir)
         await initializer.initialize()
@@ -354,7 +356,7 @@ async def test_initializer_keeps_mismatched_milvus_available_for_manual_rebuild(
 async def test_initializer_marks_recreated_empty_milvus_incompatible_when_docs_exist(
     temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
 ) -> None:
-    from knowledge_arch.domain.models import Collection, SourceDocument
+    from kacore.domain.models import Collection, SourceDocument
 
     seed_config = {
         **raw_config,
@@ -393,11 +395,11 @@ async def test_initializer_marks_recreated_empty_milvus_incompatible_when_docs_e
     }
     with (
         patch(
-            "knowledge_arch.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            "kacore.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
             return_value=Provider(),
         ),
-        patch("knowledge_arch.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
-        patch("knowledge_arch.plugin_initializer._module_available", return_value=True),
+        patch("kacore.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
+        patch("kacore.plugin_initializer._module_available", return_value=True),
     ):
         initializer = PluginInitializer(mock_context, config, temp_dir)
         await initializer.initialize()
@@ -457,7 +459,7 @@ async def test_plugin_shell_lifecycle(
     assert plugin._initializer.agent_enabled is True
     assert (temp_dir / "runtime_config.json").exists()
 
-    from knowledge_arch.domain.models import DocumentChunk
+    from kacore.domain.models import DocumentChunk
 
     mock_chunk = DocumentChunk(
         chunk_id="test-chunk-1",

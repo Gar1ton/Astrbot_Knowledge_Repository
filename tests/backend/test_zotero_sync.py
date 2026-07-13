@@ -13,13 +13,13 @@ from pathlib import Path
 import fitz
 import pytest
 
-from knowledge_arch.adapters.zotero.sqlite_reader import ZoteroSqliteReader
-from knowledge_arch.config import Config, SourceStoreConfig
-from knowledge_arch.domain.models import DocumentLifecycle, DocumentOrigin
-from knowledge_arch.managers.ingest_manager import IngestManager, make_document_id
-from knowledge_arch.pipelines.zotero_sync_pipeline import ZoteroSyncPipeline
-from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
-from knowledge_arch.zotero_sync_job import ZoteroSyncJob
+from kacore.adapters.zotero.sqlite_reader import ZoteroSqliteReader
+from kacore.config import Config, SourceStoreConfig
+from kacore.domain.models import DocumentLifecycle, DocumentOrigin
+from kacore.managers.ingest_manager import IngestManager, make_document_id
+from kacore.pipelines.zotero_sync_pipeline import ZoteroSyncPipeline
+from kacore.repository.source_store.memory import InMemorySourceDocumentStore
+from kacore.zotero_sync_job import ZoteroSyncJob
 
 _pdf_available = importlib.util.find_spec("pymupdf4llm") is not None
 pytestmark = pytest.mark.skipif(not _pdf_available, reason="pymupdf4llm not installed")
@@ -637,7 +637,7 @@ async def test_pull_linked_resolves_attachments_subpath(tmp_path: Path) -> None:
 
 
 def test_probe_zotmoov_root_branches(tmp_path: Path) -> None:
-    from knowledge_arch.adapters.zotero import paths as zpaths
+    from kacore.adapters.zotero import paths as zpaths
 
     unset = zpaths.probe_zotmoov_root("")
     assert unset["valid"] is False and "未配置" in str(unset["reason"])
@@ -733,9 +733,9 @@ def test_probe_local_read_missing_data_dir(tmp_path: Path) -> None:
 
 
 def test_probe_local_read_server_mode_is_skipped(tmp_path: Path) -> None:
-    from knowledge_arch.config import Config, SourceStoreConfig
-    from knowledge_arch.managers.ingest_manager import IngestManager
-    from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+    from kacore.config import Config, SourceStoreConfig
+    from kacore.managers.ingest_manager import IngestManager
+    from kacore.repository.source_store.memory import InMemorySourceDocumentStore
 
     store = InMemorySourceDocumentStore()
     ingest = IngestManager(

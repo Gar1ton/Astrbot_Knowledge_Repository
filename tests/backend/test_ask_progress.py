@@ -1,6 +1,6 @@
 """单元测试：ProgressStore（core/ask_progress.py）。"""
 
-from knowledge_arch.ask_progress import TTL_SEC, ProgressStore
+from kacore.ask_progress import TTL_SEC, ProgressStore
 
 
 def test_set_and_get():

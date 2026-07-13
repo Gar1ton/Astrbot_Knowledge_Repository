@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from knowledge_arch.domain.models import SourceDocument
-from knowledge_arch.managers.category_manager import CategoryManager
-from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+from kacore.domain.models import SourceDocument
+from kacore.managers.category_manager import CategoryManager
+from kacore.repository.source_store.memory import InMemorySourceDocumentStore
 
 
 def _doc(doc_id: str, collection: str = "default", tags: list[str] | None = None) -> SourceDocument:

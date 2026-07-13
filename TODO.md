@@ -1,5 +1,31 @@
 # TODO
 
+## v1.0.4 目录重命名与防撞名收敛 (completed)
+
+### User constraints / 约束
+
+- 顶层目录调整为 `kacore/`、`web/`、`migrations/`，版本提升到 `v1.0.4`。
+- 保持插件机器名、AstrBot 数据目录键、数据库/索引/LightRAG 路径和 HTTP/config 契约不变。
+- 只在 `developer` 创建本地源码提交；不生成 v1.0.4 发布树，不触碰现有
+  `publish/v1.0.3` 工作树/分支，不执行任何远端操作。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 目录与运行时防撞名**：重命名 `knowledge_arch` → `kacore`、
+  `ka_web` → `web`、`ka_migrations` → `migrations`；生产模块缓存只清理唯一包
+  `kacore`，Web 与迁移继续按文件路径加载，避免通用顶层名污染共享进程。
+- [x] **Phase 2 - 全仓引用与发布契约**：同步源码 import、测试 monkeypatch、工具链、CI、
+  发布白名单及当前架构文档；历史完成记录保留原路径。
+- [x] **Phase 3 - 版本与验证**：追加 CHANGELOG，统一 bump 到 v1.0.4，执行 pytest、ruff、
+  mypy、前端 lint/build、静态同步检查与残留扫描，通过后创建本地提交。
+
+### Verification
+
+- 定向生命周期/Web/迁移/发布树测试：77 passed；全量 pytest：610 passed / 1 skipped。
+- `ruff check .` 通过；`mypy` Success；前端 ESLint 通过，Next.js 生产构建 13 个静态页面成功。
+- `python tools/sync_frontend.py` 同步 359 文件，`--check` 一致；旧路径残留扫描、持久化标识
+  核对与 `git diff --check` 均通过。
+
 ## v1.0.3 发布生成器路径修复 (in progress)
 
 ### User constraints / 约束

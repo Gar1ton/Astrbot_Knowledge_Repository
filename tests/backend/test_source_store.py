@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from knowledge_arch.domain.models import (
+from kacore.domain.models import (
     Collection,
     ConsoleScopeState,
     DocumentChunk,
@@ -13,7 +13,7 @@ from knowledge_arch.domain.models import (
     ScopedNote,
     SourceDocument,
 )
-from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
+from kacore.repository.source_store.memory import InMemorySourceDocumentStore
 
 
 def _doc(doc_id: str, collection: str = "default", tags: list[str] | None = None) -> SourceDocument:
@@ -423,7 +423,7 @@ async def test_exact_mentions_ascii_terms_require_boundaries(
 
 
 async def test_notion_entity_map_crud(store: InMemorySourceDocumentStore) -> None:
-    from knowledge_arch.domain.models import (
+    from kacore.domain.models import (
         NOTION_ENTITY_DOCUMENT,
         NOTION_ENTITY_NOTE,
         NOTION_PUSH_DEGRADED,
@@ -468,7 +468,7 @@ async def test_notion_entity_map_crud(store: InMemorySourceDocumentStore) -> Non
 
 
 async def test_notion_outbox_lifecycle(store: InMemorySourceDocumentStore) -> None:
-    from knowledge_arch.domain.models import (
+    from kacore.domain.models import (
         NOTION_OUTBOX_PUSHED,
         NOTION_PUSH_FAILED,
         NOTION_PUSH_PENDING,

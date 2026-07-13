@@ -10,9 +10,9 @@ from typing import Any
 
 import pytest
 
-from knowledge_arch.adapters.notion_mcp import NotionMCPAdapter, NotionMCPError
-from knowledge_arch.config import NotionSyncConfig
-from knowledge_arch.domain.models import (
+from kacore.adapters.notion_mcp import NotionMCPAdapter, NotionMCPError
+from kacore.config import NotionSyncConfig
+from kacore.domain.models import (
     NOTION_ENTITY_DOCUMENT,
     NOTION_OUTBOX_PUSHED,
     NOTION_PUSH_DEGRADED,
@@ -23,9 +23,9 @@ from knowledge_arch.domain.models import (
     SourceDocument,
     SyncTargetKind,
 )
-from knowledge_arch.pipelines.notion_sync_pipeline import NotionSyncPipeline
-from knowledge_arch.repository.source_store.memory import InMemorySourceDocumentStore
-from knowledge_arch.repository.sync_targets.notion import NotionSyncTarget
+from kacore.pipelines.notion_sync_pipeline import NotionSyncPipeline
+from kacore.repository.source_store.memory import InMemorySourceDocumentStore
+from kacore.repository.sync_targets.notion import NotionSyncTarget
 
 
 @dataclass

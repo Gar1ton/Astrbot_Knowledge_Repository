@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from knowledge_arch.config import DeepThinkingConfig, RerankConfig
-from knowledge_arch.domain.deep_thinking import Checklist, ChecklistItem, EvidenceItem
-from knowledge_arch.domain.models import DocumentChunk
-from knowledge_arch.pipelines.deep_thinking_evidence import select_final_evidence
-from knowledge_arch.pipelines.deep_thinking_orchestrator import DeepThinkingOrchestrator
-from knowledge_arch.pipelines.deep_thinking_prompts import (
+from kacore.config import DeepThinkingConfig, RerankConfig
+from kacore.domain.deep_thinking import Checklist, ChecklistItem, EvidenceItem
+from kacore.domain.models import DocumentChunk
+from kacore.pipelines.deep_thinking_evidence import select_final_evidence
+from kacore.pipelines.deep_thinking_orchestrator import DeepThinkingOrchestrator
+from kacore.pipelines.deep_thinking_prompts import (
     build_plan_prompt,
     build_sea_prompt,
     build_verify_prompt,
@@ -21,8 +21,8 @@ from knowledge_arch.pipelines.deep_thinking_prompts import (
     parse_sea,
     parse_verify,
 )
-from knowledge_arch.pipelines.retrieval_orchestrator import ChunkSignal, RetrievalOutcome
-from knowledge_arch.repository.reranker.noop import NoopReranker
+from kacore.pipelines.retrieval_orchestrator import ChunkSignal, RetrievalOutcome
+from kacore.repository.reranker.noop import NoopReranker
 
 # ── 脚本化 JSON 响应 ────────────────────────────────────────
 PLAN_1ITEM = '{"checklist":[{"id":"c1","text":"方法","critical":false}],"sub_queries":["q1"]}'
@@ -755,14 +755,14 @@ async def test_per_aspect_ranking_surfaces_high_rrf_subquery_chunk():
 
 
 def test_reranker_is_passthrough_flags():
-    from knowledge_arch.repository.reranker.bge_local import CrossEncoderReranker
+    from kacore.repository.reranker.bge_local import CrossEncoderReranker
 
     assert NoopReranker().is_passthrough is True
     assert CrossEncoderReranker(model="x").is_passthrough is False
 
 
 def test_verify_prompt_respects_clip_param():
-    from knowledge_arch.pipelines.deep_thinking_prompts import build_verify_prompt
+    from kacore.pipelines.deep_thinking_prompts import build_verify_prompt
 
     chunk = DocumentChunk("c1", "d", 0, "X" * 100, "h")
     short = build_verify_prompt("q", "a", [chunk], 10)
@@ -773,7 +773,7 @@ def test_verify_prompt_respects_clip_param():
 
 @pytest.mark.asyncio
 async def test_synthesize_answer_deep_style_selects_deep_system():
-    from knowledge_arch.pipelines.answer_synthesis import synthesize_answer
+    from kacore.pipelines.answer_synthesis import synthesize_answer
 
     llm = ScriptedLLM(["ans"])
     await synthesize_answer(llm, "q", [_chunk("c1")], "zh", style="deep")
@@ -855,7 +855,7 @@ async def test_document_labels_cached_across_rounds():
 @pytest.mark.asyncio
 async def test_rank_candidates_parallel_pools_match_serial_ordering():
     """并行分池 rerank 的混合排序与按池串行时一致（max 聚合与执行顺序无关）。"""
-    from knowledge_arch.pipelines.deep_thinking_evidence import rank_candidates
+    from kacore.pipelines.deep_thinking_evidence import rank_candidates
 
     class EchoReranker:
         """按 chunk 文本内嵌分数打分的确定性 reranker。"""
@@ -863,7 +863,7 @@ async def test_rank_candidates_parallel_pools_match_serial_ordering():
         is_passthrough = False
 
         async def rerank(self, query, candidates, top_n=None):
-            from knowledge_arch.repository.reranker.base import ScoredChunk
+            from kacore.repository.reranker.base import ScoredChunk
 
             scored = [
                 ScoredChunk(chunk=c, score=float(c.text.rsplit("=", 1)[-1]))

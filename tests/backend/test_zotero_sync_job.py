@@ -1,7 +1,7 @@
 """ZoteroSyncJob 进度模型单测：progress_percent / status / to_dict 契约（纯内存，无 I/O）。"""
 from __future__ import annotations
 
-from knowledge_arch.zotero_sync_job import (
+from kacore.zotero_sync_job import (
     ZOTERO_STAGE_READING,
     ZOTERO_STAGE_SYNCING_DOCS,
     ZOTERO_SYNC_PARTIAL,

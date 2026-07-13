@@ -33,7 +33,7 @@ REQUIRED = {
     "CHANGELOG.md",
     "LICENSE",
     "logo.png",
-    "ka_web/server.py",
+    "web/server.py",
     "pages/index.html",
     ".published-source",
 }
@@ -44,7 +44,7 @@ FORBIDDEN_PREFIXES = (
     "docs/",
     "tests/",
     "tools/",
-    "ka_web/frontend/",
+    "web/frontend/",
 )
 FORBIDDEN_FILES = {
     "TODO.md",
@@ -54,7 +54,7 @@ FORBIDDEN_FILES = {
     "pyproject.toml",
     "rebuild.sh",
     "requirements-dev.txt",
-    "knowledge_arch/main.py",
+    "kacore/main.py",
 }
 
 

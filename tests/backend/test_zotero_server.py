@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from knowledge_arch.adapters.zotero.web_api import ZoteroWebApiReader, current_key_identity
-from knowledge_arch.secret_store import EncryptedSecretStore
+from kacore.adapters.zotero.web_api import ZoteroWebApiReader, current_key_identity
+from kacore.secret_store import EncryptedSecretStore
 
 
 def test_secret_store_encrypts_and_masks(tmp_path: Path) -> None:

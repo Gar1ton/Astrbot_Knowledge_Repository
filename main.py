@@ -14,7 +14,7 @@ if str(_ROOT_DIR) not in sys.path:
 
 
 def _purge_stale_local_modules() -> None:
-    """Evict ALL cached knowledge_arch/ka_web/ka_migrations modules on every load.
+    """Evict cached modules owned by this plugin's unique Python package.
 
     Two reasons:
     1. Defense in depth against another plugin claiming the same top-level
@@ -28,7 +28,9 @@ def _purge_stale_local_modules() -> None:
        installs are invisible.  Unconditional eviction forces a fresh import
        every time, fixing AttributeError on hot-reload.
     """
-    _OWNED_TOPS = frozenset(("knowledge_arch", "ka_web", "ka_migrations"))
+    # ``web`` 与 ``migrations`` 是通用目录名：生产代码分别按文件路径加载 server/SQL，
+    # 不得从共享进程的 sys.modules 清理同名顶层包，否则会误伤其他插件。
+    _OWNED_TOPS = frozenset(("kacore",))
 
     for name in list(sys.modules.keys()):
         if name == __name__:
@@ -44,21 +46,21 @@ from typing import TYPE_CHECKING, Any
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from knowledge_arch.event_handler import EventHandler
-from knowledge_arch.plugin_initializer import PluginInitializer
-from knowledge_arch.retrieval_modes import (
+from kacore.event_handler import EventHandler
+from kacore.plugin_initializer import PluginInitializer
+from kacore.retrieval_modes import (
     MODE_GRAPH_MIXED,
     MODE_GRAPH_ONLY,
     STRICT_COLLECTION_MODES,
     normalize_retrieval_mode,
 )
-from knowledge_arch.utils import text_chunks
+from kacore.utils import text_chunks
 
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
     from astrbot.api.provider import ProviderRequest
 
-_PLUGIN_VERSION = "v1.0.3"
+_PLUGIN_VERSION = "v1.0.4"
 logger = logging.getLogger(__name__)
 _RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
 _RESEARCH_PARAGRAPH_LIMIT = 700
@@ -149,12 +151,12 @@ class KnowledgeRepositoryPlugin(Star):
         yield event.plain_result(await self._handler.on_ka_persona(action))
 
     @ka.command("webui")
-    async def ka_webui(self, event: AstrMessageEvent, action: str = ""):
+    async def webui(self, event: AstrMessageEvent, action: str = ""):
         '''/ka webui <on|off> — 实时启停 Web 控制台'''
         if not self._handler:
             yield event.plain_result("插件未初始化。")
             return
-        yield event.plain_result(await self._handler.on_ka_webui(action))
+        yield event.plain_result(await self._handler.on_webui(action))
 
     @ka.command("r2")
     async def ka_r2(self, event: AstrMessageEvent, action: str = "", target: str = ""):
@@ -612,7 +614,7 @@ class KnowledgeRepositoryPlugin(Star):
             ok = await self._send_plain_message(event, chunk) and ok
         return ok
 
-    # 文本切分薄委派：实现在 core/utils/text_chunks（纯函数，v0.30.0 治本修复中文句读硬切）。
+    # 文本切分薄委派：实现在 kacore/utils/text_chunks（纯函数，v0.30.0 治本修复中文句读硬切）。
     @staticmethod
     def _split_message_text(text: str, *, limit: int = _RESEARCH_MESSAGE_CHUNK_LIMIT) -> list[str]:
         return text_chunks.split_message_text(text, limit=limit)

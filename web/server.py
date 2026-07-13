@@ -1,6 +1,6 @@
 """HTTP 路由与 WebUI 服务（见 web/README.md 与 ../ARCHITECTURE.md §7）。
 
-只做 HTTP↔业务的翻译：解析请求 → 调 `core/api` → 序列化响应。零业务逻辑。
+只做 HTTP↔业务的翻译：解析请求 → 调 `kacore/api` → 序列化响应。零业务逻辑。
 认证经中间件统一处理；静态前端由 `static_dir` 托管（生产指向 pages/，调试指向 web/frontend/）。
 
 依赖经 build_app 注入（api 门面 + 配置），自身不构造依赖。
@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, cast
 from aiohttp import web
 
 if TYPE_CHECKING:
-    from core.api import KnowledgeRepositoryApi
-    from core.log_capture import MemoryLogHandler
+    from kacore.api import KnowledgeRepositoryApi
+    from kacore.log_capture import MemoryLogHandler
 
 # ── 常量 ────────────────────────────────────────────────────────
 
@@ -147,7 +147,7 @@ async def handle_list_collections(request: web.Request) -> web.Response:
 
 
 async def handle_create_collection(request: web.Request) -> web.Response:
-    from core.api import ReadOnlyError
+    from kacore.api import ReadOnlyError
 
     body = await request.json()
     name = (body.get("name") or "").strip()
@@ -169,7 +169,7 @@ async def handle_create_collection(request: web.Request) -> web.Response:
 
 
 async def handle_delete_collection(request: web.Request) -> web.Response:
-    from core.api import ReadOnlyError
+    from kacore.api import ReadOnlyError
 
     try:
         ok = await _api(request).delete_collection(request.match_info["name"])
@@ -182,7 +182,7 @@ async def handle_delete_collection(request: web.Request) -> web.Response:
 
 async def handle_patch_collection(request: web.Request) -> web.Response:
     """按 coll_key 重命名 / 移动本地集合。body: {name?, parent_key?}。"""
-    from core.api import ReadOnlyError
+    from kacore.api import ReadOnlyError
 
     coll_key = request.match_info["coll_key"]
     body = await request.json()
@@ -200,7 +200,7 @@ async def handle_patch_collection(request: web.Request) -> web.Response:
 
 
 async def handle_delete_collection_by_key(request: web.Request) -> web.Response:
-    from core.api import ReadOnlyError
+    from kacore.api import ReadOnlyError
 
     try:
         ok = await _api(request).delete_collection_by_key(request.match_info["coll_key"])
@@ -298,7 +298,7 @@ async def handle_upload_document(request: web.Request) -> web.Response:
 
 
 async def handle_classify_document(request: web.Request) -> web.Response:
-    from core.api import ReadOnlyError
+    from kacore.api import ReadOnlyError
 
     body = await request.json()
     tags = body.get("tags")
@@ -328,7 +328,7 @@ async def handle_document_meta_patch(request: web.Request) -> web.Response:
 
 
 async def handle_delete_document(request: web.Request) -> web.Response:
-    from core.api import ReadOnlyError
+    from kacore.api import ReadOnlyError
 
     doc_id = request.match_info["doc_id"]
     _mw_logger.info("Delete document: doc_id=%s", doc_id)
@@ -541,7 +541,7 @@ async def handle_quota(request: web.Request) -> web.Response:
 
 # ── 预留端口路由（Reserved）──────────────────────────────────────
 #
-# 这些路由对应 core/api 的预留方法。现在就在 URL 层把「插座」装好，前端据此预留入口。
+# 这些路由对应 kacore/api 的预留方法。现在就在 URL 层把「插座」装好，前端据此预留入口。
 # 统一用 _reserved() 包裹：方法已实现则正常返回，未实现（NotImplementedError）则回 501 +
 # available_in，使前端可显示「将在 vX.Y.0 接入」而无需改动布局。
 
@@ -840,9 +840,9 @@ async def handle_graph_probe(request: web.Request) -> web.Response:
         )
     collection = body.get("collection") or "default"
     text = (
-        (body.get("text") or "LightRAG probe document for Knowledge Repository.")
+        (body.get("text") or "LightRAG probe document for Knowledge Arch.")
         if isinstance(body, dict)
-        else "LightRAG probe document for Knowledge Repository."
+        else "LightRAG probe document for Knowledge Arch."
     )
     doc_id = (
         (body.get("doc_id") or "kr-lightrag-probe-doc")
@@ -1162,7 +1162,7 @@ async def handle_ask(request: web.Request) -> web.Response:
     retrieval_mode = body.get("retrieval_mode") or "default"
     use_english_retrieval = bool(body.get("use_english_retrieval") or False)
     answer_language = str(body.get("answer_language") or "auto")
-    from core.api import GraphMixedQueryError, LightRAGNotReadyError
+    from kacore.api import GraphMixedQueryError, LightRAGNotReadyError
 
     try:
         result = await _api(request).ask(
@@ -1206,7 +1206,7 @@ async def handle_ask(request: web.Request) -> web.Response:
 
 
 def _collection_dict(c: object) -> dict:
-    from core.api import SYSTEM_COLLECTION_UNCATEGORIZED
+    from kacore.api import SYSTEM_COLLECTION_UNCATEGORIZED
 
     origin = getattr(c, "origin", None)
     origin_val = origin.value if origin is not None else "local"
@@ -1453,7 +1453,7 @@ def build_app(
     )
 
     # 安装内存日志 handler（幂等，重复调用安全）
-    from core.log_capture import install as _install_log_handler
+    from kacore.log_capture import install as _install_log_handler
 
     app[_LOG_HANDLER_KEY] = _install_log_handler(maxlen=500)
 

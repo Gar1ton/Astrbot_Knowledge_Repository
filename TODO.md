@@ -10,6 +10,17 @@
 
 - Linux build, two consecutive builds with the same `knowledge-arch` build ID, and `python tools/sync_frontend.py --check` all pass.
 
+## Unreleased: Notion archived ledger migration
+
+### Technical implementation path
+
+- [x] Add a one-time SQLite migration that allows the internal `archived` ledger status without adding a third `notion_sync.sync_mode` option.
+- [x] Add a regression test covering both existing ledger rows and new `archived` rows.
+
+### Verification
+
+- Migration and SQLite regression tests pass; existing ledger rows are preserved and new `archived` rows are accepted.
+
 ## v1.0.5：Codex Knowledge Arch 项目级 Skill (completed)
 
 ### User constraints / 约束

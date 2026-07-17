@@ -21,7 +21,55 @@
 
 ---
 
-## [Unreleased]
+## [v1.0.5] - 2026-07-17
+
+### 新增功能 (Added)
+
+- **Codex 项目级研究与配置 Skill**：新增 `.agents/skills/operate-knowledge-arch/`，Codex 可通过
+  本地 WebUI API 对集合/文档做元数据定位、多查询 RRF 召回、证据去重截断与按需全文分页，直接
+  生成带来源的研究回答而不调用插件 `/api/ask`；同时支持读取有效配置、预览安全白名单变更，
+  仅在显式 `--apply` 后写入，并为插件重启设置独立确认门
+  （`.agents/skills/operate-knowledge-arch/SKILL.md`、`scripts/knowledge_arch_client.py`、
+  `references/research.md`、`references/settings.md`）。
+- **Notion Strict 清理模式**：新增运行时可写的 `notion_sync.sync_mode`（默认 `preserve`，可选
+  `strict`）。Strict 同步只推送 active 文档，归档 detached 文档的账本页及同 DocID 重复页，
+  并阻止普通/强制同步与 QA 引用补推将其恢复；文档重新 active 后可正常新建页面
+  （`kacore/config.py`、`kacore/pipelines/notion_sync_pipeline.py`、
+  `kacore/repository/sync_targets/notion.py`）。
+- **Notion 模式双入口与归档统计**：Flow 同步节点高级设置、设置页 Notion 同步卡片新增
+  `preserve/strict` 下拉框和回收站警告；有效配置、推送结果、状态 API 与 `/ka notion status`
+  增加 mode/archived 信息，并同步更新静态 `pages/` 产物
+  （`web/frontend/components/flow/QuickConfigPanel.tsx`、
+  `web/frontend/components/modals/SettingModal.tsx`、`kacore/api.py`、
+  `kacore/event_handler.py`）。
+
+### 修复 (Fixed)
+
+- **Notion MCP 删除失败不再误判成功**：适配器识别工具在成功 content 中返回的顶层
+  `{error: ...}`，删除契约把 404/object_not_found 视为幂等成功，其余网络/API 错误继续上抛；
+  Strict 删除失败保留 page ID 供下轮重试并返回 `partial_failure`
+  （`kacore/adapters/notion_mcp.py`、`kacore/repository/sync_targets/notion.py`、
+  `kacore/pipelines/notion_sync_pipeline.py`）。
+
+### 测试 (Tests)
+
+- **锁定 Codex Skill 的检索、安全与发布契约**：模拟有/无鉴权 WebUI，覆盖连接失败、目录排序、
+  RRF 融合与内容去重、召回上限、全文分页、配置策略真相源一致性、敏感值遮蔽、写入/重启确认门
+  及隔离进程 CLI；发布树测试要求五个 Skill 契约文件完整入包。定向测试 15 passed，全量 pytest
+  636 passed / 1 skipped，Ruff 与 mypy 均通过
+  （`tests/backend/test_knowledge_arch_skill_client.py`、`test_published_tree.py`）。
+- **锁定 Strict 配置、清理与防恢复契约**：覆盖默认/非法配置、API 热保存、preserve 回归、
+  重复页与已删除页、失败重试、force/QA 防恢复、重新 active、本地孤儿及 MCP 错误解包；
+  全量 pytest 622 passed / 1 skipped，Ruff、mypy、前端 ESLint/生产构建和静态产物一致性均通过
+  （`tests/backend/test_config.py`、`test_notion_adapter.py`、`test_notion_target.py`、
+  `test_notion_pipeline.py`、`test_notion_event_handler.py`、`test_web_server.py`）。
+
+### 构建与工程 (Build/CI)
+
+- **正式发布包携带项目级 Skill**：`.gitignore` 继续忽略 `.agents` 的其他本地状态，仅放行
+  `operate-knowledge-arch`；发布白名单与必需文件集合同步纳入其五个契约文件，WORKTREE 预览
+  成功生成 489 文件的可验证发布树
+  （`.gitignore`、`release/published-files.txt`、`tools/build_published_tree.py`）。
 
 ## [v1.0.4] — 2026-07-13
 

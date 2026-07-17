@@ -30,6 +30,7 @@ export type QuickConfigHandle = { save: () => void };
 
 export const ZOTERO_SYNC_MODES = ["strict_mirror", "conservative", "archive"];
 export const ZOTERO_STORAGE_MODES = ["managed_copy", "linked", "zotmoov"];
+export const NOTION_SYNC_MODES = ["preserve", "strict"];
 
 type QuickConfigFieldBase = {
   id: string;
@@ -252,6 +253,15 @@ function buildQuickConfig(stage: PipelineStage, config: FlowConfigSnapshot): Qui
   if (id === "sync") {
     required.push(booleanField("r2_sync", "enabled", "flow_quick_r2_enabled", readBoolean(config, "r2_sync", "enabled", false)));
     required.push(booleanField("notion_sync", "enabled", "flow_quick_notion_enabled", readBoolean(config, "notion_sync", "enabled", false)));
+    advanced.push(selectField(
+      "notion_sync",
+      "sync_mode",
+      "flow_quick_notion_sync_mode",
+      readString(config, "notion_sync", "sync_mode", "preserve"),
+      NOTION_SYNC_MODES,
+      false,
+      "flow_quick_notion_sync_mode_help",
+    ));
     hints.push("flow_quick_sync_secret_hint");
     return { required, advanced, hints };
   }

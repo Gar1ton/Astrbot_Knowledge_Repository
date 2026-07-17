@@ -1,0 +1,4 @@
+interface:
+  display_name: "Operate Knowledge Arch"
+  short_description: "Research local knowledge and change settings safely"
+  default_prompt: "Use $operate-knowledge-arch to answer my research question from the local Knowledge Arch library."

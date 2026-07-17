@@ -233,6 +233,7 @@ function SyncTab() {
   // Notion 同步
   const [notionEnabled, setNotionEnabled] = useState(false);
   const [notionReady, setNotionReady] = useState(false);
+  const [notionSyncMode, setNotionSyncMode] = useState("preserve");
   const [notionInterval, setNotionInterval] = useState("0");
   const [notionPushing, setNotionPushing] = useState(false);
   const [notionInitializing, setNotionInitializing] = useState(false);
@@ -252,6 +253,7 @@ function SyncTab() {
       const ns = (cfg.notion_sync ?? {}) as Record<string, unknown>;
       setNotionEnabled(Boolean(ns.enabled ?? false));
       setNotionReady(Boolean(ns.database_id) && Boolean(ns.qa_database_id));
+      setNotionSyncMode(String(ns.sync_mode ?? "preserve"));
       setNotionInterval(String(ns.auto_sync_interval_sec ?? 0));
     }).catch(() => {});
   }, []);
@@ -724,6 +726,24 @@ function SyncTab() {
           <span style={{ fontSize: 12, color: "var(--fg-subtle)" }}>
             {notionEnabled ? "已在插件配置中启用" : "未启用（在 AstrBot 面板开启 notion_sync.enabled）"}
           </span>
+        </Field>
+
+        <Field
+          label="Notion 清理模式"
+          hint="preserve（默认）保持现有行为；strict 会在同步时把 detached 文章页移入 Notion 回收站，并阻止普通同步、强制同步和 QA 引用将其恢复。切回 preserve 后，仍为 detached 的页面可能重新创建。"
+        >
+          <select
+            value={notionSyncMode}
+            onChange={(e) => {
+              setNotionSyncMode(e.target.value);
+              save("notion_sync", "sync_mode", e.target.value);
+            }}
+            style={{ ...inputStyle, width: 180 }}
+            disabled={!notionEnabled || saving === "notion_sync.sync_mode"}
+          >
+            <option value="preserve">保留 detached（默认）</option>
+            <option value="strict">Strict 清理（移入回收站）</option>
+          </select>
         </Field>
 
         <Field

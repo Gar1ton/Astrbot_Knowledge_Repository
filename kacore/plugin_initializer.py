@@ -548,6 +548,7 @@ class PluginInitializer:
         self.notion_sync_pipeline = NotionSyncPipeline(
             source_store=self.source_store,
             notion_target=notion_target,
+            config_provider=self._config.get_notion_sync_config,
         )
         self.api.attach_notion_sync_pipeline(self.notion_sync_pipeline)
 

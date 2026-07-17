@@ -15,12 +15,15 @@ from kacore.config import NotionSyncConfig
 from kacore.domain.models import (
     NOTION_ENTITY_DOCUMENT,
     NOTION_OUTBOX_PUSHED,
+    NOTION_PUSH_ARCHIVED,
     NOTION_PUSH_DEGRADED,
     NOTION_PUSH_FAILED,
     NOTION_PUSH_SYNCED,
     Collection,
+    DocumentLifecycle,
     NotionOutboxItem,
     SourceDocument,
+    SyncStatus,
     SyncTargetKind,
 )
 from kacore.pipelines.notion_sync_pipeline import NotionSyncPipeline
@@ -63,20 +66,23 @@ class RoutedToolCaller:
         return sum(1 for name, _ in self.calls if name == tool_name)
 
 
-def _config() -> NotionSyncConfig:
+def _config(sync_mode: str = "preserve") -> NotionSyncConfig:
     return NotionSyncConfig(
         enabled=True,
         mcp_server_name="notion",
         database_id="db-articles",
         qa_database_id="db-qa",
+        sync_mode=sync_mode,
     )
 
 
 def _pipeline(
-    store: InMemorySourceDocumentStore, caller: RoutedToolCaller
+    store: InMemorySourceDocumentStore,
+    caller: RoutedToolCaller,
+    sync_mode: str = "preserve",
 ) -> NotionSyncPipeline:
     adapter = NotionMCPAdapter(None, tool_caller=caller, rate_limit_rps=1000)
-    target = NotionSyncTarget(_config(), store, adapter=adapter)
+    target = NotionSyncTarget(_config(sync_mode), store, adapter=adapter)
     return NotionSyncPipeline(source_store=store, notion_target=target)
 
 
@@ -211,6 +217,158 @@ async def test_force_repushes_everything(store: InMemorySourceDocumentStore) -> 
 
 
 @pytest.mark.asyncio
+async def test_preserve_mode_still_pushes_detached_documents(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    doc = _doc("detached-preserved")
+    doc.lifecycle_state = DocumentLifecycle.DETACHED
+    await store.add_document(doc)
+    caller = RoutedToolCaller()
+
+    result = await _pipeline(store, caller, "preserve").push_all()
+
+    assert result["documents"]["created"] == 1
+    assert result["documents"]["archived"] == 0
+    assert caller.count("notion_create_database_item") == 1
+
+
+@pytest.mark.asyncio
+async def test_strict_archives_detached_duplicates_and_force_cannot_restore(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    await store.add_document(_doc("d1"))
+    caller = RoutedToolCaller()
+    await _pipeline(store, caller).push_all()
+    prior = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
+    assert prior is not None and prior.page_id
+
+    doc = await store.get_document("d1")
+    assert doc is not None
+    doc.lifecycle_state = DocumentLifecycle.DETACHED
+    await store.update_document(doc)
+    caller.calls.clear()
+    caller.handlers["notion_query_database"] = {
+        "results": [
+            {"id": prior.page_id},
+            {"id": "duplicate-page"},
+            {"id": "duplicate-page"},
+        ],
+        "has_more": False,
+    }
+
+    result = await _pipeline(store, caller, "strict").push_all(force=True)
+
+    assert result["status"] == "success"
+    assert result["documents"]["archived"] == 1
+    assert caller.count("notion_delete_block") == 2
+    assert caller.count("notion_create_database_item") == 0
+    assert caller.count("notion_update_page_properties") == 0
+    record = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
+    assert record is not None
+    assert record.status == NOTION_PUSH_ARCHIVED
+    assert record.page_id == ""
+    compat = await store.get_sync_record("d1", SyncTargetKind.NOTION)
+    assert compat is not None
+    assert compat.status == SyncStatus.SKIPPED
+    assert compat.remote_ref is None
+
+    caller.calls.clear()
+    second = await _pipeline(store, caller, "strict").push_all(force=True)
+    assert second["documents"]["skipped"] == 1
+    assert caller.calls == []
+
+
+@pytest.mark.asyncio
+async def test_strict_delete_failure_is_partial_and_retried_without_upsert(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    await store.add_document(_doc("d1"))
+    caller = RoutedToolCaller()
+    await _pipeline(store, caller).push_all()
+    prior = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
+    assert prior is not None and prior.page_id
+    doc = await store.get_document("d1")
+    assert doc is not None
+    doc.lifecycle_state = DocumentLifecycle.DETACHED
+    await store.update_document(doc)
+    caller.calls.clear()
+    caller.handlers["notion_delete_block"] = [NotionMCPError("delete timeout")]
+
+    failed = await _pipeline(store, caller, "strict").push_all()
+
+    assert failed["status"] == "partial_failure"
+    assert failed["documents"]["failed"] == 1
+    assert caller.count("notion_create_database_item") == 0
+    failed_record = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
+    assert failed_record is not None
+    assert failed_record.status == NOTION_PUSH_FAILED
+    assert failed_record.page_id == prior.page_id
+
+    caller.calls.clear()
+    recovered = await _pipeline(store, caller, "strict").push_all()
+    assert recovered["documents"]["archived"] == 1
+    recovered_record = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
+    assert recovered_record is not None
+    assert recovered_record.status == NOTION_PUSH_ARCHIVED
+    assert recovered_record.page_id == ""
+
+
+@pytest.mark.asyncio
+async def test_strict_archived_document_can_be_recreated_after_reactivation(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    doc = _doc("d1")
+    doc.lifecycle_state = DocumentLifecycle.DETACHED
+    await store.add_document(doc)
+    caller = RoutedToolCaller()
+    pipeline = _pipeline(store, caller, "strict")
+    first = await pipeline.push_all()
+    assert first["documents"]["archived"] == 1
+
+    active = await store.get_document("d1")
+    assert active is not None
+    active.lifecycle_state = DocumentLifecycle.ACTIVE
+    await store.update_document(active)
+    caller.calls.clear()
+    second = await pipeline.push_all()
+
+    assert second["documents"]["created"] == 1
+    record = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
+    assert record is not None
+    assert record.status == NOTION_PUSH_SYNCED
+    assert record.page_id
+
+
+@pytest.mark.asyncio
+async def test_runtime_sync_mode_provider_applies_on_next_push(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    doc = _doc("d1")
+    doc.lifecycle_state = DocumentLifecycle.DETACHED
+    await store.add_document(doc)
+    caller = RoutedToolCaller()
+    adapter = NotionMCPAdapter(None, tool_caller=caller, rate_limit_rps=1000)
+    target = NotionSyncTarget(_config("preserve"), store, adapter=adapter)
+    current = {"config": _config("preserve")}
+    pipeline = NotionSyncPipeline(
+        source_store=store,
+        notion_target=target,
+        config_provider=lambda: current["config"],
+    )
+
+    assert (await pipeline.push_all())["documents"]["created"] == 1
+    current["config"] = _config("strict")
+    caller.calls.clear()
+    assert (await pipeline.push_all())["documents"]["archived"] == 1
+    assert caller.count("notion_delete_block") == 1
+
+    current["config"] = _config("preserve")
+    caller.calls.clear()
+    assert (await pipeline.push_all())["documents"]["created"] == 1
+    assert caller.count("notion_create_database_item") == 1
+
+
+@pytest.mark.asyncio
 async def test_orphan_map_rows_cleaned_up(store: InMemorySourceDocumentStore) -> None:
     await store.upsert_collection(Collection(name="default"))
     await store.add_document(_doc("d1"))
@@ -224,6 +382,7 @@ async def test_orphan_map_rows_cleaned_up(store: InMemorySourceDocumentStore) ->
 
     # 本地文档已删 → 账本行清理（不触碰远端）
     assert await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1") is None
+    assert caller.count("notion_delete_block") == 0
 
 
 # ── QA 暂存箱与 citations ───────────────────────────────────────
@@ -274,6 +433,43 @@ async def test_push_qa_resolves_citations_to_page_ids(
         and args["database_id"] == "db-qa"
     )
     assert len(qa_create["properties"]["Citations"]["relation"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_strict_qa_citation_cannot_restore_detached_article(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    doc = _doc("detached-citation")
+    doc.lifecycle_state = DocumentLifecycle.DETACHED
+    await store.add_document(doc)
+    caller = RoutedToolCaller()
+    pipeline = _pipeline(store, caller, "strict")
+
+    result = await pipeline.push_qa_record(
+        note_id="outbox:strict",
+        title="Q",
+        content="body",
+        tags=[],
+        citations=["detached-citation"],
+        source="research",
+    )
+
+    assert result["status"] == "success"
+    assert result["unresolved_citations"] == ["detached-citation"]
+    article_creates = [
+        args
+        for name, args in caller.calls
+        if name == "notion_create_database_item"
+        and args["database_id"] == "db-articles"
+    ]
+    assert article_creates == []
+    qa_create = next(
+        args
+        for name, args in caller.calls
+        if name == "notion_create_database_item"
+        and args["database_id"] == "db-qa"
+    )
+    assert "Citations" not in qa_create["properties"]
 
 
 @pytest.mark.asyncio

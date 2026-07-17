@@ -1,5 +1,59 @@
 # TODO
 
+## v1.0.5：Codex Knowledge Arch 项目级 Skill (completed)
+
+### User constraints / 约束
+
+- Skill 必须放在 Codex 官方项目级路径 `.agents/skills/operate-knowledge-arch/`，进入
+  `developer` 并随下一正式版本进入 GitHub 安装包。
+- Codex 直接消费本地 WebUI 检索证据并生成最终研究回答，不调用插件 LLM 的 `/api/ask`。
+- 配置修改必须先展示当前值、目标值和后果，用户明确确认后才写入；重启单独确认，永不自动重建。
+- 保留工作树中现有 Notion Strict 与静态前端产物改动；本轮不执行 commit、push 或发布。
+
+### Technical implementation path
+
+- [x] **Phase 1 - Skill 与低 Token 客户端**：初始化 `operate-knowledge-arch`，实现鉴权、目录、
+  多查询 RRF 检索、全文分页、有效配置读取、安全配置写入和显式重启子命令。
+- [x] **Phase 2 - Git 与发布契约**：只放行目标 `.agents/skills/` 子树，加入正式发布白名单和
+  发布树必需文件，确保项目检出与安装包均可自动发现 Skill。
+- [x] **Phase 3 - 测试与收尾**：覆盖模拟 WebUI API、鉴权/失败路径、召回压缩、写入确认门、
+  发布树和 Git ignore 契约；通过校验、pytest、Ruff、mypy 后更新 CHANGELOG。
+
+### Verification
+
+- Skill quick validation 通过；客户端/发布树定向测试 15 passed；全量 pytest 636 passed / 1 skipped。
+- `ruff check .` 通过；mypy Success；WORKTREE 发布树预览 489 文件并包含完整 Skill。
+- Git ignore 验证目标 Skill 可跟踪、其他 `.agents` 本地状态仍忽略；隔离 Python 进程的研究检索
+  与配置预览命令均通过，且预览未产生写操作。
+
+## v1.0.5：Notion Strict 清理模式 (completed)
+
+### User constraints / 约束
+
+- `notion_sync.sync_mode` 新增 `preserve`（默认）与 `strict`；默认升级不删除既有页面。
+- Strict 仅归档明确为 `detached` 的 Articles 页面，阻止普通/强制/QA 引用补推恢复；
+  文献重新变为 `active` 后允许重建。本地孤儿与 QA 页面不在删除范围。
+- 配置同时出现在 Flow 高级设置和“设置 → 同步 → Notion 同步”，保存后下一轮同步热生效。
+- 仅修改当前仓库，不部署到仓库外 AstrBot 运行目录，不执行 commit、push 或发布。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 配置与运行时契约**：补齐类型化配置、schema、公开配置、API 白名单与校验，
+  让 `preserve/strict` 可持久化并在下一轮 Notion 同步热生效。
+- [x] **Phase 2 - Strict 归档管线**：过滤 detached 的普通/force/citation upsert，归档已知及
+  DocID 可识别页面，落 archived tombstone；失败保留重试信息并返回 partial_failure。
+- [x] **Phase 3 - MCP 删除可靠性与状态**：识别顶层 error 响应，区分远端不存在与真实失败，
+  在推送统计、状态 API 与 `/ka notion status` 展示 archived。
+- [x] **Phase 4 - 双入口前端**：Flow 高级设置与设置页加入模式下拉框、危险行为提示、mock/i18n。
+- [x] **Phase 5 - 回归与收尾**：补配置、管线、适配器测试；执行 pytest、ruff、mypy、前端
+  lint/build、`tools/sync_frontend.py` 与 `--check`，通过后更新 CHANGELOG。
+
+### Verification
+
+- Notion 定向回归：157 passed；全量 pytest：622 passed / 1 skipped。
+- `ruff check .` 通过；`mypy` Success；前端 ESLint 通过，Next.js 生产构建 13 个静态页面成功。
+- `python tools/sync_frontend.py` 同步 359 文件，`--check` 一致；`git diff --check` 通过。
+
 ## v1.0.4 目录重命名与防撞名收敛 (completed)
 
 ### User constraints / 约束

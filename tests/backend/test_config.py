@@ -11,6 +11,8 @@ from kacore.config import (
     ENV_EMBEDDING_API_KEY,
     ENV_R2_SECRET_ACCESS_KEY,
     ENV_WEB_PASSWORD,
+    NOTION_SYNC_PRESERVE,
+    NOTION_SYNC_STRICT,
     Config,
 )
 from kacore.runtime_config import RuntimeConfigStore
@@ -34,6 +36,7 @@ def test_defaults_when_empty() -> None:
     assert cfg.get_source_store_config().db_filename == "knowledge_repository.db"
     assert cfg.get_r2_sync_config().free_tier_gb == 10
     assert cfg.get_notion_sync_config().mcp_server_name == "notion"
+    assert cfg.get_notion_sync_config().sync_mode == NOTION_SYNC_PRESERVE
     assert cfg.get_web_console_config().port == 26618
     assert cfg.get_graph_config().query_mode == "mix"
     assert cfg.get_graph_config().lightrag_llm_provider == "main"
@@ -91,6 +94,24 @@ def test_notion_max_upload_bytes() -> None:
     assert n.max_upload_bytes == 5 * 1024 * 1024
     assert n.parent_page_id == "parent-1"
     assert n.database_title == "KR"
+
+
+def test_notion_sync_mode_parsing_and_invalid_fallback() -> None:
+    strict = Config({"notion_sync": {"sync_mode": " STRICT "}})
+    invalid = Config({"notion_sync": {"sync_mode": "mirror"}})
+
+    assert strict.get_notion_sync_config().sync_mode == NOTION_SYNC_STRICT
+    assert strict.to_public_dict()["notion_sync"]["sync_mode"] == NOTION_SYNC_STRICT
+    assert invalid.get_notion_sync_config().sync_mode == NOTION_SYNC_PRESERVE
+
+
+def test_notion_sync_mode_is_hot_runtime_writable() -> None:
+    from kacore.config import CONFIG_KEY_POLICY, CONSEQUENCE_NONE
+
+    policy = CONFIG_KEY_POLICY["notion_sync"]["sync_mode"]
+    assert policy.api_writable is True
+    assert policy.runtime_persistable is True
+    assert policy.consequence == CONSEQUENCE_NONE
 
 
 def test_secret_env_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -20,7 +20,11 @@ venv/
 .claude/
 .codex/
 .codex-remote-attachments/
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/operate-knowledge-arch/
+!.agents/skills/operate-knowledge-arch/**
 
 # ── 测试 / 类型 / lint 缓存 ─────────────────────────────
 .pytest_cache/

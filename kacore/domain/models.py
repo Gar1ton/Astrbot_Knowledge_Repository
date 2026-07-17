@@ -362,6 +362,7 @@ NOTION_PUSH_PENDING = "pending"
 NOTION_PUSH_SYNCED = "synced"
 NOTION_PUSH_DEGRADED = "degraded"
 NOTION_PUSH_FAILED = "failed"
+NOTION_PUSH_ARCHIVED = "archived"
 NOTION_OUTBOX_PUSHED = "pushed"
 
 
@@ -375,8 +376,8 @@ class NotionEntityRecord:
         - page_id 为 Notion 页面 id（幂等 upsert 第一优先查找路径；空串=尚未建页）。
         - metadata_hash 记上次成功推送的属性指纹（属性变更检测）；content_hash 记
           上次成功推送的正文指纹（是否重写正文块的依据）。二者分工独立。
-        - status ∈ {pending, synced, degraded, failed}；degraded/failed 时
-          message 携带原因。
+        - status ∈ {pending, synced, degraded, failed, archived}；archived 表示
+          Strict 模式已归档远端 detached 页面；degraded/failed 时 message 携带原因。
     """
 
     entity_type: str
@@ -486,6 +487,7 @@ __all__ = [
     "NOTION_PUSH_SYNCED",
     "NOTION_PUSH_DEGRADED",
     "NOTION_PUSH_FAILED",
+    "NOTION_PUSH_ARCHIVED",
     "NOTION_OUTBOX_PUSHED",
     "QuotaUsage",
     "QuotaWarning",

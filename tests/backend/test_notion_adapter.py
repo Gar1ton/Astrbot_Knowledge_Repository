@@ -183,6 +183,50 @@ async def test_is_error_result_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_top_level_error_object_raises_with_structured_metadata() -> None:
+    caller = FakeToolCaller(
+        responses=[{
+            "error": {
+                "code": "validation_error",
+                "status": 400,
+                "message": "Tags property is invalid",
+            }
+        }]
+    )
+    adapter = _adapter(caller)
+
+    with pytest.raises(NotionMCPError, match="Tags property") as exc_info:
+        await adapter.delete_block("page-1")
+
+    assert exc_info.value.code == "validation_error"
+    assert exc_info.value.status == 400
+    assert exc_info.value.is_not_found is False
+
+
+@pytest.mark.asyncio
+async def test_json_error_content_recognizes_remote_not_found() -> None:
+    caller = FakeToolCaller(
+        responses=[
+            _FakeCallToolResult(
+                content=[_TextContent(json.dumps({
+                    "error": {
+                        "code": "object_not_found",
+                        "status": 404,
+                        "message": "Could not find block",
+                    }
+                }))]
+            )
+        ]
+    )
+    adapter = _adapter(caller)
+
+    with pytest.raises(NotionMCPError) as exc_info:
+        await adapter.delete_block("missing-page")
+
+    assert exc_info.value.is_not_found is True
+
+
+@pytest.mark.asyncio
 async def test_missing_server_raises_instead_of_stub() -> None:
     class Manager:
         mcp_client_dict: dict[str, Any] = {}

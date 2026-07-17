@@ -30,8 +30,11 @@ from kacore.config import (
 )
 from kacore.domain.models import (
     NOTION_ENTITY_DOCUMENT,
+    NOTION_PUSH_ARCHIVED,
+    NOTION_PUSH_DEGRADED,
     NOTION_PUSH_FAILED,
     NOTION_PUSH_PENDING,
+    NOTION_PUSH_SYNCED,
     Collection,
     ConsoleScopeState,
     DocumentOrigin,
@@ -2312,7 +2315,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         entities = await self._source_store.list_notion_entities(
             NOTION_ENTITY_DOCUMENT
         )
-        counts: dict[str, int] = {}
+        counts: dict[str, int] = {
+            NOTION_PUSH_SYNCED: 0,
+            NOTION_PUSH_DEGRADED: 0,
+            NOTION_PUSH_FAILED: 0,
+            NOTION_PUSH_ARCHIVED: 0,
+        }
         for rec in entities:
             counts[rec.status] = counts.get(rec.status, 0) + 1
         pending = await self._source_store.list_notion_outbox(NOTION_PUSH_PENDING)
@@ -2323,6 +2331,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "database_id": notion_cfg.database_id,
             "qa_database_id": notion_cfg.qa_database_id,
             "auto_sync_interval_sec": notion_cfg.auto_sync_interval_sec,
+            "sync_mode": notion_cfg.sync_mode,
             "documents": counts,
             "outbox_pending": len(pending),
             "outbox_failed": len(failed_qa),
@@ -2408,6 +2417,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             raise ValueError("vector_db.backend must be 'milvus' or 'astr'.")
         if section == "rerank" and key == "provider" and value not in {"cross_encoder", "noop"}:
             raise ValueError("rerank.provider must be 'cross_encoder' or 'noop'.")
+        if section == "notion_sync" and key == "sync_mode" and value not in {
+            "preserve",
+            "strict",
+        }:
+            raise ValueError("notion_sync.sync_mode must be 'preserve' or 'strict'.")
 
         changed = self._current_config_value(section, key) != value
         self._persist_config_value(section, key, value)

@@ -1087,6 +1087,24 @@ async def test_config_update_route(tmp_path: Path) -> None:
         assert deep_data["restart_required"] is False
         assert deep_data["rebuild_required"] is False
 
+        resp_notion_mode = await client.post(
+            "/api/config/update",
+            json={"section": "notion_sync", "key": "sync_mode", "value": "strict"},
+        )
+        assert resp_notion_mode.status == 200
+        notion_mode_data = await resp_notion_mode.json()
+        assert notion_mode_data["restart_required"] is False
+        assert notion_mode_data["rebuild_required"] is False
+
+        resp_invalid_notion_mode = await client.post(
+            "/api/config/update",
+            json={"section": "notion_sync", "key": "sync_mode", "value": "mirror"},
+        )
+        assert resp_invalid_notion_mode.status == 400
+        assert "notion_sync.sync_mode" in (
+            await resp_invalid_notion_mode.json()
+        )["message"]
+
         # 2. 拒绝尚未实现的 AstrBot Embedding 配置，避免保存后静默禁用召回。
         resp_invalid_provider = await client.post(
             "/api/config/update",

@@ -397,6 +397,66 @@ async def test_delete_archives_via_delete_block(
     assert caller.args_of("notion_delete_block")["block_id"] == "page-9"
 
 
+@pytest.mark.asyncio
+async def test_delete_treats_not_found_as_idempotent_but_raises_real_errors(
+    notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
+) -> None:
+    from kacore.adapters.notion_mcp import NotionMCPError
+
+    caller = RoutedToolCaller(
+        handlers={
+            "notion_delete_block": [
+                NotionMCPError(
+                    "Could not find block",
+                    code="object_not_found",
+                    status=404,
+                ),
+                NotionMCPError("Notion request timed out"),
+            ]
+        }
+    )
+    target = _target(caller, store, notion_config)
+
+    assert await target.delete("missing-page") is False
+    with pytest.raises(NotionMCPError, match="timed out"):
+        await target.delete("retry-page")
+
+
+@pytest.mark.asyncio
+async def test_archive_document_cleans_known_and_duplicate_docid_pages(
+    notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
+) -> None:
+    caller = RoutedToolCaller(
+        handlers={
+            "notion_query_database": {
+                "results": [
+                    {"id": "known-page"},
+                    {"id": "duplicate-page"},
+                    {"id": "duplicate-page"},
+                ],
+                "has_more": False,
+            }
+        }
+    )
+    target = _target(caller, store, notion_config)
+
+    archived = await target.archive_document("doc-1", "known-page")
+
+    assert archived == 2
+    query = caller.args_of("notion_query_database")
+    assert query["database_id"] == "db-articles"
+    assert query["filter"] == {
+        "property": "DocID",
+        "rich_text": {"equals": "doc-1"},
+    }
+    deleted_ids = [
+        args["block_id"]
+        for name, args in caller.calls
+        if name == "notion_delete_block"
+    ]
+    assert deleted_ids == ["known-page", "duplicate-page"]
+
+
 # ── QA 记录 ─────────────────────────────────────────────────────
 
 

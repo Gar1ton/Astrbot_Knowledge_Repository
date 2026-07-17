@@ -11,16 +11,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from kacore.config import NOTION_SYNC_STRICT
 from kacore.domain.models import (
     NOTION_ENTITY_DOCUMENT,
     NOTION_OUTBOX_PUSHED,
+    NOTION_PUSH_ARCHIVED,
     NOTION_PUSH_DEGRADED,
     NOTION_PUSH_FAILED,
     NOTION_PUSH_PENDING,
     NOTION_PUSH_SYNCED,
+    DocumentLifecycle,
     NotionEntityRecord,
     SyncRecord,
     SyncStatus,
@@ -49,14 +53,18 @@ class NotionSyncPipeline:
         self,
         source_store: SourceDocumentStore,
         notion_target: NotionSyncTarget,
+        config_provider: Callable[[], NotionSyncConfig] | None = None,
     ) -> None:
         self._store = source_store
         self._target = notion_target
+        self._config_provider = config_provider
         self._lock = asyncio.Lock()
 
     @property
     def _config(self) -> NotionSyncConfig:
-        # target.config 在 initialize_databases 后含回填的 database id，读它保证最新。
+        if self._config_provider is not None:
+            return self._config_provider()
+        # 测试/独立构造回退 target.config；initialize_databases 后含回填 database id。
         return self._target.config
 
     # ── 建库 ────────────────────────────────────────────────────
@@ -86,15 +94,30 @@ class NotionSyncPipeline:
             paths = schema.build_collection_paths(collections)
             docs = await self._store.list_documents()
 
-            doc_stats = {"created": 0, "updated": 0, "skipped": 0, "failed": 0}
+            doc_stats = {
+                "created": 0,
+                "updated": 0,
+                "archived": 0,
+                "skipped": 0,
+                "failed": 0,
+            }
             warnings: list[str] = []
+            strict_archive_failed = False
             for doc in docs:
+                strict_detached = (
+                    self._config.sync_mode == NOTION_SYNC_STRICT
+                    and doc.lifecycle_state == DocumentLifecycle.DETACHED
+                )
                 try:
-                    action = await self._push_document(
-                        doc, collections, paths, force=force
-                    )
+                    if strict_detached:
+                        action = await self._archive_detached_document(doc)
+                    else:
+                        action = await self._push_document(
+                            doc, collections, paths, force=force
+                        )
                     doc_stats[action] += 1
                 except Exception as e:  # noqa: BLE001 — 单文档失败不阻断整轮
+                    strict_archive_failed = strict_archive_failed or strict_detached
                     doc_stats["failed"] += 1
                     warnings.append(f"文档 {doc.doc_id} 推送失败：{e}")
                     logger.warning("Notion 文档推送失败（%s）：%s", doc.doc_id, e)
@@ -106,8 +129,11 @@ class NotionSyncPipeline:
             status = "success"
             if doc_stats["failed"] or qa_stats["failed"]:
                 status = "partial_failure" if (
-                    doc_stats["created"] + doc_stats["updated"] + qa_stats["pushed"]
-                ) else "error"
+                    doc_stats["created"]
+                    + doc_stats["updated"]
+                    + doc_stats["archived"]
+                    + qa_stats["pushed"]
+                ) or strict_archive_failed else "error"
             return {
                 "status": status,
                 "documents": doc_stats,
@@ -183,6 +209,46 @@ class NotionSyncPipeline:
             )
         )
         return "created" if result.action == ACTION_CREATED else "updated"
+
+    async def _archive_detached_document(self, doc: SourceDocument) -> str:
+        """Strict 模式归档 detached 页面并写 archived tombstone；已完成时零远端调用。"""
+        prior = await self._store.get_notion_entity(NOTION_ENTITY_DOCUMENT, doc.doc_id)
+        if prior is not None and prior.status == NOTION_PUSH_ARCHIVED and not prior.page_id:
+            return "skipped"
+
+        archived_count = await self._target.archive_document(
+            doc.doc_id,
+            prior.page_id if prior is not None else "",
+        )
+        message = (
+            f"Strict 模式已归档 {archived_count} 个 detached Notion 页面。"
+            if archived_count
+            else "Strict 模式确认 detached Notion 页面已不存在。"
+        )
+        await self._store.upsert_notion_entity(
+            NotionEntityRecord(
+                entity_type=NOTION_ENTITY_DOCUMENT,
+                entity_key=doc.doc_id,
+                page_id="",
+                metadata_hash=prior.metadata_hash if prior is not None else "",
+                content_hash=prior.content_hash if prior is not None else "",
+                status=NOTION_PUSH_ARCHIVED,
+                synced_at=_now(),
+                message=message,
+            )
+        )
+        await self._store.upsert_sync_record(
+            SyncRecord(
+                doc_id=doc.doc_id,
+                target=SyncTargetKind.NOTION,
+                remote_ref=None,
+                content_hash=doc.content_hash,
+                status=SyncStatus.SKIPPED,
+                synced_at=_now(),
+                message=message,
+            )
+        )
+        return "archived"
 
     # ── QA 推送 ─────────────────────────────────────────────────
 
@@ -307,12 +373,19 @@ class NotionSyncPipeline:
             doc_id = raw.strip()
             if not doc_id:
                 continue
+            doc = await self._store.get_document(doc_id)
+            if (
+                self._config.sync_mode == NOTION_SYNC_STRICT
+                and doc is not None
+                and doc.lifecycle_state == DocumentLifecycle.DETACHED
+            ):
+                unresolved.append(doc_id)
+                continue
             rec = await self._store.get_notion_entity(NOTION_ENTITY_DOCUMENT, doc_id)
             if rec is not None and rec.page_id:
                 page_ids.append(rec.page_id)
                 resolved_labels.append(doc_id)
                 continue
-            doc = await self._store.get_document(doc_id)
             if doc is None:
                 unresolved.append(doc_id)
                 continue

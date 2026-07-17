@@ -60,7 +60,7 @@ async def test_status_summarizes_ledger() -> None:
             "database_id": "db-a",
             "qa_database_id": "db-q",
             "auto_sync_interval_sec": 3600,
-            "documents": {"synced": 5, "degraded": 1, "failed": 0},
+            "documents": {"synced": 5, "degraded": 1, "failed": 0, "archived": 3},
             "outbox_pending": 2,
             "outbox_failed": 0,
         }
@@ -68,6 +68,7 @@ async def test_status_summarizes_ledger() -> None:
     msg = await handler.on_ka_notion("status")
     assert "已建库" in msg
     assert "synced=5" in msg
+    assert "archived=3" in msg
     assert "每 3600s" in msg
 
 

@@ -12,6 +12,7 @@ logo.svg
 .gitattributes
 .github/workflows/published-verify.yml
 release/AGENTS.published.md => AGENTS.md
+.agents/skills/operate-knowledge-arch/**
 
 kacore/*.py
 kacore/**/*.py

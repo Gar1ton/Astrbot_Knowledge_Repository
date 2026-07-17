@@ -365,7 +365,7 @@ class EventHandler:
             "Notion 推送状态："
             f"库={db_ok}，"
             f"文章 synced={docs.get('synced', 0)}/degraded={docs.get('degraded', 0)}"
-            f"/failed={docs.get('failed', 0)}，"
+            f"/failed={docs.get('failed', 0)}/archived={docs.get('archived', 0)}，"
             f"QA 待推={status.get('outbox_pending', 0)}，QA 失败={status.get('outbox_failed', 0)}，"
             f"定时={auto}"
         )

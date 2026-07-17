@@ -110,14 +110,37 @@ class NotionSyncTarget(SyncTarget):
         return result.page_id
 
     async def delete(self, remote_ref: str) -> bool:
-        """归档远端页面（页面即 block，经 notion_delete_block）。"""
+        """归档远端页面；不存在返回 False，其他 MCP 错误按 SyncTarget 契约上抛。"""
         if not self._config.enabled:
             return False
         try:
             return await self._adapter.delete_block(remote_ref)
         except NotionMCPError as e:
-            logger.warning("Notion 页面归档失败（%s）：%s", remote_ref, e)
-            return False
+            if e.is_not_found:
+                return False
+            raise
+
+    async def archive_document(self, doc_id: str, known_page_id: str = "") -> int:
+        """归档 Articles 库中一个 DocID 的全部页面，返回实际归档数。
+
+        账本 page_id 与 DocID 反查结果取并集，兼顾账本陈旧和历史重复页面；远端已归档/
+        不存在按幂等成功处理。真实 MCP 错误上抛，供管线保留重试账本。
+        """
+        pages = await self._adapter.query_database(
+            self._config.database_id,
+            filter={"property": schema.PROP_DOC_ID, "rich_text": {"equals": doc_id}},
+            page_size=100,
+        )
+        page_ids: list[str] = []
+        if known_page_id:
+            page_ids.append(known_page_id)
+        page_ids.extend(str(page["id"]) for page in pages if page.get("id"))
+
+        archived = 0
+        for page_id in dict.fromkeys(page_ids):
+            if await self.delete(page_id):
+                archived += 1
+        return archived
 
     async def check_quota(self, pending_bytes: int = 0) -> QuotaUsage:
         # Notion 数据库不按字节计额度，默认返回 limit_bytes=0, used_bytes=0

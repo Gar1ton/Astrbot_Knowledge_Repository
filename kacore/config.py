@@ -90,6 +90,8 @@ class R2SyncConfig:
 
 # Notion API 平台硬上限，不暴露给用户配置。
 _NOTION_RATE_LIMIT_RPS: int = 3
+NOTION_SYNC_PRESERVE = "preserve"
+NOTION_SYNC_STRICT = "strict"
 
 
 @dataclass
@@ -107,6 +109,7 @@ class NotionSyncConfig:
     parent_page_id: str = ""
     database_title: str = "Knowledge Arch"
     auto_sync_interval_sec: int = 0
+    sync_mode: str = NOTION_SYNC_PRESERVE
     max_upload_mib: int = 5
     rate_limit_rps: int = _NOTION_RATE_LIMIT_RPS
 
@@ -378,6 +381,7 @@ class Config:
                 "parent_page_id": notion.parent_page_id,
                 "database_title": notion.database_title,
                 "auto_sync_interval_sec": notion.auto_sync_interval_sec,
+                "sync_mode": notion.sync_mode,
             },
             "web_console": {
                 "enabled": web.enabled,
@@ -555,6 +559,9 @@ class Config:
 
     def get_notion_sync_config(self) -> NotionSyncConfig:
         s = _section(self.raw, "notion_sync")
+        sync_mode = str(s.get("sync_mode", NotionSyncConfig.sync_mode)).strip().lower()
+        if sync_mode not in {NOTION_SYNC_PRESERVE, NOTION_SYNC_STRICT}:
+            sync_mode = NotionSyncConfig.sync_mode
         return NotionSyncConfig(
             enabled=bool(s.get("enabled", NotionSyncConfig.enabled)),
             mcp_server_name=s.get("mcp_server_name", NotionSyncConfig.mcp_server_name),
@@ -565,6 +572,7 @@ class Config:
             auto_sync_interval_sec=int(
                 s.get("auto_sync_interval_sec", NotionSyncConfig.auto_sync_interval_sec)
             ),
+            sync_mode=sync_mode,
             # rate_limit_rps 固定为平台上限，不从配置读取。
         )
 
@@ -891,6 +899,7 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "parent_page_id": ConfigKeyPolicy(False, True),
         "database_title": ConfigKeyPolicy(False, True),
         "auto_sync_interval_sec": ConfigKeyPolicy(True, True),
+        "sync_mode": ConfigKeyPolicy(True, True),
     },
     "r2_sync": {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
@@ -1001,6 +1010,8 @@ __all__ = [
     "ZOTERO_SYNC_ARCHIVE",
     "ZOTERO_ACCESS_LOCAL",
     "ZOTERO_ACCESS_SERVER",
+    "NOTION_SYNC_PRESERVE",
+    "NOTION_SYNC_STRICT",
     "CONSEQUENCE_NONE",
     "CONSEQUENCE_RESTART",
     "CONSEQUENCE_REBUILD",

@@ -124,6 +124,16 @@
         "type": "int",
         "default": 0,
         "hint": "0 表示关闭定时推送；>0 时每隔该秒数自动增量推送一次（改动后重启生效）"
+      },
+      "sync_mode": {
+        "description": "Notion 同步模式",
+        "type": "string",
+        "default": "preserve",
+        "options": [
+          "preserve",
+          "strict"
+        ],
+        "hint": "preserve：保留 detached 页面；strict：下次同步归档所有 detached Articles 页面，并阻止同步恢复，直到文献重新变为 active"
       }
     }
   },

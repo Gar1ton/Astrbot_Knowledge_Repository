@@ -42,6 +42,28 @@ class NotionMCPError(RuntimeError):
     stub 假 uuid（历史实现的静默空转即源于此）。
     """
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "",
+        status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+    @property
+    def is_not_found(self) -> bool:
+        """Notion 明确报告远端对象不存在；删除调用可把它视为幂等 miss。"""
+        text = str(self).lower()
+        return (
+            self.code == "object_not_found"
+            or self.status == 404
+            or "object_not_found" in text
+            or "404" in text
+        )
+
 
 class NotionMCPAdapter:
     """Notion MCP 适配器：真实工具名 + 显式错误 + 全局频控。
@@ -114,6 +136,30 @@ class NotionMCPAdapter:
                 f"MCP 工具 {tool_name} 调用失败（server='{self._server_name}'）：{e}"
             ) from e
 
+    @staticmethod
+    def _embedded_error(data: Any, tool_name: str) -> NotionMCPError | None:
+        """识别 v1.2.x 把异常包进成功 content 的 ``{"error": ...}`` 形状。"""
+        if not isinstance(data, dict) or "error" not in data:
+            return None
+        raw = data.get("error")
+        code = str(data.get("error_code") or "")
+        status: int | None = None
+        message = ""
+        if isinstance(raw, dict):
+            code = str(raw.get("code") or code)
+            raw_status = raw.get("status")
+            if isinstance(raw_status, int):
+                status = raw_status
+            message = str(raw.get("message") or raw.get("body") or raw.get("name") or "")
+        elif raw is not None:
+            message = str(raw)
+        detail = message[:500] or "（无错误详情）"
+        return NotionMCPError(
+            f"MCP 工具 {tool_name} 执行报错：{detail}",
+            code=code,
+            status=status,
+        )
+
     def _unwrap(self, result: Any, tool_name: str) -> Any:
         """CallToolResult/字符串 → dict|list；isError → NotionMCPError。
 
@@ -122,7 +168,12 @@ class NotionMCPAdapter:
         """
         if result is None:
             raise NotionMCPError(f"MCP 工具 {tool_name} 返回空结果。")
-        if isinstance(result, (dict, list)):
+        if isinstance(result, dict):
+            embedded = self._embedded_error(result, tool_name)
+            if embedded is not None:
+                raise embedded
+            return result
+        if isinstance(result, list):
             return result
         content = getattr(result, "content", None)
         if content is not None:
@@ -130,15 +181,26 @@ class NotionMCPAdapter:
                 getattr(item, "text", "") for item in content if hasattr(item, "text")
             )
             if getattr(result, "isError", False):
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+                embedded = self._embedded_error(parsed, tool_name)
+                if embedded is not None:
+                    raise embedded
                 raise NotionMCPError(
                     f"MCP 工具 {tool_name} 执行报错：{text[:500] or '（无错误详情）'}"
                 )
             result = text
         if isinstance(result, str):
             try:
-                return json.loads(result)
+                decoded = json.loads(result)
             except Exception:
                 return result
+            embedded = self._embedded_error(decoded, tool_name)
+            if embedded is not None:
+                raise embedded
+            return decoded
         return result
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:

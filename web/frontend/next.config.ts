@@ -4,6 +4,9 @@ const isDev = process.env.NODE_ENV !== "production";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // `pages/` is checked byte-for-byte against each fresh static export.
+  // Next.js otherwise generates a random build ID on every build.
+  generateBuildId: async () => "knowledge-arch",
   // WSL2/Windows 路径规范化问题：强制本地编译以确保 React Client Manifest 路径一致
   transpilePackages: ["fumadocs-ui", "fumadocs-core"],
   ...(isDev ? {} : { output: "export" as const }),

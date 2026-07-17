@@ -1,5 +1,15 @@
 # TODO
 
+## Unreleased: Deterministic frontend export
+
+### Technical implementation path
+
+- [x] Stabilize the Next.js static-export build ID so CI can compare `web/frontend/out/` with `pages/` across fresh builds.
+
+### Verification
+
+- Linux build, two consecutive builds with the same `knowledge-arch` build ID, and `python tools/sync_frontend.py --check` all pass.
+
 ## v1.0.5：Codex Knowledge Arch 项目级 Skill (completed)
 
 ### User constraints / 约束

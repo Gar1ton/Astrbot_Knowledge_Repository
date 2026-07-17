@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## [Unreleased]
+
+### Fixed
+
+- **Deterministic frontend export**: configure a stable Next.js build ID and regenerate `pages/` so fresh CI builds pass the byte-for-byte exported-page consistency check (`web/frontend/next.config.ts`, `tools/sync_frontend.py`).
+
 > 本文件记录项目的所有重要变更。**所有参与者（含 AI Agent）在写入时必须遵守下方「写入规范」。**
 
 ## 写入规范

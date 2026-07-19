@@ -1,5 +1,16 @@
 # TODO
 
+## v1.0.6: Rerank idle model unloading (completed)
+
+### Technical implementation path
+
+- [x] Add idle-time unloading for the local CrossEncoder reranker without expanding the configuration surface.
+- [x] Add regression coverage for timeout unloading, disabled timeout, reload after unload, and inference-failure cleanup.
+
+### Verification
+
+- Focused reranker tests, `ruff`, `compileall`, and the backend suite pass; backend result: 640 passed / 1 skipped.
+
 ## Unreleased: Deterministic frontend export
 
 ### Technical implementation path

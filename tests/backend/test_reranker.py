@@ -5,6 +5,9 @@
 """
 from __future__ import annotations
 
+import time
+import unittest.mock as mock
+
 import pytest
 
 from kacore.domain.models import DocumentChunk
@@ -128,3 +131,77 @@ async def test_cross_encoder_failure_sets_failed_status(monkeypatch):
     assert reranker.status["status"] == "failed"
     assert reranker.status["last_error"] == "boom"
     assert reranker.is_passthrough is True
+
+
+@pytest.mark.asyncio
+async def test_cross_encoder_idle_timeout_unloads_model() -> None:
+    from kacore.repository.reranker.bge_local import CrossEncoderReranker
+
+    reranker = CrossEncoderReranker(model="test-model", idle_timeout=0.05)
+    fake_model = mock.MagicMock()
+    fake_model.predict.return_value = [0.9]
+    reranker._model = fake_model
+
+    await reranker.rerank("q", [_chunk("c1")])
+
+    assert reranker._idle_timer is not None
+    time.sleep(0.15)
+
+    assert reranker._model is None
+    assert reranker.status["status"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_cross_encoder_idle_timeout_zero_keeps_model() -> None:
+    from kacore.repository.reranker.bge_local import CrossEncoderReranker
+
+    reranker = CrossEncoderReranker(model="test-model", idle_timeout=0)
+    fake_model = mock.MagicMock()
+    fake_model.predict.return_value = [0.9]
+    reranker._model = fake_model
+
+    await reranker.rerank("q", [_chunk("c1")])
+
+    assert reranker._idle_timer is None
+    assert reranker._model is fake_model
+
+
+@pytest.mark.asyncio
+async def test_cross_encoder_reloads_after_idle_unload(monkeypatch) -> None:
+    from kacore.repository.reranker.bge_local import CrossEncoderReranker
+
+    reranker = CrossEncoderReranker(model="test-model", idle_timeout=0.05)
+    first_model = mock.MagicMock()
+    first_model.predict.return_value = [0.9]
+    second_model = mock.MagicMock()
+    second_model.predict.return_value = [0.8]
+    models = iter([first_model, second_model])
+
+    monkeypatch.setattr(
+        reranker, "_ensure_model", lambda: setattr(reranker, "_model", next(models))
+    )
+
+    await reranker.rerank("q", [_chunk("c1")])
+    time.sleep(0.15)
+    assert reranker._model is None
+
+    await reranker.rerank("q", [_chunk("c1")])
+
+    assert reranker._model is second_model
+    second_model.predict.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cross_encoder_inference_failure_unloads_model() -> None:
+    from kacore.repository.reranker.bge_local import CrossEncoderReranker
+
+    reranker = CrossEncoderReranker(model="test-model")
+    fake_model = mock.MagicMock()
+    fake_model.predict.side_effect = RuntimeError("predict boom")
+    reranker._model = fake_model
+
+    out = await reranker.rerank("q", [_chunk("c1")])
+
+    assert [item.chunk.chunk_id for item in out] == ["c1"]
+    assert reranker._model is None
+    assert reranker.status["status"] == "failed"

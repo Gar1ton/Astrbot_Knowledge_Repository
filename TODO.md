@@ -11,6 +11,41 @@
 
 - Focused reranker tests, `ruff`, `compileall`, and the backend suite pass; backend result: 640 passed / 1 skipped.
 
+## v1.0.6：Codex evidence Ask 与 LightRAG 构建代理 (completed)
+
+### User constraints / 约束
+
+- Codex 研究问答必须先判断 `default` / `enhanced` / `deep_thinking`，经 Ask evidence
+  端口分档召回；插件不得调用 AstrBot 主 LLM 或独立 OpenAI-compatible LLM，最终规划、
+  充分性判断、纠偏与作答均由 Codex 完成。
+- 一般研究不得因命中某篇文献就读取正文；只有用户明确锚定唯一论文，或明确要求阅读全文时，
+  才允许分页加载全文。
+- Codex 可在用户确认 collection 与构建估算后承担 LightRAG 实体/关系抽取；插件经官方
+  `ainsert_custom_kg` 写入图谱，不调用插件 LLM。Embedding 仍使用当前配置。
+- 本轮只实现与离线验证能力，不对真实 collection 发起构建；不手改 `pages/`，不执行 commit、
+  push 或发布。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 无 LLM Ask evidence**：抽取确定性多查询召回/重排/cutoff 内核，新增
+  `POST /api/ask/evidence`，返回紧凑证据、模式限制与 trace，并显式标记
+  `plugin_llm_used=false` / `full_text_used=false`。
+- [x] **Phase 2 - 全文意图门**：新增服务端 Markdown 分页响应；客户端 `read` 强制
+  `anchored` / `full` 意图，一般 research 只消费 Ask evidence 片段。
+- [x] **Phase 3 - Codex LightRAG 构建**：新增 pull 式构建任务与持久化账本；Codex逐 chunk
+  提交实体/关系 JSON，后端校验并调用 `ainsert_custom_kg`，支持状态查询、失败重试与恢复。
+- [x] **Phase 4 - Skill/client 接线**：更新 `operate-knowledge-arch` 的路由规则与 references，
+  新增 Ask evidence、分页阅读、构建估算/启动/取任务/提交命令，并保持配置写入确认门。
+- [x] **Phase 5 - 验证与收尾**：覆盖零插件 LLM、全文门、custom-KG schema/幂等/恢复、鉴权与
+  发布树契约；通过 pytest、Ruff、mypy、Skill quick validation 后更新 CHANGELOG 与 v1.0.6
+  版本元数据。
+
+### Verification
+
+- Ask、全文门、LightRAG 构建定向与存储回归均通过；全量 pytest：659 passed。
+- `ruff check .` 通过；mypy Success；Skill quick validation 通过。
+- `python tools/sync_frontend.py --check` 一致；WORKTREE 发布预览 491 文件并包含 LightRAG reference。
+
 ## Unreleased: Deterministic frontend export
 
 ### Technical implementation path
@@ -86,7 +121,7 @@
 - `ruff check .` 通过；`mypy` Success；前端 ESLint 通过，Next.js 生产构建 13 个静态页面成功。
 - `python tools/sync_frontend.py` 同步 359 文件，`--check` 一致；`git diff --check` 通过。
 
-## v1.0.4 目录重命名与防撞名收敛 (completed)
+## v1.0.6 目录重命名与防撞名收敛 (completed)
 
 ### User constraints / 约束
 

@@ -470,6 +470,17 @@ class PluginInitializer:
             rerank_config=rerank_cfg,
         )
 
+        # 4.8a) Codex/外部 agent 的无生成式 LLM 证据召回器。只复用检索、reranker
+        # 与各档证据预算；问题拆解、充分性判断和作答留给调用方 agent。
+        from kacore.pipelines.agent_evidence import AgentEvidenceOrchestrator
+
+        self.agent_evidence_orchestrator = AgentEvidenceOrchestrator(
+            retrieval_orchestrator=self.retrieval_orchestrator,
+            reranker=self.reranker,
+            enhanced_config=self._config.get_enhanced_recall_config(),
+            deep_config=dt_cfg,
+        )
+
         # 4.8b) 增强召回编排器（A-RAG「2+1」中间档）。与 deep 共享 reranker 实例与
         # 独立 LLM endpoint 决策（同为研究型内部 agent，不重复膨胀配置面）。
         from kacore.pipelines.enhanced_recall_orchestrator import EnhancedRecallOrchestrator
@@ -515,6 +526,7 @@ class PluginInitializer:
             retrieval_orchestrator=self.retrieval_orchestrator,
             deep_thinking_orchestrator=self.deep_thinking_orchestrator,
             enhanced_recall_orchestrator=self.enhanced_recall_orchestrator,
+            agent_evidence_orchestrator=self.agent_evidence_orchestrator,
             reranker=self.reranker,
             metrics=self.metrics,
             progress_store=self.progress_store,

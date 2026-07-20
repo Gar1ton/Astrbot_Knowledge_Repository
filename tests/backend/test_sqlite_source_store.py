@@ -103,6 +103,50 @@ async def test_graph_build_job_pause_migration_defaults_and_cleanup() -> None:
     await conn.close()
 
 
+async def test_codex_graph_task_ledger_sqlite(
+    sqlite_store: SQLiteSourceDocumentStore,
+) -> None:
+    await sqlite_store.upsert_build_job(
+        {
+            "job_id": "codex-job",
+            "collection": "papers",
+            "status": "waiting_agent",
+            "stage": "waiting_agent",
+            "started_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    await sqlite_store.replace_codex_graph_tasks(
+        "codex-job",
+        [
+            {
+                "task_id": "task-1",
+                "job_id": "codex-job",
+                "collection": "papers",
+                "doc_id": "doc-1",
+                "chunk_index": 0,
+                "chunk_hash": "hash",
+                "content": "bounded chunk",
+            }
+        ],
+    )
+
+    pending = await sqlite_store.list_codex_graph_tasks(
+        "codex-job", status="pending"
+    )
+    assert [task["task_id"] for task in pending] == ["task-1"]
+    latest = await sqlite_store.get_latest_codex_graph_build_job()
+    assert latest is not None and latest["job_id"] == "codex-job"
+    assert (
+        await sqlite_store.update_codex_graph_task("task-1", "error", "retry me")
+        is True
+    )
+    task = await sqlite_store.get_codex_graph_task("task-1")
+    assert task is not None
+    assert task["status"] == "error"
+    assert task["last_error"] == "retry me"
+    assert await sqlite_store.update_codex_graph_task("missing", "pending") is False
+
+
 async def test_add_duplicate_raises(sqlite_store: SQLiteSourceDocumentStore) -> None:
     await sqlite_store.add_document(_doc("d1"))
     with pytest.raises(ValueError):
@@ -388,6 +432,23 @@ async def test_purge_zotero_mirror_keeps_local_state(
             "started_at": "2026-01-01T00:00:00Z",
         }
     )
+    for job_id, collection, doc_id in (
+        ("local-job", "default", "local-doc"),
+        ("zotero-job", "zotero-old", "zotero-doc"),
+    ):
+        await sqlite_store.replace_codex_graph_tasks(
+            job_id,
+            [
+                {
+                    "task_id": f"{job_id}-task",
+                    "collection": collection,
+                    "doc_id": doc_id,
+                    "chunk_index": 0,
+                    "chunk_hash": f"{job_id}-hash",
+                    "content": "bounded chunk",
+                }
+            ],
+        )
     await sqlite_store.upsert_console_scope_state(
         ConsoleScopeState("document", "local-doc", selected_doc_id="local-doc")
     )
@@ -403,6 +464,8 @@ async def test_purge_zotero_mirror_keeps_local_state(
     assert await sqlite_store.get_scoped_note("local-note") is not None
     assert await sqlite_store.get_scoped_note("zotero-note") is None
     assert [job["job_id"] for job in await sqlite_store.list_build_jobs()] == ["local-job"]
+    assert len(await sqlite_store.list_codex_graph_tasks("local-job")) == 1
+    assert await sqlite_store.list_codex_graph_tasks("zotero-job") == []
     assert await sqlite_store.get_console_scope_state("document", "local-doc") is not None
     assert await sqlite_store.get_console_scope_state("document", "zotero-doc") is None
     assert await sqlite_store.get_source_account_binding("zotero_server") == {

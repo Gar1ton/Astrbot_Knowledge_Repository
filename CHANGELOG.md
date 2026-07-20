@@ -2,10 +2,37 @@
 
 ## [Unreleased]
 
-### Fixed
+## [v1.0.6] — 2026-07-20
 
-- **Deterministic frontend export**: configure a stable Next.js build ID and regenerate `pages/` so fresh CI builds pass the byte-for-byte exported-page consistency check (`web/frontend/next.config.ts`, `tools/sync_frontend.py`).
-- **Notion Strict ledger migration**: migrate the local `notion_entity_map` table to accept the internal `archived` tombstone status without exposing a third Notion sync mode (`migrations/021_notion_archived_status.sql`).
+### 新增功能 (Added)
+
+- **Codex evidence-only Ask**：新增 `default` / `enhanced` / `deep_thinking` 分档证据端口，
+  插件只执行确定性召回、融合、重排和裁剪；规划、充分性判断、纠偏与最终回答均由 Codex 完成，
+  响应显式标记不使用插件 LLM 与全文（`kacore/pipelines/agent_evidence.py`、`kacore/api.py`、`web/server.py`）。
+- **全文读取意图门**：新增服务端 Markdown 分页读取，项目级客户端仅在用户锚定唯一论文或明确
+  要求阅读全文时接受 `anchored` / `full` 意图；一般研究只消费 Ask evidence 片段
+  （`kacore/api.py`、`web/server.py`、`.agents/skills/operate-knowledge-arch/`）。
+- **Codex 驱动 LightRAG 构建**：新增持久化 pull 式任务、估算/确认、任务领取、custom-KG 校验提交、
+  失败重试与启动恢复；实体关系由 Codex 抽取，后端经官方 `ainsert_custom_kg` 写入并仅调用现有
+  embedding provider（`migrations/022_codex_graph_tasks.sql`、`kacore/lightrag_core.py`、`kacore/api.py`）。
+
+### 修复 (Fixed)
+
+- **Deterministic frontend export**：配置稳定的 Next.js build ID 并重建 `pages/`，使全新 CI 构建可通过静态导出逐字节一致性检查（`web/frontend/next.config.ts`、`tools/sync_frontend.py`）。
+- **Notion Strict 账本迁移**：本地 `notion_entity_map` 接受内部 `archived` tombstone 状态，不对外扩展第三种 Notion 同步模式（`migrations/021_notion_archived_status.sql`）。
+
+### 测试 (Tests)
+
+- **锁定 Ask、全文门和 Codex 图构建契约**：覆盖三种召回预算、零插件 LLM、分页意图校验、
+  custom-KG schema/重试/恢复、鉴权、SQLite/内存任务清理及 Skill 客户端协议；全量 pytest
+  659 passed，Ruff、mypy、Skill quick validation 与前端静态产物一致性检查均通过
+  （`tests/backend/test_agent_evidence.py`、`test_codex_graph_build.py`、`test_web_server.py`）。
+
+### 构建与工程 (Build/CI)
+
+- **正式安装包携带 LightRAG 工作流说明**：发布树必需文件加入 `references/lightrag.md`，
+  WORKTREE 预览成功生成 491 个文件；版本元数据统一提升到 `v1.0.6`
+  （`tools/build_published_tree.py`、`tests/backend/test_published_tree.py`、`metadata.yaml`）。
 
 > 本文件记录项目的所有重要变更。**所有参与者（含 AI Agent）在写入时必须遵守下方「写入规范」。**
 

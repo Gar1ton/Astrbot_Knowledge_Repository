@@ -17,6 +17,7 @@ SKILL_ROOT = ".agents/skills/operate-knowledge-arch"
 SKILL_REQUIRED = {
     f"{SKILL_ROOT}/SKILL.md",
     f"{SKILL_ROOT}/agents/openai.yaml",
+    f"{SKILL_ROOT}/references/lightrag.md",
     f"{SKILL_ROOT}/references/research.md",
     f"{SKILL_ROOT}/references/settings.md",
     f"{SKILL_ROOT}/scripts/knowledge_arch_client.py",

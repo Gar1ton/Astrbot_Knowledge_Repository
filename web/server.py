@@ -370,6 +370,24 @@ async def handle_document_content(request: web.Request) -> web.Response:
     return web.Response(text=content, content_type="text/markdown", charset="utf-8")
 
 
+async def handle_document_content_page(request: web.Request) -> web.Response:
+    """GET 文档 Markdown 的单个字符页；供具备明确阅读意图的 agent 使用。"""
+    doc_id = request.match_info["doc_id"]
+    start = _query_int(request, "start", 0, 0, 2_000_000_000)
+    max_chars = _query_int(request, "max_chars", 12000, 1, 40000)
+    try:
+        result = await _api(request).get_document_markdown_page(
+            doc_id, start=start, max_chars=max_chars
+        )
+    except FileNotFoundError as exc:
+        return web.json_response({"error": str(exc)}, status=404)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if result is None:
+        return web.json_response({"error": "document not found"}, status=404)
+    return web.json_response(result)
+
+
 async def handle_document_chunks(request: web.Request) -> web.Response:
     doc_id = request.match_info["doc_id"]
     doc = await _api(request).get_document(doc_id)
@@ -776,6 +794,78 @@ async def handle_graph_build(request: web.Request) -> web.Response:
         return web.json_response(result)
     except ValueError as exc:
         _mw_logger.warning("Graph build rejected: %s", exc)
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
+async def handle_codex_graph_build(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    collection = body.get("collection") if isinstance(body, dict) else None
+    confirmed = bool(body.get("confirmed")) if isinstance(body, dict) else False
+    try:
+        return web.json_response(
+            await _api(request).build_graph_with_codex(collection, confirmed=confirmed)
+        )
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except RuntimeError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=409)
+
+
+async def handle_codex_graph_next(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(
+            await _api(request).get_next_codex_graph_task(request.match_info["job_id"])
+        )
+    except KeyError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=404)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
+async def handle_codex_graph_submit(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    if not isinstance(body, dict) or not isinstance(body.get("result"), dict):
+        return web.json_response(
+            {"status": "error", "message": "task_id and result object are required"},
+            status=400,
+        )
+    task_id = str(body.get("task_id") or "")
+    if not task_id:
+        return web.json_response(
+            {"status": "error", "message": "task_id and result object are required"},
+            status=400,
+        )
+    try:
+        return web.json_response(
+            await _api(request).submit_codex_graph_task(
+                request.match_info["job_id"], task_id, body["result"]
+            )
+        )
+    except KeyError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=404)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception as exc:
+        _mw_logger.error("Codex graph task submission failed: %s", exc, exc_info=True)
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_codex_graph_retry(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    task_id = str(body.get("task_id") or "") if isinstance(body, dict) else ""
+    if not task_id:
+        return web.json_response(
+            {"status": "error", "message": "task_id is required"}, status=400
+        )
+    try:
+        return web.json_response(
+            await _api(request).retry_codex_graph_task(
+                request.match_info["job_id"], task_id
+            )
+        )
+    except KeyError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=404)
+    except ValueError as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
 
 
@@ -1202,6 +1292,40 @@ async def handle_ask(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def handle_ask_evidence(request: web.Request) -> web.Response:
+    """POST /api/ask/evidence — Codex 分档召回证据；不调用插件 LLM。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "JSON object required"}, status=400)
+    question = str(body.get("question") or "").strip()
+    raw_queries = body.get("queries")
+    if raw_queries is None:
+        queries = None
+    elif isinstance(raw_queries, list) and all(isinstance(item, str) for item in raw_queries):
+        queries = list(raw_queries)
+    else:
+        return web.json_response({"error": "queries must be a list of strings"}, status=400)
+    try:
+        result = await _api(request).retrieve_agent_evidence(
+            question=question,
+            queries=queries,
+            collection=str(body.get("collection") or "") or None,
+            retrieval_mode=str(body.get("retrieval_mode") or "default"),
+            round_number=_parse_int(body.get("round"), "round", 1, 1, 20),
+            scope_type=str(body.get("scope_type") or ""),
+            scope_key=str(body.get("scope_key") or ""),
+            scope_library_id=str(body.get("scope_library_id") or ""),
+        )
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except RuntimeError as exc:
+        return web.json_response({"status": "unavailable", "message": str(exc)}, status=503)
+    return web.json_response(result)
+
+
 # ── 序列化 helper（domain → JSON-safe dict）─────────────────────
 
 
@@ -1381,6 +1505,7 @@ def build_app(
     app.router.add_delete("/api/documents/{doc_id}", handle_delete_document)
     app.router.add_post("/api/documents/{doc_id}/reextract", handle_reextract_document)
     app.router.add_get("/api/documents/{doc_id}/content", handle_document_content)
+    app.router.add_get("/api/documents/{doc_id}/content/page", handle_document_content_page)
     app.router.add_get("/api/documents/{doc_id}/chunks", handle_document_chunks)
     app.router.add_get("/api/documents/{doc_id}/annotations", handle_document_annotations)
     app.router.add_get("/api/documents/{doc_id}/notes", handle_document_notes_get)
@@ -1420,6 +1545,10 @@ def build_app(
     app.router.add_get("/api/r2/job", handle_r2_job)
     app.router.add_post("/api/graph/build/estimate", handle_graph_build_estimate)
     app.router.add_post("/api/graph/build", handle_graph_build)
+    app.router.add_post("/api/graph/codex-build", handle_codex_graph_build)
+    app.router.add_get("/api/graph/codex-build/{job_id}/next", handle_codex_graph_next)
+    app.router.add_post("/api/graph/codex-build/{job_id}/submit", handle_codex_graph_submit)
+    app.router.add_post("/api/graph/codex-build/{job_id}/retry", handle_codex_graph_retry)
     app.router.add_get("/api/graph/build/active", handle_graph_build_active)
     app.router.add_get("/api/graph/build/history", handle_graph_build_history)
     app.router.add_get("/api/graph/build/{job_id}", handle_graph_build_job)
@@ -1442,6 +1571,7 @@ def build_app(
     app.router.add_post("/api/dependencies/recheck", handle_dependency_recheck)
     app.router.add_get("/api/logs", handle_logs)
     app.router.add_post("/api/logs/events", handle_log_event)
+    app.router.add_post("/api/ask/evidence", handle_ask_evidence)
     app.router.add_post("/api/ask", handle_ask)
     app.router.add_get("/api/console/scope-state", handle_console_scope_state_get)
     app.router.add_put("/api/console/scope-state", handle_console_scope_state_upsert)

@@ -129,6 +129,36 @@ async def test_registry_chunk_document_uses_lightrag_chunking_func() -> None:
     assert rag.call == ("aabb", None, False, 1, 4)
 
 
+async def test_registry_insert_custom_kg_calls_official_non_llm_path() -> None:
+    class Rag:
+        def __init__(self) -> None:
+            self.calls: list[tuple[dict, str | None]] = []
+
+        async def ainsert_custom_kg(
+            self, custom_kg: dict, full_doc_id: str | None = None
+        ) -> None:
+            self.calls.append((custom_kg, full_doc_id))
+
+    rag = Rag()
+    registry = object.__new__(LightRAGCoreRegistry)
+    registry._collection_locks = {}
+
+    async def get(collection: str):
+        assert collection == "papers"
+        return rag
+
+    registry.get = get  # type: ignore[method-assign]
+    payload = {
+        "chunks": [{"content": "bounded", "source_id": "task-1"}],
+        "entities": [],
+        "relationships": [],
+    }
+
+    await registry.insert_custom_kg("papers", "doc-1", payload)
+
+    assert rag.calls == [(payload, "doc-1")]
+
+
 async def test_lightrag_embedding_adapter_returns_numpy_batch() -> None:
     class StubEmbedding:
         async def embed_documents(self, texts: list[str]) -> list[list[float]]:

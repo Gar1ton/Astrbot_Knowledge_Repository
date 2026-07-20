@@ -646,6 +646,154 @@ async def test_notion_routes_report_unavailable_instead_of_reserved(tmp_path: Pa
         await client.close()
 
 
+async def test_agent_evidence_route_never_returns_plugin_answer(tmp_path: Path) -> None:
+    api = await _make_api()
+    retrieve = AsyncMock(
+        return_value={
+            "question": "compare",
+            "actual_retrieval_mode": "agent_enhanced",
+            "evidence": [{"doc_id": "d1", "text": "evidence"}],
+            "requires_agent_assessment": True,
+            "plugin_llm_used": False,
+            "full_text_used": False,
+        }
+    )
+    api.retrieve_agent_evidence = retrieve  # type: ignore[method-assign]
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/ask/evidence",
+            json={
+                "question": "compare",
+                "queries": ["alpha", "beta"],
+                "collection": "papers",
+                "retrieval_mode": "enhanced",
+                "round": 1,
+            },
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["plugin_llm_used"] is False
+        assert body["full_text_used"] is False
+        assert body["requires_agent_assessment"] is True
+        assert retrieve.await_args.kwargs["queries"] == ["alpha", "beta"]
+
+        invalid = await client.post(
+            "/api/ask/evidence",
+            json={"question": "compare", "queries": "not-a-list"},
+        )
+        assert invalid.status == 400
+    finally:
+        await client.close()
+
+
+async def test_document_page_route_returns_only_requested_page(tmp_path: Path) -> None:
+    api = await _make_api()
+    page = AsyncMock(
+        return_value={
+            "doc_id": "d1",
+            "start": 10,
+            "end": 20,
+            "total_chars": 100,
+            "has_more": True,
+            "content": "0123456789",
+        }
+    )
+    api.get_document_markdown_page = page  # type: ignore[method-assign]
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/documents/d1/content/page?start=10&max_chars=10")
+        assert resp.status == 200
+        assert (await resp.json())["content"] == "0123456789"
+        page.assert_awaited_once_with("d1", start=10, max_chars=10)
+    finally:
+        await client.close()
+
+
+async def test_codex_graph_routes_translate_task_protocol(tmp_path: Path) -> None:
+    api = await _make_api()
+    start = AsyncMock(
+        return_value={
+            "job_id": "job-1",
+            "status": "waiting_agent",
+            "plugin_llm_used": False,
+        }
+    )
+    next_task = AsyncMock(
+        return_value={
+            "job": {"job_id": "job-1"},
+            "task": {"task_id": "task-1", "content": "bounded"},
+            "complete": False,
+        }
+    )
+    submit = AsyncMock(return_value={"accepted": True})
+    retry = AsyncMock(return_value={"task_id": "task-1", "status": "pending"})
+    api.build_graph_with_codex = start  # type: ignore[method-assign]
+    api.get_next_codex_graph_task = next_task  # type: ignore[method-assign]
+    api.submit_codex_graph_task = submit  # type: ignore[method-assign]
+    api.retry_codex_graph_task = retry  # type: ignore[method-assign]
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        started = await client.post(
+            "/api/graph/codex-build",
+            json={"collection": "papers", "confirmed": True},
+        )
+        assert started.status == 200
+        assert (await started.json())["job_id"] == "job-1"
+        start.assert_awaited_once_with("papers", confirmed=True)
+
+        fetched = await client.get("/api/graph/codex-build/job-1/next")
+        assert fetched.status == 200
+        assert (await fetched.json())["task"]["task_id"] == "task-1"
+
+        rejected = await client.post(
+            "/api/graph/codex-build/job-1/submit",
+            json={"task_id": "task-1"},
+        )
+        assert rejected.status == 400
+        accepted = await client.post(
+            "/api/graph/codex-build/job-1/submit",
+            json={
+                "task_id": "task-1",
+                "result": {"entities": [], "relationships": []},
+            },
+        )
+        assert accepted.status == 200
+        submit.assert_awaited_once_with(
+            "job-1", "task-1", {"entities": [], "relationships": []}
+        )
+
+        retried = await client.post(
+            "/api/graph/codex-build/job-1/retry",
+            json={"task_id": "task-1"},
+        )
+        assert retried.status == 200
+        retry.assert_awaited_once_with("job-1", "task-1")
+    finally:
+        await client.close()
+
+
 # ── /api/ask ──────────────────────────────────────────────────────
 
 

@@ -50,6 +50,9 @@ class _State:
         self.config_updates: list[dict[str, Any]] = []
         self.restart_count = 0
         self.search_queries: list[dict[str, list[str]]] = []
+        self.ask_bodies: list[dict[str, Any]] = []
+        self.graph_build_bodies: list[dict[str, Any]] = []
+        self.graph_submissions: list[dict[str, Any]] = []
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -171,13 +174,35 @@ class _Handler(BaseHTTPRequestHandler):
                     "web_console": {"password": "server-password"},
                 },
             )
-        elif parsed.path == "/api/documents/d1/content":
-            payload = ("0123456789" * 10).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/markdown; charset=utf-8")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+        elif parsed.path == "/api/documents/d1/content/page":
+            params = parse_qs(parsed.query)
+            content = "0123456789" * 10
+            start = int(params.get("start", ["0"])[0])
+            max_chars = int(params.get("max_chars", ["12000"])[0])
+            end = min(len(content), start + max_chars)
+            self._json(
+                200,
+                {
+                    "doc_id": "d1",
+                    "start": start,
+                    "end": end,
+                    "total_chars": len(content),
+                    "has_more": end < len(content),
+                    "content": content[start:end],
+                },
+            )
+        elif parsed.path == "/api/graph/codex-build/job-1/next":
+            self._json(
+                200,
+                {
+                    "job": {"job_id": "job-1", "status": "waiting_agent"},
+                    "task": {"task_id": "task-1", "content": "Ada created Alpha."},
+                    "complete": False,
+                    "plugin_llm_used": False,
+                },
+            )
+        elif parsed.path == "/api/graph/build/job-1":
+            self._json(200, {"job_id": "job-1", "status": "success"})
         else:
             self._json(404, {"error": "not found"})
 
@@ -193,7 +218,62 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if self._reject_if_unauthenticated():
             return
-        if parsed.path == "/api/config/update":
+        if parsed.path == "/api/ask/evidence":
+            body = self._body()
+            self.state.ask_bodies.append(body)
+            self._json(
+                200,
+                {
+                    "question": body["question"],
+                    "collection": body.get("collection", ""),
+                    "requested_retrieval_mode": body["retrieval_mode"],
+                    "actual_retrieval_mode": f"agent_{body['retrieval_mode']}",
+                    "round": body["round"],
+                    "queries": body["queries"],
+                    "limits": {"max_queries_per_round": 4, "max_rounds": 2},
+                    "evidence": [
+                        {
+                            "n": 1,
+                            "doc_id": "d1",
+                            "title": "Alpha Paper",
+                            "chunk_id": "c1",
+                            "text": "Alpha evidence",
+                        }
+                    ],
+                    "requires_agent_assessment": True,
+                    "plugin_llm_used": False,
+                    "full_text_used": False,
+                },
+            )
+        elif parsed.path == "/api/graph/build/estimate":
+            body = self._body()
+            self._json(
+                200,
+                {
+                    "collection": body["collection"],
+                    "documents": 2,
+                    "lrag_chunks": 3,
+                },
+            )
+        elif parsed.path == "/api/graph/codex-build":
+            body = self._body()
+            self.state.graph_build_bodies.append(body)
+            self._json(
+                200,
+                {
+                    "job_id": "job-1",
+                    "status": "waiting_agent",
+                    "plugin_llm_used": False,
+                },
+            )
+        elif parsed.path == "/api/graph/codex-build/job-1/submit":
+            body = self._body()
+            self.state.graph_submissions.append(body)
+            self._json(200, {"accepted": True, "plugin_llm_used": False})
+        elif parsed.path == "/api/graph/codex-build/job-1/retry":
+            body = self._body()
+            self._json(200, {"task_id": body["task_id"], "status": "pending"})
+        elif parsed.path == "/api/config/update":
             body = self._body()
             self.state.config_updates.append(body)
             rebuild = body.get("section") == "embedding"
@@ -305,9 +385,36 @@ def test_search_rejects_unbounded_query_fanout() -> None:
             )
 
 
+def test_ask_evidence_preserves_agent_reasoning_boundary() -> None:
+    with _mock_api() as (state, url):
+        result = CLIENT.ask_evidence(
+            CLIENT.KnowledgeArchClient(url),
+            "Compare Alpha and Beta",
+            ["alpha mechanism", "beta mechanism"],
+            "papers",
+            mode="enhanced",
+            round_number=1,
+        )
+    assert result["actual_retrieval_mode"] == "agent_enhanced"
+    assert result["requires_agent_assessment"] is True
+    assert result["plugin_llm_used"] is False
+    assert result["full_text_used"] is False
+    assert state.ask_bodies == [
+        {
+            "question": "Compare Alpha and Beta",
+            "queries": ["alpha mechanism", "beta mechanism"],
+            "collection": "papers",
+            "retrieval_mode": "enhanced",
+            "round": 1,
+        }
+    ]
+
+
 def test_read_document_pages_without_dumping_full_text() -> None:
     with _mock_api() as (_state, url):
-        result = CLIENT.read_document(CLIENT.KnowledgeArchClient(url), "d1", 10, 25)
+        result = CLIENT.read_document(
+            CLIENT.KnowledgeArchClient(url), "d1", 10, 25, intent="anchored"
+        )
     assert result == {
         "doc_id": "d1",
         "start": 10,
@@ -315,7 +422,17 @@ def test_read_document_pages_without_dumping_full_text() -> None:
         "total_chars": 100,
         "has_more": True,
         "content": "0123456789012345678901234",
+        "read_intent": "anchored",
+        "full_text_used": True,
     }
+
+
+def test_read_document_requires_explicit_intent() -> None:
+    with _mock_api() as (_state, url):
+        with pytest.raises(CLIENT.UsageError, match="read requires --intent"):
+            CLIENT.read_document(
+                CLIENT.KnowledgeArchClient(url), "d1", 0, 10, intent=""
+            )
 
 
 def test_distribution_policy_snapshot_matches_config_truth_source() -> None:
@@ -365,10 +482,49 @@ def test_restart_has_a_separate_apply_gate() -> None:
     assert state.restart_count == 1
 
 
-def test_client_has_no_plugin_llm_or_rebuild_endpoint() -> None:
+def test_codex_graph_build_is_previewed_and_uses_task_protocol() -> None:
+    with _mock_api() as (state, url):
+        client = CLIENT.KnowledgeArchClient(url)
+        preview = CLIENT.graph_codex_build(client, "papers", apply=False)
+        assert preview["mutation_performed"] is False
+        assert preview["embedding_provider_will_be_used"] is True
+        assert state.graph_build_bodies == []
+
+        started = CLIENT.graph_codex_build(client, "papers", apply=True)
+        task = CLIENT.graph_next(client, "job-1")
+        submitted = CLIENT.graph_submit(
+            client,
+            "job-1",
+            "task-1",
+            {
+                "entities": [
+                    {
+                        "entity_name": "Ada",
+                        "entity_type": "PERSON",
+                        "description": "Researcher",
+                    }
+                ],
+                "relationships": [],
+            },
+        )
+        status = CLIENT.graph_status(client, "job-1")
+
+    assert started["job_id"] == "job-1"
+    assert task["task"]["task_id"] == "task-1"
+    assert submitted["accepted"] is True
+    assert status["status"] == "success"
+    assert state.graph_build_bodies == [{"collection": "papers", "confirmed": True}]
+    assert state.graph_submissions[0]["task_id"] == "task-1"
+
+
+def test_client_exposes_only_agent_evidence_and_guarded_graph_builds() -> None:
     source = CLIENT_PATH.read_text(encoding="utf-8")
+    assert '"/api/ask/evidence"' in source
     assert '"/api/ask"' not in source
+    assert '"/api/graph/codex-build"' in source
+    assert '"/api/graph/build"' not in source
     assert '"/api/documents/rebuild-index"' not in source
+    assert '/content/page"' in source
 
 
 def test_fresh_process_cli_research_and_config_preview() -> None:
@@ -381,12 +537,14 @@ def test_fresh_process_cli_research_and_config_preview() -> None:
             [
                 sys.executable,
                 str(CLIENT_PATH),
-                "search",
+                "ask-evidence",
+                "--question",
+                "What is Alpha?",
                 "--query",
                 "alpha concept",
+                "--mode",
+                "default",
                 "--all",
-                "--max-chars",
-                "250",
             ],
             check=False,
             capture_output=True,

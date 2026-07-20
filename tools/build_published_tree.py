@@ -26,6 +26,7 @@ SENTINEL = ".published-source"
 REQUIRED = {
     ".agents/skills/operate-knowledge-arch/SKILL.md",
     ".agents/skills/operate-knowledge-arch/agents/openai.yaml",
+    ".agents/skills/operate-knowledge-arch/references/lightrag.md",
     ".agents/skills/operate-knowledge-arch/references/research.md",
     ".agents/skills/operate-knowledge-arch/references/settings.md",
     ".agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py",

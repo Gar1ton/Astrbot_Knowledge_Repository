@@ -416,6 +416,35 @@ class SourceDocumentStore(ABC):
         """将启动时遗留的 queued/running/pause_requested 标为 interrupted；paused 保留可恢复。"""
         ...
 
+    @abstractmethod
+    async def replace_codex_graph_tasks(self, job_id: str, tasks: list[dict]) -> None:
+        """原子替换一个构建任务的 Codex 切片账本；task_id 为稳定主键。"""
+        ...
+
+    @abstractmethod
+    async def list_codex_graph_tasks(
+        self, job_id: str, status: str | None = None
+    ) -> list[dict]:
+        """按文档与切片顺序列出任务；可按状态过滤。"""
+        ...
+
+    @abstractmethod
+    async def get_codex_graph_task(self, task_id: str) -> dict | None:
+        """读取单个 Codex 图谱任务；不存在返回 None。"""
+        ...
+
+    @abstractmethod
+    async def update_codex_graph_task(
+        self, task_id: str, status: str, last_error: str = ""
+    ) -> bool:
+        """更新任务状态与最近错误；任务不存在返回 False。"""
+        ...
+
+    @abstractmethod
+    async def get_latest_codex_graph_build_job(self) -> dict | None:
+        """读取仍在等待 Codex 的最新构建任务；不存在返回 None。"""
+        ...
+
     # ── Zotero 逻辑镜像（单向 Pull）───────────────────────────────
     #
     # 这些方法持久化 Zotero 上游的只读镜像（含本地上传的合成 LOCAL 库）。

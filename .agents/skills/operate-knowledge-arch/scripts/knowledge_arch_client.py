@@ -24,6 +24,8 @@ MAX_QUERIES = 4
 MAX_FINAL_HITS = 20
 MAX_HIT_CHARS = 4000
 MAX_READ_CHARS = 40000
+ASK_EVIDENCE_MODES = ("default", "enhanced", "deep_thinking")
+READ_INTENTS = ("anchored", "full-text")
 
 # Keep this compact distribution-side snapshot synchronized with kacore.config.CONFIG_KEY_POLICY.
 CONFIG_POLICIES: dict[str, dict[str, str]] = {
@@ -519,28 +521,143 @@ def search(
     }
 
 
-def read_document(
-    client: KnowledgeArchClient, doc_id: str, start: int, max_chars: int
+def ask_evidence(
+    client: KnowledgeArchClient,
+    question: str,
+    queries: list[str],
+    collection: str | None,
+    *,
+    mode: str,
+    round_number: int,
 ) -> dict[str, Any]:
+    """Call the no-generative-LLM Ask evidence endpoint."""
+    clean_question = question.strip()
+    clean_queries = [query.strip() for query in queries if query.strip()]
+    if not clean_question:
+        raise UsageError("--question must not be empty")
+    if mode not in ASK_EVIDENCE_MODES:
+        raise UsageError(f"Unsupported evidence mode: {mode}")
+    if round_number < 1:
+        raise UsageError("--round must be one or greater")
+    if mode == "deep_thinking" and not collection:
+        raise UsageError("deep_thinking requires --collection")
+    payload = client.request_json(
+        "/api/ask/evidence",
+        method="POST",
+        body={
+            "question": clean_question,
+            "queries": clean_queries or [clean_question],
+            "collection": collection or "",
+            "retrieval_mode": mode,
+            "round": round_number,
+        },
+    )
+    result = _expect_dict(payload, "/api/ask/evidence")
+    if result.get("plugin_llm_used") is not False:
+        raise ApiError("Evidence endpoint did not affirm plugin_llm_used=false")
+    if result.get("full_text_used") is not False:
+        raise ApiError("Evidence endpoint unexpectedly returned full document text")
+    return result
+
+
+def read_document(
+    client: KnowledgeArchClient,
+    doc_id: str,
+    start: int,
+    max_chars: int,
+    *,
+    intent: str,
+) -> dict[str, Any]:
+    if intent not in READ_INTENTS:
+        raise UsageError("read requires --intent anchored or --intent full-text")
     if start < 0:
         raise UsageError("--start must be zero or greater")
     max_chars = _bounded(max_chars, 1, MAX_READ_CHARS)
-    content = client.request_text(
-        f"/api/documents/{quote(doc_id, safe='')}/content",
-        query_params={"format": "md"},
+    payload = client.request_json(
+        f"/api/documents/{quote(doc_id, safe='')}/content/page",
+        query_params={"start": start, "max_chars": max_chars},
     )
-    end = min(len(content), start + max_chars)
-    if start > len(content):
-        start = len(content)
-        end = start
-    return {
-        "doc_id": doc_id,
-        "start": start,
-        "end": end,
-        "total_chars": len(content),
-        "has_more": end < len(content),
-        "content": content[start:end],
-    }
+    result = _expect_dict(payload, "document content page")
+    result["read_intent"] = intent
+    result["full_text_used"] = True
+    return result
+
+
+def graph_estimate(client: KnowledgeArchClient, collection: str) -> dict[str, Any]:
+    payload = client.request_json(
+        "/api/graph/build/estimate",
+        method="POST",
+        body={"collection": collection},
+    )
+    return _expect_dict(payload, "/api/graph/build/estimate")
+
+
+def graph_codex_build(
+    client: KnowledgeArchClient, collection: str, *, apply: bool
+) -> dict[str, Any]:
+    estimate = graph_estimate(client, collection)
+    if not apply:
+        return {
+            "status": "preview",
+            "collection": collection,
+            "estimate": estimate,
+            "plugin_llm_used": False,
+            "embedding_provider_will_be_used": True,
+            "mutation_performed": False,
+            "requires_explicit_confirmation": True,
+        }
+    result = _expect_dict(
+        client.request_json(
+            "/api/graph/codex-build",
+            method="POST",
+            body={"collection": collection, "confirmed": True},
+        ),
+        "/api/graph/codex-build",
+    )
+    result["mutation_performed"] = True
+    return result
+
+
+def graph_next(client: KnowledgeArchClient, job_id: str) -> dict[str, Any]:
+    return _expect_dict(
+        client.request_json(f"/api/graph/codex-build/{quote(job_id, safe='')}/next"),
+        "Codex graph next task",
+    )
+
+
+def graph_submit(
+    client: KnowledgeArchClient, job_id: str, task_id: str, result: Any
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise UsageError("--result-json must decode to an object")
+    return _expect_dict(
+        client.request_json(
+            f"/api/graph/codex-build/{quote(job_id, safe='')}/submit",
+            method="POST",
+            body={"task_id": task_id, "result": result},
+        ),
+        "Codex graph task submission",
+    )
+
+
+def graph_retry(
+    client: KnowledgeArchClient, job_id: str, task_id: str
+) -> dict[str, Any]:
+    return _expect_dict(
+        client.request_json(
+            f"/api/graph/codex-build/{quote(job_id, safe='')}/retry",
+            method="POST",
+            body={"task_id": task_id},
+        ),
+        "Codex graph task retry",
+    )
+
+
+def graph_status(client: KnowledgeArchClient, job_id: str) -> dict[str, Any]:
+    return _expect_dict(
+        client.request_json(f"/api/graph/build/{quote(job_id, safe='')}"),
+        "graph build status",
+    )
 
 
 def config_options() -> dict[str, Any]:
@@ -654,10 +771,45 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--limit", type=int, default=10)
     search_parser.add_argument("--max-chars", type=int, default=1600)
 
+    ask_parser = subparsers.add_parser(
+        "ask-evidence", help="Retrieve mode-aware evidence without plugin LLM synthesis"
+    )
+    ask_parser.add_argument("--question", required=True)
+    ask_parser.add_argument("--query", action="append", default=[])
+    ask_parser.add_argument("--mode", choices=ASK_EVIDENCE_MODES, default="default")
+    ask_parser.add_argument("--round", type=int, default=1)
+    ask_scope = ask_parser.add_mutually_exclusive_group(required=True)
+    ask_scope.add_argument("--collection")
+    ask_scope.add_argument("--all", dest="all_collections", action="store_true")
+
     read_parser = subparsers.add_parser("read", help="Read one bounded page of document Markdown")
     read_parser.add_argument("--doc-id", required=True)
     read_parser.add_argument("--start", type=int, default=0)
     read_parser.add_argument("--max-chars", type=int, default=12000)
+    read_parser.add_argument("--intent", choices=READ_INTENTS, required=True)
+
+    graph_estimate_parser = subparsers.add_parser(
+        "graph-estimate", help="Estimate a LightRAG build without mutating state"
+    )
+    graph_estimate_parser.add_argument("--collection", required=True)
+    graph_build_parser = subparsers.add_parser(
+        "graph-build", help="Preview or start a Codex-driven LightRAG build"
+    )
+    graph_build_parser.add_argument("--collection", required=True)
+    graph_build_parser.add_argument("--apply", action="store_true")
+    graph_next_parser = subparsers.add_parser("graph-next", help="Get the next Codex KG task")
+    graph_next_parser.add_argument("--job-id", required=True)
+    graph_submit_parser = subparsers.add_parser(
+        "graph-submit", help="Submit one Codex entity/relation result"
+    )
+    graph_submit_parser.add_argument("--job-id", required=True)
+    graph_submit_parser.add_argument("--task-id", required=True)
+    graph_submit_parser.add_argument("--result-json", required=True)
+    graph_retry_parser = subparsers.add_parser("graph-retry", help="Retry one failed KG task")
+    graph_retry_parser.add_argument("--job-id", required=True)
+    graph_retry_parser.add_argument("--task-id", required=True)
+    graph_status_parser = subparsers.add_parser("graph-status", help="Show graph build status")
+    graph_status_parser.add_argument("--job-id", required=True)
 
     show_parser = subparsers.add_parser("config-show", help="Show redacted effective configuration")
     show_parser.add_argument("--section")
@@ -698,8 +850,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                     limit=args.limit,
                     max_chars=args.max_chars,
                 )
+            elif args.command == "ask-evidence":
+                result = ask_evidence(
+                    client,
+                    args.question,
+                    list(args.query),
+                    None if args.all_collections else args.collection,
+                    mode=args.mode,
+                    round_number=args.round,
+                )
             elif args.command == "read":
-                result = read_document(client, args.doc_id, args.start, args.max_chars)
+                result = read_document(
+                    client,
+                    args.doc_id,
+                    args.start,
+                    args.max_chars,
+                    intent=args.intent,
+                )
+            elif args.command == "graph-estimate":
+                result = graph_estimate(client, args.collection)
+            elif args.command == "graph-build":
+                result = graph_codex_build(client, args.collection, apply=args.apply)
+            elif args.command == "graph-next":
+                result = graph_next(client, args.job_id)
+            elif args.command == "graph-submit":
+                try:
+                    graph_result = json.loads(args.result_json)
+                except json.JSONDecodeError as exc:
+                    raise UsageError("--result-json must be valid JSON") from exc
+                result = graph_submit(client, args.job_id, args.task_id, graph_result)
+            elif args.command == "graph-retry":
+                result = graph_retry(client, args.job_id, args.task_id)
+            elif args.command == "graph-status":
+                result = graph_status(client, args.job_id)
             elif args.command == "config-show":
                 result = config_show(client, args.section)
             elif args.command == "config-set":

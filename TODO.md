@@ -1,5 +1,32 @@
 # TODO
 
+## v1.0.7：Notion 进度条 · Strict 标签清理 · 修复 CI 前端校验 (🚧)
+
+### User constraints / 约束
+
+- 所有构建/测试/校验在 Docker 容器 `naughty_germain`（Linux/node20/py3.12，挂载 `/root/Astrbot_Knowledge_Repository`）内运行。
+- 远端 push / PR / release 一律需另行单独报告并批准后执行。
+
+### Technical implementation path
+
+- [x] **Phase 1 - Notion 后台任务进度模型**：新增 `kacore/notion_sync_job.py`（`NotionSyncJob`，对齐 `ZoteroSyncJob`）；
+  `push_all` 接 `progress`；`api` 增 `sync_notion_push` / `_run_notion_push` / `get_active_notion_sync_job`；
+  `_periodic_notion_sync` 改走 job；`web/server.py` 加 `/api/sync/notion/active`。
+- [x] **Phase 2 - 前端进度条**：`lib/api.ts` 加 `NotionSyncJob` + `getActiveNotionSyncJob`；`ProgressDock` 扩五源并加 Notion 行；
+  `i18n` 加键；`SettingModal.handleNotionPush` 改后台提示。
+- [x] **Phase 3 - Strict 集合选项清理**：`notion.py` 加 `prune_collection_options`；`notion_schema` 暴露 `sanitize_option_name`；
+  `push_all` 在 strict 下按活跃文档实际选项集清理 `Collections`/`Collection Path`。
+- [x] **Phase 4 - 放宽 CI 前端校验**：`tools/sync_frontend.py` 加 `--check-structure`（忽略 `_next/` 哈希 churn，校验路由/静态资源结构）；
+  `.github/workflows/tests.yml` 改用之。
+- [x] **Phase 5 - 测试与治理**：新增/扩展 notion job/target/pipeline/api/server 测试；更新 CHANGELOG 与 `metadata.yaml` 到 v1.0.7。
+
+### Verification
+
+- 容器 `naughty_germain` 内：`ruff check .` 通过；`mypy` Success（domain 严格域）；全量 `pytest` 674 passed
+  （`test_reranker` 的 idle-unload 用例为满负载下计时抖动，单独运行通过，与本轮无关）。
+- 前端：容器内 ESLint / `tsc --noEmit` / `npm run build` 均通过；`sync_frontend.py --check-structure` 退出 0
+  （对照：旧 `--check` 仍因跨平台哈希漂移复现 CI 失败，验证根因）。
+
 ## v1.0.6: Rerank idle model unloading (completed)
 
 ### Technical implementation path

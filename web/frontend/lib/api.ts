@@ -216,6 +216,33 @@ export interface ZoteroSyncJob {
   errors?: string[];
 }
 
+// Notion 单向推送后台任务快照（与 ZoteroSyncJob 同构，供统一进度面板轮询）。
+export interface NotionSyncJob {
+  job_id: string;
+  type?: string; // "notion_sync"
+  status: string; // running | success | partial_failure | error
+  stage?: string;
+  stage_label?: string;
+  force?: boolean;
+  sync_mode?: string;
+  docs_total: number;
+  docs_processed: number;
+  docs_created?: number;
+  docs_updated?: number;
+  docs_archived?: number;
+  docs_skipped?: number;
+  docs_failed?: number;
+  qa_pushed?: number;
+  qa_failed?: number;
+  tags_pruned?: number;
+  progress_percent: number;
+  elapsed_seconds?: number;
+  started_at?: string;
+  finished_at?: string | null;
+  recent_error?: string;
+  errors?: string[];
+}
+
 export interface ZoteroProbeResult {
   connection: { connected: boolean; port?: number; detail?: string };
   read: {
@@ -1331,6 +1358,15 @@ export async function pushNotionNote(payload: {
 export async function getSyncStatus(): Promise<MaybeReserved<SyncRecord[]>> {
   if (isMock()) return { reserved: true, available_in: "v0.4.0" };
   return apiFetch<MaybeReserved<SyncRecord[]>>("/api/sync/status");
+}
+
+// 统一进度面板轮询：当前 running/partial/error 的 Notion 推送任务（无任务 → null）。
+export async function getActiveNotionSyncJob(): Promise<NotionSyncJob | null> {
+  if (isMock()) return null;
+  const res = await apiFetch<{ job: NotionSyncJob | null }>("/api/sync/notion/active", {
+    timeoutMs: 4_000,
+  });
+  return res.job;
 }
 
 export async function syncDocuments(

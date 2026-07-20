@@ -746,6 +746,11 @@ async def handle_zotero_active(request: web.Request) -> web.Response:
     return web.json_response({"job": _api(request).get_active_zotero_sync_job()})
 
 
+async def handle_notion_active(request: web.Request) -> web.Response:
+    # 进度面板轮询：返回当前 running/partial/error 的 Notion 推送任务快照（无任务 → null）。
+    return web.json_response({"job": _api(request).get_active_notion_sync_job()})
+
+
 async def handle_backup(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     force = bool(body.get("force", False)) if isinstance(body, dict) else False
@@ -1531,6 +1536,7 @@ def build_app(
     app.router.add_post("/api/notion/init", handle_notion_init)
     app.router.add_post("/api/notion/push-note", handle_notion_push_note)
     app.router.add_get("/api/sync/status", handle_sync_status)
+    app.router.add_get("/api/sync/notion/active", handle_notion_active)
     app.router.add_get("/api/zotero/config", handle_zotero_config)
     app.router.add_get("/api/zotero/probe", handle_zotero_probe)
     app.router.add_post("/api/zotero/server-key", handle_zotero_server_key_post)

@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [v1.0.7] — 2026-07-20
+
+### 新增功能 (Added)
+
+- **Notion 同步进度可视**：新增 `NotionSyncJob` 纯内存进度模型与后台单任务，Notion 单向推送
+  从同步阻塞改为立即返回任务快照，进度经 `GET /api/sync/notion/active` 轮询，在左下角统一
+  进度条与 Zotero / Milvus / LightRAG / 文档摄入并列显示（阶段、`docs done/total`、清理计数
+  与终态提示）。手动按钮与周期自动推送共用同一任务
+  （`kacore/notion_sync_job.py`、`kacore/api.py`、`kacore/plugin_initializer.py`、`web/server.py`、
+  `web/frontend/components/progress/ProgressDock.tsx`、`web/frontend/lib/api.ts`、`lib/i18n.ts`、
+  `components/modals/SettingModal.tsx`）。
+
+### 变更 (Changed)
+
+- **Strict 模式自动清理失效集合选项**：strict 同步每轮按活跃文档实际使用的选项集，回收
+  Notion `Articles` 库 `Collections`(multi_select) 与 `Collection Path`(select) 中不再对应任何
+  活跃集合/路径的残留选项（集合删/改名后越积越多）；单属性读写失败记 warning 跳过，不中断
+  整轮推送（`kacore/repository/sync_targets/notion.py`、`notion_schema.py`、
+  `kacore/pipelines/notion_sync_pipeline.py`）。
+
+### 修复 (Fixed)
+
+- **修复 developer 分支 CI 前端校验必红**：`Verify exported pages` 原对全新 Linux 构建的 `out/`
+  与开发者 Windows 构建的 `pages/` 逐字节比对，webpack 内容哈希跨平台必然不同而每次失败。
+  新增 `tools/sync_frontend.py --check-structure`：忽略 `_next/` 哈希产物，只校验路由/静态资源
+  结构对齐；CI 改用之（`tools/sync_frontend.py`、`.github/workflows/tests.yml`）。
+
+### 测试 (Tests)
+
+- 新增 `NotionSyncJob` 进度契约、`prune_collection_options` 选项回收（含降级不抛）、strict push_all
+  清理与进度计数、`sync_notion_push` 后台单任务与终态可见窗口、`/api/sync/notion/active` 路由
+  等回归；容器内全量 pytest 674 passed，ruff 通过，前端 ESLint/tsc/build 与 `--check-structure`
+  均通过（`tests/backend/test_notion_sync_job.py`、`test_notion_target.py`、`test_notion_pipeline.py`、
+  `test_api.py`、`test_web_server.py`）。
+
 ## [v1.0.6] — 2026-07-20
 
 ### 新增功能 (Added)

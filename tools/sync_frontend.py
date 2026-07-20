@@ -29,6 +29,12 @@ _DST = _ROOT / "pages"
 _SKIP_NAMES = {"README.md", ".DS_Store"}
 _SKIP_DIRS = {".next", "node_modules", "__pycache__"}
 
+# 结构校验（--check-structure）：`_next/` 下全是 webpack 内容哈希产物，跨平台构建
+# （开发者 Windows vs CI Linux）必然不同，逐字节比对必然误红，故整块忽略。路由导出
+# `.html`/`.txt` 内嵌哈希脚本引用，只校验存在性；其余静态资源（pdfjs/ 等）逐字节比对。
+_STRUCTURE_IGNORE_DIRS = {"_next"}
+_PRESENCE_ONLY_SUFFIXES = {".html", ".txt"}
+
 
 def _resolve_src() -> Path:
     """优先使用 Next.js export 产物目录；不存在时回退旧版源码目录。"""
@@ -68,6 +74,43 @@ def _check() -> int:
     return 0
 
 
+def _under_ignored(rel: Path) -> bool:
+    return any(part in _STRUCTURE_IGNORE_DIRS for part in rel.parts)
+
+
+def _check_structure() -> int:
+    """容忍哈希漂移的结构校验（CI 用）：忽略 `_next/`，校验路由/资源结构对齐。
+
+    为什么不逐字节：webpack 内容哈希跨平台（Windows/Linux）必然不同，严格比对必然误红。
+    本校验仍能拦住真实错误——新增/删除路由或静态资源、漏导出——而不被哈希 churn 干扰。
+    """
+    src = _resolve_src()
+    src_rel = {
+        s.relative_to(src) for s in _iter_files(src) if not _under_ignored(s.relative_to(src))
+    }
+    dst_rel = {
+        d.relative_to(_DST) for d in _iter_files(_DST) if not _under_ignored(d.relative_to(_DST))
+    }
+    mismatched: list[str] = []
+    for rel in sorted(src_rel - dst_rel):
+        mismatched.append(f"缺少（pages/ 未导出）：{rel.as_posix()}")
+    for rel in sorted(dst_rel - src_rel):
+        mismatched.append(f"多余（out/ 已无）：{rel.as_posix()}")
+    # 稳定静态资源逐字节比对；.html/.txt 内嵌哈希引用只校验存在性（上面已覆盖）。
+    for rel in sorted(src_rel & dst_rel):
+        if rel.suffix in _PRESENCE_ONLY_SUFFIXES:
+            continue
+        if not filecmp.cmp(src / rel, _DST / rel, shallow=False):
+            mismatched.append(f"内容漂移（静态资源）：{rel.as_posix()}")
+    if mismatched:
+        print(f"pages/ 与 {src.relative_to(_ROOT)} 结构/资源不一致，需运行 sync_frontend：")
+        for m in mismatched:
+            print("  -", m)
+        return 1
+    print(f"pages/ 与 {src.relative_to(_ROOT)} 结构一致（已容忍 _next/ 哈希漂移）。")
+    return 0
+
+
 def _sync() -> int:
     src = _resolve_src()
     print(f"同步源：{src.relative_to(_ROOT)} → pages/")
@@ -102,12 +145,19 @@ def _sync() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="同步前端产物到 pages/")
-    parser.add_argument("--check", action="store_true", help="只检查一致性，不写入")
+    parser.add_argument("--check", action="store_true", help="逐字节一致性检查（本机，同环境用）")
+    parser.add_argument(
+        "--check-structure",
+        action="store_true",
+        help="结构一致性检查（CI 用）：忽略 _next/ 哈希产物，只校验路由/资源结构",
+    )
     parser.add_argument("-f", "--force", action="store_true", help="强制同步（与默认行为相同）")
     args = parser.parse_args()
     if not _NEXT_OUT.exists() and not _LEGACY_SRC.exists():
         print(f"未找到前端源码目录：{_NEXT_OUT} 或 {_LEGACY_SRC}", file=sys.stderr)
         return 2
+    if args.check_structure:
+        return _check_structure()
     return _check() if args.check else _sync()
 
 

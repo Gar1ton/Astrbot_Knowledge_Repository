@@ -756,7 +756,8 @@ class PluginInitializer:
 
     async def _periodic_notion_sync(self) -> None:
         """Notion 周期增量推送：每轮 sleep 当前配置间隔（重读以吸收前端改值），
-        再触发一次 push_all(force=False)；异常吞掉记日志不影响循环。"""
+        再经 `api.sync_notion_push` 触发一次后台推送——与手动按钮共用同一进度任务，
+        使周期推送也在左下角进度条可视；异常吞掉记日志不影响循环。"""
         logger.info("Notion periodic push scheduled.")
         try:
             while True:
@@ -765,11 +766,10 @@ class PluginInitializer:
                     logger.info("Notion 周期推送间隔置 0，任务退出。")
                     return
                 await asyncio.sleep(interval)
-                if self.notion_sync_pipeline is not None:
-                    try:
-                        await self.notion_sync_pipeline.push_all(force=False)
-                    except Exception as exc:
-                        logger.error("Notion periodic push failed: %s", exc)
+                try:
+                    await self.api.sync_notion_push(force=False)
+                except Exception as exc:
+                    logger.error("Notion periodic push failed: %s", exc)
         except asyncio.CancelledError:
             logger.info("Notion periodic push task cancelled.")
 

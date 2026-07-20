@@ -59,6 +59,13 @@ from kacore.milvus_build import (
     MILVUS_BUILD_SUCCESS,
     MilvusBuildJob,
 )
+from kacore.notion_sync_job import (
+    NOTION_SYNC_ERROR,
+    NOTION_SYNC_PARTIAL,
+    NOTION_SYNC_RUNNING,
+    NOTION_SYNC_SUCCESS,
+    NotionSyncJob,
+)
 from kacore.pipelines.agent_evidence import AGENT_EVIDENCE_MODES
 from kacore.pipelines.retrieval_orchestrator import ChunkSignal, RetrievalScope
 from kacore.retrieval_modes import (
@@ -87,6 +94,7 @@ TERMINAL_BUILD_STATUSES = {"success", "partial_failure", "error", "interrupted"}
 CODEX_GRAPH_TASK_FINAL = "completed"
 CODEX_GRAPH_TASK_RETRYABLE = ("pending", "error", "processing")
 ZOTERO_SYNC_TERMINAL_VISIBLE_SECONDS = 30.0
+NOTION_SYNC_TERMINAL_VISIBLE_SECONDS = 30.0
 
 
 def _bounded_text(value: Any, field: str, *, max_chars: int, default: str = "") -> str:
@@ -560,6 +568,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         self._r2_backup_manager = r2_backup_manager
         # Notion 单向推送管线（组合根在 api 构造后注入）。
         self._notion_sync_pipeline: Any | None = None
+        # Notion push：全局单任务的进度快照 + 后台任务句柄（与 Zotero Pull 同构）。
+        self._notion_sync_job: NotionSyncJob | None = None
+        self._notion_sync_task: asyncio.Task | None = None  # type: ignore[type-arg]
         # Zotero 同步管线（组合根在 api 构造后注入，避免回调循环依赖）。
         self._zotero_pipeline: Any | None = None
         self._last_zotero_sync: dict[str, Any] = {}
@@ -2352,10 +2363,15 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                         results[kind.value] = await self._sync_pipeline.sync(
                             kind, doc_ids, force=force
                         )
+                # Notion 现为后台单任务：其快照 status="running" 表示已成功启动，
+                # 视为非失败（终态由进度条呈现），避免 all 汇总被误判为 error。
                 return {
                     "status": (
                         "success"
-                        if all(result.get("status") == "success" for result in results.values())
+                        if all(
+                            result.get("status") in ("success", "running")
+                            for result in results.values()
+                        )
                         else "error"
                     ),
                     "targets": results,
@@ -2369,9 +2385,79 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         raise NotImplementedError("sync_documents: available in v0.3.0 (r2) / v0.4.0 (notion)")
 
     async def _notion_push_all(self, *, force: bool) -> dict:
+        """兼容入口：把 Notion 全量推送交给后台单任务执行并立即返回任务快照。
+
+        历史上此处 `await push_all` 整段阻塞（大库时逐文档 upsert 数分钟易超时）；现改为
+        与 Zotero Pull 同构的后台单任务，进度由 `get_active_notion_sync_job` 轮询呈现。
+        """
+        return await self.sync_notion_push(force=force)
+
+    async def sync_notion_push(self, force: bool = False) -> dict[str, Any]:
+        """在后台启动一次 Notion 全量推送并立即返回任务快照（不再阻塞 HTTP 请求）。
+
+        全局单任务：已有 running 任务直接返回当前快照；否则建 job 后台执行，进度由
+        `NotionSyncPipeline.push_all(progress=job)` 逐阶段/逐文档更新，终态与错误由
+        `_run_notion_push` 写回。手动按钮与周期自动推送共用本入口，进而统一进度可视。
+        """
         if self._notion_sync_pipeline is None:
             return {"status": "error", "message": "Notion 同步管线未装配。"}
-        return await self._notion_sync_pipeline.push_all(force=force)
+        current = self._notion_sync_job
+        if current is not None and current.status == NOTION_SYNC_RUNNING:
+            return current.to_dict()
+
+        job = NotionSyncJob(force=force)
+        job.start()
+        self._notion_sync_job = job
+        self._notion_sync_task = asyncio.create_task(self._run_notion_push(job, force))
+        return job.to_dict()
+
+    async def _run_notion_push(self, job: NotionSyncJob, force: bool) -> None:
+        """后台执行 push_all，把终态与错误写回 job（后台任务不应抛出）。"""
+        try:
+            assert self._notion_sync_pipeline is not None
+            result = await self._notion_sync_pipeline.push_all(force=force, progress=job)
+            raw_status = str(result.get("status", ""))
+            if raw_status in ("disabled", "already_running", "error"):
+                # 未启用/未初始化/重入/整体失败：直接落定为对应终态并带上原因。
+                status = NOTION_SYNC_ERROR if raw_status == "error" else NOTION_SYNC_SUCCESS
+                message = str(result.get("message", ""))
+                if message and status == NOTION_SYNC_ERROR:
+                    job.note_error(message)
+            elif raw_status == "partial_failure":
+                status = NOTION_SYNC_PARTIAL
+            else:
+                status = NOTION_SYNC_SUCCESS
+            for warning in result.get("warnings", [])[:5]:
+                if warning not in job.errors:
+                    job.note_error(str(warning))
+            job.finish(status)
+            logger.info("Notion push job %s finished: status=%s", job.job_id, status)
+        except asyncio.CancelledError:
+            job.finish(NOTION_SYNC_ERROR)
+            job.note_error("cancelled")
+            raise
+        except Exception as exc:  # noqa: BLE001 - 终态统一兜底，后台任务不应抛出
+            logger.error("Notion push job failed: %s", exc, exc_info=True)
+            job.finish(NOTION_SYNC_ERROR)
+            job.note_error(str(exc))
+
+    def get_active_notion_sync_job(self) -> dict[str, Any] | None:
+        """返回当前需展示的 Notion 推送任务快照（无则 None）。
+
+        running → 返回；success / partial_failure / error → 短暂返回，供前端捕获终态 notice；
+        无任务或终态展示窗口过期 → 返回 None（完全镜像 get_active_zotero_sync_job）。
+        """
+        job = self._notion_sync_job
+        if job is None:
+            return None
+        if job.status == NOTION_SYNC_RUNNING:
+            return job.to_dict()
+        if (
+            job.finished_at is not None
+            and time.monotonic() - job.finished_at <= NOTION_SYNC_TERMINAL_VISIBLE_SECONDS
+        ):
+            return job.to_dict()
+        return None
 
     async def initialize_notion_database(
         self,

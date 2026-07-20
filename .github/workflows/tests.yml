@@ -51,7 +51,9 @@ jobs:
           python-version: "3.10"
       - name: Verify exported pages
         working-directory: .
-        run: python tools/sync_frontend.py --check
+        # 结构校验：忽略 _next/ 的 webpack 内容哈希（跨平台构建必然不同），只校验
+        # 路由/静态资源结构对齐，避免逐字节比对因 Windows/Linux 哈希漂移必然误红。
+        run: python tools/sync_frontend.py --check-structure
 
   package:
     runs-on: ubuntu-latest

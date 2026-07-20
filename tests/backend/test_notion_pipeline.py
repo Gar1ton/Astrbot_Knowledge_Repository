@@ -26,6 +26,7 @@ from kacore.domain.models import (
     SyncStatus,
     SyncTargetKind,
 )
+from kacore.notion_sync_job import NOTION_STAGE_FINALIZING, NotionSyncJob
 from kacore.pipelines.notion_sync_pipeline import NotionSyncPipeline
 from kacore.repository.source_store.memory import InMemorySourceDocumentStore
 from kacore.repository.sync_targets.notion import NotionSyncTarget
@@ -275,7 +276,8 @@ async def test_strict_archives_detached_duplicates_and_force_cannot_restore(
     caller.calls.clear()
     second = await _pipeline(store, caller, "strict").push_all(force=True)
     assert second["documents"]["skipped"] == 1
-    assert caller.calls == []
+    # strict 每轮额外探一次库做失效选项清理；除此之外无文档/QA 写入。
+    assert [name for name, _ in caller.calls] == ["notion_retrieve_database"]
 
 
 @pytest.mark.asyncio
@@ -619,3 +621,82 @@ async def test_push_all_without_database_id_errors(
     result = await pipeline.push_all()
 
     assert result["status"] == "error"
+
+
+# ── 进度快照与 strict 选项清理 ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_push_all_updates_progress_counters(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    await store.upsert_collection(Collection(name="default"))
+    await store.add_document(_doc("d1"))
+    await store.add_document(_doc("d2"))
+    caller = RoutedToolCaller()
+    pipeline = _pipeline(store, caller)
+    job = NotionSyncJob()
+
+    result = await pipeline.push_all(progress=job)
+
+    assert result["status"] == "success"
+    assert job.docs_total == 2
+    assert job.docs_processed == 2
+    assert job.docs_created == 2
+    assert job.stage == NOTION_STAGE_FINALIZING
+
+
+@pytest.mark.asyncio
+async def test_strict_push_all_prunes_stale_options(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    await store.upsert_collection(Collection(name="default"))
+    await store.add_document(_doc("d1"))
+    caller = RoutedToolCaller(
+        handlers={
+            "notion_retrieve_database": {
+                "properties": {
+                    "Collections": {
+                        "multi_select": {
+                            "options": [
+                                {"id": "o1", "name": "default"},
+                                {"id": "o2", "name": "deleted_old"},
+                            ]
+                        }
+                    },
+                    "Collection Path": {
+                        "select": {
+                            "options": [
+                                {"id": "p1", "name": "default"},
+                                {"id": "p2", "name": "deleted_old"},
+                            ]
+                        }
+                    },
+                }
+            }
+        }
+    )
+    pipeline = _pipeline(store, caller, sync_mode="strict")
+    job = NotionSyncJob()
+
+    result = await pipeline.push_all(progress=job)
+
+    assert result["pruned"] == {"collections": 1, "collection_path": 1}
+    assert job.tags_pruned == 2
+    assert caller.count("notion_update_database") == 2
+
+
+@pytest.mark.asyncio
+async def test_preserve_push_all_skips_pruning(
+    store: InMemorySourceDocumentStore,
+) -> None:
+    await store.upsert_collection(Collection(name="default"))
+    await store.add_document(_doc("d1"))
+    caller = RoutedToolCaller()
+    pipeline = _pipeline(store, caller, sync_mode="preserve")
+
+    result = await pipeline.push_all()
+
+    assert result["pruned"] == {"collections": 0, "collection_path": 0}
+    # preserve 模式不读库对选项清理，零 retrieve_database 调用
+    assert caller.count("notion_retrieve_database") == 0

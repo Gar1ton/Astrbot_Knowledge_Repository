@@ -11,6 +11,7 @@ import {
   getActiveBuildJob,
   getActiveIngestJob,
   getActiveMilvusBuildJob,
+  getActiveNotionSyncJob,
   getActiveZoteroSyncJob,
   pauseBuildJob,
   resumeBuildJob,
@@ -22,7 +23,7 @@ import { useToast } from "@/components/ui/Toast";
 
 // ─── 归一化模型 ───────────────────────────────────────────────
 
-type DockKind = "zotero_sync" | "milvus_build" | "graph_build" | "ingest";
+type DockKind = "zotero_sync" | "notion_sync" | "milvus_build" | "graph_build" | "ingest";
 
 interface DockJob {
   key: string;
@@ -54,28 +55,33 @@ function useProgressJobs(): DockJob[] {
   const [jobs, setJobs] = useState<DockJob[]>([]);
   const anyActiveRef = useRef(false);
   const notifiedZoteroRef = useRef<Set<string>>(new Set());
+  const notifiedNotionRef = useRef<Set<string>>(new Set());
   // 单次轮询请求超时/网络抖动不代表任务已结束：失败的那一路沿用上次成功值，
   // 避免后端短暂阻塞（如同步期间的 PDF 解析）把整个面板闪没。
   const lastRef = useRef<{
     zotero: Awaited<ReturnType<typeof getActiveZoteroSyncJob>>;
+    notion: Awaited<ReturnType<typeof getActiveNotionSyncJob>>;
     milvus: Awaited<ReturnType<typeof getActiveMilvusBuildJob>>;
     graph: Awaited<ReturnType<typeof getActiveBuildJob>>;
     ingest: Awaited<ReturnType<typeof getActiveIngestJob>>;
-  }>({ zotero: null, milvus: null, graph: null, ingest: null });
+  }>({ zotero: null, notion: null, milvus: null, graph: null, ingest: null });
 
   const poll = useCallback(async () => {
-    const [zoteroResult, milvusResult, graphResult, ingestResult] = await Promise.allSettled([
-      getActiveZoteroSyncJob(),
-      getActiveMilvusBuildJob(),
-      getActiveBuildJob(),
-      getActiveIngestJob(),
-    ]);
+    const [zoteroResult, notionResult, milvusResult, graphResult, ingestResult] =
+      await Promise.allSettled([
+        getActiveZoteroSyncJob(),
+        getActiveNotionSyncJob(),
+        getActiveMilvusBuildJob(),
+        getActiveBuildJob(),
+        getActiveIngestJob(),
+      ]);
     const last = lastRef.current;
     const zotero = zoteroResult.status === "fulfilled" ? zoteroResult.value : last.zotero;
+    const notion = notionResult.status === "fulfilled" ? notionResult.value : last.notion;
     const milvus = milvusResult.status === "fulfilled" ? milvusResult.value : last.milvus;
     const graph = graphResult.status === "fulfilled" ? graphResult.value : last.graph;
     const ingest = ingestResult.status === "fulfilled" ? ingestResult.value : last.ingest;
-    lastRef.current = { zotero, milvus, graph, ingest };
+    lastRef.current = { zotero, notion, milvus, graph, ingest };
     const next: DockJob[] = [];
 
     if (zotero) {
@@ -107,6 +113,36 @@ function useProgressJobs(): DockJob[] {
         active: zotero.status === "running",
         paused: false,
         recentError: zotero.recent_error || "",
+        collection: "",
+      });
+    }
+    if (notion) {
+      if (notion.status !== "running") {
+        const notifyKey = `${notion.job_id}:${notion.status}`;
+        if (!notifiedNotionRef.current.has(notifyKey)) {
+          notifiedNotionRef.current.add(notifyKey);
+          if (notion.status === "success") toast(t("notion_sync_done"), "ok");
+          else if (notion.status === "partial_failure") {
+            toast(notion.recent_error || t("notion_sync_partial"), "error");
+          } else if (notion.status === "error") {
+            toast(notion.recent_error || t("notion_sync_failed"), "error");
+          }
+        }
+      }
+      const notionDone = notion.docs_processed ?? 0;
+      const prunedBits = notion.tags_pruned ? ` · ${notion.tags_pruned} tags` : "";
+      next.push({
+        key: `notion_sync:${notion.job_id}`,
+        kind: "notion_sync",
+        jobId: notion.job_id,
+        label: t("progress_dock_notion"),
+        sub: notion.stage_label || notion.stage || "",
+        pct: pctOf(notion.progress_percent),
+        detail: `${notionDone}/${notion.docs_total ?? 0} docs · +${notion.docs_created ?? 0} ~${notion.docs_updated ?? 0} · ${notion.docs_archived ?? 0} arch${prunedBits}`,
+        status: notion.status,
+        active: notion.status === "running",
+        paused: false,
+        recentError: notion.recent_error || "",
         collection: "",
       });
     }

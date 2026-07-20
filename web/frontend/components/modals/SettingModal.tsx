@@ -353,13 +353,14 @@ function SyncTab() {
   async function handleNotionPush() {
     setNotionPushing(true);
     try {
+      // 推送已改为后台单任务：立即返回任务快照，进度与完成提示由左下角进度条呈现。
       const res = await syncDocuments("notion");
       if ("reserved" in res) {
         toast("Notion 同步端口预留中", "error");
-      } else if (res.status === "success") {
-        toast("Notion 增量推送完成", "ok");
+      } else if (res.status === "error") {
+        toast("Notion 推送启动失败", "error");
       } else {
-        toast(`Notion 推送：${res.status}`, "error");
+        toast("已开始 Notion 推送，进度见左下角", "ok");
       }
     } catch (e) {
       toast(e instanceof Error ? e.message : "推送失败", "error");

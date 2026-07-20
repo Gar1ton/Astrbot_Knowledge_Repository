@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from kacore.adapters.notion_mcp import NotionMCPAdapter
+from kacore.adapters.notion_mcp import NotionMCPAdapter, NotionMCPError
 from kacore.config import NotionSyncConfig
 from kacore.domain.models import (
     Collection,
@@ -701,3 +701,92 @@ def test_text_to_paragraph_blocks_caps_and_splits() -> None:
     split_blocks = schema.text_to_paragraph_blocks(oversize)
     assert len(split_blocks) == 3  # 1800 + 1800 + 400
     assert schema.text_to_paragraph_blocks("") == []
+
+
+# ── Strict 选项清理 ─────────────────────────────────────────────
+
+
+def _retrieve_with_options() -> dict[str, Any]:
+    """伪造 retrieve_database：Collections/Collection Path 各含一个失效选项。"""
+    return {
+        "properties": {
+            "Collections": {
+                "type": "multi_select",
+                "multi_select": {
+                    "options": [
+                        {"id": "o1", "name": "keep", "color": "blue"},
+                        {"id": "o2", "name": "stale", "color": "red"},
+                    ]
+                },
+            },
+            "Collection Path": {
+                "type": "select",
+                "select": {
+                    "options": [
+                        {"id": "p1", "name": "keep", "color": "blue"},
+                        {"id": "p2", "name": "gone", "color": "gray"},
+                    ]
+                },
+            },
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_prune_collection_options_removes_stale(
+    notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
+) -> None:
+    caller = RoutedToolCaller(
+        handlers={"notion_retrieve_database": _retrieve_with_options()}
+    )
+    target = _target(caller, store, notion_config)
+
+    pruned = await target.prune_collection_options(
+        live_collection_names={"keep"}, live_path_names={"keep"}
+    )
+
+    assert pruned == {"collections": 1, "collection_path": 1}
+    # 两次 update_database，各只保留活跃选项（带 id）→ Notion 据此删除被省略的失效项。
+    assert caller.tools_called().count("notion_update_database") == 2
+    coll = caller.args_of("notion_update_database", 0)["properties"]["Collections"]
+    assert [o["name"] for o in coll["multi_select"]["options"]] == ["keep"]
+    assert coll["multi_select"]["options"][0]["id"] == "o1"
+    path = caller.args_of("notion_update_database", 1)["properties"]["Collection Path"]
+    assert [o["name"] for o in path["select"]["options"]] == ["keep"]
+
+
+@pytest.mark.asyncio
+async def test_prune_collection_options_noop_when_all_live(
+    notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
+) -> None:
+    caller = RoutedToolCaller(
+        handlers={"notion_retrieve_database": _retrieve_with_options()}
+    )
+    target = _target(caller, store, notion_config)
+
+    pruned = await target.prune_collection_options(
+        live_collection_names={"keep", "stale"},
+        live_path_names={"keep", "gone"},
+    )
+
+    assert pruned == {"collections": 0, "collection_path": 0}
+    assert "notion_update_database" not in caller.tools_called()
+
+
+@pytest.mark.asyncio
+async def test_prune_collection_options_swallows_update_error(
+    notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
+) -> None:
+    caller = RoutedToolCaller(
+        handlers={
+            "notion_retrieve_database": _retrieve_with_options(),
+            "notion_update_database": NotionMCPError("boom"),
+        }
+    )
+    target = _target(caller, store, notion_config)
+
+    # 单属性写失败记 warning 跳过，绝不抛出中断整轮推送。
+    pruned = await target.prune_collection_options(
+        live_collection_names={"keep"}, live_path_names={"keep"}
+    )
+    assert pruned == {"collections": 0, "collection_path": 0}

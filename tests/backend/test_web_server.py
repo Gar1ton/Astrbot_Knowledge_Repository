@@ -1991,3 +1991,13 @@ async def test_upload_filename_is_sanitized(tmp_path: Path) -> None:
         assert not (tmp_path / "evil.pdf").exists()
     finally:
         await client.close()
+
+
+async def test_notion_active_route_returns_null_when_idle(tmp_path: Path) -> None:
+    client = await _client(tmp_path)
+    try:
+        resp = await client.get("/api/sync/notion/active")
+        assert resp.status == 200
+        assert await resp.json() == {"job": None}
+    finally:
+        await client.close()

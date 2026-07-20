@@ -642,12 +642,16 @@ const zh = {
   build_widget_resume_hint: "新建构建将从断点续建",
   progress_dock_title: "进度",
   progress_dock_zotero: "Zotero 同步",
+  progress_dock_notion: "Notion 同步",
   progress_dock_milvus: "Milvus 构建",
   progress_dock_graph: "LightRAG 图谱",
   progress_dock_ingest: "文档摄入",
   zotero_sync_done: "Zotero 同步完成",
   zotero_sync_partial: "Zotero 同步部分失败",
   zotero_sync_failed: "Zotero 同步失败",
+  notion_sync_done: "Notion 同步完成",
+  notion_sync_partial: "Notion 同步部分失败",
+  notion_sync_failed: "Notion 同步失败",
 } as const;
 
 const en: Record<keyof typeof zh, string> = {
@@ -1268,12 +1272,16 @@ const en: Record<keyof typeof zh, string> = {
   build_widget_resume_hint: "New build will resume from checkpoint",
   progress_dock_title: "Progress",
   progress_dock_zotero: "Zotero sync",
+  progress_dock_notion: "Notion sync",
   progress_dock_milvus: "Milvus build",
   progress_dock_graph: "LightRAG graph",
   progress_dock_ingest: "Ingesting",
   zotero_sync_done: "Zotero sync complete",
   zotero_sync_partial: "Zotero sync partially failed",
   zotero_sync_failed: "Zotero sync failed",
+  notion_sync_done: "Notion sync complete",
+  notion_sync_partial: "Notion sync partially failed",
+  notion_sync_failed: "Notion sync failed",
 };
 
 export type I18nKey = keyof typeof zh;

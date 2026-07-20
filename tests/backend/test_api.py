@@ -334,9 +334,9 @@ async def test_sync_all_fans_out_to_each_target() -> None:
     class StubNotionPipeline:
         calls = []
 
-        async def push_all(self, force=False):
+        async def push_all(self, force=False, *, progress=None):
             self.calls.append(force)
-            return {"status": "success", "documents": {}, "qa": {}}
+            return {"status": "success", "documents": {}, "qa": {}, "pruned": {}}
 
     pipeline = StubPipeline()
     notion_pipeline = StubNotionPipeline()
@@ -349,8 +349,12 @@ async def test_sync_all_fans_out_to_each_target() -> None:
     result = await api.sync_documents("all", ["d1"])
     assert result["status"] == "success"
     assert set(result["targets"]) == {"r2", "notion"}
-    # Notion 走独立推送管线（push_all），R2 走 SyncPipeline.sync
+    # Notion 现为后台单任务：快照 status=running 表示已启动（视为非失败）
+    assert result["targets"]["notion"]["status"] == "running"
+    # R2 走 SyncPipeline.sync；Notion 后台推送最终跑一次 push_all(force=False)
     assert pipeline.calls == [(SyncTargetKind.R2, ["d1"])]
+    if api._notion_sync_task is not None:
+        await api._notion_sync_task
     assert notion_pipeline.calls == [False]
 
 
@@ -440,6 +444,66 @@ async def test_push_note_to_notion_disabled_returns_hint() -> None:
     api.attach_notion_sync_pipeline(_StubNotionPipeline())
     result = await api.push_note_to_notion("x")
     assert result["status"] == "disabled"
+
+
+async def test_sync_notion_push_runs_background_job_and_exposes_active() -> None:
+    class StubNotionPipeline:
+        def __init__(self) -> None:
+            self.calls: list[bool] = []
+
+        async def push_all(self, force=False, *, progress=None):
+            self.calls.append(force)
+            if progress is not None:
+                progress.docs_total = 1
+                progress.record_document("created")
+            return {"status": "success", "documents": {}, "qa": {}, "pruned": {}, "warnings": []}
+
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+    )
+    pipeline = StubNotionPipeline()
+    api.attach_notion_sync_pipeline(pipeline)
+
+    snapshot = await api.sync_notion_push()
+    assert snapshot["type"] == "notion_sync"
+    assert snapshot["status"] == "running"
+    # 后台任务完成后落定 success；终态可见窗口内 get_active 仍返回快照
+    assert api._notion_sync_task is not None
+    await api._notion_sync_task
+    active = api.get_active_notion_sync_job()
+    assert active is not None
+    assert active["status"] == "success"
+    assert active["docs_created"] == 1
+    assert pipeline.calls == [False]
+
+
+async def test_sync_notion_push_is_single_flight() -> None:
+    release = asyncio.Event()
+
+    class BlockingNotionPipeline:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def push_all(self, force=False, *, progress=None):
+            self.calls += 1
+            await release.wait()
+            return {"status": "success", "documents": {}, "qa": {}, "pruned": {}, "warnings": []}
+
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+    )
+    pipeline = BlockingNotionPipeline()
+    api.attach_notion_sync_pipeline(pipeline)
+
+    first = await api.sync_notion_push()
+    second = await api.sync_notion_push()  # running 任务未结束 → 复用同一快照
+    assert first["job_id"] == second["job_id"]
+    assert second["status"] == "running"
+    release.set()
+    await api._notion_sync_task
+    assert pipeline.calls == 1  # 单任务：只真正跑一次 push_all
 
 
 # ── ask() ────────────────────────────────────────────────────────

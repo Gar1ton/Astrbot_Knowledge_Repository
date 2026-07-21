@@ -36,11 +36,34 @@ def _load_client_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("knowledge_arch_skill_client", CLIENT_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
 CLIENT = _load_client_module()
+SKILL_PATH = ROOT / ".agents" / "skills" / "operate-knowledge-arch" / "SKILL.md"
+
+
+class _MemoryCredentialStore:
+    """测试用系统凭据库桩：密码永不写入连接配置文件。"""
+
+    def __init__(self) -> None:
+        self.passwords: dict[tuple[str, str], str] = {}
+        self.deleted: list[tuple[str, str]] = []
+        self.fail_on_set = False
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.passwords.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        if self.fail_on_set:
+            raise CLIENT.CredentialStoreUnavailable("credential backend unavailable")
+        self.passwords[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        self.deleted.append((service, username))
+        self.passwords.pop((service, username), None)
 
 
 class _State:
@@ -328,6 +351,7 @@ def test_doctor_and_catalog_use_read_only_endpoints() -> None:
 def test_authentication_uses_environment_only_password(monkeypatch: pytest.MonkeyPatch) -> None:
     with _mock_api(auth_required=True) as (state, url):
         monkeypatch.setenv("KNOWLEDGE_ARCH_URL", url)
+        monkeypatch.setenv("KNOWLEDGE_ARCH_USERNAME", "admin")
         monkeypatch.setenv("KR_WEB_PASSWORD", "correct-password")
         result = CLIENT.doctor(CLIENT.KnowledgeArchClient.from_env())
     assert result["auth_required"] is True
@@ -347,6 +371,189 @@ def test_missing_password_and_connection_failure_are_actionable() -> None:
     sock.close()
     with pytest.raises(CLIENT.ConnectionFailure, match="Cannot reach Knowledge Arch"):
         CLIENT.doctor(CLIENT.KnowledgeArchClient(f"http://127.0.0.1:{port}"))
+
+
+def test_connection_status_requires_explicit_registration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """首次使用不猜测本机端口或用户名，必须先登记。"""
+    for variable in (
+        "KNOWLEDGE_ARCH_URL",
+        "KNOWLEDGE_ARCH_USERNAME",
+        "KR_WEB_PASSWORD",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    config_path = tmp_path / "connection.json"
+
+    assert CLIENT.connection_status(config_path) == {"status": "unconfigured"}
+    with pytest.raises(CLIENT.ConnectionNotConfigured, match="connection-setup"):
+        CLIENT.resolve_connection_client(path=config_path)
+
+
+def test_connection_setup_stores_only_non_secret_profile_and_resolves(
+    tmp_path: Path,
+) -> None:
+    """成功登记先验证，密码只进入凭据库，后续可被安全解析。"""
+    config_path = tmp_path / "connection.json"
+    store = _MemoryCredentialStore()
+    with _mock_api(auth_required=True) as (state, url):
+        answers = iter([url, "admin"])
+        result = CLIENT.connection_setup(
+            path=config_path,
+            credential_store=store,
+            input_func=lambda _prompt: next(answers),
+            password_func=lambda _prompt: "correct-password",
+        )
+        client, source = CLIENT.resolve_connection_client(
+            path=config_path, credential_store=store
+        )
+        doctor = CLIENT.doctor(client)
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    saved_text = json.dumps(saved)
+    assert result == {
+        "status": "configured",
+        "auth_required": True,
+        "credential_stored": True,
+    }
+    assert CLIENT.connection_status(config_path) == {"status": "configured"}
+    assert source == "configured"
+    assert doctor["status"] == "ok"
+    assert "password" not in saved
+    assert "correct-password" not in saved_text
+    assert len(store.passwords) == 1
+    assert state.login_bodies == [
+        {"username": "admin", "password": "correct-password"},
+        {"username": "admin", "password": "correct-password"},
+    ]
+
+
+def test_connection_setup_rolls_back_on_verification_or_profile_write_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """验证或原子配置写入失败时均不残留新配置或密码。"""
+    config_path = tmp_path / "connection.json"
+    store = _MemoryCredentialStore()
+    with _mock_api(auth_required=True) as (_state, url):
+        answers = iter([url, "admin"])
+        with pytest.raises(CLIENT.AuthenticationError):
+            CLIENT.connection_setup(
+                path=config_path,
+                credential_store=store,
+                input_func=lambda _prompt: next(answers),
+                password_func=lambda _prompt: "wrong-password",
+            )
+    assert not config_path.exists()
+    assert store.passwords == {}
+
+    with _mock_api(auth_required=True) as (_state, url):
+        monkeypatch.setattr(
+            CLIENT,
+            "_write_connection_profile",
+            lambda _profile, _path=None: (_ for _ in ()).throw(OSError("disk unavailable")),
+        )
+        answers = iter([url, "admin"])
+        with pytest.raises(OSError, match="disk unavailable"):
+            CLIENT.connection_setup(
+                path=config_path,
+                credential_store=store,
+                input_func=lambda _prompt: next(answers),
+                password_func=lambda _prompt: "correct-password",
+            )
+    assert not config_path.exists()
+    assert store.passwords == {}
+    assert store.deleted
+
+
+def test_connection_setup_replaces_old_credential_only_after_new_registration(
+    tmp_path: Path,
+) -> None:
+    """替换成功后才删除旧凭据，避免失败时丢失可用连接。"""
+    config_path = tmp_path / "connection.json"
+    store = _MemoryCredentialStore()
+    old_id = CLIENT._credential_id("http://old-instance.invalid", "old-user")
+    store.set_password(CLIENT.CONNECTION_KEYRING_SERVICE, old_id, "old-password")
+    CLIENT._write_connection_profile(
+        CLIENT.ConnectionProfile(
+            base_url="http://old-instance.invalid",
+            username="old-user",
+            credential_id=old_id,
+        ),
+        config_path,
+    )
+    with _mock_api(auth_required=True) as (_state, url):
+        answers = iter(["y", url, "admin"])
+        CLIENT.connection_setup(
+            path=config_path,
+            credential_store=store,
+            input_func=lambda _prompt: next(answers),
+            password_func=lambda _prompt: "correct-password",
+        )
+
+    assert (CLIENT.CONNECTION_KEYRING_SERVICE, old_id) in store.deleted
+    assert old_id not in {account for _service, account in store.passwords}
+    assert CLIENT.load_connection_profile(config_path).username == "admin"
+
+
+def test_temporary_connection_override_never_reuses_registered_password(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """开发者临时 URL/用户名覆盖不读取、发送或写回日常实例密码。"""
+    config_path = tmp_path / "connection.json"
+    store = _MemoryCredentialStore()
+    credential_id = CLIENT._credential_id("http://registered.invalid", "registered")
+    store.set_password(CLIENT.CONNECTION_KEYRING_SERVICE, credential_id, "stored-secret")
+    CLIENT._write_connection_profile(
+        CLIENT.ConnectionProfile(
+            base_url="http://registered.invalid",
+            username="registered",
+            credential_id=credential_id,
+        ),
+        config_path,
+    )
+    monkeypatch.setenv("KNOWLEDGE_ARCH_URL", "http://temporary.invalid")
+    monkeypatch.setenv("KNOWLEDGE_ARCH_USERNAME", "developer")
+    monkeypatch.delenv("KR_WEB_PASSWORD", raising=False)
+
+    client, source = CLIENT.resolve_connection_client(
+        path=config_path, credential_store=store
+    )
+
+    assert CLIENT.connection_status(config_path) == {"status": "environment_override"}
+    assert source == "environment_override"
+    assert client.username == "developer"
+    assert client._password is None
+    assert CLIENT.load_connection_profile(config_path).username == "registered"
+
+
+def test_credential_store_failure_is_actionable_and_never_writes_a_profile(
+    tmp_path: Path,
+) -> None:
+    """无法使用系统凭据库时拒绝明文降级，并保留未登记状态。"""
+    config_path = tmp_path / "connection.json"
+    store = _MemoryCredentialStore()
+    store.fail_on_set = True
+    with _mock_api(auth_required=True) as (_state, url):
+        answers = iter([url, "admin"])
+        with pytest.raises(CLIENT.CredentialStoreUnavailable):
+            CLIENT.connection_setup(
+                path=config_path,
+                credential_store=store,
+                input_func=lambda _prompt: next(answers),
+                password_func=lambda _prompt: "correct-password",
+            )
+    assert not config_path.exists()
+
+
+def test_skill_requires_explicit_connection_and_external_authorization() -> None:
+    """分发 Skill 不得包含机器端口，并锁定首次连接与联网授权边界。"""
+    source = SKILL_PATH.read_text(encoding="utf-8")
+    assert "9821" not in source
+    assert "connection-status" in source
+    assert "connection-setup" in source
+    assert "unless the user explicitly grants permission" in source
+    assert "windows sandbox: helper_unknown_error: apply deny-read ACLs" in source
+    assert "Do not rerun `doctor`" in source
 
 
 def test_search_fuses_queries_deduplicates_content_and_caps_text() -> None:
@@ -532,6 +739,7 @@ def test_fresh_process_cli_research_and_config_preview() -> None:
     with _mock_api() as (state, url):
         env = os.environ.copy()
         env["KNOWLEDGE_ARCH_URL"] = url
+        env["KNOWLEDGE_ARCH_USERNAME"] = "admin"
         env.pop("KR_WEB_PASSWORD", None)
         research = subprocess.run(
             [

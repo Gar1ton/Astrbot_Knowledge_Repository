@@ -35,6 +35,7 @@ REQUIRED = {
     "_conf_schema.json",
     "requirements.txt",
     "requirements-additional.txt",
+    "requirements-codex-skill.txt",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",

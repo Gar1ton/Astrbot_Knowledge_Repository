@@ -22,6 +22,7 @@ SKILL_REQUIRED = {
     f"{SKILL_ROOT}/references/settings.md",
     f"{SKILL_ROOT}/scripts/knowledge_arch_client.py",
 }
+CODEX_SKILL_REQUIREMENT = "requirements-codex-skill.txt"
 
 
 def test_published_tree_paths_follow_plugin_scoped_packages() -> None:
@@ -34,14 +35,16 @@ def test_published_tree_paths_follow_plugin_scoped_packages() -> None:
 
 
 def test_published_tree_requires_project_skill() -> None:
-    """正式安装包必须携带 Codex 项目级 Skill 的全部契约文件。"""
+    """正式安装包必须携带 Codex 项目级 Skill 的全部契约文件与轻量依赖。"""
     assert SKILL_REQUIRED <= REQUIRED
+    assert CODEX_SKILL_REQUIREMENT in REQUIRED
 
 
 def test_worktree_manifest_selects_project_skill() -> None:
-    """发布白名单必须实际命中当前工作树中的 Skill 文件。"""
+    """发布白名单必须实际命中当前工作树中的 Skill 文件和轻量依赖。"""
     selected = _select_files("WORKTREE")
     assert SKILL_REQUIRED <= set(selected)
+    assert CODEX_SKILL_REQUIREMENT in selected
 
 
 def test_gitignore_only_allows_the_published_project_skill() -> None:

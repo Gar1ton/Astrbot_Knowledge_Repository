@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### 新增功能 (Added)
+
+- **Codex 单实例首次连接登记**：项目级 Knowledge Arch 客户端新增 `connection-status` 与交互式
+  `connection-setup`；未登记时不再猜测 WebUI 地址或用户名，地址/用户名仅写入用户级配置，密码
+  仅经系统凭据库保存。开发者的 `KNOWLEDGE_ARCH_URL`/`KNOWLEDGE_ARCH_USERNAME` 临时覆盖永不持久化，
+  且不会复用日常实例密码（`.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py`、
+  `requirements-codex-skill.txt`）。
+
+### 变更 (Changed)
+
+- **Codex 研究权限收口**：Skill 明确本地证据调用只访问用户已登记实例；网页、下载、外部证据和
+  依赖安装均须获得当前问题的用户明确授权。本地证据不足时固定报告缺口并询问外网补充；用户指定文献
+  采用 `catalog` → `ask-evidence` → 锚定分页读取的验证流程
+  （`.agents/skills/operate-knowledge-arch/SKILL.md`）。
+- **首次 Windows ACL 故障可操作化**：Skill 区分相对路径、连接拒绝、鉴权和
+  `apply deny-read ACLs` 沙箱失败；ACL 失败后不重复 `doctor`，改为受限授权、根目录确认和同权限级别
+  排障，不要求修改项目 ACL 或 AstrBot 安装目录（`.agents/skills/operate-knowledge-arch/SKILL.md`）。
+
+### 测试 (Tests)
+
+- 覆盖未登记拒绝、隐藏密码、凭据库保存与回滚、替换旧凭据、临时覆盖隔离、无秘密落盘、凭据库失败
+  及 Skill 的端口/外网/ACL 静态契约；客户端与发布树定向测试 25 passed
+  （`tests/backend/test_knowledge_arch_skill_client.py`、`tests/backend/test_published_tree.py`）。
+
+### 构建与工程 (Build/CI)
+
+- 新增发布的轻量 `keyring` 依赖清单，并把它加入正式发布白名单、发布树必需文件与 main 分支 CI 校验
+  （`requirements-codex-skill.txt`、`release/published-files.txt`、`tools/build_published_tree.py`、
+  `.github/workflows/published-verify.yml`）。
+
 ## [v1.0.7] — 2026-07-20
 
 ### 新增功能 (Added)

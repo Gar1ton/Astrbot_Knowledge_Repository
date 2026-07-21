@@ -4,20 +4,26 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from http.cookiejar import CookieJar
-from typing import Any
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
-DEFAULT_URL = "http://127.0.0.1:26618"
-DEFAULT_USERNAME = "admin"
+CONNECTION_CONFIG_VERSION = 1
+CONNECTION_KEYRING_SERVICE = "knowledge-arch.codex.connection.v1"
+
+
 DEFAULT_TIMEOUT_SECONDS = 30
 RRF_K = 60
 MAX_QUERIES = 4
@@ -149,22 +155,279 @@ def _bounded(value: int, lower: int, upper: int) -> int:
     return max(lower, min(value, upper))
 
 
+class ConnectionNotConfigured(ClientError):
+    code = "connection_not_configured"
+    exit_code = 6
+
+
+class CredentialStoreUnavailable(ClientError):
+    code = "credential_store_unavailable"
+    exit_code = 7
+
+
+class CredentialStore(Protocol):
+    """最小系统凭据库契约，便于隔离测试且不提供明文回退。"""
+
+    def get_password(self, service: str, username: str) -> str | None: ...
+
+    def set_password(self, service: str, username: str, password: str) -> None: ...
+
+    def delete_password(self, service: str, username: str) -> None: ...
+
+
+class KeyringCredentialStore:
+    """通过 keyring 使用操作系统凭据库；依赖缺失时明确失败。"""
+
+    def __init__(self) -> None:
+        try:
+            import keyring
+        except ImportError as exc:
+            raise CredentialStoreUnavailable(
+                "System credential storage requires keyring. Install it into this Python "
+                "environment with: python -m pip install -r requirements-codex-skill.txt"
+            ) from exc
+        try:
+            backend = keyring.get_keyring()
+            if getattr(backend, "priority", 0) <= 0:
+                raise RuntimeError("no usable keyring backend")
+        except Exception as exc:
+            raise CredentialStoreUnavailable(
+                "System credential storage is unavailable. Configure an operating-system "
+                "credential backend and rerun connection-setup."
+            ) from exc
+        self._keyring = keyring
+
+    def get_password(self, service: str, username: str) -> str | None:
+        try:
+            return self._keyring.get_password(service, username)
+        except Exception as exc:
+            raise CredentialStoreUnavailable(
+                "System credential storage could not read the registered password."
+            ) from exc
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        try:
+            self._keyring.set_password(service, username, password)
+        except Exception as exc:
+            raise CredentialStoreUnavailable(
+                "System credential storage could not save the password."
+            ) from exc
+
+    def delete_password(self, service: str, username: str) -> None:
+        try:
+            self._keyring.delete_password(service, username)
+        except Exception as exc:
+            raise CredentialStoreUnavailable(
+                "System credential storage could not remove a replaced password."
+            ) from exc
+
+
+@dataclass(frozen=True)
+class ConnectionProfile:
+    """单一日常实例的非秘密连接资料。"""
+
+    base_url: str
+    username: str
+    credential_id: str | None
+
+
+def _normalize_base_url(base_url: str) -> str:
+    parsed = urlsplit(base_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise UsageError("WebUI URL must be an absolute http(s) URL")
+    if parsed.username or parsed.password:
+        raise UsageError("Do not embed credentials in the WebUI URL")
+    return base_url.strip().rstrip("/")
+
+
+def _credential_id(base_url: str, username: str) -> str:
+    identity = f"{base_url}\0{username}".encode()
+    return hashlib.sha256(identity).hexdigest()
+
+
+def connection_config_path() -> Path:
+    """返回用户级连接配置路径；该文件不含密码。"""
+    if os.name == "nt":
+        root = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        return root / "Codex" / "knowledge-arch" / "connection.json"
+    if sys.platform == "darwin":
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Codex"
+            / "knowledge-arch"
+            / "connection.json"
+        )
+    root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return root / "codex" / "knowledge-arch" / "connection.json"
+
+
+def load_connection_profile(path: Path | None = None) -> ConnectionProfile | None:
+    """加载非秘密单实例配置；损坏配置要求用户重新登记。"""
+    target = path or connection_config_path()
+    if not target.is_file():
+        return None
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("version") != CONNECTION_CONFIG_VERSION:
+            raise ValueError("unsupported connection profile")
+        base_url = _normalize_base_url(str(raw["base_url"]))
+        username = str(raw["username"]).strip()
+        credential_id = raw.get("credential_id")
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ConnectionNotConfigured(
+            "Registered connection details are invalid. Run connection-setup again."
+        ) from exc
+    if not username or (credential_id is not None and not isinstance(credential_id, str)):
+        raise ConnectionNotConfigured(
+            "Registered connection details are invalid. Run connection-setup again."
+        )
+    return ConnectionProfile(
+        base_url=base_url,
+        username=username,
+        credential_id=credential_id or None,
+    )
+
+
+def _write_connection_profile(profile: ConnectionProfile, path: Path | None = None) -> None:
+    """原子写入无密码配置，并在 POSIX 上限制为当前用户可读写。"""
+    target = path or connection_config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": CONNECTION_CONFIG_VERSION,
+        "base_url": profile.base_url,
+        "username": profile.username,
+        "credential_id": profile.credential_id,
+    }
+    with NamedTemporaryFile(
+        "w", encoding="utf-8", dir=target.parent, delete=False, prefix=".connection-"
+    ) as handle:
+        temp_path = Path(handle.name)
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n")
+    try:
+        os.replace(temp_path, target)
+        if os.name != "nt":
+            os.chmod(target, 0o600)
+    except OSError:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _default_credential_store() -> CredentialStore:
+    return KeyringCredentialStore()
+
+
+def connection_status(path: Path | None = None) -> dict[str, str]:
+    """仅报告连接来源状态，不输出地址、用户名、密码或凭据标识。"""
+    env_url = os.environ.get("KNOWLEDGE_ARCH_URL")
+    env_username = os.environ.get("KNOWLEDGE_ARCH_USERNAME")
+    if env_url or env_username:
+        if env_url and env_username:
+            return {"status": "environment_override"}
+        return {"status": "unconfigured", "reason": "temporary_connection_incomplete"}
+    return {"status": "configured" if load_connection_profile(path) else "unconfigured"}
+
+
+def resolve_connection_client(
+    *,
+    path: Path | None = None,
+    credential_store: CredentialStore | None = None,
+) -> tuple[KnowledgeArchClient, str]:
+    """解析临时覆盖或已登记实例，绝不将已登记密码发送给临时目标。"""
+    env_url = os.environ.get("KNOWLEDGE_ARCH_URL")
+    env_username = os.environ.get("KNOWLEDGE_ARCH_USERNAME")
+    env_password = os.environ.get("KR_WEB_PASSWORD")
+    if env_url or env_username:
+        if not env_url or not env_username:
+            raise UsageError(
+                "Temporary connection requires both KNOWLEDGE_ARCH_URL and "
+                "KNOWLEDGE_ARCH_USERNAME."
+            )
+        return KnowledgeArchClient(env_url, env_username, env_password), "environment_override"
+
+    profile = load_connection_profile(path)
+    if profile is None:
+        raise ConnectionNotConfigured(
+            "No Knowledge Arch instance is registered. Run connection-setup first."
+        )
+    if env_password is not None:
+        return KnowledgeArchClient(profile.base_url, profile.username, env_password), "configured"
+    password = None
+    if profile.credential_id:
+        store = credential_store or _default_credential_store()
+        password = store.get_password(CONNECTION_KEYRING_SERVICE, profile.credential_id)
+    return KnowledgeArchClient(profile.base_url, profile.username, password), "configured"
+
+
+def connection_setup(
+    *,
+    path: Path | None = None,
+    credential_store: CredentialStore | None = None,
+    input_func: Callable[[str], str] = input,
+    password_func: Callable[[str], str] = getpass.getpass,
+) -> dict[str, object]:
+    """交互验证后持久化单一实例；失败时不留下新配置或新密码。"""
+    target = path or connection_config_path()
+    previous = load_connection_profile(target)
+    if previous is not None:
+        replace = input_func(
+            "A connection is already registered. Replace it? [y/N]: "
+        ).strip().lower()
+        if replace not in {"y", "yes"}:
+            raise UsageError("Connection setup cancelled; existing registration was kept.")
+    base_url = _normalize_base_url(input_func("Knowledge Arch WebUI URL: "))
+    username = input_func("Knowledge Arch username: ").strip()
+    if not username:
+        raise UsageError("Knowledge Arch username must not be empty")
+    password = password_func(
+        "Knowledge Arch password (leave blank only when authentication is disabled): "
+    )
+    client = KnowledgeArchClient(base_url, username, password or None)
+    verification = doctor(client)
+
+    credential_id = _credential_id(base_url, username) if password else None
+    store = credential_store
+    stored_new_credential = False
+    try:
+        if credential_id:
+            store = store or _default_credential_store()
+            store.set_password(CONNECTION_KEYRING_SERVICE, credential_id, password)
+            stored_new_credential = True
+        _write_connection_profile(
+            ConnectionProfile(base_url=base_url, username=username, credential_id=credential_id),
+            target,
+        )
+    except Exception:
+        if stored_new_credential and store is not None and credential_id:
+            try:
+                store.delete_password(CONNECTION_KEYRING_SERVICE, credential_id)
+            except CredentialStoreUnavailable:
+                pass
+        raise
+
+    if previous and previous.credential_id and previous.credential_id != credential_id:
+        store = store or _default_credential_store()
+        store.delete_password(CONNECTION_KEYRING_SERVICE, previous.credential_id)
+    return {
+        "status": "configured",
+        "auth_required": bool(verification["auth_required"]),
+        "credential_stored": bool(credential_id),
+    }
+
+
 class KnowledgeArchClient:
     """Cookie-aware synchronous client; one short-lived instance per CLI invocation."""
 
     def __init__(
         self,
         base_url: str,
-        username: str = DEFAULT_USERNAME,
+        username: str = "",
         password: str | None = None,
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
-        parsed = urlsplit(base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise UsageError("KNOWLEDGE_ARCH_URL must be an absolute http(s) URL")
-        if parsed.username or parsed.password:
-            raise UsageError("Do not embed credentials in KNOWLEDGE_ARCH_URL")
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _normalize_base_url(base_url)
         self.username = username
         self._password = password
         self.timeout = timeout
@@ -173,11 +436,9 @@ class KnowledgeArchClient:
 
     @classmethod
     def from_env(cls) -> KnowledgeArchClient:
-        return cls(
-            os.environ.get("KNOWLEDGE_ARCH_URL", DEFAULT_URL),
-            username=os.environ.get("KNOWLEDGE_ARCH_USERNAME", DEFAULT_USERNAME),
-            password=os.environ.get("KR_WEB_PASSWORD"),
-        )
+        """兼容入口：解析临时覆盖或用户已登记的单一实例。"""
+        client, _source = resolve_connection_client()
+        return client
 
     def _protect_message(self, message: str) -> str:
         if self._password:
@@ -753,6 +1014,12 @@ def restart(client: KnowledgeArchClient, *, apply: bool) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser(
+        "connection-status", help="Show whether a safe local connection is available"
+    )
+    subparsers.add_parser(
+        "connection-setup", help="Interactively register one Knowledge Arch instance"
+    )
     subparsers.add_parser("doctor", help="Probe authentication and core read endpoints")
 
     catalog_parser = subparsers.add_parser(
@@ -831,7 +1098,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.command == "config-options":
+        if args.command == "connection-status":
+            result = connection_status()
+        elif args.command == "connection-setup":
+            result = connection_setup()
+        elif args.command == "config-options":
             result = config_options()
         else:
             client = KnowledgeArchClient.from_env()

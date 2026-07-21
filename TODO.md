@@ -1,5 +1,28 @@
 # TODO
 
+## v1.0.8：Codex 首次连接登记 · 外网授权 · Windows 权限指引 (completed)
+
+### User constraints / 约束
+
+- 每位系统用户首次使用 Codex 本地知识库功能时，必须显式登记一个日常 AstrBot 实例；不预置端口、用户名或任何机器特有地址。
+- 地址/用户名保存到用户级配置，密码仅进入系统凭据库；开发环境只能用本次命令的环境变量临时覆盖，绝不持久化。
+- 外网搜索、网页打开、下载与外部资料补充均须获得当前问题的用户明确授权；本地证据不足时不得用模型记忆补全。
+- 首次 Windows 沙箱 ACL 失败必须给出可复制的受限授权与排障步骤；不要求用户修改项目 ACL、关闭安全软件或编辑 AstrBot 运行目录。
+
+### Technical implementation path
+
+- [x] **Phase 1 - 单实例安全连接登记**：为 Codex 客户端添加 `connection-status` 与交互式 `connection-setup`；删除无配置时的默认地址/用户名回退，使用用户级非秘密配置与系统凭据库保存单一实例，支持原子写入及失败回滚。
+- [x] **Phase 2 - 临时开发覆盖与错误语义**：保留受限环境变量覆盖，禁止临时目标复用已登记实例密码；为未登记、凭据库不可用、相对路径、连接拒绝与 Windows ACL 失败提供不泄密的可操作错误。
+- [x] **Phase 3 - Skill 检索授权与首次连接路由**：将首次登记、单次 `doctor`、本地证据边界、外网显式授权、用户指定文献验证流程及 Windows 受限授权指引写入项目级 Skill。
+- [x] **Phase 4 - 依赖、契约测试与治理**：增加独立轻量的 Codex Skill 凭据库依赖与发布树允许项；覆盖注册、回滚、临时覆盖、无泄密、Skill 静态契约与 CLI 回归；全量验证后更新 CHANGELOG。
+
+### Verification
+
+- `python -m pytest tests/backend/test_knowledge_arch_skill_client.py tests/backend/test_published_tree.py -q` → 25 passed。
+- `ruff check . && mypy` → All checks passed / Success。
+- `python -m pytest -q` → 681 passed、1 个既有 reranker idle-unload 计时抖动失败；失败用例单独复跑 → 1 passed。
+- `python tools/build_published_tree.py --source WORKTREE --output dist/codex-skill-preview` → 494 files。
+
 ## v1.0.7：Notion 进度条 · Strict 标签清理 · 修复 CI 前端校验 (🚧)
 
 ### User constraints / 约束

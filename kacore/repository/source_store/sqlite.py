@@ -771,10 +771,15 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         async with self._db.execute(
             """
             SELECT
-                (SELECT COUNT(*) FROM documents),
+                (SELECT COUNT(*) FROM documents
+                   WHERE lifecycle_state = 'active'),
                 (SELECT COALESCE(SUM(CASE WHEN needs_reindex != 0 THEN 1 ELSE 0 END), 0)
-                   FROM documents),
-                (SELECT COUNT(*) FROM chunks)
+                   FROM documents
+                   WHERE lifecycle_state = 'active'),
+                (SELECT COUNT(*)
+                   FROM chunks AS c
+                   JOIN documents AS d ON d.doc_id = c.doc_id
+                   WHERE d.lifecycle_state = 'active')
             """
         ) as cursor:
             row = await cursor.fetchone()

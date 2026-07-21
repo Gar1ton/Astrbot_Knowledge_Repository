@@ -22,7 +22,10 @@ README_BADGE_VERSION_RE = re.compile(
     r"(\[!\[version\]\(https://img\.shields\.io/badge/版本-)v?\d+\.\d+\.\d+"
     r"(-blueviolet\)\]\(metadata\.yaml\))"
 )
-TODO_HEADING_RE = re.compile(r"^(##\s+)v?(\d+\.\d+\.\d+)(\s+.+)$", re.MULTILINE)
+TODO_HEADING_RE = re.compile(
+    r"^(##\s+)v?(\d+\.\d+\.\d+)((?:\s*[:：]\s*|\s+).+)$",
+    re.MULTILINE,
+)
 CHANGELOG_UNRELEASED_RE = re.compile(r"^## \[Unreleased\]\s*", re.MULTILINE)
 CHANGELOG_RELEASE_RE = re.compile(r"^## \[v\d+\.\d+\.\d+\]", re.MULTILINE)
 

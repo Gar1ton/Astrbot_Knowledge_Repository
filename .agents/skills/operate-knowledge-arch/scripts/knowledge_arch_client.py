@@ -30,6 +30,9 @@ MAX_QUERIES = 4
 MAX_FINAL_HITS = 20
 MAX_HIT_CHARS = 4000
 MAX_READ_CHARS = 40000
+MAX_NOTION_QA_ITEMS = 20
+MAX_NOTION_QA_QUESTION_CHARS = 2000
+MAX_NOTION_QA_ANSWER_CHARS = 100000
 ASK_EVIDENCE_MODES = ("default", "enhanced", "deep_thinking")
 READ_INTENTS = ("anchored", "full-text")
 
@@ -944,6 +947,147 @@ def config_show(client: KnowledgeArchClient, section: str | None) -> dict[str, A
     return redact_secrets(config)
 
 
+def _notion_qa_string_list(value: Any, field: str) -> list[str]:
+    """校验并去重 QA 标签或引用；禁止把任意对象隐式写进同步载荷。"""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise UsageError(f"{field} must be an array of strings")
+    result: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            raise UsageError(f"{field} must contain only strings")
+        text = raw.strip()
+        if not text:
+            continue
+        if len(text) > 1000:
+            raise UsageError(f"{field} entries must not exceed 1000 characters")
+        if text not in result:
+            result.append(text)
+    return result
+
+
+def load_notion_qa_items(input_file: str) -> list[dict[str, Any]]:
+    """读取 Codex 临时生成的 UTF-8 问答列表，供逐条写入已配置 QA 库。"""
+    path = Path(input_file)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise UsageError(f"Cannot read --input-file: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise UsageError("--input-file must contain valid UTF-8 JSON") from exc
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise UsageError("--input-file must be an object with an items array")
+    raw_items = payload["items"]
+    if not raw_items:
+        raise UsageError("--input-file items must not be empty")
+    if len(raw_items) > MAX_NOTION_QA_ITEMS:
+        raise UsageError(f"At most {MAX_NOTION_QA_ITEMS} QA items may be saved at once")
+
+    items: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(raw_items, start=1):
+        if not isinstance(raw_item, dict):
+            raise UsageError(f"items[{index}] must be an object")
+        raw_question = raw_item.get("question")
+        raw_answer = raw_item.get("answer")
+        if not isinstance(raw_question, str) or not raw_question.strip():
+            raise UsageError(f"items[{index}].question must be a non-empty string")
+        if not isinstance(raw_answer, str) or not raw_answer.strip():
+            raise UsageError(f"items[{index}].answer must be a non-empty string")
+        question = raw_question.strip()
+        answer = raw_answer.strip()
+        if len(question) > MAX_NOTION_QA_QUESTION_CHARS:
+            raise UsageError(
+                f"items[{index}].question exceeds {MAX_NOTION_QA_QUESTION_CHARS} characters"
+            )
+        if len(answer) > MAX_NOTION_QA_ANSWER_CHARS:
+            raise UsageError(
+                f"items[{index}].answer exceeds {MAX_NOTION_QA_ANSWER_CHARS} characters"
+            )
+        items.append(
+            {
+                "question": question,
+                "answer": answer,
+                "tags": _notion_qa_string_list(raw_item.get("tags"), f"items[{index}].tags"),
+                "citations": _notion_qa_string_list(
+                    raw_item.get("citations"), f"items[{index}].citations"
+                ),
+            }
+        )
+    return items
+
+
+def notion_save_qa(client: KnowledgeArchClient, input_file: str) -> dict[str, Any]:
+    """把多个原问题/回答逐条推送到已配置的 Notion QA 库。
+
+    目标只能是 `notion_sync.qa_database_id`；文章镜像库 `database_id` 不可作为
+    会话问答写入目标。每条请求由服务端先暂存 outbox，再立即尝试远端写入。
+    """
+    items = load_notion_qa_items(input_file)
+    config = config_show(client, "notion_sync")
+    notion = config.get("notion_sync")
+    if not isinstance(notion, dict):
+        raise ApiError("Effective config is missing notion_sync")
+    if not bool(notion.get("enabled")):
+        raise UsageError("Notion sync is disabled; enable it and restart the plugin first")
+    target_database_id = str(notion.get("qa_database_id", "")).strip()
+    if not target_database_id:
+        raise UsageError(
+            "Notion QA database is not configured (notion_sync.qa_database_id); "
+            "initialize the QA database before saving conversation answers"
+        )
+
+    outcomes: list[dict[str, Any]] = []
+    pushed_count = 0
+    queued_count = 0
+    failed_count = 0
+    for index, item in enumerate(items, start=1):
+        response = _expect_dict(
+            client.request_json(
+                "/api/notion/push-note",
+                method="POST",
+                body={
+                    "content": item["answer"],
+                    "title": item["question"],
+                    "tags": item["tags"],
+                    "citations": item["citations"],
+                    "source": "codex",
+                    "keep_local": False,
+                },
+            ),
+            "/api/notion/push-note",
+        )
+        status = str(response.get("status", "error"))
+        outcome = {
+            "index": index,
+            "question": item["question"],
+            "status": status,
+            "page_id": str(response.get("page_id", "")),
+            "outbox_id": str(response.get("outbox_id", "")),
+            "message": str(response.get("message", "")),
+        }
+        outcomes.append(outcome)
+        if status == "success":
+            pushed_count += 1
+        elif status == "partial":
+            queued_count += 1
+        else:
+            failed_count += 1
+
+    status = "success" if not queued_count and not failed_count else "partial"
+    if failed_count == len(outcomes):
+        status = "error"
+    return {
+        "status": status,
+        "target_database_id": target_database_id,
+        "pushed_count": pushed_count,
+        "queued_count": queued_count,
+        "failed_count": failed_count,
+        "items": outcomes,
+    }
+
+
 def config_set(
     client: KnowledgeArchClient,
     section: str,
@@ -1055,6 +1199,15 @@ def build_parser() -> argparse.ArgumentParser:
     read_parser.add_argument("--max-chars", type=int, default=12000)
     read_parser.add_argument("--intent", choices=READ_INTENTS, required=True)
 
+    notion_save_parser = subparsers.add_parser(
+        "notion-save-qa", help="Save conversation QA records to the configured Notion QA database"
+    )
+    notion_save_parser.add_argument(
+        "--input-file",
+        required=True,
+        help="UTF-8 JSON object: {items:[{question,answer,tags?,citations?}]}",
+    )
+
     graph_estimate_parser = subparsers.add_parser(
         "graph-estimate", help="Estimate a LightRAG build without mutating state"
     )
@@ -1138,6 +1291,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.max_chars,
                     intent=args.intent,
                 )
+            elif args.command == "notion-save-qa":
+                result = notion_save_qa(client, args.input_file)
             elif args.command == "graph-estimate":
                 result = graph_estimate(client, args.collection)
             elif args.command == "graph-build":

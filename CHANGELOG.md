@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [v1.0.8] — 2026-07-21
+
 ### 新增功能 (Added)
 
 - **Codex 单实例首次连接登记**：项目级 Knowledge Arch 客户端新增 `connection-status` 与交互式
@@ -9,6 +11,12 @@
   仅经系统凭据库保存。开发者的 `KNOWLEDGE_ARCH_URL`/`KNOWLEDGE_ARCH_USERNAME` 临时覆盖永不持久化，
   且不会复用日常实例密码（`.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py`、
   `requirements-codex-skill.txt`）。
+- **Codex 对话问答定向 Notion 同步**：新增 `notion-save-qa`，从 UTF-8 问答清单逐条以原问题
+  为标题、最终回答与本地文献引用为正文推送到已配置的 `notion_sync.qa_database_id`；拒绝未配置
+  或禁用状态，绝不把文章库或游离 Notion 页面当作降级目标。成功记录远端页，暂存失败记录 outbox
+  状态（`.agents/skills/operate-knowledge-arch/SKILL.md`、
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py`、
+  `.agents/skills/operate-knowledge-arch/agents/openai.yaml`）。
 
 ### 变更 (Changed)
 
@@ -20,11 +28,18 @@
   `apply deny-read ACLs` 沙箱失败；ACL 失败后不重复 `doctor`，改为受限授权、根目录确认和同权限级别
   排障，不要求修改项目 ACL 或 AstrBot 安装目录（`.agents/skills/operate-knowledge-arch/SKILL.md`）。
 
+### 修复 (Fixed)
+
+- **Milvus 状态卡统计口径**：`get_corpus_stats()` 仅汇总 `active` 文档及其 chunks/待重建数，严格镜像留下的 `detached` 文档不再被显示为可检索的向量库内容；SQLite、内存与回退实现保持同一契约，并补充仓储/API 回归测试（`kacore/repository/source_store/{sqlite,memory,base}.py`、`tests/backend/test_sqlite_source_store.py`、`tests/backend/test_api.py`）。
+- **版本同步历史保护**：`bump_version.py` 识别中文冒号版本标题，优先更新真正的顶部版本条目，不会再把历史 `v1.0.6` 任务错误改写为当前发布版本。
+
 ### 测试 (Tests)
 
 - 覆盖未登记拒绝、隐藏密码、凭据库保存与回滚、替换旧凭据、临时覆盖隔离、无秘密落盘、凭据库失败
   及 Skill 的端口/外网/ACL 静态契约；客户端与发布树定向测试 25 passed
   （`tests/backend/test_knowledge_arch_skill_client.py`、`tests/backend/test_published_tree.py`）。
+- 覆盖多问答 UTF-8 输入、已配置 QA 库定向写入、部分失败 outbox 暂存、未配置目标拒绝、Skill
+  规则与独立进程 CLI（`tests/backend/test_knowledge_arch_skill_client.py`）。
 
 ### 构建与工程 (Build/CI)
 

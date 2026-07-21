@@ -1,4 +1,4 @@
 interface:
   display_name: "Operate Knowledge Arch"
-  short_description: "Research local evidence and build LightRAG with Codex"
-  default_prompt: "Use $operate-knowledge-arch to research my local library or build LightRAG with Codex."
+  short_description: "Research local evidence, save Q&A to Notion, and build LightRAG"
+  default_prompt: "Use $operate-knowledge-arch to research my local library, save completed Q&A to its configured Notion database, or build LightRAG with Codex."

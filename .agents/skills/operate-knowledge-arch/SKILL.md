@@ -1,6 +1,6 @@
 ---
 name: operate-knowledge-arch
-description: Use the local Knowledge Arch WebUI API to register one user-selected instance, retrieve mode-aware library evidence without plugin LLM generation, read anchored papers, build LightRAG with Codex extraction, inspect effective settings, or safely prepare configuration changes.
+description: Use the local Knowledge Arch WebUI API to register one user-selected instance, retrieve mode-aware library evidence without plugin LLM generation, save selected conversation Q&A to the configured Notion QA database, read anchored papers, build LightRAG with Codex extraction, inspect effective settings, or safely prepare configuration changes.
 ---
 
 # Operate Knowledge Arch
@@ -40,7 +40,38 @@ For a one-command development override, set both `KNOWLEDGE_ARCH_URL` and `KNOWL
 - For research, source discovery, comparison, synthesis, or citation questions, read [references/research.md](references/research.md) and follow it.
 - For a user-requested LightRAG build, read [references/lightrag.md](references/lightrag.md) and follow it.
 - For configuration inspection, adjustment, restart, or consequences, read [references/settings.md](references/settings.md) and follow it.
+- For a user-requested save of one or more conversation questions/answers to Notion, follow [Save conversation Q&A to Notion](#save-conversation-qa-to-notion).
 - For a post-connection failure, run `doctor` once and report the actionable error. Do not repeatedly retry.
+
+## Save conversation Q&A to Notion
+
+An explicit request such as “保存上面的两个问题并同步到 Notion” authorizes this narrowly scoped write: save the completed question/answer pairs named by the user. Do not include unrelated conversation turns, chain-of-thought, or draft answers.
+
+1. Identify each completed pair in the current conversation. Preserve the original user question as `question`; use the final user-visible answer as `answer`. Include known local-document IDs as `citations` only when they support that answer.
+2. Prepare a temporary UTF-8 JSON file outside the repository using this exact shape, then delete it after the command completes:
+
+   ```json
+   {
+     "items": [
+       {
+         "question": "原始问题",
+         "answer": "最终回答",
+         "tags": ["conversation"],
+         "citations": ["local-doc-id"]
+       }
+     ]
+   }
+   ```
+
+3. Run:
+
+   ```powershell
+   python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py notion-save-qa --input-file <temporary-json-path>
+   ```
+
+The command first verifies `notion_sync.enabled` and the configured `notion_sync.qa_database_id`. That QA database is the only destination: `database_id` is the article mirror database and must never receive conversation records. Never create a loose Notion page through a generic connector, and do not ask for a database URL or name when `qa_database_id` is already configured.
+
+On success, report the number pushed. A `partial` result means the local outbox retained the affected answer for retry; report its count rather than claiming the remote write succeeded. If the QA database is missing or Notion sync is disabled, report the actionable configuration error and do not silently use another page or database.
 
 ## Internet and evidence boundary
 

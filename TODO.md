@@ -1,5 +1,35 @@
 # TODO
 
+## 未发布：Codex 对话问答保存至指定 Notion QA 库 (🚧)
+
+### Technical implementation path
+
+- [x] **Phase 1 — 语义与边界**：将“保存上面的多个问题并同步到 Notion”定义为每组原问题/回答各写一条 QA 记录；目标固定为已配置的 `notion_sync.qa_database_id`，不创建游离页面、不把文章库 `database_id` 当作问答库。
+- [x] **Phase 2 — Skill 与客户端**：为 `operate-knowledge-arch` 增加批量 QA 保存命令及调用规则；先核验 QA 库配置，再以原问题作标题、回答/引用作正文逐条推送，并完整汇报成功、暂存与失败。
+- [x] **Phase 3 — 契约与治理**：覆盖 UTF-8 输入、目标库核验、逐条请求、部分失败和 Skill 静态约束；测试通过后更新 CHANGELOG 并标记完成。
+
+### Verification
+
+- 容器 `naughty_germain`：`python -m pytest tests/backend/test_knowledge_arch_skill_client.py -q` → 24 passed。
+- 容器 `naughty_germain`：`ruff check .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py tests/backend/test_knowledge_arch_skill_client.py` → All checks passed。
+- 容器 `naughty_germain`：`python -m pytest -q` → 686 passed；1 个既有 reranker 空闲卸载计时抖动失败；失败用例单独复跑 → 1 passed。
+- 容器 `naughty_germain`：`ruff check . && mypy` → All checks passed / Success（3 source files）。
+
+## 未发布：向量库状态卡仅统计可检索语料 (completed)
+
+### Technical implementation path
+
+- [x] **Phase 1 — 统计口径**：`get_corpus_stats()` 仅统计 `lifecycle_state=active` 的文档、chunks 与待重建数；严格镜像产生的 `detached` 文档不再被作为 Milvus 可检索语料展示。
+- [x] **Phase 2 — 契约与回归**：同步 SQLite、内存和基类回退实现；补 `detached` 文档的仓储/API 回归测试，验证状态卡不受其影响。
+- [x] **Phase 3 — 验证与治理**：运行定向 pytest 与 ruff，测试通过后更新 CHANGELOG 并标记完成。
+
+### Verification
+
+- 容器 `naughty_germain`：`python -m pytest tests/backend/test_sqlite_source_store.py tests/backend/test_api.py -q` → 104 passed。
+- 容器 `naughty_germain`：`ruff check kacore/repository/source_store tests/backend/test_sqlite_source_store.py tests/backend/test_api.py` → All checks passed。
+- 容器 `naughty_germain`：`git diff --check` → 通过；`python -m pytest -q` → 683 passed、1 个既有 reranker idle-unload 计时抖动失败。
+- 失败用例单独复跑：`python -m pytest tests/backend/test_reranker.py::test_cross_encoder_reloads_after_idle_unload -q` → 1 passed。
+
 ## v1.0.8：Codex 首次连接登记 · 外网授权 · Windows 权限指引 (completed)
 
 ### User constraints / 约束

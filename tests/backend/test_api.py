@@ -14,6 +14,7 @@ from kacore.api import KnowledgeRepositoryApi, LightRAGNotReadyError
 from kacore.domain.models import (
     Collection,
     DocumentChunk,
+    DocumentLifecycle,
     DocumentOrigin,
     SourceDocument,
     SyncRecord,
@@ -2224,3 +2225,46 @@ async def test_restart_plugin_schedules_reload() -> None:
     result = await api.restart_plugin()
     assert result["status"] == "restarting"
     await asyncio.wait_for(reloaded.wait(), timeout=3.0)
+
+
+async def test_capabilities_excludes_detached_documents_from_vector_stats(tmp_path: Path) -> None:
+    from kacore.config import Config
+    from kacore.index_compatibility import IndexCompatibilityStore
+    from kacore.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    store = InMemorySourceDocumentStore()
+    active = _doc("active", "papers")
+    active.needs_reindex = True
+    detached = _doc("detached", "papers")
+    detached.lifecycle_state = DocumentLifecycle.DETACHED
+    detached.needs_reindex = True
+    await store.add_document(active)
+    await store.add_document(detached)
+    await store.replace_chunks(
+        "active", [DocumentChunk("active-0", "active", 0, "active", "h0")]
+    )
+    await store.replace_chunks(
+        "detached",
+        [
+            DocumentChunk("detached-0", "detached", 0, "old", "h1"),
+            DocumentChunk("detached-1", "detached", 1, "old", "h2"),
+        ],
+    )
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=InMemoryVectorStore(),
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    caps = await api.get_capabilities()
+    vector_stage = next(stage for stage in caps["pipeline"] if stage["id"] == "vector_store")
+    assert vector_stage["detail"]["document_count"] == 1
+    assert vector_stage["detail"]["pending_reindex_count"] == 1
+    assert vector_stage["detail"]["chunk_count"] == 1

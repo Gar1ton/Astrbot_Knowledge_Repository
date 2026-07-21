@@ -74,6 +74,7 @@ class _State:
         self.restart_count = 0
         self.search_queries: list[dict[str, list[str]]] = []
         self.ask_bodies: list[dict[str, Any]] = []
+        self.notion_push_bodies: list[dict[str, Any]] = []
         self.graph_build_bodies: list[dict[str, Any]] = []
         self.graph_submissions: list[dict[str, Any]] = []
 
@@ -193,7 +194,11 @@ class _Handler(BaseHTTPRequestHandler):
                 200,
                 {
                     "embedding": {"provider": "local", "api_key": "server-secret"},
-                    "notion_sync": {"sync_mode": "preserve"},
+                    "notion_sync": {
+                        "enabled": True,
+                        "qa_database_id": "qa-configured",
+                        "sync_mode": "preserve",
+                    },
                     "web_console": {"password": "server-password"},
                 },
             )
@@ -268,6 +273,27 @@ class _Handler(BaseHTTPRequestHandler):
                     "full_text_used": False,
                 },
             )
+        elif parsed.path == "/api/notion/push-note":
+            body = self._body()
+            self.state.notion_push_bodies.append(body)
+            if body.get("title") == "暂存问题":
+                self._json(
+                    200,
+                    {
+                        "status": "partial",
+                        "outbox_id": "outbox-queued",
+                        "message": "queued for retry",
+                    },
+                )
+            else:
+                self._json(
+                    200,
+                    {
+                        "status": "success",
+                        "page_id": f"qa-page-{len(self.state.notion_push_bodies)}",
+                        "outbox_id": f"outbox-{len(self.state.notion_push_bodies)}",
+                    },
+                )
         elif parsed.path == "/api/graph/build/estimate":
             body = self._body()
             self._json(
@@ -554,6 +580,75 @@ def test_skill_requires_explicit_connection_and_external_authorization() -> None
     assert "unless the user explicitly grants permission" in source
     assert "windows sandbox: helper_unknown_error: apply deny-read ACLs" in source
     assert "Do not rerun `doctor`" in source
+    assert "notion-save-qa" in source
+    assert "qa_database_id" in source
+    assert "Never create a loose Notion page" in source
+
+
+def test_notion_save_qa_uses_configured_database_and_preserves_partial_results(
+    tmp_path: Path,
+) -> None:
+    payload_path = tmp_path / "conversation.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "question": "问题一",
+                        "answer": "回答一",
+                        "tags": ["conversation"],
+                        "citations": ["d1"],
+                    },
+                    {"question": "暂存问题", "answer": "回答二"},
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with _mock_api() as (state, url):
+        result = CLIENT.notion_save_qa(CLIENT.KnowledgeArchClient(url), str(payload_path))
+
+    assert result["status"] == "partial"
+    assert result["target_database_id"] == "qa-configured"
+    assert result["pushed_count"] == 1
+    assert result["queued_count"] == 1
+    assert result["failed_count"] == 0
+    assert state.notion_push_bodies == [
+        {
+            "content": "回答一",
+            "title": "问题一",
+            "tags": ["conversation"],
+            "citations": ["d1"],
+            "source": "codex",
+            "keep_local": False,
+        },
+        {
+            "content": "回答二",
+            "title": "暂存问题",
+            "tags": [],
+            "citations": [],
+            "source": "codex",
+            "keep_local": False,
+        },
+    ]
+
+
+def test_notion_save_qa_requires_configured_qa_database(tmp_path: Path) -> None:
+    payload_path = tmp_path / "conversation.json"
+    payload_path.write_text(
+        json.dumps({"items": [{"question": "Q", "answer": "A"}]}),
+        encoding="utf-8",
+    )
+
+    class MissingQaDatabaseClient:
+        def request_json(self, path: str, **_kwargs: Any) -> dict[str, Any]:
+            assert path == "/api/config/effective"
+            return {"notion_sync": {"enabled": True, "qa_database_id": ""}}
+
+    with pytest.raises(CLIENT.UsageError, match="qa_database_id"):
+        CLIENT.notion_save_qa(MissingQaDatabaseClient(), str(payload_path))
 
 
 def test_search_fuses_queries_deduplicates_content_and_caps_text() -> None:
@@ -732,6 +827,38 @@ def test_client_exposes_only_agent_evidence_and_guarded_graph_builds() -> None:
     assert '"/api/graph/build"' not in source
     assert '"/api/documents/rebuild-index"' not in source
     assert '/content/page"' in source
+
+
+def test_fresh_process_cli_notion_save_qa(tmp_path: Path) -> None:
+    payload_path = tmp_path / "conversation.json"
+    payload_path.write_text(
+        json.dumps({"items": [{"question": "CLI 问题", "answer": "CLI 回答"}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    with _mock_api() as (state, url):
+        env = os.environ.copy()
+        env["KNOWLEDGE_ARCH_URL"] = url
+        env["KNOWLEDGE_ARCH_USERNAME"] = "admin"
+        env.pop("KR_WEB_PASSWORD", None)
+        saved = subprocess.run(
+            [
+                sys.executable,
+                str(CLIENT_PATH),
+                "notion-save-qa",
+                "--input-file",
+                str(payload_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            timeout=10,
+        )
+
+    assert saved.returncode == 0, saved.stderr
+    assert json.loads(saved.stdout)["status"] == "success"
+    assert state.notion_push_bodies[0]["title"] == "CLI 问题"
 
 
 def test_fresh_process_cli_research_and_config_preview() -> None:

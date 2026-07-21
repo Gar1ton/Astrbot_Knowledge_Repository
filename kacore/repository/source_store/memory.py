@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from kacore.domain.models import DocumentLifecycle
 from kacore.repository.source_store.base import SourceDocumentStore
 
 
@@ -245,11 +246,18 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         return [copy.deepcopy(c) for c in ordered]
 
     async def get_corpus_stats(self) -> dict[str, int]:
-        pending_reindex = sum(1 for doc in self._documents.values() if doc.needs_reindex)
+        active_documents = [
+            doc
+            for doc in self._documents.values()
+            if doc.lifecycle_state is DocumentLifecycle.ACTIVE
+        ]
+        pending_reindex = sum(1 for doc in active_documents if doc.needs_reindex)
         return {
-            "document_count": len(self._documents),
+            "document_count": len(active_documents),
             "pending_reindex_count": pending_reindex,
-            "chunk_count": sum(len(chunks) for chunks in self._chunks.values()),
+            "chunk_count": sum(
+                len(self._chunks.get(doc.doc_id, [])) for doc in active_documents
+            ),
         }
 
     # ── LightRAG 索引状态 ───────────────────────────────────────

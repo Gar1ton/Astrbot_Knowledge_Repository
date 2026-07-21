@@ -222,18 +222,24 @@ class SourceDocumentStore(ABC):
         return hits[:limit]
 
     async def get_corpus_stats(self) -> dict[str, int]:
-        """Return aggregate corpus counts used by hot status endpoints.
+        """Return aggregate counts for documents eligible for retrieval.
 
-        Production stores should override this with database-native aggregate queries. The fallback
-        preserves compatibility for small in-memory/fake stores without changing their contracts.
+        Only documents whose lifecycle is ``active`` contribute to the document, chunk, and pending
+        reindex counts. Production stores should override this with database-native aggregate
+        queries; the fallback preserves that contract for small in-memory/fake stores.
         """
+        from kacore.domain.models import DocumentLifecycle
+
         docs = await self.list_documents()
+        active_docs = [doc for doc in docs if doc.lifecycle_state is DocumentLifecycle.ACTIVE]
         chunk_count = 0
-        for doc in docs:
+        for doc in active_docs:
             chunk_count += len(await self.list_chunks(doc.doc_id))
         return {
-            "document_count": len(docs),
-            "pending_reindex_count": sum(1 for doc in docs if getattr(doc, "needs_reindex", False)),
+            "document_count": len(active_docs),
+            "pending_reindex_count": sum(
+                1 for doc in active_docs if getattr(doc, "needs_reindex", False)
+            ),
             "chunk_count": chunk_count,
         }
 

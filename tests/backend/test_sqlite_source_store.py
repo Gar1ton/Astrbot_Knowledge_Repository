@@ -15,6 +15,7 @@ from kacore.domain.models import (
     Collection,
     ConsoleScopeState,
     DocumentChunk,
+    DocumentLifecycle,
     DocumentOrigin,
     ScopedNote,
     SourceDocument,
@@ -696,3 +697,35 @@ async def test_notion_outbox_lifecycle(sqlite_store: SQLiteSourceDocumentStore) 
     assert [i.id for i in await sqlite_store.list_notion_outbox()] == ["ob2", "ob3", "ob1"]
 
     assert await sqlite_store.update_notion_outbox(NotionOutboxItem(id="missing")) is False
+
+
+async def test_corpus_stats_excludes_detached_documents(
+    sqlite_store: SQLiteSourceDocumentStore,
+) -> None:
+    active = _doc("active")
+    active.needs_reindex = True
+    detached = _doc("detached")
+    detached.lifecycle_state = DocumentLifecycle.DETACHED
+    detached.needs_reindex = True
+    await sqlite_store.add_document(active)
+    await sqlite_store.add_document(detached)
+    await sqlite_store.replace_chunks(
+        "active",
+        [
+            DocumentChunk("active-0", "active", 0, "first", "h0"),
+            DocumentChunk("active-1", "active", 1, "second", "h1"),
+        ],
+    )
+    await sqlite_store.replace_chunks(
+        "detached",
+        [
+            DocumentChunk("detached-0", "detached", 0, "old", "h2"),
+            DocumentChunk("detached-1", "detached", 1, "old", "h3"),
+        ],
+    )
+
+    assert await sqlite_store.get_corpus_stats() == {
+        "document_count": 1,
+        "pending_reindex_count": 1,
+        "chunk_count": 2,
+    }

@@ -30,12 +30,19 @@ from kacore.domain.models import (
     SyncStatus,
     SyncTargetKind,
 )
+from kacore.notion_sync_job import (
+    NOTION_STAGE_FINALIZING,
+    NOTION_STAGE_PRUNING_TAGS,
+    NOTION_STAGE_PUSHING_DOCUMENTS,
+    NOTION_STAGE_PUSHING_QA,
+)
 from kacore.repository.sync_targets import notion_schema as schema
 from kacore.repository.sync_targets.notion import ACTION_CREATED
 
 if TYPE_CHECKING:
     from kacore.config import NotionSyncConfig
     from kacore.domain.models import Collection, NotionOutboxItem, SourceDocument
+    from kacore.notion_sync_job import NotionSyncJob
     from kacore.repository.source_store.base import SourceDocumentStore
     from kacore.repository.sync_targets.notion import NotionSyncTarget
 
@@ -76,11 +83,14 @@ class NotionSyncPipeline:
 
     # ── 全量增量推送 ────────────────────────────────────────────
 
-    async def push_all(self, force: bool = False) -> dict[str, Any]:
+    async def push_all(
+        self, force: bool = False, *, progress: NotionSyncJob | None = None
+    ) -> dict[str, Any]:
         """把全部文章 + 待推 QA 增量推送到 Notion。
 
         流程：文档 diff/upsert（含冗余写 sync_records）→ outbox(pending/failed) 补推 →
-        孤儿账本行对账清理。单实体失败记 FAILED 不中断；并发重入直接返回 already_running。
+        孤儿账本行对账清理 → strict 模式失效集合选项清理。单实体失败记 FAILED 不中断；
+        并发重入直接返回 already_running。`progress` 非空时逐阶段/逐文档更新进度快照。
         """
         if not self._config.enabled:
             return {"status": "disabled", "message": "Notion 同步未启用。"}
@@ -93,6 +103,12 @@ class NotionSyncPipeline:
             collections = await self._store.list_collections()
             paths = schema.build_collection_paths(collections)
             docs = await self._store.list_documents()
+            strict = self._config.sync_mode == NOTION_SYNC_STRICT
+            if progress is not None:
+                progress.sync_mode = self._config.sync_mode
+                progress.force = force
+                progress.docs_total = len(docs)
+                progress.set_stage(NOTION_STAGE_PUSHING_DOCUMENTS)
 
             doc_stats = {
                 "created": 0,
@@ -103,11 +119,18 @@ class NotionSyncPipeline:
             }
             warnings: list[str] = []
             strict_archive_failed = False
+            # strict 清理的「保留集」：所有非 strict-detached 文档实际使用的选项名（含失败/跳过，
+            # 取超集确保不误删仍被活跃页面引用的选项）。
+            live_collection_names: set[str] = set()
+            live_path_names: set[str] = set()
             for doc in docs:
-                strict_detached = (
-                    self._config.sync_mode == NOTION_SYNC_STRICT
-                    and doc.lifecycle_state == DocumentLifecycle.DETACHED
-                )
+                strict_detached = strict and doc.lifecycle_state == DocumentLifecycle.DETACHED
+                if not strict_detached:
+                    for name in _doc_collection_names(doc, collections):
+                        live_collection_names.add(schema.sanitize_option_name(name))
+                    path = schema.primary_collection_path(doc, collections, paths)
+                    if path:
+                        live_path_names.add(schema.sanitize_option_name(path))
                 try:
                     if strict_detached:
                         action = await self._archive_detached_document(doc)
@@ -116,15 +139,43 @@ class NotionSyncPipeline:
                             doc, collections, paths, force=force
                         )
                     doc_stats[action] += 1
+                    if progress is not None:
+                        progress.record_document(action)
                 except Exception as e:  # noqa: BLE001 — 单文档失败不阻断整轮
                     strict_archive_failed = strict_archive_failed or strict_detached
                     doc_stats["failed"] += 1
+                    if progress is not None:
+                        progress.record_document("failed")
+                        progress.note_error(f"{doc.doc_id}: {e}")
                     warnings.append(f"文档 {doc.doc_id} 推送失败：{e}")
                     logger.warning("Notion 文档推送失败（%s）：%s", doc.doc_id, e)
                     await self._record_failure(NOTION_ENTITY_DOCUMENT, doc.doc_id, str(e))
 
+            if progress is not None:
+                progress.set_stage(NOTION_STAGE_PUSHING_QA)
             qa_stats = await self._push_pending_outbox(collections, paths, warnings)
+            if progress is not None:
+                progress.qa_pushed = qa_stats["pushed"]
+                progress.qa_failed = qa_stats["failed"]
             await self._cleanup_orphans({d.doc_id for d in docs})
+
+            pruned = {"collections": 0, "collection_path": 0}
+            if strict:
+                if progress is not None:
+                    progress.set_stage(NOTION_STAGE_PRUNING_TAGS)
+                try:
+                    pruned = await self._target.prune_collection_options(
+                        live_collection_names=live_collection_names,
+                        live_path_names=live_path_names,
+                    )
+                    if progress is not None:
+                        progress.tags_pruned = pruned["collections"] + pruned["collection_path"]
+                except Exception as e:  # noqa: BLE001 — 清理失败不阻断整轮推送
+                    warnings.append(f"Strict 选项清理失败：{e}")
+                    logger.warning("Strict 选项清理失败：%s", e)
+
+            if progress is not None:
+                progress.set_stage(NOTION_STAGE_FINALIZING)
 
             status = "success"
             if doc_stats["failed"] or qa_stats["failed"]:
@@ -138,6 +189,7 @@ class NotionSyncPipeline:
                 "status": status,
                 "documents": doc_stats,
                 "qa": qa_stats,
+                "pruned": pruned,
                 "warnings": warnings,
             }
 

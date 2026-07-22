@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
+import threading
 from typing import TYPE_CHECKING, Any
 
 from kacore.repository.reranker.base import Reranker, ScoredChunk
@@ -45,15 +47,19 @@ class CrossEncoderReranker(Reranker):
         device: str = "auto",
         batch_size: int = 32,
         max_candidates: int = 30,
+        idle_timeout: float = 420,
     ) -> None:
         self._model_name = model
         self._device = None if device == "auto" else device
         self._batch_size = batch_size
         self._max_candidates = max_candidates
+        self._idle_timeout = max(0.0, float(idle_timeout))
         self._model: Any = None
         self._disabled = False
         self._state = "idle"
         self._last_error: str | None = None
+        self._model_lock = threading.RLock()
+        self._idle_timer: threading.Timer | None = None
 
     @property
     def is_passthrough(self) -> bool:
@@ -71,10 +77,65 @@ class CrossEncoderReranker(Reranker):
         }
 
     def _ensure_model(self) -> None:
-        if self._model is None:
-            from sentence_transformers import CrossEncoder
+        with self._model_lock:
+            if self._model is None:
+                from sentence_transformers import CrossEncoder
 
-            self._model = CrossEncoder(self._model_name, device=self._device)
+                self._model = CrossEncoder(self._model_name, device=self._device)
+
+    def _reset_idle_timer(self) -> None:
+        """Reset the timer after a completed inference."""
+        with self._model_lock:
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
+            if self._idle_timeout > 0 and self._model is not None:
+                self._idle_timer = threading.Timer(self._idle_timeout, self._unload)
+                self._idle_timer.daemon = True
+                self._idle_timer.start()
+
+    @staticmethod
+    def _release_model_memory(model: Any) -> None:
+        """Release Python references and clear optional accelerator caches."""
+        del model
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except (ImportError, RuntimeError):
+            return
+
+    def _unload(self) -> None:
+        """Unload the model after an idle period; the next call lazy-loads it again."""
+        with self._model_lock:
+            model = self._model
+            self._model = None
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
+            if model is None:
+                return
+            self._state = "idle"
+        self._release_model_memory(model)
+
+    def close(self) -> None:
+        """Unload the local model and cancel its idle timer."""
+        self._unload()
+
+    def _predict(self, pairs: list[tuple[str, str]]) -> Any:
+        """Load, predict, and arm the idle timer as one lifecycle-critical operation."""
+        with self._model_lock:
+            if self._model is None:
+                self._state = "loading"
+                self._ensure_model()
+            self._state = "ready"
+            self._last_error = None
+            model = self._model
+            scores = model.predict(pairs, batch_size=self._batch_size)
+            self._reset_idle_timer()
+            return scores
 
     async def rerank(
         self, query: str, candidates: list[DocumentChunk], *, top_n: int | None = None
@@ -85,17 +146,11 @@ class CrossEncoderReranker(Reranker):
         if self._disabled:
             return _passthrough(pool, top_n)
         try:
-            if self._model is None:
-                self._state = "loading"
-            await asyncio.to_thread(self._ensure_model)
-            self._state = "ready"
-            self._last_error = None
             pairs = [(query, chunk.text) for chunk in pool]
-            scores = await asyncio.to_thread(
-                self._model.predict, pairs, batch_size=self._batch_size
-            )
+            scores = await asyncio.to_thread(self._predict, pairs)
         except Exception as exc:  # 加载/推理失败 → 永久退化为按序，不抛崩 deep thinking。
             logger.warning("CrossEncoder rerank failed, fallback to input order: %s", exc)
+            self._unload()
             self._disabled = True
             self._state = "failed"
             self._last_error = str(exc)

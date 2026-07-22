@@ -213,6 +213,23 @@ def _row_to_build_job(row: tuple) -> dict:
     }
 
 
+def _row_to_codex_graph_task(row: tuple) -> dict:
+    """将 codex_graph_tasks 查询行映射为任务字典。"""
+    return {
+        "task_id": row[0],
+        "job_id": row[1],
+        "collection": row[2],
+        "doc_id": row[3],
+        "chunk_index": row[4],
+        "chunk_hash": row[5],
+        "content": row[6],
+        "status": row[7],
+        "last_error": row[8],
+        "created_at": row[9],
+        "updated_at": row[10],
+    }
+
+
 def _row_to_chat_message(row: tuple) -> dict:
     """把 chat_history 一行映射成前端 API 字典。"""
     return {
@@ -754,10 +771,15 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         async with self._db.execute(
             """
             SELECT
-                (SELECT COUNT(*) FROM documents),
+                (SELECT COUNT(*) FROM documents
+                   WHERE lifecycle_state = 'active'),
                 (SELECT COALESCE(SUM(CASE WHEN needs_reindex != 0 THEN 1 ELSE 0 END), 0)
-                   FROM documents),
-                (SELECT COUNT(*) FROM chunks)
+                   FROM documents
+                   WHERE lifecycle_state = 'active'),
+                (SELECT COUNT(*)
+                   FROM chunks AS c
+                   JOIN documents AS d ON d.doc_id = c.doc_id
+                   WHERE d.lifecycle_state = 'active')
             """
         ) as cursor:
             row = await cursor.fetchone()
@@ -895,6 +917,86 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
         )
         await self._db.commit()
         return cursor.rowcount
+
+    @_locked_write
+    async def replace_codex_graph_tasks(self, job_id: str, tasks: list[dict]) -> None:
+        await self._db.execute("DELETE FROM codex_graph_tasks WHERE job_id = ?", (job_id,))
+        await self._db.executemany(
+            """
+            INSERT INTO codex_graph_tasks
+                (task_id, job_id, collection, doc_id, chunk_index, chunk_hash,
+                 content, status, last_error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    task["task_id"],
+                    job_id,
+                    task["collection"],
+                    task["doc_id"],
+                    int(task["chunk_index"]),
+                    task["chunk_hash"],
+                    task["content"],
+                    task.get("status", "pending"),
+                    task.get("last_error", ""),
+                )
+                for task in tasks
+            ],
+        )
+        await self._db.commit()
+
+    async def list_codex_graph_tasks(
+        self, job_id: str, status: str | None = None
+    ) -> list[dict]:
+        query = (
+            "SELECT task_id, job_id, collection, doc_id, chunk_index, chunk_hash, "
+            "content, status, last_error, created_at, updated_at "
+            "FROM codex_graph_tasks WHERE job_id = ?"
+        )
+        params: tuple[Any, ...] = (job_id,)
+        if status is not None:
+            query += " AND status = ?"
+            params = (job_id, status)
+        query += " ORDER BY doc_id, chunk_index"
+        async with self._db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_codex_graph_task(row) for row in rows]
+
+    async def get_codex_graph_task(self, task_id: str) -> dict | None:
+        async with self._db.execute(
+            "SELECT task_id, job_id, collection, doc_id, chunk_index, chunk_hash, "
+            "content, status, last_error, created_at, updated_at "
+            "FROM codex_graph_tasks WHERE task_id = ?",
+            (task_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _row_to_codex_graph_task(row) if row is not None else None
+
+    @_locked_write
+    async def update_codex_graph_task(
+        self, task_id: str, status: str, last_error: str = ""
+    ) -> bool:
+        cursor = await self._db.execute(
+            "UPDATE codex_graph_tasks SET status = ?, last_error = ?, "
+            "updated_at = CURRENT_TIMESTAMP WHERE task_id = ?",
+            (status, last_error, task_id),
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
+
+    async def get_latest_codex_graph_build_job(self) -> dict | None:
+        async with self._db.execute(
+            "SELECT j.job_id, j.collection, j.status, j.stage, j.processed_docs, "
+            "j.failed_docs, j.total_docs, j.processed_chunks, j.failed_chunks, "
+            "j.total_chunks, j.recent_error, j.started_at, j.finished_at, j.created_at, "
+            "j.pause_requested, j.paused_at, j.paused_seconds, j.progress_current, "
+            "j.progress_total FROM graph_build_jobs j "
+            "WHERE j.status = 'waiting_agent' AND EXISTS "
+            "(SELECT 1 FROM codex_graph_tasks t WHERE t.job_id = j.job_id) "
+            "ORDER BY j.created_at DESC LIMIT 1"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _row_to_build_job(row) if row is not None else None
 
     # ── 同步状态 ──────────────────────────────────────────────────
 
@@ -1743,6 +1845,11 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
     async def purge_zotero_mirror(self) -> None:
         """单事务删除 Zotero 镜像；documents 外键级联清理 chunks/sync 等。"""
         try:
+            await self._db.execute(
+                "DELETE FROM codex_graph_tasks WHERE job_id IN "
+                "(SELECT job_id FROM graph_build_jobs WHERE collection IN "
+                "(SELECT name FROM collections WHERE origin = 'zotero'))"
+            )
             await self._db.execute(
                 "DELETE FROM graph_build_jobs WHERE collection IN "
                 "(SELECT name FROM collections WHERE origin = 'zotero')"

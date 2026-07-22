@@ -2,9 +2,117 @@
 
 ## [Unreleased]
 
-### Fixed
+## [v1.0.8] — 2026-07-21
 
-- **Deterministic frontend export**: configure a stable Next.js build ID and regenerate `pages/` so fresh CI builds pass the byte-for-byte exported-page consistency check (`web/frontend/next.config.ts`, `tools/sync_frontend.py`).
+### 新增功能 (Added)
+
+- **Codex 单实例首次连接登记**：项目级 Knowledge Arch 客户端新增 `connection-status` 与交互式
+  `connection-setup`；未登记时不再猜测 WebUI 地址或用户名，地址/用户名仅写入用户级配置，密码
+  仅经系统凭据库保存。开发者的 `KNOWLEDGE_ARCH_URL`/`KNOWLEDGE_ARCH_USERNAME` 临时覆盖永不持久化，
+  且不会复用日常实例密码（`.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py`、
+  `requirements-codex-skill.txt`）。
+- **Codex 对话问答定向 Notion 同步**：新增 `notion-save-qa`，从 UTF-8 问答清单逐条以原问题
+  为标题、最终回答与本地文献引用为正文推送到已配置的 `notion_sync.qa_database_id`；拒绝未配置
+  或禁用状态，绝不把文章库或游离 Notion 页面当作降级目标。成功记录远端页，暂存失败记录 outbox
+  状态（`.agents/skills/operate-knowledge-arch/SKILL.md`、
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py`、
+  `.agents/skills/operate-knowledge-arch/agents/openai.yaml`）。
+
+### 变更 (Changed)
+
+- **Codex 研究权限收口**：Skill 明确本地证据调用只访问用户已登记实例；网页、下载、外部证据和
+  依赖安装均须获得当前问题的用户明确授权。本地证据不足时固定报告缺口并询问外网补充；用户指定文献
+  采用 `catalog` → `ask-evidence` → 锚定分页读取的验证流程
+  （`.agents/skills/operate-knowledge-arch/SKILL.md`）。
+- **首次 Windows ACL 故障可操作化**：Skill 区分相对路径、连接拒绝、鉴权和
+  `apply deny-read ACLs` 沙箱失败；ACL 失败后不重复 `doctor`，改为受限授权、根目录确认和同权限级别
+  排障，不要求修改项目 ACL 或 AstrBot 安装目录（`.agents/skills/operate-knowledge-arch/SKILL.md`）。
+
+### 修复 (Fixed)
+
+- **Milvus 状态卡统计口径**：`get_corpus_stats()` 仅汇总 `active` 文档及其 chunks/待重建数，严格镜像留下的 `detached` 文档不再被显示为可检索的向量库内容；SQLite、内存与回退实现保持同一契约，并补充仓储/API 回归测试（`kacore/repository/source_store/{sqlite,memory,base}.py`、`tests/backend/test_sqlite_source_store.py`、`tests/backend/test_api.py`）。
+- **版本同步历史保护**：`bump_version.py` 识别中文冒号版本标题，优先更新真正的顶部版本条目，不会再把历史 `v1.0.6` 任务错误改写为当前发布版本。
+
+### 测试 (Tests)
+
+- 覆盖未登记拒绝、隐藏密码、凭据库保存与回滚、替换旧凭据、临时覆盖隔离、无秘密落盘、凭据库失败
+  及 Skill 的端口/外网/ACL 静态契约；客户端与发布树定向测试 25 passed
+  （`tests/backend/test_knowledge_arch_skill_client.py`、`tests/backend/test_published_tree.py`）。
+- 覆盖多问答 UTF-8 输入、已配置 QA 库定向写入、部分失败 outbox 暂存、未配置目标拒绝、Skill
+  规则与独立进程 CLI（`tests/backend/test_knowledge_arch_skill_client.py`）。
+
+### 构建与工程 (Build/CI)
+
+- 新增发布的轻量 `keyring` 依赖清单，并把它加入正式发布白名单、发布树必需文件与 main 分支 CI 校验
+  （`requirements-codex-skill.txt`、`release/published-files.txt`、`tools/build_published_tree.py`、
+  `.github/workflows/published-verify.yml`）。
+
+## [v1.0.7] — 2026-07-20
+
+### 新增功能 (Added)
+
+- **Notion 同步进度可视**：新增 `NotionSyncJob` 纯内存进度模型与后台单任务，Notion 单向推送
+  从同步阻塞改为立即返回任务快照，进度经 `GET /api/sync/notion/active` 轮询，在左下角统一
+  进度条与 Zotero / Milvus / LightRAG / 文档摄入并列显示（阶段、`docs done/total`、清理计数
+  与终态提示）。手动按钮与周期自动推送共用同一任务
+  （`kacore/notion_sync_job.py`、`kacore/api.py`、`kacore/plugin_initializer.py`、`web/server.py`、
+  `web/frontend/components/progress/ProgressDock.tsx`、`web/frontend/lib/api.ts`、`lib/i18n.ts`、
+  `components/modals/SettingModal.tsx`）。
+
+### 变更 (Changed)
+
+- **Strict 模式自动清理失效集合选项**：strict 同步每轮按活跃文档实际使用的选项集，回收
+  Notion `Articles` 库 `Collections`(multi_select) 与 `Collection Path`(select) 中不再对应任何
+  活跃集合/路径的残留选项（集合删/改名后越积越多）；单属性读写失败记 warning 跳过，不中断
+  整轮推送（`kacore/repository/sync_targets/notion.py`、`notion_schema.py`、
+  `kacore/pipelines/notion_sync_pipeline.py`）。
+
+### 修复 (Fixed)
+
+- **修复 developer 分支 CI 前端校验必红**：`Verify exported pages` 原对全新 Linux 构建的 `out/`
+  与开发者 Windows 构建的 `pages/` 逐字节比对，webpack 内容哈希跨平台必然不同而每次失败。
+  新增 `tools/sync_frontend.py --check-structure`：忽略 `_next/` 哈希产物，只校验路由/静态资源
+  结构对齐；CI 改用之（`tools/sync_frontend.py`、`.github/workflows/tests.yml`）。
+
+### 测试 (Tests)
+
+- 新增 `NotionSyncJob` 进度契约、`prune_collection_options` 选项回收（含降级不抛）、strict push_all
+  清理与进度计数、`sync_notion_push` 后台单任务与终态可见窗口、`/api/sync/notion/active` 路由
+  等回归；容器内全量 pytest 674 passed，ruff 通过，前端 ESLint/tsc/build 与 `--check-structure`
+  均通过（`tests/backend/test_notion_sync_job.py`、`test_notion_target.py`、`test_notion_pipeline.py`、
+  `test_api.py`、`test_web_server.py`）。
+
+## [v1.0.6] — 2026-07-20
+
+### 新增功能 (Added)
+
+- **Codex evidence-only Ask**：新增 `default` / `enhanced` / `deep_thinking` 分档证据端口，
+  插件只执行确定性召回、融合、重排和裁剪；规划、充分性判断、纠偏与最终回答均由 Codex 完成，
+  响应显式标记不使用插件 LLM 与全文（`kacore/pipelines/agent_evidence.py`、`kacore/api.py`、`web/server.py`）。
+- **全文读取意图门**：新增服务端 Markdown 分页读取，项目级客户端仅在用户锚定唯一论文或明确
+  要求阅读全文时接受 `anchored` / `full` 意图；一般研究只消费 Ask evidence 片段
+  （`kacore/api.py`、`web/server.py`、`.agents/skills/operate-knowledge-arch/`）。
+- **Codex 驱动 LightRAG 构建**：新增持久化 pull 式任务、估算/确认、任务领取、custom-KG 校验提交、
+  失败重试与启动恢复；实体关系由 Codex 抽取，后端经官方 `ainsert_custom_kg` 写入并仅调用现有
+  embedding provider（`migrations/022_codex_graph_tasks.sql`、`kacore/lightrag_core.py`、`kacore/api.py`）。
+
+### 修复 (Fixed)
+
+- **Deterministic frontend export**：配置稳定的 Next.js build ID 并重建 `pages/`，使全新 CI 构建可通过静态导出逐字节一致性检查（`web/frontend/next.config.ts`、`tools/sync_frontend.py`）。
+- **Notion Strict 账本迁移**：本地 `notion_entity_map` 接受内部 `archived` tombstone 状态，不对外扩展第三种 Notion 同步模式（`migrations/021_notion_archived_status.sql`）。
+
+### 测试 (Tests)
+
+- **锁定 Ask、全文门和 Codex 图构建契约**：覆盖三种召回预算、零插件 LLM、分页意图校验、
+  custom-KG schema/重试/恢复、鉴权、SQLite/内存任务清理及 Skill 客户端协议；全量 pytest
+  659 passed，Ruff、mypy、Skill quick validation 与前端静态产物一致性检查均通过
+  （`tests/backend/test_agent_evidence.py`、`test_codex_graph_build.py`、`test_web_server.py`）。
+
+### 构建与工程 (Build/CI)
+
+- **正式安装包携带 LightRAG 工作流说明**：发布树必需文件加入 `references/lightrag.md`，
+  WORKTREE 预览成功生成 491 个文件；版本元数据统一提升到 `v1.0.6`
+  （`tools/build_published_tree.py`、`tests/backend/test_published_tree.py`、`metadata.yaml`）。
 
 > 本文件记录项目的所有重要变更。**所有参与者（含 AI Agent）在写入时必须遵守下方「写入规范」。**
 

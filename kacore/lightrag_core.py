@@ -365,6 +365,26 @@ class LightRAGCoreRegistry:
                 _LLM_PROGRESS_CALLBACK.reset(token)
                 _LLM_PAUSE_GATE.reset(pause_token)
 
+    async def insert_custom_kg(
+        self,
+        collection: str,
+        doc_id: str,
+        custom_kg: dict[str, Any],
+    ) -> None:
+        """写入由外部 agent 提取的实体与关系；仅触发 LightRAG 存储/嵌入。"""
+        async with self._get_collection_lock(collection):
+            rag = await self.get(collection)
+            insert = getattr(rag, "ainsert_custom_kg", None)
+            if not callable(insert):
+                raise RuntimeError("Installed LightRAG does not support ainsert_custom_kg")
+            _terminal(
+                f"ainsert_custom_kg collection={collection!r} doc_id={doc_id!r} "
+                f"chunks={len(custom_kg.get('chunks', []))} "
+                f"entities={len(custom_kg.get('entities', []))} "
+                f"relationships={len(custom_kg.get('relationships', []))}"
+            )
+            await insert(custom_kg, full_doc_id=doc_id)
+
     async def query(
         self, collection: str, query: str, *, only_need_context: bool = False
     ) -> dict[str, Any]:

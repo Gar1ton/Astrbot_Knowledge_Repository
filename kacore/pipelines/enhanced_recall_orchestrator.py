@@ -18,14 +18,18 @@ verified=True + verify_notes 携带 insufficiency_reasons（透明进「思考�
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from kacore.domain.deep_thinking import Checklist, DeepThinkingOutcome, RoundTrace
+from kacore.pipelines.agent_evidence import (
+    rank_pool as rank_agent_pool,
+)
+from kacore.pipelines.agent_evidence import (
+    retrieve_many as retrieve_agent_many,
+)
 from kacore.pipelines.answer_synthesis import synthesize_answer
-from kacore.pipelines.deep_thinking_evidence import rank_candidates
 from kacore.pipelines.deep_thinking_prompts import JsonContractError
 from kacore.pipelines.deep_thinking_view import live_detail
 from kacore.pipelines.enhanced_recall_prompts import (
@@ -39,7 +43,6 @@ from kacore.pipelines.enhanced_recall_prompts import (
     parse_synth_check,
 )
 from kacore.pipelines.llm_json import est_tokens, llm_json_call
-from kacore.utils.cutoff import adaptive_cutoff
 
 if TYPE_CHECKING:
     from kacore.adapters.llm import LLMAdapter
@@ -251,34 +254,14 @@ class EnhancedRecallOrchestrator:
         scope: RetrievalScope | None,
     ) -> list[tuple[str, RetrievalOutcome]]:
         """并行执行各 query 的混合召回（宽候选池，不传内核 reranker——重排统一在合并池做）。"""
-        if not queries:
-            return []
-        outcomes = await asyncio.gather(
-            *(
-                self._retrieval.retrieve_with_outcome(
-                    collection,
-                    q,
-                    self._cfg.wide_top_k,
-                    scope,
-                    candidate_k=self._cfg.candidate_k,
-                )
-                for q in queries
-            ),
-            # 单个 sub_query 瞬断不应废掉整次增强召回：失败的跳过，全部失败才抛。
-            return_exceptions=True,
+        return await retrieve_agent_many(
+            self._retrieval,
+            collection,
+            queries,
+            scope,
+            top_k=self._cfg.wide_top_k,
+            candidate_k=self._cfg.candidate_k,
         )
-        results: list[tuple[str, RetrievalOutcome]] = []
-        for q, oc in zip(queries, outcomes):
-            if isinstance(oc, asyncio.CancelledError):
-                raise oc
-            if isinstance(oc, BaseException):
-                logger.warning("Sub-query retrieval failed, skipping %r: %s", q, oc)
-            else:
-                results.append((q, oc))
-        if not results:
-            first_failure = next(oc for oc in outcomes if isinstance(oc, BaseException))
-            raise first_failure
-        return results
 
     async def _rank_pool(
         self, query_outcomes: list[tuple[str, RetrievalOutcome]]
@@ -286,29 +269,12 @@ class EnhancedRecallOrchestrator:
         """合并各 query 候选池：anchor pinned 前置无条件保留，非 pinned 经
         rank_candidates（rrf×cross-encoder 混合）+ adaptive_cutoff，总量截 max_final_evidence。
         """
-        candidates: dict[str, DocumentChunk] = {}
-        anchor_ids: set[str] = set()
-        for _q, oc in query_outcomes:
-            for chunk in oc.chunks:
-                candidates.setdefault(chunk.chunk_id, chunk)
-                sig = oc.per_chunk_signals.get(chunk.chunk_id)
-                if sig and sig.anchor_hit:
-                    anchor_ids.add(chunk.chunk_id)
-        non_pinned = [c for cid, c in candidates.items() if cid not in anchor_ids]
-        scored = await rank_candidates(
-            query_outcomes, non_pinned, anchor_ids, self._reranker, self._cfg.rerank_weight
+        return await rank_agent_pool(
+            query_outcomes,
+            self._reranker,
+            rerank_weight=self._cfg.rerank_weight,
+            max_evidence=self._cfg.max_final_evidence,
         )
-        kept = adaptive_cutoff(scored, keep_max=self._cfg.max_final_evidence)
-        final: list[DocumentChunk] = []
-        seen: set[str] = set()
-        for chunk in [candidates[cid] for cid in anchor_ids] + [sc.chunk for sc in kept]:
-            if chunk.chunk_id in seen:
-                continue
-            seen.add(chunk.chunk_id)
-            final.append(chunk)
-            if len(final) >= self._cfg.max_final_evidence:
-                break
-        return final, [c.chunk_id for c in final]
 
     async def _degraded(
         self,

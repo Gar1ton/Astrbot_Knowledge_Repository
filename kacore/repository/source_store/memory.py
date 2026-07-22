@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from kacore.domain.models import DocumentLifecycle
 from kacore.repository.source_store.base import SourceDocumentStore
 
 
@@ -51,6 +52,7 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._notion_outbox: dict[str, NotionOutboxItem] = {}
         self._lightrag_status: dict[str, dict[str, str]] = {}
         self._build_jobs: dict[str, dict] = {}
+        self._codex_graph_tasks: dict[str, dict] = {}
         # Zotero 镜像 + 页面 provenance（key 均含 library_id 命名空间）
         self._zlibraries: dict[str, ZoteroLibrary] = {}
         self._zcollections: dict[tuple[str, str], ZoteroCollection] = {}
@@ -244,11 +246,18 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         return [copy.deepcopy(c) for c in ordered]
 
     async def get_corpus_stats(self) -> dict[str, int]:
-        pending_reindex = sum(1 for doc in self._documents.values() if doc.needs_reindex)
+        active_documents = [
+            doc
+            for doc in self._documents.values()
+            if doc.lifecycle_state is DocumentLifecycle.ACTIVE
+        ]
+        pending_reindex = sum(1 for doc in active_documents if doc.needs_reindex)
         return {
-            "document_count": len(self._documents),
+            "document_count": len(active_documents),
             "pending_reindex_count": pending_reindex,
-            "chunk_count": sum(len(chunks) for chunks in self._chunks.values()),
+            "chunk_count": sum(
+                len(self._chunks.get(doc.doc_id, [])) for doc in active_documents
+            ),
         }
 
     # ── LightRAG 索引状态 ───────────────────────────────────────
@@ -472,6 +481,56 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
                 count += 1
         return count
 
+    async def replace_codex_graph_tasks(self, job_id: str, tasks: list[dict]) -> None:
+        self._codex_graph_tasks = {
+            task_id: task
+            for task_id, task in self._codex_graph_tasks.items()
+            if task.get("job_id") != job_id
+        }
+        for task in tasks:
+            stored = copy.deepcopy(task)
+            stored.setdefault("status", "pending")
+            stored.setdefault("last_error", "")
+            self._codex_graph_tasks[str(stored["task_id"])] = stored
+
+    async def list_codex_graph_tasks(
+        self, job_id: str, status: str | None = None
+    ) -> list[dict]:
+        tasks = [
+            task
+            for task in self._codex_graph_tasks.values()
+            if task.get("job_id") == job_id
+            and (status is None or task.get("status") == status)
+        ]
+        tasks.sort(key=lambda task: (str(task.get("doc_id")), int(task.get("chunk_index", 0))))
+        return [copy.deepcopy(task) for task in tasks]
+
+    async def get_codex_graph_task(self, task_id: str) -> dict | None:
+        task = self._codex_graph_tasks.get(task_id)
+        return copy.deepcopy(task) if task is not None else None
+
+    async def update_codex_graph_task(
+        self, task_id: str, status: str, last_error: str = ""
+    ) -> bool:
+        task = self._codex_graph_tasks.get(task_id)
+        if task is None:
+            return False
+        task["status"] = status
+        task["last_error"] = last_error
+        return True
+
+    async def get_latest_codex_graph_build_job(self) -> dict | None:
+        job_ids = {str(task["job_id"]) for task in self._codex_graph_tasks.values()}
+        jobs = [
+            job
+            for job in self._build_jobs.values()
+            if job.get("job_id") in job_ids and job.get("status") == "waiting_agent"
+        ]
+        if not jobs:
+            return None
+        jobs.sort(key=lambda job: str(job.get("created_at") or ""), reverse=True)
+        return copy.deepcopy(jobs[0])
+
     # ── Zotero 逻辑镜像 ──────────────────────────────────────────
 
     async def upsert_zotero_library(self, library: ZoteroLibrary) -> None:
@@ -618,10 +677,20 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
             for note_id, note in self._notes.items()
             if note.library_id == "LOCAL"
         }
+        removed_job_ids = {
+            job_id
+            for job_id, job in self._build_jobs.items()
+            if str(job.get("collection") or "") in zotero_collection_names
+        }
         self._build_jobs = {
             job_id: job
             for job_id, job in self._build_jobs.items()
-            if str(job.get("collection") or "") not in zotero_collection_names
+            if job_id not in removed_job_ids
+        }
+        self._codex_graph_tasks = {
+            task_id: task
+            for task_id, task in self._codex_graph_tasks.items()
+            if str(task.get("job_id") or "") not in removed_job_ids
         }
         self._console_scope_states = {
             key: state

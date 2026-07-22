@@ -257,6 +257,77 @@ class NotionSyncTarget(SyncTarget):
         if missing:
             await self._adapter.update_database(database_id, missing)
 
+    # ── Strict 选项清理（失效集合派生选项回收）──────────────────
+
+    async def prune_collection_options(
+        self,
+        *,
+        live_collection_names: set[str],
+        live_path_names: set[str],
+    ) -> dict[str, int]:
+        """Strict 模式清理 Articles 库中失效的集合派生选项。
+
+        删除 `Collections`(multi_select) 与 `Collection Path`(select) 里不再对应任何活跃
+        集合/路径的残留选项——集合被删/改名后 Notion 不会自动回收这些选项，越积越多。
+        发送**保留项（带 id）**即可让 Notion 删除被省略的失效项。每个属性独立降级：
+        单属性读/写失败记 warning 跳过，绝不中断整轮推送。返回各属性实际删除数。
+
+        入参 name 集合须已按 `schema.sanitize_option_name` 净化，与写库口径一致。
+        """
+        pruned = {"collections": 0, "collection_path": 0}
+        if not self._config.enabled or not self._config.database_id:
+            return pruned
+        try:
+            data = await self._adapter.retrieve_database(self._config.database_id)
+        except NotionMCPError as e:
+            logger.warning("Strict 选项清理跳过（读库失败）：%s", e)
+            return pruned
+        properties = data.get("properties")
+        if not isinstance(properties, dict):
+            return pruned
+
+        pruned["collections"] = await self._prune_property_options(
+            properties, schema.PROP_COLLECTIONS, "multi_select", live_collection_names
+        )
+        pruned["collection_path"] = await self._prune_property_options(
+            properties, schema.PROP_COLLECTION_PATH, "select", live_path_names
+        )
+        return pruned
+
+    async def _prune_property_options(
+        self,
+        properties: dict[str, Any],
+        prop_name: str,
+        kind: str,
+        live_names: set[str],
+    ) -> int:
+        """删除单个 select/multi_select 属性里 name 不在 live_names 的选项，返回删除数。"""
+        prop = properties.get(prop_name)
+        spec = prop.get(kind) if isinstance(prop, dict) else None
+        options = spec.get("options") if isinstance(spec, dict) else None
+        if not isinstance(options, list):
+            return 0
+        keep = [o for o in options if isinstance(o, dict) and o.get("name") in live_names]
+        removed = len(options) - len(keep)
+        if removed <= 0:
+            return 0
+        payload = {
+            prop_name: {
+                kind: {
+                    "options": [
+                        {k: o[k] for k in ("id", "name", "color") if k in o}
+                        for o in keep
+                    ]
+                }
+            }
+        }
+        try:
+            await self._adapter.update_database(self._config.database_id, payload)
+        except NotionMCPError as e:
+            logger.warning("Strict 选项清理失败（%s）：%s", prop_name, e)
+            return 0
+        return removed
+
     # ── 文章幂等 upsert ─────────────────────────────────────────
 
     async def upsert_document(

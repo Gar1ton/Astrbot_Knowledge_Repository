@@ -57,6 +57,11 @@ def _option_name(name: str) -> str:
     return name.replace(",", "，")[:_OPTION_MAX_LEN]
 
 
+def sanitize_option_name(name: str) -> str:
+    """`_option_name` 的公共别名：strict 选项清理需按与写库一致的口径比对选项名。"""
+    return _option_name(name)
+
+
 def _rich_text_value(content: str) -> dict[str, Any]:
     return {"rich_text": [{"text": {"content": content[:_RICH_TEXT_LIMIT]}}]}
 
@@ -341,6 +346,7 @@ __all__ = [
     "BLOCK_TEXT_LIMIT",
     "MAX_BODY_BLOCKS",
     "PATH_SEPARATOR",
+    "sanitize_option_name",
     "build_collection_paths",
     "expand_ancestor_names",
     "primary_collection_path",

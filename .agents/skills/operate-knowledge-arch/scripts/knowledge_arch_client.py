@@ -4,26 +4,37 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from http.cookiejar import CookieJar
-from typing import Any
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
-DEFAULT_URL = "http://127.0.0.1:26618"
-DEFAULT_USERNAME = "admin"
+CONNECTION_CONFIG_VERSION = 1
+CONNECTION_KEYRING_SERVICE = "knowledge-arch.codex.connection.v1"
+
+
 DEFAULT_TIMEOUT_SECONDS = 30
 RRF_K = 60
 MAX_QUERIES = 4
 MAX_FINAL_HITS = 20
 MAX_HIT_CHARS = 4000
 MAX_READ_CHARS = 40000
+MAX_NOTION_QA_ITEMS = 20
+MAX_NOTION_QA_QUESTION_CHARS = 2000
+MAX_NOTION_QA_ANSWER_CHARS = 100000
+ASK_EVIDENCE_MODES = ("default", "enhanced", "deep_thinking")
+READ_INTENTS = ("anchored", "full-text")
 
 # Keep this compact distribution-side snapshot synchronized with kacore.config.CONFIG_KEY_POLICY.
 CONFIG_POLICIES: dict[str, dict[str, str]] = {
@@ -147,22 +158,279 @@ def _bounded(value: int, lower: int, upper: int) -> int:
     return max(lower, min(value, upper))
 
 
+class ConnectionNotConfigured(ClientError):
+    code = "connection_not_configured"
+    exit_code = 6
+
+
+class CredentialStoreUnavailable(ClientError):
+    code = "credential_store_unavailable"
+    exit_code = 7
+
+
+class CredentialStore(Protocol):
+    """最小系统凭据库契约，便于隔离测试且不提供明文回退。"""
+
+    def get_password(self, service: str, username: str) -> str | None: ...
+
+    def set_password(self, service: str, username: str, password: str) -> None: ...
+
+    def delete_password(self, service: str, username: str) -> None: ...
+
+
+class KeyringCredentialStore:
+    """通过 keyring 使用操作系统凭据库；依赖缺失时明确失败。"""
+
+    def __init__(self) -> None:
+        try:
+            import keyring
+        except ImportError as exc:
+            raise CredentialStoreUnavailable(
+                "System credential storage requires keyring. Install it into this Python "
+                "environment with: python -m pip install -r requirements-codex-skill.txt"
+            ) from exc
+        try:
+            backend = keyring.get_keyring()
+            if getattr(backend, "priority", 0) <= 0:
+                raise RuntimeError("no usable keyring backend")
+        except Exception as exc:
+            raise CredentialStoreUnavailable(
+                "System credential storage is unavailable. Configure an operating-system "
+                "credential backend and rerun connection-setup."
+            ) from exc
+        self._keyring = keyring
+
+    def get_password(self, service: str, username: str) -> str | None:
+        try:
+            return self._keyring.get_password(service, username)
+        except Exception as exc:
+            raise CredentialStoreUnavailable(
+                "System credential storage could not read the registered password."
+            ) from exc
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        try:
+            self._keyring.set_password(service, username, password)
+        except Exception as exc:
+            raise CredentialStoreUnavailable(
+                "System credential storage could not save the password."
+            ) from exc
+
+    def delete_password(self, service: str, username: str) -> None:
+        try:
+            self._keyring.delete_password(service, username)
+        except Exception as exc:
+            raise CredentialStoreUnavailable(
+                "System credential storage could not remove a replaced password."
+            ) from exc
+
+
+@dataclass(frozen=True)
+class ConnectionProfile:
+    """单一日常实例的非秘密连接资料。"""
+
+    base_url: str
+    username: str
+    credential_id: str | None
+
+
+def _normalize_base_url(base_url: str) -> str:
+    parsed = urlsplit(base_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise UsageError("WebUI URL must be an absolute http(s) URL")
+    if parsed.username or parsed.password:
+        raise UsageError("Do not embed credentials in the WebUI URL")
+    return base_url.strip().rstrip("/")
+
+
+def _credential_id(base_url: str, username: str) -> str:
+    identity = f"{base_url}\0{username}".encode()
+    return hashlib.sha256(identity).hexdigest()
+
+
+def connection_config_path() -> Path:
+    """返回用户级连接配置路径；该文件不含密码。"""
+    if os.name == "nt":
+        root = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        return root / "Codex" / "knowledge-arch" / "connection.json"
+    if sys.platform == "darwin":
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Codex"
+            / "knowledge-arch"
+            / "connection.json"
+        )
+    root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return root / "codex" / "knowledge-arch" / "connection.json"
+
+
+def load_connection_profile(path: Path | None = None) -> ConnectionProfile | None:
+    """加载非秘密单实例配置；损坏配置要求用户重新登记。"""
+    target = path or connection_config_path()
+    if not target.is_file():
+        return None
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("version") != CONNECTION_CONFIG_VERSION:
+            raise ValueError("unsupported connection profile")
+        base_url = _normalize_base_url(str(raw["base_url"]))
+        username = str(raw["username"]).strip()
+        credential_id = raw.get("credential_id")
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ConnectionNotConfigured(
+            "Registered connection details are invalid. Run connection-setup again."
+        ) from exc
+    if not username or (credential_id is not None and not isinstance(credential_id, str)):
+        raise ConnectionNotConfigured(
+            "Registered connection details are invalid. Run connection-setup again."
+        )
+    return ConnectionProfile(
+        base_url=base_url,
+        username=username,
+        credential_id=credential_id or None,
+    )
+
+
+def _write_connection_profile(profile: ConnectionProfile, path: Path | None = None) -> None:
+    """原子写入无密码配置，并在 POSIX 上限制为当前用户可读写。"""
+    target = path or connection_config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": CONNECTION_CONFIG_VERSION,
+        "base_url": profile.base_url,
+        "username": profile.username,
+        "credential_id": profile.credential_id,
+    }
+    with NamedTemporaryFile(
+        "w", encoding="utf-8", dir=target.parent, delete=False, prefix=".connection-"
+    ) as handle:
+        temp_path = Path(handle.name)
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n")
+    try:
+        os.replace(temp_path, target)
+        if os.name != "nt":
+            os.chmod(target, 0o600)
+    except OSError:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _default_credential_store() -> CredentialStore:
+    return KeyringCredentialStore()
+
+
+def connection_status(path: Path | None = None) -> dict[str, str]:
+    """仅报告连接来源状态，不输出地址、用户名、密码或凭据标识。"""
+    env_url = os.environ.get("KNOWLEDGE_ARCH_URL")
+    env_username = os.environ.get("KNOWLEDGE_ARCH_USERNAME")
+    if env_url or env_username:
+        if env_url and env_username:
+            return {"status": "environment_override"}
+        return {"status": "unconfigured", "reason": "temporary_connection_incomplete"}
+    return {"status": "configured" if load_connection_profile(path) else "unconfigured"}
+
+
+def resolve_connection_client(
+    *,
+    path: Path | None = None,
+    credential_store: CredentialStore | None = None,
+) -> tuple[KnowledgeArchClient, str]:
+    """解析临时覆盖或已登记实例，绝不将已登记密码发送给临时目标。"""
+    env_url = os.environ.get("KNOWLEDGE_ARCH_URL")
+    env_username = os.environ.get("KNOWLEDGE_ARCH_USERNAME")
+    env_password = os.environ.get("KR_WEB_PASSWORD")
+    if env_url or env_username:
+        if not env_url or not env_username:
+            raise UsageError(
+                "Temporary connection requires both KNOWLEDGE_ARCH_URL and "
+                "KNOWLEDGE_ARCH_USERNAME."
+            )
+        return KnowledgeArchClient(env_url, env_username, env_password), "environment_override"
+
+    profile = load_connection_profile(path)
+    if profile is None:
+        raise ConnectionNotConfigured(
+            "No Knowledge Arch instance is registered. Run connection-setup first."
+        )
+    if env_password is not None:
+        return KnowledgeArchClient(profile.base_url, profile.username, env_password), "configured"
+    password = None
+    if profile.credential_id:
+        store = credential_store or _default_credential_store()
+        password = store.get_password(CONNECTION_KEYRING_SERVICE, profile.credential_id)
+    return KnowledgeArchClient(profile.base_url, profile.username, password), "configured"
+
+
+def connection_setup(
+    *,
+    path: Path | None = None,
+    credential_store: CredentialStore | None = None,
+    input_func: Callable[[str], str] = input,
+    password_func: Callable[[str], str] = getpass.getpass,
+) -> dict[str, object]:
+    """交互验证后持久化单一实例；失败时不留下新配置或新密码。"""
+    target = path or connection_config_path()
+    previous = load_connection_profile(target)
+    if previous is not None:
+        replace = input_func(
+            "A connection is already registered. Replace it? [y/N]: "
+        ).strip().lower()
+        if replace not in {"y", "yes"}:
+            raise UsageError("Connection setup cancelled; existing registration was kept.")
+    base_url = _normalize_base_url(input_func("Knowledge Arch WebUI URL: "))
+    username = input_func("Knowledge Arch username: ").strip()
+    if not username:
+        raise UsageError("Knowledge Arch username must not be empty")
+    password = password_func(
+        "Knowledge Arch password (leave blank only when authentication is disabled): "
+    )
+    client = KnowledgeArchClient(base_url, username, password or None)
+    verification = doctor(client)
+
+    credential_id = _credential_id(base_url, username) if password else None
+    store = credential_store
+    stored_new_credential = False
+    try:
+        if credential_id:
+            store = store or _default_credential_store()
+            store.set_password(CONNECTION_KEYRING_SERVICE, credential_id, password)
+            stored_new_credential = True
+        _write_connection_profile(
+            ConnectionProfile(base_url=base_url, username=username, credential_id=credential_id),
+            target,
+        )
+    except Exception:
+        if stored_new_credential and store is not None and credential_id:
+            try:
+                store.delete_password(CONNECTION_KEYRING_SERVICE, credential_id)
+            except CredentialStoreUnavailable:
+                pass
+        raise
+
+    if previous and previous.credential_id and previous.credential_id != credential_id:
+        store = store or _default_credential_store()
+        store.delete_password(CONNECTION_KEYRING_SERVICE, previous.credential_id)
+    return {
+        "status": "configured",
+        "auth_required": bool(verification["auth_required"]),
+        "credential_stored": bool(credential_id),
+    }
+
+
 class KnowledgeArchClient:
     """Cookie-aware synchronous client; one short-lived instance per CLI invocation."""
 
     def __init__(
         self,
         base_url: str,
-        username: str = DEFAULT_USERNAME,
+        username: str = "",
         password: str | None = None,
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
-        parsed = urlsplit(base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise UsageError("KNOWLEDGE_ARCH_URL must be an absolute http(s) URL")
-        if parsed.username or parsed.password:
-            raise UsageError("Do not embed credentials in KNOWLEDGE_ARCH_URL")
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _normalize_base_url(base_url)
         self.username = username
         self._password = password
         self.timeout = timeout
@@ -171,11 +439,9 @@ class KnowledgeArchClient:
 
     @classmethod
     def from_env(cls) -> KnowledgeArchClient:
-        return cls(
-            os.environ.get("KNOWLEDGE_ARCH_URL", DEFAULT_URL),
-            username=os.environ.get("KNOWLEDGE_ARCH_USERNAME", DEFAULT_USERNAME),
-            password=os.environ.get("KR_WEB_PASSWORD"),
-        )
+        """兼容入口：解析临时覆盖或用户已登记的单一实例。"""
+        client, _source = resolve_connection_client()
+        return client
 
     def _protect_message(self, message: str) -> str:
         if self._password:
@@ -519,28 +785,143 @@ def search(
     }
 
 
-def read_document(
-    client: KnowledgeArchClient, doc_id: str, start: int, max_chars: int
+def ask_evidence(
+    client: KnowledgeArchClient,
+    question: str,
+    queries: list[str],
+    collection: str | None,
+    *,
+    mode: str,
+    round_number: int,
 ) -> dict[str, Any]:
+    """Call the no-generative-LLM Ask evidence endpoint."""
+    clean_question = question.strip()
+    clean_queries = [query.strip() for query in queries if query.strip()]
+    if not clean_question:
+        raise UsageError("--question must not be empty")
+    if mode not in ASK_EVIDENCE_MODES:
+        raise UsageError(f"Unsupported evidence mode: {mode}")
+    if round_number < 1:
+        raise UsageError("--round must be one or greater")
+    if mode == "deep_thinking" and not collection:
+        raise UsageError("deep_thinking requires --collection")
+    payload = client.request_json(
+        "/api/ask/evidence",
+        method="POST",
+        body={
+            "question": clean_question,
+            "queries": clean_queries or [clean_question],
+            "collection": collection or "",
+            "retrieval_mode": mode,
+            "round": round_number,
+        },
+    )
+    result = _expect_dict(payload, "/api/ask/evidence")
+    if result.get("plugin_llm_used") is not False:
+        raise ApiError("Evidence endpoint did not affirm plugin_llm_used=false")
+    if result.get("full_text_used") is not False:
+        raise ApiError("Evidence endpoint unexpectedly returned full document text")
+    return result
+
+
+def read_document(
+    client: KnowledgeArchClient,
+    doc_id: str,
+    start: int,
+    max_chars: int,
+    *,
+    intent: str,
+) -> dict[str, Any]:
+    if intent not in READ_INTENTS:
+        raise UsageError("read requires --intent anchored or --intent full-text")
     if start < 0:
         raise UsageError("--start must be zero or greater")
     max_chars = _bounded(max_chars, 1, MAX_READ_CHARS)
-    content = client.request_text(
-        f"/api/documents/{quote(doc_id, safe='')}/content",
-        query_params={"format": "md"},
+    payload = client.request_json(
+        f"/api/documents/{quote(doc_id, safe='')}/content/page",
+        query_params={"start": start, "max_chars": max_chars},
     )
-    end = min(len(content), start + max_chars)
-    if start > len(content):
-        start = len(content)
-        end = start
-    return {
-        "doc_id": doc_id,
-        "start": start,
-        "end": end,
-        "total_chars": len(content),
-        "has_more": end < len(content),
-        "content": content[start:end],
-    }
+    result = _expect_dict(payload, "document content page")
+    result["read_intent"] = intent
+    result["full_text_used"] = True
+    return result
+
+
+def graph_estimate(client: KnowledgeArchClient, collection: str) -> dict[str, Any]:
+    payload = client.request_json(
+        "/api/graph/build/estimate",
+        method="POST",
+        body={"collection": collection},
+    )
+    return _expect_dict(payload, "/api/graph/build/estimate")
+
+
+def graph_codex_build(
+    client: KnowledgeArchClient, collection: str, *, apply: bool
+) -> dict[str, Any]:
+    estimate = graph_estimate(client, collection)
+    if not apply:
+        return {
+            "status": "preview",
+            "collection": collection,
+            "estimate": estimate,
+            "plugin_llm_used": False,
+            "embedding_provider_will_be_used": True,
+            "mutation_performed": False,
+            "requires_explicit_confirmation": True,
+        }
+    result = _expect_dict(
+        client.request_json(
+            "/api/graph/codex-build",
+            method="POST",
+            body={"collection": collection, "confirmed": True},
+        ),
+        "/api/graph/codex-build",
+    )
+    result["mutation_performed"] = True
+    return result
+
+
+def graph_next(client: KnowledgeArchClient, job_id: str) -> dict[str, Any]:
+    return _expect_dict(
+        client.request_json(f"/api/graph/codex-build/{quote(job_id, safe='')}/next"),
+        "Codex graph next task",
+    )
+
+
+def graph_submit(
+    client: KnowledgeArchClient, job_id: str, task_id: str, result: Any
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        raise UsageError("--result-json must decode to an object")
+    return _expect_dict(
+        client.request_json(
+            f"/api/graph/codex-build/{quote(job_id, safe='')}/submit",
+            method="POST",
+            body={"task_id": task_id, "result": result},
+        ),
+        "Codex graph task submission",
+    )
+
+
+def graph_retry(
+    client: KnowledgeArchClient, job_id: str, task_id: str
+) -> dict[str, Any]:
+    return _expect_dict(
+        client.request_json(
+            f"/api/graph/codex-build/{quote(job_id, safe='')}/retry",
+            method="POST",
+            body={"task_id": task_id},
+        ),
+        "Codex graph task retry",
+    )
+
+
+def graph_status(client: KnowledgeArchClient, job_id: str) -> dict[str, Any]:
+    return _expect_dict(
+        client.request_json(f"/api/graph/build/{quote(job_id, safe='')}"),
+        "graph build status",
+    )
 
 
 def config_options() -> dict[str, Any]:
@@ -564,6 +945,147 @@ def config_show(client: KnowledgeArchClient, section: str | None) -> dict[str, A
             raise UsageError(f"Unknown effective config section: {section}")
         return {section: redact_secrets(config[section])}
     return redact_secrets(config)
+
+
+def _notion_qa_string_list(value: Any, field: str) -> list[str]:
+    """校验并去重 QA 标签或引用；禁止把任意对象隐式写进同步载荷。"""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise UsageError(f"{field} must be an array of strings")
+    result: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            raise UsageError(f"{field} must contain only strings")
+        text = raw.strip()
+        if not text:
+            continue
+        if len(text) > 1000:
+            raise UsageError(f"{field} entries must not exceed 1000 characters")
+        if text not in result:
+            result.append(text)
+    return result
+
+
+def load_notion_qa_items(input_file: str) -> list[dict[str, Any]]:
+    """读取 Codex 临时生成的 UTF-8 问答列表，供逐条写入已配置 QA 库。"""
+    path = Path(input_file)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise UsageError(f"Cannot read --input-file: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise UsageError("--input-file must contain valid UTF-8 JSON") from exc
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+        raise UsageError("--input-file must be an object with an items array")
+    raw_items = payload["items"]
+    if not raw_items:
+        raise UsageError("--input-file items must not be empty")
+    if len(raw_items) > MAX_NOTION_QA_ITEMS:
+        raise UsageError(f"At most {MAX_NOTION_QA_ITEMS} QA items may be saved at once")
+
+    items: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(raw_items, start=1):
+        if not isinstance(raw_item, dict):
+            raise UsageError(f"items[{index}] must be an object")
+        raw_question = raw_item.get("question")
+        raw_answer = raw_item.get("answer")
+        if not isinstance(raw_question, str) or not raw_question.strip():
+            raise UsageError(f"items[{index}].question must be a non-empty string")
+        if not isinstance(raw_answer, str) or not raw_answer.strip():
+            raise UsageError(f"items[{index}].answer must be a non-empty string")
+        question = raw_question.strip()
+        answer = raw_answer.strip()
+        if len(question) > MAX_NOTION_QA_QUESTION_CHARS:
+            raise UsageError(
+                f"items[{index}].question exceeds {MAX_NOTION_QA_QUESTION_CHARS} characters"
+            )
+        if len(answer) > MAX_NOTION_QA_ANSWER_CHARS:
+            raise UsageError(
+                f"items[{index}].answer exceeds {MAX_NOTION_QA_ANSWER_CHARS} characters"
+            )
+        items.append(
+            {
+                "question": question,
+                "answer": answer,
+                "tags": _notion_qa_string_list(raw_item.get("tags"), f"items[{index}].tags"),
+                "citations": _notion_qa_string_list(
+                    raw_item.get("citations"), f"items[{index}].citations"
+                ),
+            }
+        )
+    return items
+
+
+def notion_save_qa(client: KnowledgeArchClient, input_file: str) -> dict[str, Any]:
+    """把多个原问题/回答逐条推送到已配置的 Notion QA 库。
+
+    目标只能是 `notion_sync.qa_database_id`；文章镜像库 `database_id` 不可作为
+    会话问答写入目标。每条请求由服务端先暂存 outbox，再立即尝试远端写入。
+    """
+    items = load_notion_qa_items(input_file)
+    config = config_show(client, "notion_sync")
+    notion = config.get("notion_sync")
+    if not isinstance(notion, dict):
+        raise ApiError("Effective config is missing notion_sync")
+    if not bool(notion.get("enabled")):
+        raise UsageError("Notion sync is disabled; enable it and restart the plugin first")
+    target_database_id = str(notion.get("qa_database_id", "")).strip()
+    if not target_database_id:
+        raise UsageError(
+            "Notion QA database is not configured (notion_sync.qa_database_id); "
+            "initialize the QA database before saving conversation answers"
+        )
+
+    outcomes: list[dict[str, Any]] = []
+    pushed_count = 0
+    queued_count = 0
+    failed_count = 0
+    for index, item in enumerate(items, start=1):
+        response = _expect_dict(
+            client.request_json(
+                "/api/notion/push-note",
+                method="POST",
+                body={
+                    "content": item["answer"],
+                    "title": item["question"],
+                    "tags": item["tags"],
+                    "citations": item["citations"],
+                    "source": "codex",
+                    "keep_local": False,
+                },
+            ),
+            "/api/notion/push-note",
+        )
+        status = str(response.get("status", "error"))
+        outcome = {
+            "index": index,
+            "question": item["question"],
+            "status": status,
+            "page_id": str(response.get("page_id", "")),
+            "outbox_id": str(response.get("outbox_id", "")),
+            "message": str(response.get("message", "")),
+        }
+        outcomes.append(outcome)
+        if status == "success":
+            pushed_count += 1
+        elif status == "partial":
+            queued_count += 1
+        else:
+            failed_count += 1
+
+    status = "success" if not queued_count and not failed_count else "partial"
+    if failed_count == len(outcomes):
+        status = "error"
+    return {
+        "status": status,
+        "target_database_id": target_database_id,
+        "pushed_count": pushed_count,
+        "queued_count": queued_count,
+        "failed_count": failed_count,
+        "items": outcomes,
+    }
 
 
 def config_set(
@@ -636,6 +1158,12 @@ def restart(client: KnowledgeArchClient, *, apply: bool) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser(
+        "connection-status", help="Show whether a safe local connection is available"
+    )
+    subparsers.add_parser(
+        "connection-setup", help="Interactively register one Knowledge Arch instance"
+    )
     subparsers.add_parser("doctor", help="Probe authentication and core read endpoints")
 
     catalog_parser = subparsers.add_parser(
@@ -654,10 +1182,54 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--limit", type=int, default=10)
     search_parser.add_argument("--max-chars", type=int, default=1600)
 
+    ask_parser = subparsers.add_parser(
+        "ask-evidence", help="Retrieve mode-aware evidence without plugin LLM synthesis"
+    )
+    ask_parser.add_argument("--question", required=True)
+    ask_parser.add_argument("--query", action="append", default=[])
+    ask_parser.add_argument("--mode", choices=ASK_EVIDENCE_MODES, default="default")
+    ask_parser.add_argument("--round", type=int, default=1)
+    ask_scope = ask_parser.add_mutually_exclusive_group(required=True)
+    ask_scope.add_argument("--collection")
+    ask_scope.add_argument("--all", dest="all_collections", action="store_true")
+
     read_parser = subparsers.add_parser("read", help="Read one bounded page of document Markdown")
     read_parser.add_argument("--doc-id", required=True)
     read_parser.add_argument("--start", type=int, default=0)
     read_parser.add_argument("--max-chars", type=int, default=12000)
+    read_parser.add_argument("--intent", choices=READ_INTENTS, required=True)
+
+    notion_save_parser = subparsers.add_parser(
+        "notion-save-qa", help="Save conversation QA records to the configured Notion QA database"
+    )
+    notion_save_parser.add_argument(
+        "--input-file",
+        required=True,
+        help="UTF-8 JSON object: {items:[{question,answer,tags?,citations?}]}",
+    )
+
+    graph_estimate_parser = subparsers.add_parser(
+        "graph-estimate", help="Estimate a LightRAG build without mutating state"
+    )
+    graph_estimate_parser.add_argument("--collection", required=True)
+    graph_build_parser = subparsers.add_parser(
+        "graph-build", help="Preview or start a Codex-driven LightRAG build"
+    )
+    graph_build_parser.add_argument("--collection", required=True)
+    graph_build_parser.add_argument("--apply", action="store_true")
+    graph_next_parser = subparsers.add_parser("graph-next", help="Get the next Codex KG task")
+    graph_next_parser.add_argument("--job-id", required=True)
+    graph_submit_parser = subparsers.add_parser(
+        "graph-submit", help="Submit one Codex entity/relation result"
+    )
+    graph_submit_parser.add_argument("--job-id", required=True)
+    graph_submit_parser.add_argument("--task-id", required=True)
+    graph_submit_parser.add_argument("--result-json", required=True)
+    graph_retry_parser = subparsers.add_parser("graph-retry", help="Retry one failed KG task")
+    graph_retry_parser.add_argument("--job-id", required=True)
+    graph_retry_parser.add_argument("--task-id", required=True)
+    graph_status_parser = subparsers.add_parser("graph-status", help="Show graph build status")
+    graph_status_parser.add_argument("--job-id", required=True)
 
     show_parser = subparsers.add_parser("config-show", help="Show redacted effective configuration")
     show_parser.add_argument("--section")
@@ -679,7 +1251,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.command == "config-options":
+        if args.command == "connection-status":
+            result = connection_status()
+        elif args.command == "connection-setup":
+            result = connection_setup()
+        elif args.command == "config-options":
             result = config_options()
         else:
             client = KnowledgeArchClient.from_env()
@@ -698,8 +1274,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                     limit=args.limit,
                     max_chars=args.max_chars,
                 )
+            elif args.command == "ask-evidence":
+                result = ask_evidence(
+                    client,
+                    args.question,
+                    list(args.query),
+                    None if args.all_collections else args.collection,
+                    mode=args.mode,
+                    round_number=args.round,
+                )
             elif args.command == "read":
-                result = read_document(client, args.doc_id, args.start, args.max_chars)
+                result = read_document(
+                    client,
+                    args.doc_id,
+                    args.start,
+                    args.max_chars,
+                    intent=args.intent,
+                )
+            elif args.command == "notion-save-qa":
+                result = notion_save_qa(client, args.input_file)
+            elif args.command == "graph-estimate":
+                result = graph_estimate(client, args.collection)
+            elif args.command == "graph-build":
+                result = graph_codex_build(client, args.collection, apply=args.apply)
+            elif args.command == "graph-next":
+                result = graph_next(client, args.job_id)
+            elif args.command == "graph-submit":
+                try:
+                    graph_result = json.loads(args.result_json)
+                except json.JSONDecodeError as exc:
+                    raise UsageError("--result-json must be valid JSON") from exc
+                result = graph_submit(client, args.job_id, args.task_id, graph_result)
+            elif args.command == "graph-retry":
+                result = graph_retry(client, args.job_id, args.task_id)
+            elif args.command == "graph-status":
+                result = graph_status(client, args.job_id)
             elif args.command == "config-show":
                 result = config_show(client, args.section)
             elif args.command == "config-set":

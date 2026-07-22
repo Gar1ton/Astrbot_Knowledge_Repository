@@ -12,40 +12,59 @@ python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py ca
 - Use document and collection metadata to select the narrowest relevant collection. Do not load full
   documents merely to discover titles.
 
-## 2. Retrieve compact evidence
+## 2. Select and call the evidence mode
 
-For an exact question, use one query. For comparison or synthesis, decompose the question into 2-4
-independent English retrieval queries when English papers are likely, while preserving important names,
-DOIs, and technical terms.
+Choose the least expensive mode that matches the question:
+
+- `default`: one exact lookup or a narrow factual question; one query, one round.
+- `enhanced`: explanation, comparison, or synthesis across a few dimensions; plan 2-4 focused
+  subqueries and use at most one corrective round.
+- `deep_thinking`: broad, contested, multi-hop, or counterevidence-sensitive research; first lock a
+  concrete collection, then work within the endpoint's returned query and round limits.
+
+Preserve names, DOI fragments, and technical terms. Prefer English subqueries for English papers.
 
 ```powershell
-python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py search `
-  --query "first focused query" --query "second focused query" --all
+python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py ask-evidence `
+  --question "original user question" --query "focused retrieval query" `
+  --mode default --all
 ```
 
-Prefer `--collection NAME` over `--all` when scope is known. Defaults return at most 10 fused hits with
-1600 characters each. Increase `--limit` or `--max-chars` only when the question genuinely needs it;
-hard limits are 20 hits and 4000 characters per hit.
+For enhanced or deep work, repeat `--query` within the returned per-round limit. Prefer
+`--collection NAME` over `--all` whenever scope is known; `deep_thinking` requires it.
 
-The client performs deterministic reciprocal-rank fusion, chunk/content deduplication, context assembly,
-and document metadata enrichment. It does not call any LLM endpoint.
+The endpoint performs deterministic retrieval, fusion, reranking, cutoff, and metadata enrichment. It
+returns evidence only with `plugin_llm_used=false` and `full_text_used=false`. Codex performs all
+planning, assessment, correction, and synthesis.
 
 ## 3. Correct only material gaps
 
-Inspect whether the evidence covers the entities, relationship, comparison dimensions, time period, and
-counterevidence requested. If one material gap remains, issue one corrective search. Stop after that and
-report unresolved gaps rather than expanding indefinitely.
+Check whether evidence covers the requested entities, relationships, comparison dimensions, time period,
+and counterevidence. If a material gap remains and the returned `limits.max_rounds` permits it, issue a
+targeted next call with `--round 2` (or the next allowed number) and new queries. Combine prior evidence
+in Codex; the endpoint does not generate or remember an answer. Stop at the limit and report unresolved
+gaps instead of expanding indefinitely.
 
-When a precise passage or broader argument is essential, page through one document at a time:
+Use the low-level `search` command only to troubleshoot retrieval or inspect deterministic raw fusion,
+not as the default research path.
+
+## 4. Gate document reading
+
+Do not read a document merely because it is the top hit. Reading is allowed only when:
+
+1. metadata/evidence has anchored one unique paper and a passage or broader argument from that paper is
+   necessary; use `--intent anchored`; or
+2. the user explicitly asked to read the full text; use `--intent full-text`.
 
 ```powershell
 python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py read `
-  --doc-id DOCUMENT_ID --start 0 --max-chars 12000
+  --doc-id DOCUMENT_ID --intent anchored --start 0 --max-chars 12000
 ```
 
-Continue from the returned `end` only if `has_more` is true and more text is necessary.
+The server returns only the requested page. Continue from `end` only when `has_more` is true and the
+allowed reading intent still requires more text.
 
-## 4. Answer from evidence
+## 5. Answer from evidence
 
 - Put citations directly after supported claims, using available title, author/year, page, and `doc_id`.
 - Distinguish the source's claim from your inference. Label cross-source synthesis as synthesis.

@@ -24,7 +24,7 @@ jobs:
 
           required = {
               "main.py", "metadata.yaml", "_conf_schema.json", "requirements.txt",
-              "requirements-additional.txt", "README.md", "CHANGELOG.md", "LICENSE",
+              "requirements-additional.txt", "requirements-codex-skill.txt", "README.md", "CHANGELOG.md", "LICENSE",
               "logo.png", "web/server.py", "pages/index.html", ".published-source",
           }
           forbidden = ("data/", "deliverables/", "dev/", "docs/", "tests/", "tools/", "web/frontend/")

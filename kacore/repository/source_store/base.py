@@ -222,18 +222,24 @@ class SourceDocumentStore(ABC):
         return hits[:limit]
 
     async def get_corpus_stats(self) -> dict[str, int]:
-        """Return aggregate corpus counts used by hot status endpoints.
+        """Return aggregate counts for documents eligible for retrieval.
 
-        Production stores should override this with database-native aggregate queries. The fallback
-        preserves compatibility for small in-memory/fake stores without changing their contracts.
+        Only documents whose lifecycle is ``active`` contribute to the document, chunk, and pending
+        reindex counts. Production stores should override this with database-native aggregate
+        queries; the fallback preserves that contract for small in-memory/fake stores.
         """
+        from kacore.domain.models import DocumentLifecycle
+
         docs = await self.list_documents()
+        active_docs = [doc for doc in docs if doc.lifecycle_state is DocumentLifecycle.ACTIVE]
         chunk_count = 0
-        for doc in docs:
+        for doc in active_docs:
             chunk_count += len(await self.list_chunks(doc.doc_id))
         return {
-            "document_count": len(docs),
-            "pending_reindex_count": sum(1 for doc in docs if getattr(doc, "needs_reindex", False)),
+            "document_count": len(active_docs),
+            "pending_reindex_count": sum(
+                1 for doc in active_docs if getattr(doc, "needs_reindex", False)
+            ),
             "chunk_count": chunk_count,
         }
 
@@ -414,6 +420,35 @@ class SourceDocumentStore(ABC):
     @abstractmethod
     async def mark_interrupted_build_jobs(self) -> int:
         """将启动时遗留的 queued/running/pause_requested 标为 interrupted；paused 保留可恢复。"""
+        ...
+
+    @abstractmethod
+    async def replace_codex_graph_tasks(self, job_id: str, tasks: list[dict]) -> None:
+        """原子替换一个构建任务的 Codex 切片账本；task_id 为稳定主键。"""
+        ...
+
+    @abstractmethod
+    async def list_codex_graph_tasks(
+        self, job_id: str, status: str | None = None
+    ) -> list[dict]:
+        """按文档与切片顺序列出任务；可按状态过滤。"""
+        ...
+
+    @abstractmethod
+    async def get_codex_graph_task(self, task_id: str) -> dict | None:
+        """读取单个 Codex 图谱任务；不存在返回 None。"""
+        ...
+
+    @abstractmethod
+    async def update_codex_graph_task(
+        self, task_id: str, status: str, last_error: str = ""
+    ) -> bool:
+        """更新任务状态与最近错误；任务不存在返回 False。"""
+        ...
+
+    @abstractmethod
+    async def get_latest_codex_graph_build_job(self) -> dict | None:
+        """读取仍在等待 Codex 的最新构建任务；不存在返回 None。"""
         ...
 
     # ── Zotero 逻辑镜像（单向 Pull）───────────────────────────────

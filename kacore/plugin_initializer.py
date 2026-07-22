@@ -470,6 +470,17 @@ class PluginInitializer:
             rerank_config=rerank_cfg,
         )
 
+        # 4.8a) Codex/外部 agent 的无生成式 LLM 证据召回器。只复用检索、reranker
+        # 与各档证据预算；问题拆解、充分性判断和作答留给调用方 agent。
+        from kacore.pipelines.agent_evidence import AgentEvidenceOrchestrator
+
+        self.agent_evidence_orchestrator = AgentEvidenceOrchestrator(
+            retrieval_orchestrator=self.retrieval_orchestrator,
+            reranker=self.reranker,
+            enhanced_config=self._config.get_enhanced_recall_config(),
+            deep_config=dt_cfg,
+        )
+
         # 4.8b) 增强召回编排器（A-RAG「2+1」中间档）。与 deep 共享 reranker 实例与
         # 独立 LLM endpoint 决策（同为研究型内部 agent，不重复膨胀配置面）。
         from kacore.pipelines.enhanced_recall_orchestrator import EnhancedRecallOrchestrator
@@ -515,6 +526,7 @@ class PluginInitializer:
             retrieval_orchestrator=self.retrieval_orchestrator,
             deep_thinking_orchestrator=self.deep_thinking_orchestrator,
             enhanced_recall_orchestrator=self.enhanced_recall_orchestrator,
+            agent_evidence_orchestrator=self.agent_evidence_orchestrator,
             reranker=self.reranker,
             metrics=self.metrics,
             progress_store=self.progress_store,
@@ -744,7 +756,8 @@ class PluginInitializer:
 
     async def _periodic_notion_sync(self) -> None:
         """Notion 周期增量推送：每轮 sleep 当前配置间隔（重读以吸收前端改值），
-        再触发一次 push_all(force=False)；异常吞掉记日志不影响循环。"""
+        再经 `api.sync_notion_push` 触发一次后台推送——与手动按钮共用同一进度任务，
+        使周期推送也在左下角进度条可视；异常吞掉记日志不影响循环。"""
         logger.info("Notion periodic push scheduled.")
         try:
             while True:
@@ -753,11 +766,10 @@ class PluginInitializer:
                     logger.info("Notion 周期推送间隔置 0，任务退出。")
                     return
                 await asyncio.sleep(interval)
-                if self.notion_sync_pipeline is not None:
-                    try:
-                        await self.notion_sync_pipeline.push_all(force=False)
-                    except Exception as exc:
-                        logger.error("Notion periodic push failed: %s", exc)
+                try:
+                    await self.api.sync_notion_push(force=False)
+                except Exception as exc:
+                    logger.error("Notion periodic push failed: %s", exc)
         except asyncio.CancelledError:
             logger.info("Notion periodic push task cancelled.")
 

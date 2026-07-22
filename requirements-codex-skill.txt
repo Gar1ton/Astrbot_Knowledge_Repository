@@ -1,0 +1,2 @@
+# Codex 项目级 Knowledge Arch Skill 的轻量本地凭据存储依赖。
+keyring

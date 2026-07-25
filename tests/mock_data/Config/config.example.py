@@ -73,3 +73,14 @@ EMBEDDING_API_URL = "https://api.openai.com/v1"
 RERANK_MODEL = "Alibaba-NLP/gte-reranker-modernbert-base"
 # 也可切换：RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 DEEP_THINKING_RERANK_WEIGHT = 0.2
+
+# ── MemEcho 托管记忆 API（可选）────────────────────────────────────
+# Key 只能通过 KR_MEMECHO_API_KEY 环境变量或 WebUI 加密 secret store 提供；
+# 不要在本文件新增 MEMECHO_API_KEY，避免真实凭证进入工作区。
+MEMECHO_ENABLED = False
+MEMECHO_BASE_URL = "https://api.artific.social"
+MEMECHO_DEFAULT_VAULT_ID = ""  # 创建/选择 vault 后填入 library_id
+MEMECHO_QUERY_READONLY = True  # True：Ask 召回不写查询历史
+MEMECHO_WRITE_BACK_ENABLED = False  # True：把问答追加回 vault（会产生远端写入）
+MEMECHO_TIMEOUT_SECONDS = 30
+MEMECHO_IMPORT_PRESET = "default"

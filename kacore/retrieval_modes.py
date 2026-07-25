@@ -11,6 +11,9 @@ MODE_ENHANCED = "enhanced"
 MODE_GRAPH_MIXED = "graph_mixed"
 MODE_GRAPH_ONLY = "graph_only"
 MODE_DEEP_THINKING = "deep_thinking"
+# MemEcho 召回（分支 Experiment-with-MemEcho-API 新增）：托管 MemoryEcho 记忆库的语义召回，
+# 与本地检索二选一，不占用本地 collection（用远端 vault），故不属于 STRICT_COLLECTION_MODES。
+MODE_MEMECHO = "memecho"
 
 LEGACY_MODE_HIGH_PRECISION = "high_precision"
 
@@ -21,6 +24,7 @@ VALID_RETRIEVAL_MODES = frozenset(
         MODE_GRAPH_MIXED,
         MODE_GRAPH_ONLY,
         MODE_DEEP_THINKING,
+        MODE_MEMECHO,
     }
 )
 STRICT_COLLECTION_MODES = frozenset(
@@ -43,6 +47,7 @@ __all__ = [
     "MODE_ENHANCED",
     "MODE_GRAPH_MIXED",
     "MODE_GRAPH_ONLY",
+    "MODE_MEMECHO",
     "STRICT_COLLECTION_MODES",
     "VALID_RETRIEVAL_MODES",
     "normalize_retrieval_mode",

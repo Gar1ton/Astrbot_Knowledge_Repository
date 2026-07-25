@@ -28,7 +28,8 @@ type RetrievalMode =
   | "graph_mixed"
   | "graph_only"
   | "fulltext"
-  | "deep_thinking";
+  | "deep_thinking"
+  | "memecho";
 
 interface Message {
   id?: number;
@@ -66,6 +67,7 @@ function retrievalModeLabel(
   if (mode === "deep_degraded_to_default") return t("chat_retrieval_deep_degraded");
   if (mode === "enhanced_recall") return t("chat_retrieval_enhanced_mode");
   if (mode === "enhanced_degraded_to_default") return t("chat_retrieval_enhanced_degraded");
+  if (mode === "memecho") return t("chat_retrieval_memecho_mode");
   return t("chat_retrieval_milvus");
 }
 
@@ -688,6 +690,8 @@ export function ChatPanel({ width }: { width?: number }) {
   const [liveProgress, setLiveProgress] = useState<LiveProgressDetail | null>(null);
   const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [retrievalMode, setRetrievalMode] = useState<RetrievalMode>("default");
+  // MemEcho 召回可用性：memecho.enabled + API Key 已配 + 默认记忆库已设（读 effective config）。
+  const [memechoReady, setMemechoReady] = useState(false);
   const personaEnabled = false;
   const [useEnglishRetrieval, setUseEnglishRetrieval] = useState(true);
   const [answerLanguage, setAnswerLanguage] = useState<"auto" | "zh" | "en">("auto");
@@ -718,6 +722,12 @@ export function ChatPanel({ width }: { width?: number }) {
         }
         const ns = (cfg.notion_sync as { enabled?: boolean } | undefined)?.enabled;
         if (!cancelled) setNotionEnabled(Boolean(ns));
+        const me = cfg.memecho as
+          | { enabled?: boolean; api_key_present?: boolean; default_vault_id?: string }
+          | undefined;
+        if (!cancelled) {
+          setMemechoReady(Boolean(me?.enabled && me?.api_key_present && me?.default_vault_id));
+        }
       })
       .catch(() => {
         /* 配置不可用时保持默认 auto，不打断聊天 */
@@ -757,7 +767,8 @@ export function ChatPanel({ width }: { width?: number }) {
     if (!collectionName && (retrievalMode === "deep_thinking" || retrievalMode === "graph_mixed" || retrievalMode === "graph_only")) {
       setRetrievalMode("default");
     }
-  }, [selectedDocId, collectionName, retrievalMode]);
+    if (!memechoReady && retrievalMode === "memecho") setRetrievalMode("default");
+  }, [selectedDocId, collectionName, retrievalMode, memechoReady]);
 
   function handleCite(msg: Message, n: number) {
     const src = msg.sources?.find((s) => s.n === n);
@@ -1162,6 +1173,7 @@ export function ChatPanel({ width }: { width?: number }) {
                           { value: "graph_only" as RetrievalMode,     label: t("chat_retrieval_graph"),    desc: t("chat_retrieval_graph_desc"),    disabled: !isLightRAG },
                           { value: "graph_mixed" as RetrievalMode, label: t("chat_retrieval_graph_mixed"), desc: t("chat_retrieval_graph_mixed_desc"), disabled: !isLightRAG },
                           { value: "deep_thinking" as RetrievalMode,  label: t("chat_retrieval_deep"),     desc: t("chat_retrieval_deep_desc"),     disabled: !collectionName },
+                          { value: "memecho" as RetrievalMode,        label: t("chat_retrieval_memecho"),  desc: t("chat_retrieval_memecho_desc"),  disabled: !memechoReady },
                           { value: "fulltext" as RetrievalMode,       label: t("chat_retrieval_fulltext"), desc: t("chat_retrieval_fulltext_desc"), disabled: !selectedDocId },
                         ]
                       ).map(({ value, label, desc, disabled }) => {

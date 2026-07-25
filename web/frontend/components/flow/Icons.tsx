@@ -82,6 +82,15 @@ export function StageIcon({ name }: { name: string }) {
       </IconFrame>
     );
   }
+  if (name === "echo") {
+    return (
+      <IconFrame>
+        <circle cx="12" cy="12" r="2.1" />
+        <path d="M8.6 8.6a5 5 0 0 0 0 6.8M15.4 8.6a5 5 0 0 1 0 6.8" />
+        <path d="M6 6a9 9 0 0 0 0 12M18 6a9 9 0 0 1 0 12" />
+      </IconFrame>
+    );
+  }
   return (
     <IconFrame>
       <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />

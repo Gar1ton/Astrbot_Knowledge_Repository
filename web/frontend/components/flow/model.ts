@@ -10,6 +10,7 @@ export type FlowStageId =
   | "vector_store"
   | "retrieval"
   | "graph"
+  | "memecho"
   | "ask"
   | "sync";
 
@@ -26,7 +27,7 @@ export type FlowStageMeta = {
   titleKey: I18nKey;
   descKey: I18nKey;
   roleKey: I18nKey;
-  icon: "doc" | "spark" | "db" | "layers" | "graph" | "chat" | "cloud" | "book";
+  icon: "doc" | "spark" | "db" | "layers" | "graph" | "chat" | "cloud" | "book" | "echo";
   kind: "pipe" | "dest" | "source";
   link?: { labelKey: I18nKey; href: string; primary?: boolean };
 };
@@ -82,8 +83,16 @@ export const STAGE_META: Record<FlowStageId, FlowStageMeta> = {
     kind: "pipe",
     link: { labelKey: "flow_open_graph", href: "/graph" },
   },
-  ask: {
+  memecho: {
     idx: 6,
+    titleKey: "flow_stage_memecho",
+    descKey: "flow_stage_memecho_desc",
+    roleKey: "flow_role_parallel",
+    icon: "echo",
+    kind: "pipe",
+  },
+  ask: {
+    idx: 7,
     titleKey: "flow_stage_ask",
     descKey: "flow_stage_ask_desc",
     roleKey: "flow_role_interface_switchable",
@@ -92,7 +101,7 @@ export const STAGE_META: Record<FlowStageId, FlowStageMeta> = {
     link: { labelKey: "flow_open_ask", href: "/ask", primary: true },
   },
   sync: {
-    idx: 7,
+    idx: 8,
     titleKey: "flow_stage_sync",
     descKey: "flow_stage_sync_desc",
     roleKey: "flow_role_interface_bypass",
@@ -108,6 +117,7 @@ export const FIELD_LABEL_KEYS: Partial<Record<FlowStageId, I18nKey>> = {
   vector_store: "flow_field_backend",
   retrieval: "flow_field_strategy",
   graph: "flow_field_enabled",
+  memecho: "flow_field_enabled",
   sync: "flow_field_enabled",
 };
 
@@ -116,6 +126,7 @@ export const SWITCH_MAP: Partial<Record<FlowStageId, { section: string; key: str
   embedding: { section: "embedding", key: "provider" },
   vector_store: { section: "vector_db", key: "backend" },
   graph: { section: "graph", key: "enabled", toBool: true },
+  memecho: { section: "memecho", key: "enabled", toBool: true },
 };
 
 // 整体右移一列，最左列(col 1)留给 Zotero 可选来源；与 ingest 同行(row 2)。
@@ -127,6 +138,7 @@ export const GRID: Record<FlowStageId, { col: number; row: number }> = {
   vector_store: { col: 4, row: 2 },
   retrieval: { col: 5, row: 1 },
   graph: { col: 5, row: 3 },
+  memecho: { col: 5, row: 4 },
   ask: { col: 6, row: 2 },
 };
 
@@ -138,6 +150,8 @@ export const EDGES: FlowEdge[] = [
   { from: "vector_store", to: "graph", labelKey: "flow_edge_graph_mixed" },
   { from: "retrieval", to: "ask" },
   { from: "graph", to: "ask" },
+  { from: "ingest", to: "memecho", labelKey: "flow_edge_memecho", dashed: true },
+  { from: "memecho", to: "ask" },
   { from: "ingest", to: "sync", labelKey: "flow_edge_backup", dashed: true, vertical: true },
 ];
 

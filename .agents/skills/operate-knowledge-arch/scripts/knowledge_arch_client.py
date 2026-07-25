@@ -89,6 +89,15 @@ CONFIG_POLICIES: dict[str, dict[str, str]] = {
         "rerank_weight": "none",
         "corrective_enabled": "none",
     },
+    "memecho": {
+        "enabled": "restart",
+        "base_url": "restart",
+        "default_vault_id": "none",
+        "query_readonly": "none",
+        "write_back_enabled": "none",
+        "timeout_seconds": "none",
+        "import_preset": "none",
+    },
 }
 
 _SECRET_MARKERS = ("password", "secret", "api_key", "access_key", "token")

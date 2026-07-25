@@ -187,6 +187,7 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
     rerank_cfg = config.get_rerank_config()
     r2_cfg = config.get_r2_sync_config()
     notion_cfg = config.get_notion_sync_config()
+    memecho_cfg = config.get_memecho_config()
 
     has_local = module_available("sentence_transformers")
     has_milvus = module_available("pymilvus")
@@ -336,6 +337,33 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         },
     }
 
+    # ⑤.5 MemEcho 云端记忆库召回：可选并行支路（与 graph 平级）。off/ready/degraded 三态由
+    # enabled + API Key 存在态（runtime 探针位）+ default_vault_id 共同判定。无 pip 依赖。
+    memecho_key_present = bool(getattr(config, "runtime_memecho_key_present", False))
+    if not memecho_cfg.enabled:
+        memecho_status = STATUS_OFF
+    elif memecho_key_present and memecho_cfg.default_vault_id:
+        memecho_status = STATUS_READY
+    else:
+        memecho_status = STATUS_DEGRADED
+    memecho = {
+        "id": "memecho",
+        "current": "on" if memecho_cfg.enabled else "off",
+        "candidates": ["on", "off"],
+        "status": memecho_status,
+        "switchable": True,
+        "consequence": CONSEQUENCE_RESTART,
+        "required_deps": [],
+        "configured": memecho_cfg.enabled,
+        "detail": {
+            "base_url": memecho_cfg.base_url,
+            "vault_id": memecho_cfg.default_vault_id,
+            "api_key_present": memecho_key_present,
+            "query_readonly": memecho_cfg.query_readonly,
+            "write_back_enabled": memecho_cfg.write_back_enabled,
+        },
+    }
+
     # ⑥ 问答模式：普通 Ask 配置即时生效；rerank 仅供 Deep Thinking 路径使用。
     rerank_enabled = rerank_cfg.provider == "cross_encoder"
     rerank_ready = rerank_enabled and has_local
@@ -386,7 +414,7 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         },
     }
 
-    return [zotero, ingest, embedding, vector_store, retrieval, graph, ask, sync]
+    return [zotero, ingest, embedding, vector_store, retrieval, graph, memecho, ask, sync]
 
 
 def detect_capabilities(config: Config) -> dict[str, Any]:

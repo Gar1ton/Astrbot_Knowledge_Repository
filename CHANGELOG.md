@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+### 新增功能 (Added)
+
+- **真实开发环境与 MemEcho API 冒烟入口**：将真实 SQLite / Milvus Lite / LightRAG / LLM、
+  PDF 种子、索引自动重建及 `.test_data/` 归档/恢复能力移植到当前 `kacore` 分支；新增
+  `tests/mocks/run_dev_realtime.py` 组合根及 `realtime_config.py` / `realtime_data.py` 辅助模块，
+  注入加密 secret store、`MemEchoClient` 与 `MemEchoRecall`，可通过 WebUI/HTTP 验证 probe、
+  vault、集合导入和 `retrieval_mode=memecho` 问答。真实 Key 仅从 `KR_MEMECHO_API_KEY` 或加密
+  secret store 读取（`tests/mock_data/Config/config.example.py`、`tests/mocks/README.md`）。
+- **MemEcho（MemoryEcho）召回接入**（分支 `Experiment-with-MemEcho-API`）：新增兼容 Artific 托管记忆
+  服务 MemoryEcho API 的召回模块，作为一种新的知识检索方法 `memecho`——独立 flow 阶段 + 检索模式，
+  二选一独立，不与本地 LightRAG/Milvus 融合；**默认关闭**，未配置 API Key 时行为与现状逐字节一致。
+  - 配置/模式：`kacore/retrieval_modes.py` 注册 `MODE_MEMECHO`；`kacore/config.py` 新增
+    `MemEchoConfig`、`get_memecho_config`、`CONFIG_KEY_POLICY["memecho"]`、`ENV_MEMECHO_API_KEY`
+    与 `to_public_dict` 脱敏（`runtime_memecho_key_present`）。
+  - 适配器/编排：新增 `kacore/adapters/memecho/client.py`（aiohttp 客户端：vaults / query-readonly /
+    query / append / import_file(SSE) / usage / probe + 降级解析 + 错误码→异常映射，可注入 transport）
+    与 `kacore/pipelines/memecho_recall.py`（召回 shaping、写回、文件导入编排）。
+  - API/组合根/路由：`kacore/api.py` 新增 `ask` 的 `memecho` 分支及
+    `get_memecho_config`/`save|delete_memecho_api_key`/`probe_memecho`/`list|create_memecho_vault`/
+    `import_collection_to_memecho`（API Key 走加密 `secret_store`，永不回传明文）；
+    `kacore/plugin_initializer.py` 按 `memecho.enabled` 懒装配注入；`web/server.py` 新增
+    `/api/memecho/*` 路由。
+  - 能力/薄壳：`kacore/capabilities.py` 新增 `memecho` 数据流阶段（off/ready/degraded）；
+    `main.py` 与 `kacore/research_skill.py` 补 memecho 模式文案与可选项。
+  - 前端：flow 面板新增 MemEcho 节点（`components/flow/model.ts`、`Icons.tsx`）与专用
+    `MemEchoQuickConfig.tsx`（密钥存删 + 连通探针 + 建库/选库 + 集合导入）；`lib/api.ts` 客户端方法与
+    类型、`lib/flowHealth.ts`、`lib/i18n.ts`（中英）、`components/panels/ChatPanel.tsx` 模式选择接入；
+    `pages/` 静态产物已同步。
+
+### 变更 (Changed)
+
+- **版本号规则（分支 `Experiment-with-MemEcho-API`）**：`bump_version.py` 全部版本正则支持可选 `.ME`
+  构建后缀并在 patch/minor/major bump 时保留，本分支版本格式固定 `x.x.x.ME`。
+
+### 测试 (Tests)
+
+- 新增 `tests/backend/test_run_dev_realtime.py`，离线覆盖 MemEcho 配置默认值/显式值、禁用态、
+  缺 Key 诊断、动态 Key 轮换装配及配置模板无明文 Key；开发入口与现有 MemEcho/Web 路由定向
+  回归 107 passed，全后端在 Windows UTF-8 模式下 727 passed / 1 skipped。
+- 新增 `tests/backend/test_memecho_client.py`、`test_memecho_recall.py`、`test_memecho_api.py`
+  （鉴权/端点/请求体/错误码/SSE/探针；召回 shaping、降级兜底、写回容错、导入汇总；ask(memecho) 分支
+  与缺 vault/未装配/未启用错误路径、密钥门面不泄明文、能力三态、模式登记与非严格集合）。
+  `tests/backend/test_capabilities.py` 与 `test_web_server.py` 的流水线顺序断言纳入 `memecho` 阶段；
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 策略快照同步 memecho。
+
 ## [v1.0.8] — 2026-07-21
 
 ### 新增功能 (Added)

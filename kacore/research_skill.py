@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from kacore.retrieval_modes import (
     MODE_GRAPH_MIXED,
+    MODE_MEMECHO,
     STRICT_COLLECTION_MODES,
     VALID_RETRIEVAL_MODES,
     normalize_retrieval_mode,
@@ -208,6 +209,17 @@ class ResearchService:
         available_modes = ["default", "enhanced", "deep_thinking"]
         if any(lightrag_ready.values()):
             available_modes.append(MODE_GRAPH_MIXED)
+        # MemEcho 云端记忆库召回：仅在已启用 + 配好 API Key + 记忆库时列为可选（二选一独立）。
+        try:
+            memecho_cfg = await self._api.get_memecho_config()
+        except Exception:
+            memecho_cfg = {}
+        if (
+            memecho_cfg.get("enabled")
+            and memecho_cfg.get("api_key_present")
+            and memecho_cfg.get("default_vault_id")
+        ):
+            available_modes.append(MODE_MEMECHO)
 
         # 正文精确命中：防「title/tag 没标 → 误判库里没有」的假阴性。
         # 命中正文时 exact_match=True，主 LLM 不得再回答「库里没有」。

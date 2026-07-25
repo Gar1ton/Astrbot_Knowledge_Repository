@@ -1,5 +1,54 @@
 # TODO
 
+## 未发布：真实开发环境脚本移植与 MemEcho API 冒烟入口 (completed)
+
+### Technical implementation path
+
+- [x] **Phase 1 — 入口与装配移植**：将 `tests/mocks/run_dev_realtime.py` 的真实
+  SQLite / Milvus / LightRAG / LLM、PDF 种子、索引重建及归档恢复能力适配到当前
+  `kacore` 包结构，并让入口脚本正式进入当前分支。
+- [x] **Phase 2 — MemEcho 测试装配**：为本地真实环境注入独立 secret store、
+  `MemEchoClient` 与 `MemEchoRecall`，支持经 Web API 完成探针、vault、集合导入和
+  `retrieval_mode=memecho` 问答验证，真实 API Key 不进入仓库。
+- [x] **Phase 3 — 契约、文档与验证**：补安全配置模板、启动/HTTP 验证说明及离线装配测试；
+  通过定向 pytest、Ruff 与编码检查后更新 CHANGELOG。
+
+### Verification
+
+- `python -m pytest tests/backend/test_run_dev_realtime.py tests/backend/test_memecho_client.py
+  tests/backend/test_memecho_recall.py tests/backend/test_memecho_api.py
+  tests/backend/test_web_server.py -q` → 107 passed。
+- Windows `PYTHONUTF8=1`：`python -m pytest tests/backend -q` → 727 passed, 1 skipped；
+  不设 UTF-8 模式时仅既有 Notion Skill 子进程用例受控制台代码页影响，单独启用后通过。
+- `python -m ruff check .` → All checks passed；`python -m mypy` → Success（3 source files）；
+  `git diff --check` 与新增/修改文本 UTF-8 无 BOM/替换字符检查通过。
+- 真实联网写入（create vault / import / query）未自动执行；用户可提供
+  `KR_MEMECHO_API_KEY` 后按 `tests/mocks/README.md` 显式触发。
+
+## 未发布：接入 MemoryEcho API 召回模块 · 新检索方法 MemEcho (🚧)
+
+> 分支 `Experiment-with-MemEcho-API` 专属；版本格式固定 `x.x.x.ME`，本特性首个发布版 = `v1.0.9.ME`
+> （首次引入 `.ME` 后缀用 `python bump_version.py --version v1.0.9.ME`，此后 patch 自动保留后缀）。
+> 设计定案：独立 flow 阶段 + 新检索模式 `memecho`；完整读写（召回+写回+文件导入）；仅独立模式二选一，不与本地检索融合。
+> 非破坏铁律：`memecho.enabled=false` 或未配置 API Key 时行为与现状逐字节一致。
+
+### Technical implementation path
+
+- [x] **Phase 0 — 版本规则与挂账**：`bump_version.py` 全部版本正则支持可选 `.ME` 后缀并在 bump 时保留；本 TODO 段落建立。
+- [x] **Phase 1 — 后端配置层**：`retrieval_modes.py` 加 `MODE_MEMECHO`（入 `VALID`、不入 `STRICT_COLLECTION_MODES`）；`config.py` 加 `MemEchoConfig`+`get_memecho_config`+`CONFIG_KEY_POLICY["memecho"]`+`ENV_MEMECHO_API_KEY`+`runtime_memecho_key_present`+effective 段脱敏。
+- [x] **Phase 2 — 适配器与编排**：新建 `kacore/adapters/memecho/client.py`（aiohttp，可注入 transport：vaults/append/import_file(SSE)/query-readonly/usage/probe + degraded 解析 + 错误码映射）与 `kacore/pipelines/memecho_recall.py`（recall / write_back / import_documents）。
+- [x] **Phase 3 — ask 分支/组合根/Web 路由**：`api.py` 加 `memecho` 分支（二选一，不触本地 orchestrator）+ key/probe/vaults/import 方法；`plugin_initializer.py` 按 `memecho.enabled` 懒装配注入；`web/server.py` 加 `/api/memecho/*` 路由。
+- [x] **Phase 4 — 能力探针与薄壳**：`capabilities.py` 加 `memecho` stage（off/ready/degraded）；`main.py`/`research_skill.py` 补 memecho 模式文案与可选项。
+- [x] **Phase 5 — 前端 flow/文案**：`flow/model.ts`+`Icons.tsx`+`MemEchoQuickConfig.tsx`+`QuickConfigPanel.tsx`+`lib/api.ts`+`lib/flowHealth.ts`+`lib/i18n.ts`+`ChatPanel.tsx` 全链路接入 memecho（flow 快配为规范配置面，未在 SettingModal 重复）。
+- [x] **Phase 6 — 测试与验证**：新增 `test_memecho_client/recall/api`；`test_capabilities`/`test_web_server` 顺序断言纳入 memecho；策略快照同步。全量 pytest / ruff / mypy / 前端 build 全绿。
+
+### Verification
+
+- 容器内：`python -m pytest tests/backend -q` → 721 passed；1 个既有 reranker 空闲卸载计时抖动失败，单独复跑 `tests/backend/test_reranker.py::test_cross_encoder_reloads_after_idle_unload` → 1 passed。
+- 容器内：`ruff check .` → All checks passed；`mypy` → Success（3 source files）。
+- 前端：`cd web/frontend && npm ci && npm run build` → 编译 + TypeScript 通过、13 页静态产出；`python tools/sync_frontend.py` → 同步 357 文件到 `pages/`，`--check` 一致。
+- 真实联网冒烟（需 `KR_MEMECHO_API_KEY`、会计费）尚未执行：留待用户以真实 Key 验证 create vault → import → query-readonly 端到端。
+
 ## 未发布：Codex 对话问答保存至指定 Notion QA 库 (🚧)
 
 ### Technical implementation path

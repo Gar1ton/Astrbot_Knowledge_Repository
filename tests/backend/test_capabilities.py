@@ -73,7 +73,8 @@ def test_pipeline_has_ordered_stages_with_zotero_first(monkeypatch: pytest.Monke
     )
     ids = [s["id"] for s in detect_pipeline(_cfg(dim=384))]
     assert ids == [
-        "zotero", "ingest", "embedding", "vector_store", "retrieval", "graph", "ask", "sync"
+        "zotero", "ingest", "embedding", "vector_store", "retrieval",
+        "graph", "memecho", "ask", "sync",
     ]
 
 

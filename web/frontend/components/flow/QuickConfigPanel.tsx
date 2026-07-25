@@ -5,6 +5,7 @@ import type { I18nKey, Lang } from "@/lib/i18n";
 import { backendLabel, type FlowStageId } from "./model";
 import { DirPickerDialog } from "./DirPickerDialog";
 import { ZoteroQuickConfig } from "./ZoteroQuickConfig";
+import { MemEchoQuickConfig } from "./MemEchoQuickConfig";
 
 export type FlowConfigSnapshot = EffectiveConfig;
 export type QuickConfigValue = string | number | boolean;
@@ -21,7 +22,8 @@ export type ConfigSection =
   | "zotero_sync"
   | "rerank"
   | "deep_thinking"
-  | "enhanced_recall";
+  | "enhanced_recall"
+  | "memecho";
 
 // 由各 panel 上报给 FlowNode 头部徽章的草稿态；徽章据此变「保存」。
 export type QuickConfigDirty = { count: number; canSave: boolean };
@@ -710,8 +712,9 @@ const GenericQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelProps>(
   );
 });
 
-// Zotero 阶段走标签式专用面板，其余阶段走通用字段面板。
+// Zotero / MemEcho 阶段走专用面板，其余阶段走通用字段面板。
 export const QuickConfigPanel = forwardRef<QuickConfigHandle, QuickConfigPanelProps>(function QuickConfigPanel(props, ref) {
   if (props.stage.id === "zotero") return <ZoteroQuickConfig ref={ref} {...props} />;
+  if (props.stage.id === "memecho") return <MemEchoQuickConfig ref={ref} {...props} />;
   return <GenericQuickConfig ref={ref} {...props} />;
 });

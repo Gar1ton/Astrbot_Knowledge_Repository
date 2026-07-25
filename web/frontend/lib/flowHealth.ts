@@ -3,7 +3,7 @@ import type { CapabilitiesData, PipelineStage } from "@/lib/api";
 export type WorkflowStatus = "red" | "green" | "purple";
 
 const CORE_STAGE_IDS = new Set(["ingest", "embedding", "vector_store", "retrieval", "ask"]);
-const OPTIONAL_STAGE_IDS = new Set(["zotero", "graph", "sync"]);
+const OPTIONAL_STAGE_IDS = new Set(["zotero", "graph", "memecho", "sync"]);
 
 export function deriveWorkflowStatus(caps: CapabilitiesData | null | undefined): WorkflowStatus {
   if (!caps) return "red";

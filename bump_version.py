@@ -12,22 +12,27 @@ README_PATH = ROOT / "README.md"
 TODO_PATH = ROOT / "TODO.md"
 CHANGELOG_PATH = ROOT / "CHANGELOG.md"
 
-VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
-METADATA_VERSION_RE = re.compile(r"^(version:\s*)v?(\d+\.\d+\.\d+)(.*)$", re.MULTILINE)
+# 本分支（Experiment-with-MemEcho-API）版本号格式固定为 x.x.x.ME：数字核心为 SemVer，
+# 追加不可变构建后缀 .ME 标识 MemEcho 实验线。以下正则统一识别可选 (?:\.ME)? 后缀，
+# bump 时保留 current 的后缀不变（数字核心照常 patch/minor/major 递增）。
+VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(\.ME)?$")
+METADATA_VERSION_RE = re.compile(
+    r"^(version:\s*)(v?\d+\.\d+\.\d+(?:\.ME)?)(.*)$", re.MULTILINE
+)
 MAIN_VERSION_RE = re.compile(
-    r'^(_PLUGIN_VERSION\s*=\s*")v?\d+\.\d+\.\d+(".*)$',
+    r'^(_PLUGIN_VERSION\s*=\s*")v?\d+\.\d+\.\d+(?:\.ME)?(".*)$',
     re.MULTILINE,
 )
 README_BADGE_VERSION_RE = re.compile(
-    r"(\[!\[version\]\(https://img\.shields\.io/badge/版本-)v?\d+\.\d+\.\d+"
+    r"(\[!\[version\]\(https://img\.shields\.io/badge/版本-)v?\d+\.\d+\.\d+(?:\.ME)?"
     r"(-blueviolet\)\]\(metadata\.yaml\))"
 )
 TODO_HEADING_RE = re.compile(
-    r"^(##\s+)v?(\d+\.\d+\.\d+)((?:\s*[:：]\s*|\s+).+)$",
+    r"^(##\s+)v?\d+\.\d+\.\d+(?:\.ME)?((?:\s*[:：]\s*|\s+).+)$",
     re.MULTILINE,
 )
 CHANGELOG_UNRELEASED_RE = re.compile(r"^## \[Unreleased\]\s*", re.MULTILINE)
-CHANGELOG_RELEASE_RE = re.compile(r"^## \[v\d+\.\d+\.\d+\]", re.MULTILINE)
+CHANGELOG_RELEASE_RE = re.compile(r"^## \[v\d+\.\d+\.\d+(?:\.ME)?\]", re.MULTILINE)
 
 
 def _read(path: Path) -> str:
@@ -39,15 +44,19 @@ def _write(path: Path, content: str, *, dry_run: bool) -> None:
         path.write_text(content, encoding="utf-8", newline="\n")
 
 
-def _parse_version(value: str) -> tuple[int, int, int]:
+def _parse_version(value: str) -> tuple[int, int, int, str]:
     match = VERSION_RE.fullmatch(value.strip())
     if not match:
-        raise ValueError(f"Invalid version: {value!r}; expected vX.Y.Z or X.Y.Z")
-    return tuple(int(part) for part in match.groups())
+        raise ValueError(
+            f"Invalid version: {value!r}; expected vX.Y.Z[.ME] or X.Y.Z[.ME]"
+        )
+    major, minor, patch = (int(match.group(i)) for i in (1, 2, 3))
+    suffix = match.group(4) or ""
+    return (major, minor, patch, suffix)
 
 
-def _format_version(parts: tuple[int, int, int]) -> str:
-    return f"v{parts[0]}.{parts[1]}.{parts[2]}"
+def _format_version(major: int, minor: int, patch: int, suffix: str = "") -> str:
+    return f"v{major}.{minor}.{patch}{suffix}"
 
 
 def _current_metadata_version() -> str:
@@ -55,21 +64,21 @@ def _current_metadata_version() -> str:
     match = METADATA_VERSION_RE.search(metadata)
     if not match:
         raise RuntimeError("metadata.yaml does not contain a version: vX.Y.Z line")
-    return f"v{match.group(2)}"
+    return _format_version(*_parse_version(match.group(2)))
 
 
 def _resolve_target(current: str, bump: str) -> str:
     if VERSION_RE.fullmatch(bump):
-        return _format_version(_parse_version(bump))
+        return _format_version(*_parse_version(bump))
 
-    major, minor, patch = _parse_version(current)
+    major, minor, patch, suffix = _parse_version(current)
     if bump == "major":
-        return _format_version((major + 1, 0, 0))
+        return _format_version(major + 1, 0, 0, suffix)
     if bump == "minor":
-        return _format_version((major, minor + 1, 0))
+        return _format_version(major, minor + 1, 0, suffix)
     if bump == "patch":
-        return _format_version((major, minor, patch + 1))
-    raise ValueError("bump must be one of: patch, minor, major, or vX.Y.Z")
+        return _format_version(major, minor, patch + 1, suffix)
+    raise ValueError("bump must be one of: patch, minor, major, or vX.Y.Z[.ME]")
 
 
 def _update_metadata(target: str, *, dry_run: bool) -> bool:
@@ -101,7 +110,7 @@ def _update_readme_badge(target: str, *, dry_run: bool) -> bool:
 
 def _update_todo_top_version(target: str, *, dry_run: bool) -> bool:
     content = _read(TODO_PATH)
-    updated, count = TODO_HEADING_RE.subn(rf"\g<1>{target}\g<3>", content, count=1)
+    updated, count = TODO_HEADING_RE.subn(rf"\g<1>{target}\g<2>", content, count=1)
     if count != 1:
         raise RuntimeError("Failed to update the first TODO.md version heading")
     _write(TODO_PATH, updated, dry_run=dry_run)
@@ -132,7 +141,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Bump project version across metadata.yaml, main.py, README.md, "
-            "the top TODO.md version heading, and CHANGELOG.md [Unreleased]."
+            "the top TODO.md version heading, and CHANGELOG.md [Unreleased]. "
+            "本分支版本格式固定为 x.x.x.ME；bump 时保留 .ME 后缀不变。"
         )
     )
     parser.add_argument(
@@ -144,7 +154,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--version",
-        help="Explicit target version, e.g. v0.26.4. Overrides the bump argument.",
+        help="Explicit target version, e.g. v1.0.9.ME. Overrides the bump argument.",
     )
     parser.add_argument(
         "--date",

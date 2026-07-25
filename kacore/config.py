@@ -28,6 +28,9 @@ ENV_EMBEDDING_API_KEY = "KR_EMBEDDING_API_KEY"
 ENV_LIGHTRAG_LLM_API_KEY = "KR_LIGHTRAG_LLM_API_KEY"
 ENV_DEEP_THINKING_LLM_API_KEY = "KR_DEEP_THINKING_LLM_API_KEY"
 ENV_ZOTERO_API_KEY = "KR_ZOTERO_API_KEY"
+# MemEcho（MemoryEcho）记忆库召回 API Key。优先经 Web 控制台存入加密 secret_store
+# （secret 名 memecho.api_key），此环境变量作覆盖/回退（分支 Experiment-with-MemEcho-API 新增）。
+ENV_MEMECHO_API_KEY = "KR_MEMECHO_API_KEY"
 DEFAULT_RERANK_MODEL = "Alibaba-NLP/gte-reranker-modernbert-base"
 
 
@@ -270,6 +273,30 @@ class EnhancedRecallConfig:
     json_max_retries: int = 1
 
 
+@dataclass
+class MemEchoConfig:
+    """MemoryEcho 托管记忆库召回配置（分支 Experiment-with-MemEcho-API 新增）。
+
+    定位：独立数据流阶段 + 新检索模式 memecho（二选一，不与本地 LightRAG/Milvus 融合）。
+    无「运行开关」——手动 retrieval_mode=memecho 即触发召回；``enabled`` 仅作阶段总闸与装配门。
+    API Key 不落配置文件：经 Web 控制台存入加密 secret_store（secret 名 ``memecho.api_key``）或
+    环境变量 KR_MEMECHO_API_KEY 注入，故此处**无** api_key 字段。
+    """
+
+    enabled: bool = False
+    base_url: str = "https://api.artific.social"
+    # 召回目标记忆库（各 MemoryEcho 接口中的 library_id）。memecho 模式必须已配置本项。
+    default_vault_id: str = ""
+    # 只读召回：True 走 /query-readonly（不留痕）；False 走 /query（写入查询历史，可被后续召回）。
+    query_readonly: bool = True
+    # 问答写回：True 时把本轮 user/assistant 消息 append 回 vault 形成长期记忆（默认关，保非破坏）。
+    write_back_enabled: bool = False
+    # 单次 HTTP 请求超时（秒）。
+    timeout_seconds: int = 30
+    # 文件导入调优预设，透传给 /memories/import_file 的 preset。
+    import_preset: str = "default"
+
+
 # Zotero 同步模式常量（杜绝魔法字面量散落）。
 ZOTERO_STORAGE_MANAGED = "managed_copy"
 ZOTERO_STORAGE_LINKED = "linked"
@@ -319,6 +346,9 @@ class Config:
     raw: dict[str, Any] = field(default_factory=dict)
     runtime_diagnostics: list[str] = field(default_factory=list)
     runtime_embedding_dimension: int | None = None
+    # memecho API Key 是否已配置（secret_store 或 env）。由 plugin_initializer 装配时置位，
+    # 供 capabilities 纯函数探针判定 memecho 阶段就绪态（Config 自身不访问 secret_store）。
+    runtime_memecho_key_present: bool = False
 
     def apply_override(self, override: dict[str, Any]) -> None:
         """合并运行时覆盖配置。用于自动建库后回填 database_id。"""
@@ -353,6 +383,7 @@ class Config:
         enhanced = self.get_enhanced_recall_config()
         zotero = self.get_zotero_sync_config()
         ask = self.get_ask_agent_config()
+        memecho = self.get_memecho_config()
         return {
             "ask": {
                 # 与前端 askAI 的 answer_language 同一参数；召回恒英文，仅决定回答语言。
@@ -455,12 +486,24 @@ class Config:
                 "auto_sync_enabled": zotero.auto_sync_enabled,
                 "auto_sync_interval_sec": zotero.auto_sync_interval_sec,
             },
+            "memecho": {
+                "enabled": memecho.enabled,
+                "base_url": memecho.base_url,
+                "default_vault_id": memecho.default_vault_id,
+                "query_readonly": memecho.query_readonly,
+                "write_back_enabled": memecho.write_back_enabled,
+                "timeout_seconds": memecho.timeout_seconds,
+                "import_preset": memecho.import_preset,
+                # api_key_present/masked 由 api.get_memecho_config 端点补充（Config 无
+                # secret_store 访问权）；此运行时探针位供前端快速判定密钥是否就绪。
+                "api_key_present": self.runtime_memecho_key_present,
+            },
             "diagnostics": self.get_diagnostics(),
         }
 
     def get_diagnostics(self) -> list[str]:
         """返回已启用子系统的缺失配置提示，不阻断保存半成品配置。"""
-        diagnostics = []
+        diagnostics: list[str] = []
         r2 = self.get_r2_sync_config()
         if r2.enabled:
             required = {
@@ -490,6 +533,13 @@ class Config:
                     "notion_sync.database_id or notion_sync.parent_page_id is required "
                     "when notion_sync.enabled=true"
                 )
+
+        memecho = self.get_memecho_config()
+        if memecho.enabled and not memecho.default_vault_id:
+            diagnostics.append(
+                "memecho.default_vault_id is required when memecho.enabled=true"
+            )
+
         embedding_raw = _section(self.raw, "embedding")
         vector_raw = _section(self.raw, "vector_db")
         graph_raw = _section(self.raw, "graph")
@@ -823,6 +873,26 @@ class Config:
             ),
         )
 
+    def get_memecho_config(self) -> MemEchoConfig:
+        s = _section(self.raw, "memecho")
+        return MemEchoConfig(
+            enabled=bool(s.get("enabled", MemEchoConfig.enabled)),
+            base_url=str(s.get("base_url", MemEchoConfig.base_url)).strip()
+            or MemEchoConfig.base_url,
+            default_vault_id=str(
+                s.get("default_vault_id", MemEchoConfig.default_vault_id)
+            ).strip(),
+            query_readonly=bool(s.get("query_readonly", MemEchoConfig.query_readonly)),
+            write_back_enabled=bool(
+                s.get("write_back_enabled", MemEchoConfig.write_back_enabled)
+            ),
+            timeout_seconds=max(
+                1, int(s.get("timeout_seconds", MemEchoConfig.timeout_seconds))
+            ),
+            import_preset=str(s.get("import_preset", MemEchoConfig.import_preset)).strip()
+            or MemEchoConfig.import_preset,
+        )
+
 
 # ── 可写配置键登记（API 写入 / 运行时持久化的唯一真相源）────────────
 #
@@ -941,6 +1011,17 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "rerank_weight": ConfigKeyPolicy(True, True),
         "corrective_enabled": ConfigKeyPolicy(True, True),
     },
+    "memecho": {
+        # enabled/base_url 装配期读取，改后需重启重建 client；其余运行期逐调用读取，即时生效。
+        # api_key 不登记（机密走 secret_store/env，永不经 API 写入）。
+        "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        "default_vault_id": ConfigKeyPolicy(True, True),
+        "query_readonly": ConfigKeyPolicy(True, True),
+        "write_back_enabled": ConfigKeyPolicy(True, True),
+        "timeout_seconds": ConfigKeyPolicy(True, True),
+        "import_preset": ConfigKeyPolicy(True, True),
+    },
 }
 
 
@@ -1003,6 +1084,7 @@ __all__ = [
     "ENV_EMBEDDING_API_KEY",
     "ENV_LIGHTRAG_LLM_API_KEY",
     "ENV_ZOTERO_API_KEY",
+    "ENV_MEMECHO_API_KEY",
     "ZOTERO_STORAGE_MANAGED",
     "ZOTERO_STORAGE_LINKED",
     "ZOTERO_SYNC_STRICT",
@@ -1027,6 +1109,7 @@ __all__ = [
     "NotionSyncConfig",
     "WebConsoleConfig",
     "GraphConfig",
+    "MemEchoConfig",
     "VectorDbConfig",
     "EmbeddingConfig",
     "AskAgentConfig",

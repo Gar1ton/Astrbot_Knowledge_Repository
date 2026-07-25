@@ -51,6 +51,7 @@ from kacore.plugin_initializer import PluginInitializer
 from kacore.retrieval_modes import (
     MODE_GRAPH_MIXED,
     MODE_GRAPH_ONLY,
+    MODE_MEMECHO,
     STRICT_COLLECTION_MODES,
     normalize_retrieval_mode,
 )
@@ -257,7 +258,9 @@ class KnowledgeRepositoryPlugin(Star):
             mode(string): default=标准召回（查存/单点事实）；enhanced=增强召回（分析/对比/机制类，
                 一次拆解+宽召回+自检纠偏，成本远低于 deep_thinking）；deep_thinking=综合分析
                 （仅综述/系统梳理级任务）；graph_mixed=图谱混合检索（语义/词法证据 +
-                LightRAG 图谱上下文）；graph_only=纯图谱检索（仅 LightRAG 图谱上下文）。
+                LightRAG 图谱上下文）；graph_only=纯图谱检索（仅 LightRAG 图谱上下文）；
+                memecho=MemEcho 召回（查托管 MemoryEcho 记忆库，二选一独立，不含本地检索，
+                需已配置 memecho.enabled + API Key + 记忆库）。
             breadth(string): narrow/normal/wide——问题宽泛时用 wide 放大候选池再重排
                 （默认 normal；仅 default 生效，enhanced/deep_thinking 用自身配置管证据量）。
         '''
@@ -413,6 +416,8 @@ class KnowledgeRepositoryPlugin(Star):
             )
         if mode == MODE_GRAPH_ONLY:
             return f"🕸️ 已开始纯图谱检索：范围「{scope}」，稍后直接发结果。"
+        if mode == MODE_MEMECHO:
+            return "🧠 已开始 MemEcho 召回：正在查询托管记忆库，稍后直接发结果。"
         return f"🔎 已开始检索：范围「{scope}」，mode={mode}，breadth={breadth}。"
 
     @staticmethod
@@ -583,6 +588,8 @@ class KnowledgeRepositoryPlugin(Star):
             done_label = "图谱混合检索完成"
         elif requested_mode == MODE_GRAPH_ONLY:
             done_label = "纯图谱检索完成"
+        elif requested_mode == MODE_MEMECHO:
+            done_label = "MemEcho 召回完成"
         else:
             done_label = "检索完成"
         citations = [str(item) for item in (result.get("citations") or []) if item]

@@ -95,7 +95,43 @@ export interface EffectiveConfig {
   vector_db?: Record<string, unknown>;
   embedding?: Record<string, unknown>;
   zotero_sync?: Record<string, unknown>;
+  memecho?: Record<string, unknown>;
   diagnostics?: string[];
+}
+
+// MemEcho（MemoryEcho）托管记忆库召回（分支 Experiment-with-MemEcho-API 新增）。
+export interface MemEchoConfig {
+  enabled: boolean;
+  base_url: string;
+  default_vault_id: string;
+  query_readonly: boolean;
+  write_back_enabled: boolean;
+  timeout_seconds: number;
+  import_preset: string;
+  api_key_present?: boolean;
+  api_key_masked?: string;
+}
+
+export interface MemEchoVault {
+  id: string;
+  name?: string;
+  description?: string | null;
+  memory_count?: number;
+  storage_bytes?: number;
+}
+
+export interface MemEchoProbeResult {
+  ok: boolean;
+  vault_count?: number;
+  usage?: Record<string, unknown>;
+  error?: string;
+  status?: number | null;
+}
+
+export interface MemEchoImportSummary {
+  imported: number;
+  failed: Array<{ doc_id: string; error: string; status?: number | null }>;
+  total: number;
 }
 
 export interface ZoteroConfig {
@@ -405,7 +441,8 @@ export interface AskResult {
     | "graph_mixed"
     | "graph_only"
     | "fulltext"
-    | "deep_thinking";
+    | "deep_thinking"
+    | "memecho";
   actual_retrieval_mode: string;
   retrieval_engines: string[];
   fallback_reason?: string | null;
@@ -665,6 +702,7 @@ const MOCK_CONFIG: EffectiveConfig = {
   vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true },
   embedding: { provider: "local", model: "intfloat/multilingual-e5-small", base_url: "https://api.openai.com/v1", max_token_size: 512, actual_dimension: 384, api_key: "" },
   zotero_sync: { enabled: false, access_mode: "local", zotero_data_dir: "", resolved_data_dir: "", api_port: 23119, storage_mode: "managed_copy", linked_root: "", zotmoov_root: "", sync_mode: "conservative", auto_sync_enabled: false, auto_sync_interval_sec: 3600, server_key_present: false, server_key_masked: "" },
+  memecho: { enabled: false, base_url: "https://api.artific.social", default_vault_id: "", query_readonly: true, write_back_enabled: false, timeout_seconds: 30, import_preset: "default", api_key_present: false, api_key_masked: "" },
 };
 
 const MOCK_ASK: AskResult = {
@@ -1447,6 +1485,82 @@ export async function deleteZoteroServerKey(): Promise<ZoteroConfig> {
   return apiFetch<ZoteroConfig>("/api/zotero/server-key", { method: "DELETE" });
 }
 
+// ── MemEcho（MemoryEcho）召回（分支 Experiment-with-MemEcho-API）────
+
+export async function getMemEchoConfig(timeoutMs = 8_000): Promise<MemEchoConfig> {
+  if (isMock()) {
+    const m = (MOCK_CONFIG.memecho ?? {}) as Record<string, unknown>;
+    return {
+      enabled: Boolean(m.enabled),
+      base_url: String(m.base_url ?? "https://api.artific.social"),
+      default_vault_id: String(m.default_vault_id ?? ""),
+      query_readonly: m.query_readonly !== false,
+      write_back_enabled: Boolean(m.write_back_enabled),
+      timeout_seconds: Number(m.timeout_seconds ?? 30),
+      import_preset: String(m.import_preset ?? "default"),
+      api_key_present: Boolean(m.api_key_present),
+      api_key_masked: String(m.api_key_masked ?? ""),
+    };
+  }
+  return apiFetch<MemEchoConfig>("/api/memecho/config", { timeoutMs });
+}
+
+export async function saveMemEchoApiKey(apiKey: string): Promise<MemEchoConfig> {
+  if (isMock()) {
+    const m = (MOCK_CONFIG.memecho ?? {}) as Record<string, unknown>;
+    m.api_key_present = true;
+    m.api_key_masked = apiKey ? "as****ey" : "";
+    return getMemEchoConfig();
+  }
+  return apiFetch<MemEchoConfig>("/api/memecho/key", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+}
+
+export async function clearMemEchoApiKey(): Promise<MemEchoConfig> {
+  if (isMock()) {
+    const m = (MOCK_CONFIG.memecho ?? {}) as Record<string, unknown>;
+    m.api_key_present = false;
+    m.api_key_masked = "";
+    return getMemEchoConfig();
+  }
+  return apiFetch<MemEchoConfig>("/api/memecho/key", { method: "DELETE" });
+}
+
+export async function probeMemEcho(): Promise<MemEchoProbeResult> {
+  if (isMock()) return { ok: false, error: "mock" };
+  return apiFetch<MemEchoProbeResult>("/api/memecho/probe", { timeoutMs: 10_000 });
+}
+
+export async function listMemEchoVaults(): Promise<MemEchoVault[]> {
+  if (isMock()) return [];
+  return apiFetch<MemEchoVault[]>("/api/memecho/vaults", { timeoutMs: 10_000 });
+}
+
+export async function createMemEchoVault(name: string, description = ""): Promise<MemEchoVault> {
+  if (isMock()) return { id: "mock-vault", name };
+  return apiFetch<MemEchoVault>("/api/memecho/vaults", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, description }),
+  });
+}
+
+export async function importCollectionToMemEcho(
+  collection: string,
+  vaultId = "",
+): Promise<MemEchoImportSummary> {
+  if (isMock()) return { imported: 0, failed: [], total: 0 };
+  return apiFetch<MemEchoImportSummary>("/api/memecho/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ collection, vault_id: vaultId }),
+    timeoutMs: 120_000,
+  });
+}
+
 export async function syncZoteroPull(incremental = true): Promise<ZoteroSyncResult> {
   if (isMock()) return { status: "success", new: [], changed: [], skipped_unchanged: 0 };
   return apiFetch<ZoteroSyncResult>("/api/sync/zotero/pull", {
@@ -1528,7 +1642,8 @@ export async function ask(opts: {
     | "graph_mixed"
     | "graph_only"
     | "fulltext"
-    | "deep_thinking";
+    | "deep_thinking"
+    | "memecho";
   use_english_retrieval?: boolean;
   answer_language?: "auto" | "zh" | "en";
 }): Promise<AskResult> {
@@ -1739,6 +1854,7 @@ const MOCK_CAPABILITIES: CapabilitiesData = {
     { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true, astrbot_locked: true, compatible: true, rebuild_required: false, pending_reindex_count: 0, document_count: 0, chunk_count: 0, reason: "" } },
     { id: "retrieval", current: "rrf_fusion", candidates: ["rrf_fusion"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { engines: ["milvus", "sqlite_lexical"] } },
     { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix", llm_provider: "main", llm_model: "", llm_label: "<main - AstrBot main LLM>" } },
+    { id: "memecho", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { base_url: "https://api.artific.social", vault_id: "", api_key_present: false, query_readonly: true, write_back_enabled: false } },
     { id: "ask", current: "", candidates: [], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { rerank_provider: "cross_encoder", rerank_model: "Alibaba-NLP/gte-reranker-modernbert-base", rerank_status: "idle", rerank_dependency_ready: true, rerank_runtime: { provider: "cross_encoder", status: "idle", model: "Alibaba-NLP/gte-reranker-modernbert-base", enabled: true, last_error: null } } },
     { id: "sync", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { r2_enabled: false, notion_enabled: false } },
   ],

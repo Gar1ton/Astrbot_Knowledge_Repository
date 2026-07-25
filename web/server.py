@@ -728,6 +728,80 @@ async def handle_zotero_server_key_delete(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "message": str(exc)}, status=500)
 
 
+# ── MemEcho（MemoryEcho）召回（分支 Experiment-with-MemEcho-API）────
+
+
+async def handle_memecho_config(request: web.Request) -> web.Response:
+    return web.json_response(await _api(request).get_memecho_config())
+
+
+async def handle_memecho_key_post(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    if not isinstance(body, dict):
+        return web.json_response({"status": "error", "message": "invalid JSON"}, status=400)
+    api_key = str(body.get("api_key") or body.get("key") or "").strip()
+    if not api_key:
+        return web.json_response(
+            {"status": "error", "message": "api_key is required"}, status=400
+        )
+    try:
+        return web.json_response(await _api(request).save_memecho_api_key(api_key))
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_memecho_key_delete(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(await _api(request).delete_memecho_api_key())
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_memecho_probe(request: web.Request) -> web.Response:
+    return web.json_response(await _api(request).probe_memecho())
+
+
+async def handle_memecho_vaults_get(request: web.Request) -> web.Response:
+    try:
+        return web.json_response(await _api(request).list_memecho_vaults())
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_memecho_vaults_post(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    if not isinstance(body, dict):
+        return web.json_response({"status": "error", "message": "invalid JSON"}, status=400)
+    name = str(body.get("name") or "").strip()
+    description = str(body.get("description") or "").strip()
+    try:
+        return web.json_response(await _api(request).create_memecho_vault(name, description))
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
+async def handle_memecho_import(request: web.Request) -> web.Response:
+    body = await request.json() if request.can_read_body else {}
+    if not isinstance(body, dict):
+        return web.json_response({"status": "error", "message": "invalid JSON"}, status=400)
+    collection = str(body.get("collection") or "").strip()
+    vault_id = str(body.get("vault_id") or "").strip()
+    try:
+        return web.json_response(
+            await _api(request).import_collection_to_memecho(collection, vault_id=vault_id)
+        )
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=500)
+
+
 async def handle_zotero_pull(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     incremental = bool(body.get("incremental", True)) if isinstance(body, dict) else True
@@ -1545,6 +1619,13 @@ def build_app(
     app.router.add_post("/api/sync/zotero/pull", handle_zotero_pull)
     app.router.add_get("/api/sync/zotero/status", handle_zotero_status)
     app.router.add_get("/api/sync/zotero/active", handle_zotero_active)
+    app.router.add_get("/api/memecho/config", handle_memecho_config)
+    app.router.add_post("/api/memecho/key", handle_memecho_key_post)
+    app.router.add_delete("/api/memecho/key", handle_memecho_key_delete)
+    app.router.add_get("/api/memecho/probe", handle_memecho_probe)
+    app.router.add_get("/api/memecho/vaults", handle_memecho_vaults_get)
+    app.router.add_post("/api/memecho/vaults", handle_memecho_vaults_post)
+    app.router.add_post("/api/memecho/import", handle_memecho_import)
     app.router.add_post("/api/backup", handle_backup)
     app.router.add_post("/api/restore", handle_restore)
     app.router.add_get("/api/r2/status", handle_r2_status)

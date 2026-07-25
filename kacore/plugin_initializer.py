@@ -564,6 +564,31 @@ class PluginInitializer:
         )
         self.api.attach_notion_sync_pipeline(self.notion_sync_pipeline)
 
+        # 5.56) MemEcho（MemoryEcho）召回门面（分支 Experiment-with-MemEcho-API）：
+        # 按 memecho.enabled + API Key 懒装配；未启用/无 key 保持 None，与现状逐字节一致。
+        # runtime 存在态无条件置位，供 capabilities 探针与 effective config 判定密钥就绪。
+        memecho_cfg = self._config.get_memecho_config()
+        memecho_key = self.api._memecho_api_key()
+        self._config.runtime_memecho_key_present = bool(memecho_key)
+        if memecho_cfg.enabled and memecho_key:
+            from kacore.adapters.memecho.client import MemEchoClient
+            from kacore.pipelines.memecho_recall import MemEchoRecall
+
+            # 传 callable（而非定值）：每次请求取最新 key，支持运行时改密。
+            memecho_client = MemEchoClient(
+                memecho_cfg.base_url,
+                self.api._memecho_api_key,
+                timeout_seconds=memecho_cfg.timeout_seconds,
+            )
+            self.api._memecho_recall = MemEchoRecall(memecho_client)
+            logger.info(
+                "MemEcho 召回已启用：base_url=%s vault=%s",
+                memecho_cfg.base_url,
+                memecho_cfg.default_vault_id or "<未配置>",
+            )
+        elif memecho_cfg.enabled and not memecho_key:
+            logger.warning("memecho.enabled=true 但未配置 API Key，MemEcho 召回已跳过。")
+
         # 5.6) Research 服务（对话式只读检索）：probe（范围探查）+ execute（召回+引用）。
         from kacore.research_skill import ResearchService
 

@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [v1.0.9] — 2026-07-30
+
+### 修复 (Fixed)
+
+- **插件安装期 `NameError: AstrMessageEvent`**：`main.py`（真壳）曾把 `AstrMessageEvent`、
+  `ProviderRequest` 仅放进 `if TYPE_CHECKING:` 块。配合本文件顶部的 `from __future__ import
+  annotations`（PEP 563），AstrBot core（v4.26.8+）在注册 `@ka.command(...)` 时会对字符串
+  注解调用 `inspect.signature(handler, eval_str=True)`，被 `TYPE_CHECKING` 挡住的名字在模块
+  全局命名空间里找不到，插件加载即失败（Windows 安装日志复现；与操作系统无关，任意平台跑同一
+  版本 AstrBot core 都会触发）。修复为把两个类型提升为顶层真实导入（`main.py`）。
+
+### 测试 (Tests)
+
+- **补齐真壳装饰器注册的测试盲区**：`tests/backend/test_lifecycle_and_cli.py` 只测
+  `kacore/main.py`（假壳，装饰器均已注释），从未触达 `main.py` 真壳的框架装饰器注册路径，
+  上述 `NameError` 是结构性测不到的。新增
+  `tests/backend/test_main_shell_command_annotations.py`：进程内搭最小 astrbot SDK 桩（装饰器
+  原样透传），对真壳里全部方法直接调用 `inspect.signature(fn, eval_str=True)`，复现 AstrBot
+  core 同一条注解求值路径，防止同类问题再次悄悄漏网。
+
 ## [v1.0.8] — 2026-07-21
 
 ### 新增功能 (Added)

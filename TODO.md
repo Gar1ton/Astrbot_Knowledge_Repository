@@ -1,5 +1,24 @@
 # TODO
 
+## v1.0.9：修复 main.py 命令注解在 AstrBot v4.26.8+ 核心下的 NameError (completed)
+
+### Technical implementation path
+
+- [x] **Phase 1 — 核心修复**：`main.py` 将 `AstrMessageEvent`、`ProviderRequest` 从 `TYPE_CHECKING` 块提升为顶层真实导入；修复 AstrBot core（v4.26.8+）在 `@ka.command(...)` 装饰期对 `from __future__ import annotations` 字符串注解调用 `inspect.signature(handler, eval_str=True)` 时抛出的 `NameError: name 'AstrMessageEvent' is not defined`，导致插件安装即失败（Windows 安装日志复现，非环境问题）。
+- [x] **Phase 2 — 回归测试**：新增不依赖真实 AstrBot SDK 的轻量测试，模拟框架 `eval_str=True` 签名内省，覆盖 `main.py`（真壳）里全部 `@ka.command`/`@filter.*` 装饰方法的注解；堵住 `tests/backend/test_lifecycle_and_cli.py` 只测 `kacore/main.py`（假壳，装饰器均已注释）导致的测试盲区。
+- [x] **Phase 3 — 版本与文档**：`_PLUGIN_VERSION`/`metadata.yaml`/`README.md` 徽章同步至 v1.0.9；测试通过后更新 CHANGELOG.md 并标记完成。
+
+### Verification
+
+- 本地 venv（`/tmp/.../scratchpad/venv`，`pip install -r requirements.txt -r requirements-dev.txt`）：
+  `pytest tests/backend/test_main_shell_command_annotations.py -v` → 1 passed。
+- 红/绿验证：`git stash push -- main.py` 临时回退修复后重跑该测试 → 1 failed（20 处
+  `NameError: name 'AstrMessageEvent' is not defined`，逐一列出真壳全部命令方法），确认测试
+  能复现 v1.0.8 的安装期报错；`git stash pop` 恢复修复后重跑 → 1 passed。
+- `pytest -q` → 687 passed, 1 skipped（较此前记录的 686 passed 多出本次新增的 1 条测试）。
+- `ruff check main.py tests/backend/test_main_shell_command_annotations.py` → All checks passed。
+- `mypy` → Success: no issues found in 3 source files。
+
 ## 未发布：Codex 对话问答保存至指定 Notion QA 库 (🚧)
 
 ### Technical implementation path

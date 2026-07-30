@@ -41,9 +41,10 @@ def _purge_stale_local_modules() -> None:
 
 _purge_stale_local_modules()
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from astrbot.api.event import filter
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 
 from kacore.event_handler import EventHandler
@@ -56,11 +57,12 @@ from kacore.retrieval_modes import (
 )
 from kacore.utils import text_chunks
 
-if TYPE_CHECKING:
-    from astrbot.api.event import AstrMessageEvent
-    from astrbot.api.provider import ProviderRequest
+# AstrMessageEvent/ProviderRequest 必须是真实的顶层导入而非 TYPE_CHECKING-only：
+# AstrBot core 在 @ka.command(...) 装饰期对本文件的字符串注解（PEP 563）调用
+# inspect.signature(handler, eval_str=True)，会在模块全局命名空间里对注解求值；
+# 放进 TYPE_CHECKING 会导致运行时 NameError，插件直接加载失败。
 
-_PLUGIN_VERSION = "v1.0.8"
+_PLUGIN_VERSION = "v1.0.9"
 logger = logging.getLogger(__name__)
 _RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
 _RESEARCH_PARAGRAPH_LIMIT = 700

@@ -442,6 +442,8 @@ export class ApiError extends Error {
     public readonly status: number,
     message: string,
     public readonly body?: Record<string, unknown>,
+    /** 客户端主动放弃等待（后端很可能还在跑）：调用方据此区分「超时」与「真失败」。 */
+    public readonly timedOut: boolean = false,
   ) {
     super(message);
     this.name = "ApiError";
@@ -451,6 +453,15 @@ export class ApiError extends Error {
 // ─── 核心 fetch 封装 ───────────────────────────────────────────
 
 const DEFAULT_API_TIMEOUT_MS = 30_000;
+
+// 长任务专用时限：默认 30s 会把「正常但耗时」的请求误报成超时——后端其实还在跑，
+// 用户却看到「请求超时，请稍后重试」，重试又叠一份负载。各值按最坏情况给足余量，
+// 但仍保留上限，避免请求永远悬着（timeoutMs: 0 = 不设限，留给调用方显式选择）。
+const ASK_TIMEOUT_MS = 600_000; // 深度思考 / 图谱问答可跑数分钟
+const UPLOAD_TIMEOUT_MS = 300_000; // PDF 清洗 + 切块 + 首次索引
+const DEPENDENCY_INSTALL_TIMEOUT_MS = 900_000; // pip 安装 torch 等大包
+const MODEL_PROBE_TIMEOUT_MS = 300_000; // 模型连通性探测（可能触发首次下载）
+const ZOTERO_PULL_TIMEOUT_MS = 600_000; // 全量镜像同步
 
 type ApiFetchOptions = RequestInit & {
   timeoutMs?: number;
@@ -487,7 +498,12 @@ async function apiFetch<T>(
     });
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      throw new ApiError(0, timedOut ? "请求超时，请稍后重试" : "请求已取消");
+      throw new ApiError(
+        0,
+        timedOut ? "请求超时，请稍后重试" : "请求已取消",
+        undefined,
+        timedOut,
+      );
     }
     throw err;
   } finally {
@@ -817,7 +833,11 @@ export async function uploadDocument(
   form.append("file", file);
   form.append("collection", collection);
   if (tags.length) form.append("tags", tags.join(","));
-  return apiFetch<KrDocument>("/api/documents", { method: "POST", body: form });
+  return apiFetch<KrDocument>("/api/documents", {
+    method: "POST",
+    body: form,
+    timeoutMs: UPLOAD_TIMEOUT_MS,
+  });
 }
 
 export async function patchDocument(
@@ -1202,6 +1222,7 @@ export async function testEmbeddingConnection(
   if (isMock()) return { status: "ok", dimension: 1024, model: modelName };
   return apiFetch<EmbeddingTestResult>("/api/config/test-embedding", {
     method: "POST",
+    timeoutMs: MODEL_PROBE_TIMEOUT_MS,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ base_url: baseUrl, model_name: modelName }),
   });
@@ -1545,6 +1566,7 @@ export async function ask(opts: {
   }
   return apiFetch<AskResult>("/api/ask", {
     method: "POST",
+    timeoutMs: ASK_TIMEOUT_MS,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       question: opts.question,
@@ -1707,6 +1729,10 @@ export interface DependencyStatus {
   stages: string[];
   required?: boolean;
   installed: boolean;
+  /** 顶层包装了 ≠ 功能能跑（如 pymilvus 装了但缺 milvus-lite）。缺省视为与 installed 相同。 */
+  runtime_ready?: boolean;
+  /** runtime_ready=false 时的中文修复建议，直接展示给用户。 */
+  runtime_hint?: string;
   version: string | null;
 }
 
@@ -1748,7 +1774,9 @@ const MOCK_CAPABILITIES: CapabilitiesData = {
 
 export async function getCapabilities(): Promise<CapabilitiesData> {
   if (isMock()) return JSON.parse(JSON.stringify(MOCK_CAPABILITIES));
-  return apiFetch<CapabilitiesData>("/api/capabilities", { timeoutMs: 1_500 });
+  // 8s 而非 1.5s：该端点会聚合 SQLite 统计与 Milvus 运行态，重建/加载模型时 1.5s 必超，
+  // 于是数据流页会毫无征兆地弹「请求超时」。
+  return apiFetch<CapabilitiesData>("/api/capabilities", { timeoutMs: 8_000 });
 }
 
 export async function listDependencies(): Promise<DependencyStatus[]> {
@@ -1761,6 +1789,7 @@ export async function installDependency(pkg: string): Promise<InstallResult> {
   if (isMock()) return { status: "ok", package: pkg, restart_required: true, message: "mock installed" };
   return apiFetch<InstallResult>("/api/dependencies/install", {
     method: "POST",
+    timeoutMs: DEPENDENCY_INSTALL_TIMEOUT_MS,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ package: pkg }),
   });

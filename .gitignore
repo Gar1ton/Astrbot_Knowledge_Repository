@@ -25,6 +25,9 @@ venv/
 .agents/skills/*
 !.agents/skills/operate-knowledge-arch/
 !.agents/skills/operate-knowledge-arch/**
+# 上面的 ** 会把顶部的 __pycache__/ 规则一并推翻（后匹配者胜），这里再排除一次：
+# 否则 skill 脚本每被 import 一次，字节码缓存就会以二进制形式脏一次工作区。
+.agents/skills/operate-knowledge-arch/**/__pycache__/
 
 # ── 测试 / 类型 / lint 缓存 ─────────────────────────────
 .pytest_cache/

@@ -30,10 +30,19 @@ _SKIP_PREFIXES = (
     "httpcore",
     "urllib3",
     "asyncio",
-    "sentence_transformers",
     "filelock",
     "grpc",
     "PIL",
+)
+
+# 只保留 WARNING+ 的三方 logger：平时话痨，但出问题时是唯一的一手证据。
+# 典型场景——本地 Embedding 模型名写错，huggingface_hub 会报 401；此前这条被整体丢弃，
+# 用户在终端页只看到「卡住」，看不到真正的原因。
+_WARN_ONLY_PREFIXES = (
+    "sentence_transformers",
+    "huggingface_hub",
+    "transformers",
+    "torch",
 )
 
 # 项目自有 logger 前缀：DEBUG 级别予以保留；名单外的三方 DEBUG 直接丢弃。
@@ -78,6 +87,11 @@ _CATEGORY_BY_PREFIX: tuple[tuple[tuple[str, ...], str], ...] = (
             "ExternalEmbeddingProvider",
             "CachedEmbeddingProvider",
             "EmbeddingProviderFactory",
+            # 模型下载栈的 WARNING+ 归入 embedding，与本地 provider 的日志排在一起。
+            "sentence_transformers",
+            "huggingface_hub",
+            "transformers",
+            "torch",
         ),
         "embedding",
     ),
@@ -125,6 +139,9 @@ class MemoryLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         if record.name.startswith(_SKIP_PREFIXES):
+            return
+        # 模型下载/推理栈：只放行 WARNING+（401、磁盘满、显存不足这类一手证据）。
+        if record.name.startswith(_WARN_ONLY_PREFIXES) and record.levelno < logging.WARNING:
             return
         # 三方 DEBUG 噪声（faiss/pymilvus 等）不进缓冲区；项目自有 DEBUG 保留。
         if record.levelno <= logging.DEBUG and not record.name.startswith(_PROJECT_PREFIXES):

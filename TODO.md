@@ -1,5 +1,58 @@
 # TODO
 
+## v1.0.9：重启挂死 · Milvus 就绪度 · 可观测性 · ask 超时 (completed)
+
+### User constraints / 约束
+
+- 版本号锁定 v1.0.9，不新开版本；`metadata.yaml`/`main.py::_PLUGIN_VERSION` 保持不变。
+- 超时兜底不得中止已在后台跑的模型下载：`asyncio.to_thread` 不可取消，超时只放弃等待、
+  让 `initialize()` 走完把 Web 控制台拉起来，下载继续写入 HuggingFace 缓存。
+- 依赖状态必须反映「运行时真的能用」，不能只反映「import 名存在」。
+
+### Technical implementation path
+
+- [x] **Phase 1 — Embedding 探针与本地模型加载超时**：新增 `embedding.load_timeout_seconds`
+  （默认 180s，钳制 30–3600，0=不限）并登记 `_conf_schema.json` 与 `CONFIG_KEY_POLICY`；
+  `LocalEmbeddingProvider` 仅在「模型未加载」时给该次调用加闸（已加载后的 encode 不设超时，
+  沿用 `bge_local.py` 既定理由），加载期 30s 心跳日志；组合根探针改非破坏式等待
+  （不取消后台任务 + 完成回调补日志/诊断 + 纳入 teardown），超时走中文诊断。
+  技术理由：裸 await 卡在 HuggingFace 下载时，旧 Web 控制台已关、新端口永不启动。
+- [x] **Phase 2 — Milvus 真实就绪度与精确诊断**：`capabilities.py` 把 `milvus_lite` 纳入探测与
+  依赖卡（含 Windows 平台不支持判定）；组合根 gate 收严并区分「pymilvus 缺失 / milvus-lite 缺失 /
+  embedding 未就绪」；`api.py` 两处固定文案改为按运行态派生的真实原因；`_run_pip_install` 装完
+  校验 import 名可用，Windows 装 milvus 前置拒绝并给替代方案。技术理由：`pymilvus[milvus_lite]`
+  的 extra 带 `sys_platform != 'win32'` 标记，Windows 上 pip 静默跳过 milvus-lite 且退出码为 0，
+  依赖面板却显示已安装，用户陷入「装了也没用、提示还叫你再装」的死循环。
+- [x] **Phase 3 — 日志与进度可观测性**：`initialize/teardown/reload` 逐步骤 INFO + 耗时 + 跳过原因；
+  本地模型加载心跳；`LLMAdapter` 失败带 traceback、空响应显式 WARNING（不再静默返回离线占位）、
+  每次调用记耗时；`ask` 各阶段耗时；`log_capture` 放行 `sentence_transformers`/`huggingface_hub`
+  的 WARNING+。技术理由：当前长耗时链路全程静默，用户只能看到「卡住」而看不到卡在哪。
+- [x] **Phase 4 — ask 与长任务超时**：前端 `apiFetch` 支持 `timeoutMs: 0` 并为长任务显式设时限
+  （ask 600s、上传 300s、依赖安装 900s、test-embedding 300s、zotero pull 600s）；后端
+  `LLMAdapter` 主 LLM 调用加 `asyncio.wait_for`（新增 `ask.llm_timeout_seconds`，默认 300s）。
+  技术理由：前端 30s 默认时限会把正常的长问答误报为超时，而后端主 LLM 调用完全没有上限。
+- [x] **Phase 5 — 验证与治理**：全量 pytest、ruff、mypy、前端 tsc/build + `tools/sync_frontend.py`；
+  测试通过后勾 `[x]` 并在 CHANGELOG 的 v1.0.9 段内追加条目。
+
+### Verification
+
+- 基线（改动前）：scratchpad venv `python -m pytest -q` → 686 passed, 2 skipped。
+- 改动后：`python -m pytest -q` → 704 passed, 1 skipped（新增 18 条；装齐
+  `pymilvus[milvus_lite]` 后原本 skip 的 Milvus Lite 生命周期用例已实际执行）。
+- `ruff check .` → All checks passed；`mypy` → Success（3 source files）。
+- 前端：`node node_modules/typescript/bin/tsc --noEmit --incremental false` → 无输出（通过）；
+  `npm run build` → 全部 11 条路由静态产出成功；`python tools/sync_frontend.py` → 同步 357 个文件到 `pages/`。
+- 实测确认 Milvus 根因：干净 venv 只装 `pymilvus>=2.5,<3.0` →
+  `milvus_lite installed: False`、extra 标记 `(sys_platform != 'win32')`、
+  `MilvusClient('<local>.db')` 抛 `ConnectionConfigException: milvus-lite is required for
+  local database connections`；用户侧「重新安装插件后恢复正常」与该结论一致
+  （AstrBot 重装会重跑 requirements.txt 补回 milvus-lite）。
+- 新增回归用例：探针超时后 `initialize()` 仍走完并保留后台探针任务（`test_lifecycle_and_cli.py`）、
+  本地模型加载超时/已加载不加闸/加载中快速失败（`test_embedding.py`）、
+  只装 pymilvus 时 Milvus 判未就绪与 Windows 提示（`test_capabilities.py`）、
+  重建入口四类精确原因与安装后校验（`test_api.py`）、主 LLM 超时与离线占位告警
+  （`test_llm_adapter.py`）、模型下载栈 WARNING+ 不再被丢弃（`test_log_capture.py`）。
+
 ## v1.0.9：修复 main.py 命令注解在 AstrBot v4.26.8+ 核心下的 NameError (completed)
 
 ### Technical implementation path

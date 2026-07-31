@@ -252,6 +252,51 @@ async def test_initializer_probe_failure_disables_embedding_indexes(
         await initializer.teardown()
 
 
+async def test_initializer_probe_timeout_keeps_startup_moving(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    """探针挂死（如 HuggingFace 下载卡住）不得拖住 initialize()。
+
+    回归 v1.0.9：重启会先 teardown 掉旧 Web 控制台，若探针无限等待，新控制台永远起不来，
+    数据流页表现为「重启卡死」。这里断言：超时后 initialize() 正常走完、写中文诊断、
+    并保留后台探针任务（不取消——模型下载线程无法中断，留着让它写满缓存）。
+    """
+    import asyncio
+
+    class HangingProvider:
+        async def embed_query(self, text: str) -> list[float]:
+            await asyncio.sleep(30)
+            return [0.1]
+
+    config = {
+        **raw_config,
+        "vector_db": {"backend": "milvus"},
+        "embedding": {"provider": "local", "load_timeout_seconds": 1},
+    }
+    with (
+        patch(
+            "kacore.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            return_value=HangingProvider(),
+        ),
+        patch("kacore.plugin_initializer._module_available", return_value=True),
+        # 生产下限 30s 是防用户把正常加载误判为卡死；测试只关心「超时后还能走完」。
+        patch("kacore.config._LOAD_TIMEOUT_MIN_SECONDS", 1),
+    ):
+        initializer = PluginInitializer(mock_context, config, temp_dir)
+        await initializer.initialize()
+
+        # 走完了：embedding 降级、后续装配（含 Web 控制台阶段）未被阻断。
+        assert initializer.embedding_provider is None
+        assert initializer.vector_store is None
+        assert initializer.api is not None
+        diagnostics = initializer.config.get_diagnostics()
+        assert any("加载超时" in item and "重启插件" in item for item in diagnostics)
+        # 探针任务留在后台（下载继续），teardown 才收走。
+        assert initializer._pending_probe_task is not None
+        await initializer.teardown()
+        assert initializer._pending_probe_task is None
+
+
 async def test_fresh_install_uploads_and_lexically_retrieves_when_embedding_probe_fails(
     temp_dir: Path, mock_context: object
 ) -> None:

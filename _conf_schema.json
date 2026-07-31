@@ -163,6 +163,12 @@
         "type": "string",
         "default": "https://api.openai.com/v1",
         "hint": "兼容 OpenAI Embeddings 接口的端点，例如 https://api.openai.com/v1 或自建代理地址"
+      },
+      "load_timeout_seconds": {
+        "description": "模型就绪等待上限（秒）",
+        "type": "int",
+        "default": 180,
+        "hint": "启动时的维度探针与 local 模式首次加载的最长等待时间；超时不会中止后台下载，只是本次启动降级为 AstrBot/SQLite 基础召回，避免重启卡死、Web 控制台起不来。取值钳制在 30–3600，填 0 表示不限"
       }
     }
   }

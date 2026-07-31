@@ -2268,3 +2268,125 @@ async def test_capabilities_excludes_detached_documents_from_vector_stats(tmp_pa
     assert vector_stage["detail"]["document_count"] == 1
     assert vector_stage["detail"]["pending_reindex_count"] == 1
     assert vector_stage["detail"]["chunk_count"] == 1
+
+
+# ── 向量库不可用时的精确原因（v1.0.9）────────────────────────────
+
+
+async def test_rebuild_reports_missing_milvus_lite_instead_of_generic_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回归：装了 pymilvus 但缺 milvus-lite 时，重建入口必须说清缺什么、怎么修。
+
+    旧文案对所有情况都说「请安装 Milvus 并重启插件，或配置 embedding provider」，
+    用户照着再装一次 `pymilvus[milvus_lite]` 在 Windows 上仍然什么都不会发生。
+    """
+    from kacore.config import Config
+
+    monkeypatch.setattr(
+        "kacore.capabilities.module_available", lambda name: name == "pymilvus"
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await api.rebuild_index_pending()
+    assert "milvus-lite" in str(excinfo.value)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await api.start_milvus_rebuild()
+    assert "milvus-lite" in str(excinfo.value)
+
+
+async def test_rebuild_reports_embedding_not_ready_when_deps_are_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """依赖齐全但 embedding 探针失败/超时时，原因指向 embedding 而不是「去装 Milvus」。"""
+    from kacore.config import Config
+
+    monkeypatch.setattr("kacore.capabilities.module_available", lambda name: True)
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await api.rebuild_index_pending()
+    assert "Embedding provider 未就绪" in str(excinfo.value)
+
+
+async def test_rebuild_reports_astr_backend_without_telling_user_to_install_milvus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """后端选的是 astr 时，没有 Milvus 索引可重建——不该把用户送去装依赖。"""
+    from kacore.config import Config
+
+    monkeypatch.setattr("kacore.capabilities.module_available", lambda name: False)
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "astr"}}),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await api.rebuild_index_pending()
+    message = str(excinfo.value)
+    assert "astr" in message
+    assert "安装" not in message
+
+
+async def test_install_dependency_rejects_milvus_on_unsupported_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows 上 pip 会「成功」但不装 milvus-lite：前置拒绝并给替代方案。"""
+    monkeypatch.setattr("kacore.capabilities.sys.platform", "win32")
+    monkeypatch.setattr(
+        "kacore.capabilities.module_available", lambda name: name == "pymilvus"
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+    )
+
+    async def _fail_install(spec: str) -> dict:
+        raise AssertionError(f"pip 不应被调用：{spec}")
+
+    monkeypatch.setattr(api, "_run_pip_install", _fail_install)
+
+    result = await api.install_dependency("milvus")
+    assert result["status"] == "error"
+    assert result["restart_required"] is False
+    assert "WSL" in result["message"]
+
+
+async def test_install_dependency_flags_pip_success_that_left_milvus_unusable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pip 退出码 0 ≠ 功能可用：装完仍缺 milvus-lite 时必须报错而不是「重启即可生效」。"""
+    monkeypatch.setattr(
+        "kacore.capabilities.module_available", lambda name: name == "pymilvus"
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+    )
+
+    async def _ok_install(spec: str) -> dict:
+        return {
+            "status": "ok",
+            "package": spec,
+            "returncode": 0,
+            "restart_required": True,
+            "message": "已安装，需重启插件生效；Docker 部署请注意依赖持久化。",
+        }
+
+    monkeypatch.setattr(api, "_run_pip_install", _ok_install)
+
+    result = await api.install_dependency("milvus")
+    assert result["status"] == "error"
+    assert result["restart_required"] is False
+    assert "milvus-lite" in result["message"]

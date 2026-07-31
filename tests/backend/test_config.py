@@ -281,6 +281,8 @@ def test_diagnostics_report_missing_optional_feature_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("kacore.config._module_available", lambda name: False)
+    # Milvus 就绪度收口在 capabilities（pymilvus ∧ milvus_lite），须一并置为「都没装」。
+    monkeypatch.setattr("kacore.capabilities.module_available", lambda name: False)
     diagnostics = Config(
         {
             "r2_sync": {"enabled": True},

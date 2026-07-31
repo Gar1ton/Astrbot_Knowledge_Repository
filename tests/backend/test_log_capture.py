@@ -145,3 +145,30 @@ def test_status_from_level():
     handler.emit(_record(level=logging.INFO))
     statuses = [line["status"] for line in handler.get_lines()]
     assert statuses == ["error", "warning", "ok"]
+
+
+# ── 模型下载栈：WARNING+ 必须留下（v1.0.9）──────────────────────
+
+
+def test_model_stack_warnings_are_kept_but_chatter_is_dropped():
+    """回归：`sentence_transformers`/`huggingface_hub` 曾被整体丢弃。
+
+    本地模型名写错时 huggingface_hub 的 401 是唯一的一手证据，被丢掉后终端页只剩「卡住」。
+    契约：这些 logger 的 INFO/DEBUG 仍然不进缓冲区，WARNING+ 必须进。
+    """
+    handler = MemoryLogHandler()
+    handler.emit(_record(name="sentence_transformers", level=logging.INFO, msg="chatter"))
+    handler.emit(
+        _record(name="huggingface_hub.file_download", level=logging.INFO, msg="downloading")
+    )
+    handler.emit(
+        _record(
+            name="huggingface_hub.utils._http",
+            level=logging.ERROR,
+            msg="401 Client Error: Unauthorized for url",
+        )
+    )
+
+    lines = handler.get_lines()
+    assert [line["msg"] for line in lines] == ["401 Client Error: Unauthorized for url"]
+    assert lines[0]["category"] == "embedding"

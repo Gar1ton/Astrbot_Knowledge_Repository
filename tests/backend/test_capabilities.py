@@ -14,6 +14,7 @@ from kacore.capabilities import (
     STATUS_READY,
     dependency_statuses,
     detect_pipeline,
+    milvus_runtime_status,
     resolve_install_spec,
 )
 from kacore.config import Config
@@ -101,7 +102,7 @@ def test_local_embedding_degraded_without_dependency(monkeypatch: pytest.MonkeyP
 
 
 def test_milvus_ready_when_installed_and_probed(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_modules(monkeypatch, {"sentence_transformers", "pymilvus"})
+    _patch_modules(monkeypatch, {"sentence_transformers", "pymilvus", "milvus_lite"})
     cfg = _cfg({"vector_db": {"backend": "milvus"}, "embedding": {"provider": "local"}}, dim=384)
     pipeline = detect_pipeline(cfg)
     assert _stage(pipeline, "embedding")["status"] == STATUS_READY
@@ -116,6 +117,43 @@ def test_milvus_degraded_falls_back_to_astrbot(monkeypatch: pytest.MonkeyPatch) 
     pipeline = detect_pipeline(cfg)
     assert _stage(pipeline, "vector_store")["status"] == STATUS_DEGRADED
     assert "astrbot_kb" in _stage(pipeline, "retrieval")["detail"]["engines"]
+
+
+def test_milvus_not_ready_when_only_pymilvus_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归 v1.0.9：装了 pymilvus 但没有 milvus-lite ≠ 可用。
+
+    `pymilvus[milvus_lite]` 的 extra 带 `sys_platform != "win32"` 标记，Windows 上 pip
+    静默跳过 milvus-lite 且退出码为 0。旧实现只探 pymilvus，于是面板显示绿灯、装配却抛
+    `ConnectionConfigException`，用户被引导去重复安装同一个包。
+    """
+    _patch_modules(monkeypatch, {"sentence_transformers", "pymilvus"})
+    cfg = _cfg({"vector_db": {"backend": "milvus"}, "embedding": {"provider": "local"}}, dim=384)
+
+    stage = _stage(detect_pipeline(cfg), "vector_store")
+    assert stage["status"] == STATUS_DEGRADED
+    assert stage["detail"]["milvus_runtime_ready"] is False
+    assert "milvus-lite" in stage["detail"]["milvus_runtime_hint"]
+
+    milvus_dep = next(d for d in dependency_statuses() if d["key"] == "milvus")
+    assert milvus_dep["installed"] is True  # 顶层包确实在
+    assert milvus_dep["runtime_ready"] is False  # 但功能跑不起来
+    assert "milvus-lite" in milvus_dep["runtime_hint"]
+
+
+def test_milvus_hint_points_to_platform_fallback_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows 上 milvus-lite 根本没有发行版：提示必须给替代路径，而不是叫用户再装一次。"""
+    _patch_modules(monkeypatch, {"pymilvus"})
+    monkeypatch.setattr("kacore.capabilities.sys.platform", "win32")
+
+    status = milvus_runtime_status()
+    assert status["ready"] is False
+    assert status["platform_supported"] is False
+    assert "astr" in status["hint"]
+    assert "WSL" in status["hint"]
 
 
 def test_graph_off_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

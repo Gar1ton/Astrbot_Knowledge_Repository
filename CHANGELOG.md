@@ -6,6 +6,77 @@
 
 ### 修复 (Fixed)
 
+- **点「重启插件」后卡死、Web 控制台再也起不来**：`PluginInitializer.initialize()` 的 embedding
+  维度探针是一次裸 `await`，`provider=local` 时会触发 `SentenceTransformer()` 从 HuggingFace
+  下载权重（`BAAI/bge-large-en-v1.5` 约 1.3GB），底层无任何读超时，网络卡住即永不返回；而
+  `reload()` 先 `teardown()` 关掉旧 Web 控制台、新控制台的重建又排在探针之后，于是旧端口已关、
+  新端口永不启动。现在探针改为 `asyncio.wait(timeout=...)` 的**非破坏式**等待：超时只放弃等待，
+  **不取消**探针任务（`asyncio.to_thread` 的下载线程本就无法中断，取消只会丢掉已下载的进度），
+  启动流程照常走完把控制台拉起来；后台下载完成时补一条日志与诊断告知「模型已就绪，重启即可启用」，
+  该任务纳入 `teardown()` 生命周期。新增 `embedding.load_timeout_seconds`（默认 180s，钳制
+  30–3600，`0`=不限，已登记 `_conf_schema.json` 与 `CONFIG_KEY_POLICY`），超时写中文诊断而非
+  英文异常串（`kacore/plugin_initializer.py`、`kacore/config.py`、`_conf_schema.json`）。
+- **本地模型加载在正常使用阶段同样会挂死**：`LocalEmbeddingProvider._lazy_init()` 在每次
+  embed 的首调都可能触发同一条无超时下载路径（重启之外，空闲卸载后的再加载也会）。现在同一个
+  `load_timeout_seconds` 只在「模型尚未加载」时给该次调用加闸，超时抛中文 `RuntimeError` 走既有
+  降级路径；模型已加载后的 encode 不设超时（与 `bge_local.py` 既定理由一致：本地推理无法可靠中断）。
+  另加「加载进行中则后续调用快速失败」，避免被超时放弃的线程堆在 `_lock` 上耗尽默认 executor
+  （`kacore/repository/embedding/local.py`、`kacore/repository/embedding/factory.py`）。
+- **装了 Milvus 却一直提示「请安装 Milvus」的死循环**：全链路只探测 `pymilvus`，但
+  `pymilvus[milvus_lite]` 的 extra 带 `sys_platform != "win32"` 标记——Windows 上 pip 会静默跳过
+  `milvus-lite` 并以退出码 0「安装成功」。于是依赖面板显示绿灯、装配却抛
+  `ConnectionConfigException: milvus-lite is required for local database connections`，
+  重建入口再回一句「请安装 Milvus 并重启插件」。现在就绪判定收口为
+  `capabilities.milvus_runtime_status()`（`pymilvus ∧ milvus_lite` + 平台可行性），依赖状态新增
+  `runtime_ready`/`runtime_hint`（前端据此显示「依赖已安装但运行时不可用」并给出具体修复建议），
+  组合根 gate、`config.get_diagnostics()` 与数据流环节共用同一真相源
+  （`kacore/capabilities.py`、`kacore/plugin_initializer.py`、`kacore/config.py`、
+  `web/frontend/components/flow/FlowNode.tsx`、`web/frontend/lib/{api,i18n}.ts`）。
+- **重建索引失败只会回一句放之四海皆准的错误**：`rebuild_index_pending()` 与
+  `start_milvus_rebuild()` 原本对所有情况都返回「VectorStore 未配置（请安装 Milvus 并重启插件，
+  或配置 embedding provider）」。新增唯一真相源 `vector_store_unavailable_reason()`，按排查顺序
+  区分四类原因并给出下一步：后端选的是 `astr`、milvus-lite 缺失、embedding 探针失败/超时、
+  依赖齐全但装配报错（`kacore/api.py`、`kacore/api_capabilities.py`）。
+- **依赖面板「安装成功」但功能仍不可用**：`install_dependency()` 现在在不支持的平台上前置拒绝安装
+  milvus 并给出替代路径（切 `astr` 后端 / WSL / Linux / Docker），且 pip 退出码为 0 后会再校验一次
+  真实 import 名，未就绪时报错而不是提示「重启即可生效」（`kacore/api_capabilities.py`）。
+- **正常的长问答被误报为超时**：前端 `apiFetch` 的 30s 默认时限套在了所有长任务上——`/api/ask`
+  超过 30s 即弹「请求超时，请稍后重试」，而后端仍在生成。现在按最坏情况给足时限：ask 600s、
+  文档上传 300s、依赖安装 900s、embedding 连通性测试 300s；`/api/capabilities` 心跳从 1.5s 放宽到
+  8s（该端点会聚合 SQLite 统计与 Milvus 运行态，重建/加载模型时 1.5s 必超，数据流页会无征兆弹超时）。
+  `ApiError` 新增 `timedOut` 标志，数据流页的后台刷新不再把客户端抖动报成错误，Zotero「触发即轮询」
+  的 5s 放弃等待也改提示「已在后台进行」（`web/frontend/lib/api.ts`、
+  `web/frontend/components/panels/FlowPageContent.tsx`、`web/frontend/components/modals/SettingModal.tsx`）。
+- **AstrBot 主 LLM 调用没有任何上限**：provider 挂死时整条 ask 永不返回。新增
+  `ask.llm_timeout_seconds`（默认 300s，`0`=不限，可经 `/api/config/update` 修改），
+  超时记明确错误并放弃等待（`kacore/adapters/llm.py`、`kacore/config.py`、`kacore/plugin_initializer.py`）。
+
+### 变更 (Changed)
+
+- **后端可观测性补强（问题与进度都要看得见）**：`initialize()` 逐段落记「步骤完成 + 累计耗时」
+  （SQLite 迁移 → 编排层 → Embedding 探针 → Milvus → API → Web 控制台），终端页最后一条 INFO
+  直接指出卡在哪一步；`teardown()`/`reload()` 记总耗时，软重启失败带 traceback；本地模型加载期
+  每 30s 输出一次心跳（含已等待秒数与 HuggingFace 缓存目录），加载完成记维度与耗时；
+  `LLMAdapter` 记每次调用的路径/耗时/字符数，异常带 traceback，**空响应改 WARNING**——此前
+  降级为「离线占位答案」只记 INFO，用户看到的是一段看似正常实则虚构的回答却几乎无痕迹；
+  `ask` 收尾输出「检索 Xs + 生成 Ys = 总计 Zs、命中数、生效引擎」，受控降级单独 WARNING；
+  `log_capture` 不再整体丢弃 `sentence_transformers`，改为放行该栈（含 `huggingface_hub`/
+  `transformers`/`torch`）的 WARNING+ 并归类到 embedding——模型名写错时 huggingface_hub 的 401
+  是唯一的一手证据，此前被丢弃后终端页只剩「卡住」（`kacore/plugin_initializer.py`、
+  `kacore/adapters/llm.py`、`kacore/api.py`、`kacore/log_capture.py`）。
+
+### 测试 (Tests)
+
+- 新增 18 条回归：探针超时后 `initialize()` 仍走完、诊断为中文且后台探针任务保留至 teardown
+  （`test_lifecycle_and_cli.py`）；本地模型首调超时 / 已加载不加闸 / 加载中快速失败 / `0`=不限
+  （`test_embedding.py`）；只装 pymilvus 时 Milvus 判未就绪、Windows 提示给替代方案而非重复安装
+  （`test_capabilities.py`）；重建入口四类精确原因、Windows 前置拒绝安装、pip 成功但运行时仍不可用
+  （`test_api.py`）；主 LLM 超时闸与离线占位 WARNING、provider 异常带 traceback
+  （`test_llm_adapter.py`）；模型下载栈 WARNING+ 不再被丢弃（`test_log_capture.py`）。
+- 验证：`python -m pytest -q` → 704 passed, 1 skipped；`ruff check .` → All checks passed；
+  `mypy` → Success；前端 `tsc --noEmit` 通过、`npm run build` 通过、`tools/sync_frontend.py`
+  同步 357 个文件到 `pages/`。
+
 - **插件安装期 `NameError: AstrMessageEvent`**：`main.py`（真壳）曾把 `AstrMessageEvent`、
   `ProviderRequest` 仅放进 `if TYPE_CHECKING:` 块。配合本文件顶部的 `from __future__ import
   annotations`（PEP 563），AstrBot core（v4.26.8+）在注册 `@ka.command(...)` 时会对字符串

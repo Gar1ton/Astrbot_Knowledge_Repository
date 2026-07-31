@@ -1559,7 +1559,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         """
         if not self._vector_store or not self._embedding_provider:
             raise RuntimeError(
-                "VectorStore 未配置（请安装 Milvus 并重启插件，或配置 embedding provider）"
+                self.vector_store_unavailable_reason() or "VectorStore 未配置"
             )
 
         if (
@@ -1659,7 +1659,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         """
         if not self._vector_store or not self._embedding_provider:
             raise RuntimeError(
-                "VectorStore 未配置（请安装 Milvus 并重启插件，或配置 embedding provider）"
+                self.vector_store_unavailable_reason() or "VectorStore 未配置"
             )
         current = self._milvus_build_job
         if current is not None and current.status == MILVUS_BUILD_RUNNING:
@@ -2179,6 +2179,19 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         _record("llm_generate", t_llm)
         _record("ask_total", ask_start, sources=len(sources))
         _progress("done", 100)
+        # 一次 ask 的收尾摘要：检索/生成各花多久、命中多少、走了哪些引擎。
+        # 排查「问答变慢/超时」时，这一行就能区分是检索慢还是 LLM 慢。
+        logger.info(
+            "ask 完成 mode=%s 引擎=%s 命中=%d 检索 %.1fs + 生成 %.1fs = 总计 %.1fs",
+            retrieval_mode,
+            ",".join(dict.fromkeys(engines)) or "none",
+            len(sources),
+            t_llm - ask_start,
+            time.monotonic() - t_llm,
+            time.monotonic() - ask_start,
+        )
+        if fallback_reason:
+            logger.warning("ask 发生受控降级：%s", fallback_reason)
 
         engines = list(dict.fromkeys(engines))
         if retrieval_mode in {"deep_thinking", "enhanced"} and deep_outcome is not None:

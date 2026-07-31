@@ -12,6 +12,7 @@ import { useI18n, type I18nKey } from "@/lib/i18n";
 import { useToast } from "@/components/ui/Toast";
 import { TerminalPanel } from "@/components/ui/terminal/TerminalPanel";
 import {
+  ApiError,
   getEffectiveConfig, getZoteroConfig, syncZoteroPull, backupNow, restoreBackup, logout,
   updateConfigValue, saveZoteroServerKey, deleteZoteroServerKey,
   resolveZoteroAccountChange, getR2Status, getR2Job, notionInit, syncDocuments,
@@ -300,7 +301,10 @@ function SyncTab() {
       await syncZoteroPull(true);
       toast("Zotero 同步已启动", "ok");
     } catch (e) {
-      toast(e instanceof Error ? e.message : "同步失败", "error");
+      // 这里的请求是「触发即轮询」：5s 后放弃等待属于预期，后端仍在同步，
+      // 进度看左下角进度条。把它当失败弹红字只会让用户以为同步没跑起来。
+      if (e instanceof ApiError && e.timedOut) toast("Zotero 同步已在后台进行", "ok");
+      else toast(e instanceof Error ? e.message : "同步失败", "error");
     } finally {
       setSyncing(false);
     }

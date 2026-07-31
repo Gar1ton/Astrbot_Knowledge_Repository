@@ -169,3 +169,89 @@ def test_local_provider_idle_timeout_zero_never_unloads() -> None:
 
     assert provider._idle_timer is None
     assert provider._model is not None
+
+
+# ── 加载超时闸（v1.0.9）──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_local_provider_first_call_times_out_while_model_loads() -> None:
+    """模型未加载时，首次调用受 load_timeout 约束，超时给中文可读错误。"""
+
+    def _never_returns(_payload: object) -> list[float]:
+        time.sleep(5)  # 模拟卡在 HuggingFace 下载
+        return [0.1] * 384
+
+    provider = LocalEmbeddingProvider(model_name="BAAI/bge-large-en-v1.5", load_timeout=0.2)
+    provider._embed_query_sync = _never_returns  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider.embed_query("hello")
+
+    assert "加载超时" in str(excinfo.value)
+    assert "BAAI/bge-large-en-v1.5" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_local_provider_loaded_model_is_not_time_boxed() -> None:
+    """模型已加载后不再加闸：慢 encode 不应被误判为加载卡死。"""
+    import unittest.mock as mock
+
+    provider = LocalEmbeddingProvider(
+        model_name="intfloat/multilingual-e5-small",
+        idle_timeout=0,
+        load_timeout=0.05,
+    )
+    fake_model = mock.MagicMock()
+
+    def _slow_encode(*_args: object, **_kwargs: object) -> list[float]:
+        time.sleep(0.2)  # 比 load_timeout 长
+        return [0.1] * 384
+
+    fake_model.encode.side_effect = _slow_encode
+    provider._model = fake_model
+
+    assert len(await provider.embed_query("hello")) == 384
+
+
+@pytest.mark.asyncio
+async def test_local_provider_load_timeout_zero_disables_guard() -> None:
+    """load_timeout<=0 保留旧的无限等待行为（给愿意等下载的用户）。"""
+    import unittest.mock as mock
+
+    provider = LocalEmbeddingProvider(
+        model_name="intfloat/multilingual-e5-small",
+        idle_timeout=0,
+        load_timeout=0,
+    )
+    fake_model = mock.MagicMock()
+    fake_model.encode.return_value = [[0.1] * 384]
+
+    def _load_then_encode(texts: list[str]) -> list[list[float]]:
+        time.sleep(0.15)
+        provider._model = fake_model
+        return [[0.1] * 384 for _ in texts]
+
+    provider._embed_documents_sync = _load_then_encode  # type: ignore[method-assign]
+
+    assert len(await provider.embed_documents(["hello"])) == 1
+
+
+@pytest.mark.asyncio
+async def test_local_provider_fails_fast_while_another_load_is_in_flight() -> None:
+    """加载进行中时后续调用快速失败，不再往线程池堆积会卡死的线程。
+
+    超时只让 await 放弃等待，底层线程仍卡在 _lock 上；不拦住并发调用会耗尽默认 executor，
+    把「一个模型加载慢」放大成「所有 to_thread 操作都卡住」。
+    """
+    provider = LocalEmbeddingProvider(model_name="BAAI/bge-large-en-v1.5", load_timeout=5)
+    provider._loading = True  # 模拟已有一次加载在跑
+
+    def _should_not_run(_payload: object) -> list[float]:
+        raise AssertionError("加载进行中不应再投递新线程")
+
+    provider._embed_query_sync = _should_not_run  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider.embed_query("hello")
+    assert "仍在后台加载" in str(excinfo.value)

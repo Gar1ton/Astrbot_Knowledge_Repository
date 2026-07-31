@@ -35,6 +35,7 @@ from kacore.managers.r2_restore import (
 
 if TYPE_CHECKING:
     from kacore.config import Config, R2SyncConfig
+    from kacore.log_capture import RuntimeEventSink
     from kacore.repository.source_store.base import SourceDocumentStore
     from kacore.repository.sync_targets.base import SyncTarget
 
@@ -88,6 +89,7 @@ class R2BackupManager:
         db_path: Path,
         quiesce_indexes: Callable[[], Awaitable[None]] | None = None,
         reload_callback: Callable[[], Awaitable[None]] | None = None,
+        runtime_event_sink: RuntimeEventSink | None = None,
     ) -> None:
         self._target = target
         self._source_store = source_store
@@ -97,6 +99,9 @@ class R2BackupManager:
         self._db_path = db_path
         self._quiesce_indexes = quiesce_indexes
         self._reload_callback = reload_callback
+        from kacore.runtime_events import RuntimeEventRecorder
+
+        self._runtime_events = RuntimeEventRecorder(runtime_event_sink)
         self._lock = asyncio.Lock()
         self._job: R2BackupJob | None = None
         self._task: asyncio.Task[dict[str, Any]] | None = None
@@ -123,11 +128,40 @@ class R2BackupManager:
                 "job": self.active_job,
             }
         self._job = R2BackupJob(job_id=uuid.uuid4().hex, action=action)
+        self._runtime_events.start(
+            category="sync",
+            operation="r2_backup_restore",
+            operation_id=self._job.job_id,
+            msg="R2 备份/恢复任务开始",
+            metadata={"action": action},
+        )
         self._task = asyncio.create_task(self._run_job(coro))
         return {"status": "started", "job": self.active_job}
 
+    async def _observe_job(self, job: R2BackupJob) -> None:
+        while job.status == "running":
+            self._runtime_events.progress(
+                operation_id=job.job_id,
+                category="sync",
+                operation="r2_backup_restore",
+                phase=job.stage,
+                percent=job.progress,
+                msg=f"R2 任务进度：{job.stage}",
+                metadata={
+                    "job_id": job.job_id,
+                    "action": job.action,
+                    "files_done": job.files_done,
+                    "files_total": job.files_total,
+                    "bytes_done": job.bytes_done,
+                    "bytes_total": job.bytes_total,
+                },
+            )
+            await asyncio.sleep(1.0)
+
     async def _run_job(self, coro: Awaitable[dict[str, Any]]) -> dict[str, Any]:
         assert self._job is not None
+        job = self._job
+        observer = asyncio.create_task(self._observe_job(job))
         try:
             result = await coro
             if result.get("status") == "success":
@@ -147,6 +181,34 @@ class R2BackupManager:
         except Exception as exc:  # noqa: BLE001 - 后台任务需落可观测终态
             self._job.finish("error", error=str(exc))
             return {"status": "error", "message": str(exc), "job": self.active_job}
+        finally:
+            observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
+            metadata = {
+                "job_id": job.job_id,
+                "action": job.action,
+                "files_done": job.files_done,
+                "files_total": job.files_total,
+                "bytes_done": job.bytes_done,
+                "bytes_total": job.bytes_total,
+            }
+            if job.status == "success":
+                self._runtime_events.finish(
+                    operation_id=job.job_id,
+                    category="sync",
+                    operation="r2_backup_restore",
+                    msg="R2 备份/恢复任务完成",
+                    metadata=metadata,
+                )
+            else:
+                self._runtime_events.fail(
+                    operation_id=job.job_id,
+                    category="sync",
+                    operation="r2_backup_restore",
+                    msg="R2 备份/恢复任务失败或取消",
+                    error=job.error or job.status,
+                    metadata=metadata,
+                )
 
     async def _delayed_reload(self) -> None:
         await asyncio.sleep(0.25)

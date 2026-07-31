@@ -89,6 +89,7 @@ class PluginInitializer:
         self.zotero_sync_pipeline: Any | None = None
         self.notion_sync_pipeline: Any | None = None
         self._web_runner: Any | None = None
+        self._log_handler: Any | None = None
 
         # 子系统句柄 —— 在 initialize() 中按依赖顺序赋值，供 event_handler / web 引用。
         self.source_store: SourceDocumentStore | None = None
@@ -130,7 +131,8 @@ class PluginInitializer:
     async def initialize(self) -> None:
         # 0) 最优先安装日志 handler，确保后续所有启动日志可被终端页捕获。
         from kacore.log_capture import install as _install_log_capture
-        _install_log_capture()
+
+        self._log_handler = _install_log_capture()
         logger.info("PluginInitializer.initialize() 开始")
 
         # 启动是一条长链路，任何一环卡住都表现为「重启没反应」。逐段落记累计耗时，
@@ -561,6 +563,7 @@ class PluginInitializer:
             db_path=db_path,
             quiesce_indexes=self._quiesce_indexes_for_backup,
             reload_callback=self.reload,
+            runtime_event_sink=self._log_handler,
         )
 
         # 5) 业务门面（依赖已装配的仓储/managers）。
@@ -591,6 +594,7 @@ class PluginInitializer:
             secret_store=self.secret_store,
             reload_callback=self.reload,
             r2_backup_manager=self.r2_backup_manager,
+            runtime_event_sink=self._log_handler,
         )
         await self.api.restore_paused_build_job()
 
@@ -852,6 +856,7 @@ class PluginInitializer:
                 auth_required=True,
                 username=web_cfg.username,
                 password=web_cfg.password,
+                log_handler=self._log_handler,
             )
             runner = aiohttp_web.AppRunner(app)
             await runner.setup()

@@ -1,5 +1,34 @@
 # TODO
 
+## v1.0.10：Web 终端日志完整性与可观测性增强 (completed)
+
+### User constraints / 约束
+
+- 仅增强 Web 控制台终端日志；保留现有日志，不降低级别、不删除字段，不额外扩大宿主终端输出。
+- 长任务采用「阶段变化立即记录 + 同阶段每 10% 或 30s 节流进度」，逐文档成功不刷屏、失败必留。
+- `DataDirLockedError` 只做根因诊断与安全建议，不自动破锁、终止进程或删除 Milvus 数据目录。
+- 版本锁定 v1.0.10；不做磁盘日志持久化，不执行 commit、push、PR 或发布。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 日志传输可靠性与诊断**：为日志增加单调 `seq`、2000 条统一缓冲、
+  `after_seq` 增量契约与显式丢行计数；保留时间戳兼容；异常补根因类型、诊断码与安全建议。
+- [x] **Phase 2 — Web 请求时间线**：组合根注入唯一日志处理器；直接记录变更请求的开始/结束、
+  非 2xx 或慢 GET、请求 ID、规范化路由、状态和耗时，不记录请求正文或秘密。
+- [x] **Phase 3 — 长任务结构化事件**：注入框架无关 RuntimeEventSink，覆盖摄入、Milvus、
+  LightRAG、Zotero/Notion、R2、Ask、依赖安装与重启的开始、阶段、节流进度和终态。
+- [x] **Phase 4 — 前端完整性提示**：按 `seq` 去重合并并稳定渲染；显示缓冲轮转遗漏数量，
+  保持暂停、清屏、筛选、复制和下载行为。
+- [x] **Phase 5 — 验证与治理**：补后端/HTTP/任务回归，执行 pytest、ruff、mypy 与前端
+  lint/tsc/build；仅经同步脚本更新 `pages/`，通过后统一版本并追加 CHANGELOG。
+
+### Verification
+
+- 定向日志/Web/运行事件测试：`88 passed`；相关 API、生命周期、同步与 R2 回归：`179 passed`。
+- 全量后端：`719 passed, 1 skipped`；`ruff check .` → All checks passed；`mypy` → Success。
+- 前端：TypeScript 无错误；ESLint 通过（仅保留 1 条既有 unused 常量 warning）；生产构建成功，
+  13 条路由静态产出；`tools/sync_frontend.py` 同步 357 个文件，`--check` 逐字节一致。
+
 ## v1.0.9：重启挂死 · Milvus 就绪度 · 可观测性 · ask 超时 (completed)
 
 ### User constraints / 约束

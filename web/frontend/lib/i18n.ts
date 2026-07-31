@@ -282,6 +282,7 @@ const zh = {
   terminal_new_logs: "{n} 条新日志",
   terminal_expand_trace: "展开堆栈 ({n} 行)",
   terminal_collapse_trace: "收起堆栈",
+  terminal_dropped_logs: "日志产生过快或缓冲区已轮转，至少有 {n} 条日志无法恢复；以下为仍保留的最新记录。",
 
   // 文档工作台
   docs_all: "全部文档",
@@ -924,6 +925,7 @@ const en: Record<keyof typeof zh, string> = {
   terminal_new_logs: "{n} new logs",
   terminal_expand_trace: "Show traceback ({n} lines)",
   terminal_collapse_trace: "Hide traceback",
+  terminal_dropped_logs: "The log buffer rotated or filled too quickly. At least {n} lines cannot be recovered; the newest retained records follow.",
 
   docs_all: "All Documents",
   docs_collection: "Collection",

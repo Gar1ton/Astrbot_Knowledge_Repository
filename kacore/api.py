@@ -46,6 +46,7 @@ from kacore.domain.models import (
 from kacore.ingest_job import (
     INGEST_ERROR,
     INGEST_STAGE_INDEXING,
+    INGEST_STAGE_PARSING,
     INGEST_SUCCESS,
     IngestJob,
 )
@@ -375,6 +376,7 @@ if TYPE_CHECKING:
     from kacore.domain.models import DocumentChunk, QuotaUsage
     from kacore.index_compatibility import IndexCompatibilityStore
     from kacore.lightrag_core import BuildJob, LightRAGCoreRegistry
+    from kacore.log_capture import RuntimeEventSink
     from kacore.managers.base import (
         BaseCategoryManager,
         BaseIngestManager,
@@ -531,6 +533,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         secret_store: EncryptedSecretStore | None = None,
         reload_callback: Callable[[], Any] | None = None,
         r2_backup_manager: Any | None = None,
+        runtime_event_sink: RuntimeEventSink | None = None,
     ) -> None:
         self._source_store = source_store
         self._kb_reader = kb_reader
@@ -566,6 +569,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         # 软重启回调（组合根注入 PluginInitializer.reload；为空表示当前环境不支持程序化重启）。
         self._reload_callback = reload_callback
         self._r2_backup_manager = r2_backup_manager
+        from kacore.runtime_events import RuntimeEventRecorder
+
+        self._runtime_events = RuntimeEventRecorder(runtime_event_sink)
         # Notion 单向推送管线（组合根在 api 构造后注入）。
         self._notion_sync_pipeline: Any | None = None
         # Notion push：全局单任务的进度快照 + 后台任务句柄（与 Zotero Pull 同构）。
@@ -589,6 +595,43 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     def attach_notion_sync_pipeline(self, pipeline: Any) -> None:
         """组合根注入 NotionSyncPipeline（Notion 单向增量推送编排）。"""
         self._notion_sync_pipeline = pipeline
+
+    async def _observe_runtime_job(
+        self,
+        job: Any,
+        *,
+        category: str,
+        operation: str,
+        label: str,
+        active_statuses: frozenset[str] = frozenset({"running", "paused"}),
+    ) -> None:
+        """轮询既有任务快照，把直接字段更新转为 10%/30s 节流事件。"""
+        while True:
+            snapshot = job.to_dict()
+            phase = str(snapshot.get("stage") or snapshot.get("phase") or "running")
+            percent = int(snapshot.get("progress_percent") or snapshot.get("progress") or 0)
+            self._runtime_events.progress(
+                operation_id=str(snapshot.get("job_id") or job.job_id),
+                category=category,
+                operation=operation,
+                phase=phase,
+                percent=percent,
+                msg=f"{label}：{snapshot.get('stage_label') or phase}",
+                metadata={
+                    "job_id": str(snapshot.get("job_id") or job.job_id),
+                    "processed_docs": int(snapshot.get("processed_docs") or 0),
+                    "total_docs": int(
+                        snapshot.get("total_docs") or snapshot.get("docs_total") or 0
+                    ),
+                    "failed_docs": int(
+                        snapshot.get("failed_docs") or snapshot.get("docs_failed") or 0
+                    ),
+                    "chunks": int(snapshot.get("total_chunks") or 0),
+                },
+            )
+            if str(snapshot.get("status") or "") not in active_statuses:
+                return
+            await asyncio.sleep(1.0)
 
     # ── 集合（分类）────────────────────────────────────────────
 
@@ -1130,6 +1173,21 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             job = IngestJob(title=title)
             job.start()
             self._ingest_job = job
+            self._runtime_events.start(
+                category="ingest",
+                operation="document_ingest",
+                operation_id=job.job_id,
+                msg="文档摄入开始",
+                metadata={"collection": collection, "size_bytes": size_bytes},
+            )
+            self._runtime_events.progress(
+                operation_id=job.job_id,
+                category="ingest",
+                operation="document_ingest",
+                phase=INGEST_STAGE_PARSING,
+                percent=job.progress_percent(),
+                msg="正在解析文档并生成结构化制品",
+            )
             logger.info("Document ingest start: title=%r collection=%r", title, collection)
             try:
                 doc_id = await self._ingest_manager.ingest(
@@ -1144,9 +1202,25 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 job.recent_error = str(exc)
                 job.finish(INGEST_ERROR)
                 logger.error("Document ingest failed for %r: %s", title, exc, exc_info=True)
+                self._runtime_events.fail(
+                    operation_id=job.job_id,
+                    category="ingest",
+                    operation="document_ingest",
+                    msg="文档摄入失败",
+                    error=exc,
+                )
                 raise
             job.doc_id = doc_id
             job.set_stage(INGEST_STAGE_INDEXING)
+            self._runtime_events.progress(
+                operation_id=job.job_id,
+                category="ingest",
+                operation="document_ingest",
+                phase=INGEST_STAGE_INDEXING,
+                percent=job.progress_percent(),
+                msg="文档解析完成，正在更新检索索引",
+                metadata={"doc_id": doc_id},
+            )
             # 同步写入 Milvus 向量库（仅在 auto_index_enabled=True 时执行）
             if auto_index and self._config and self._milvus_index_is_compatible():
                 vdb = self._config.get_vector_db_config()
@@ -1164,6 +1238,19 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                             exc_info=True,
                         )
                         await self._mark_document_needs_reindex(doc_id)
+                        self._runtime_events.emit(
+                            category="ingest",
+                            operation="document_ingest",
+                            status="error",
+                            level="ERROR",
+                            msg="文档已摄入，但 Milvus 自动索引失败",
+                            metadata={
+                                "operation_id": job.job_id,
+                                "doc_id": doc_id,
+                                "phase": INGEST_STAGE_INDEXING,
+                                "error": str(exc),
+                            },
+                        )
             elif not auto_index or (
                 self._config
                 and self._config.get_vector_db_config().backend == "milvus"
@@ -1172,6 +1259,13 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 await self._mark_document_needs_reindex(doc_id)
             await self._mark_lightrag_pending(doc_id, collection)
             job.finish(INGEST_SUCCESS)
+            self._runtime_events.finish(
+                operation_id=job.job_id,
+                category="ingest",
+                operation="document_ingest",
+                msg="文档摄入完成",
+                metadata={"doc_id": doc_id, "collection": collection},
+            )
             logger.info("Document ingest done: doc_id=%s title=%r", doc_id, title)
             return doc_id
 
@@ -1485,6 +1579,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         if job is not None:
             job.stage = MILVUS_BUILD_STAGE_INDEXING
             job.total_index_docs = len(index_docs)
+            self._record_milvus_progress(job, force=True)
         total_chunks = 0
 
         # 3. 逐个文档批量进行 Embedding 计算与 upsert
@@ -1498,6 +1593,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     job.processed_docs += 1
                     job.processed_index_docs += 1
                     job.total_chunks += chunks
+                    self._record_milvus_progress(job)
             except Exception as exc:
                 logger.error(
                     "Milvus indexing failed after retries for %s during full rebuild: %s",
@@ -1525,6 +1621,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         if job is not None:
             job.stage = MILVUS_BUILD_STAGE_FINALIZING
+            self._record_milvus_progress(job, force=True)
 
         if errors:
             failed_ids = {e["doc_id"] for e in errors}
@@ -1586,6 +1683,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         if job is not None:
             job.stage = MILVUS_BUILD_STAGE_INDEXING
             job.total_index_docs = len(index_docs)
+            self._record_milvus_progress(job, force=True)
         total_chunks = 0
         rebuilt_docs = 0
         logger.info("rebuild_index_pending: %d 个文档待重建", len(docs))
@@ -1602,6 +1700,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     job.processed_docs += 1
                     job.processed_index_docs += 1
                     job.total_chunks += chunks
+                    self._record_milvus_progress(job)
             except Exception as exc:
                 logger.error(
                     "Milvus indexing failed after retries for %s during pending rebuild: %s",
@@ -1629,6 +1728,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         if job is not None:
             job.stage = MILVUS_BUILD_STAGE_FINALIZING
+            self._record_milvus_progress(job, force=True)
 
         logger.info(
             "rebuild_index_pending 完成: %d docs, %d chunks, %d failed",
@@ -1671,8 +1771,35 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             started_at_iso=_now_iso(),
         )
         self._milvus_build_job = job
+        self._runtime_events.start(
+            category="retrieval",
+            operation="milvus_rebuild",
+            operation_id=job.job_id,
+            msg="Milvus 索引重建开始",
+            metadata={"mode": job.mode},
+        )
+        self._record_milvus_progress(job, force=True)
         self._milvus_build_task = asyncio.create_task(self._run_milvus_rebuild(job))
         return job.to_dict()
+
+    def _record_milvus_progress(self, job: MilvusBuildJob, *, force: bool = False) -> None:
+        snapshot = job.to_dict()
+        self._runtime_events.progress(
+            operation_id=job.job_id,
+            category="retrieval",
+            operation="milvus_rebuild",
+            phase=str(snapshot["stage"]),
+            percent=int(snapshot["progress_percent"]),
+            msg=f"Milvus 重建进度：{snapshot['stage_label']}",
+            force=force,
+            metadata={
+                "mode": snapshot["mode"],
+                "processed_docs": snapshot["processed_docs"],
+                "total_docs": snapshot["total_docs"],
+                "failed_docs": snapshot["failed_docs"],
+                "chunks": snapshot["total_chunks"],
+            },
+        )
 
     async def _run_milvus_rebuild(self, job: MilvusBuildJob) -> None:
         """后台执行 rebuild_index_pending，并把终态写回 job（不打崩任务循环）。"""
@@ -1692,6 +1819,33 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         finally:
             job.finished_at = time.monotonic()
             job.finished_at_iso = _now_iso()
+            self._record_milvus_progress(job, force=True)
+            metadata = {
+                "mode": job.mode,
+                "processed_docs": job.processed_docs,
+                "total_docs": job.total_docs,
+                "failed_docs": job.failed_docs,
+                "chunks": job.total_chunks,
+            }
+            if job.status == MILVUS_BUILD_ERROR:
+                self._runtime_events.fail(
+                    operation_id=job.job_id,
+                    category="retrieval",
+                    operation="milvus_rebuild",
+                    msg="Milvus 索引重建失败",
+                    error=job.recent_error or "unknown error",
+                    metadata=metadata,
+                )
+            else:
+                self._runtime_events.finish(
+                    operation_id=job.job_id,
+                    category="retrieval",
+                    operation="milvus_rebuild",
+                    msg="Milvus 索引重建完成",
+                    status="warning" if job.failed_docs else "ok",
+                    level="WARNING" if job.failed_docs else "INFO",
+                    metadata=metadata,
+                )
 
     def get_active_milvus_build_job(self) -> dict[str, Any] | None:
         """返回当前需展示的 Milvus 构建任务快照（无则 None）。
@@ -1814,6 +1968,18 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
         cid = conversation_id or uuid.uuid4().hex
         ask_start = time.monotonic()
+        self._runtime_events.start(
+            category="llm",
+            operation="ask",
+            operation_id=cid,
+            msg="Ask 问答开始",
+            metadata={
+                "conversation_id": cid,
+                "collection": collection or "all",
+                "mode": retrieval_mode,
+                "top_k": top_k,
+            },
+        )
         logger.info(
             "ask: mode=%s collection=%r top_k=%d question=%r",
             retrieval_mode,
@@ -1825,6 +1991,20 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         def _progress(stage: str, pct: int, detail: dict | None = None) -> None:
             if self._progress_store is not None:
                 self._progress_store.set(cid, stage, pct, detail)
+            self._runtime_events.progress(
+                operation_id=cid,
+                category="llm",
+                operation="ask",
+                phase=stage,
+                percent=pct,
+                msg=f"Ask 阶段：{stage}",
+                metadata={
+                    "conversation_id": cid,
+                    "collection": collection or "all",
+                    "mode": retrieval_mode,
+                    **(detail or {}),
+                },
+            )
 
         def _record(op: str, t0: float, **meta: object) -> None:
             if self._metrics is not None:
@@ -1921,6 +2101,18 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 )
             except Exception as exc:
                 logger.warning("Failed to persist chat history: %s", exc)
+            self._runtime_events.finish(
+                operation_id=cid,
+                category="llm",
+                operation="ask",
+                msg="Ask 问答完成",
+                metadata={
+                    "conversation_id": cid,
+                    "mode": retrieval_mode,
+                    "engines": "lightrag",
+                    "sources": 0,
+                },
+            )
             return {
                 "conversation_id": cid,
                 "answer": answer,
@@ -2227,6 +2419,21 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         except Exception as exc:
             logger.warning("Failed to persist chat history: %s", exc)
 
+        self._runtime_events.finish(
+            operation_id=cid,
+            category="llm",
+            operation="ask",
+            msg="Ask 问答完成",
+            status="warning" if fallback_reason else "ok",
+            level="WARNING" if fallback_reason else "INFO",
+            metadata={
+                "conversation_id": cid,
+                "mode": retrieval_mode,
+                "engines": ",".join(engines) or "none",
+                "sources": len(sources),
+                "fallback_reason": fallback_reason or "",
+            },
+        )
         return {
             "conversation_id": cid,
             "answer": answer,
@@ -2426,6 +2633,18 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
     async def _run_notion_push(self, job: NotionSyncJob, force: bool) -> None:
         """后台执行 push_all，把终态与错误写回 job（后台任务不应抛出）。"""
+        self._runtime_events.start(
+            category="sync",
+            operation="notion_push",
+            operation_id=job.job_id,
+            msg="Notion 推送开始",
+            metadata={"force": force},
+        )
+        observer = asyncio.create_task(
+            self._observe_runtime_job(
+                job, category="sync", operation="notion_push", label="Notion 推送进度"
+            )
+        )
         try:
             assert self._notion_sync_pipeline is not None
             result = await self._notion_sync_pipeline.push_all(force=force, progress=job)
@@ -2453,6 +2672,36 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             logger.error("Notion push job failed: %s", exc, exc_info=True)
             job.finish(NOTION_SYNC_ERROR)
             job.note_error(str(exc))
+        finally:
+            observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
+            snapshot = job.to_dict()
+            metadata = {
+                "job_id": job.job_id,
+                "processed_docs": int(snapshot.get("docs_processed") or 0),
+                "total_docs": int(snapshot.get("docs_total") or 0),
+                "failed_docs": int(snapshot.get("docs_failed") or 0),
+                "force": force,
+            }
+            if job.status == NOTION_SYNC_ERROR:
+                self._runtime_events.fail(
+                    operation_id=job.job_id,
+                    category="sync",
+                    operation="notion_push",
+                    msg="Notion 推送失败",
+                    error=job.errors[0] if job.errors else "unknown error",
+                    metadata=metadata,
+                )
+            else:
+                self._runtime_events.finish(
+                    operation_id=job.job_id,
+                    category="sync",
+                    operation="notion_push",
+                    msg="Notion 推送完成",
+                    status="warning" if job.status == NOTION_SYNC_PARTIAL else "ok",
+                    level="WARNING" if job.status == NOTION_SYNC_PARTIAL else "INFO",
+                    metadata=metadata,
+                )
 
     def get_active_notion_sync_job(self) -> dict[str, Any] | None:
         """返回当前需展示的 Notion 推送任务快照（无则 None）。
@@ -2764,12 +3013,31 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 "message": "当前环境不支持程序化重启，请手动重启插件。",
             }
 
+        operation_id = self._runtime_events.start(
+            category="system",
+            operation="plugin_restart",
+            msg="插件软重启已排队",
+        )
+
         async def _deferred_reload() -> None:
             await asyncio.sleep(0.4)
             try:
                 await self._reload_callback()
+                self._runtime_events.finish(
+                    operation_id=operation_id,
+                    category="system",
+                    operation="plugin_restart",
+                    msg="插件软重启完成",
+                )
             except Exception as exc:  # noqa: BLE001 - 后台任务需吞掉异常并记录
                 logger.error("plugin soft restart failed: %s", exc, exc_info=True)
+                self._runtime_events.fail(
+                    operation_id=operation_id,
+                    category="system",
+                    operation="plugin_restart",
+                    msg="插件软重启失败",
+                    error=exc,
+                )
 
         # 持引用防 GC 提前回收 fire-and-forget 任务；done 后自释放。
         self._deferred_reload_task = asyncio.create_task(_deferred_reload())
@@ -3414,6 +3682,18 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     async def _run_lightrag_build_job(self, job_id: str) -> None:
         job = self._graph_build_jobs[job_id]
         assert self._lightrag_registry is not None
+        self._runtime_events.start(
+            category="graph",
+            operation="lightrag_build",
+            operation_id=job.job_id,
+            msg="LightRAG 图谱构建开始或恢复",
+            metadata={"collection": job.collection},
+        )
+        observer = asyncio.create_task(
+            self._observe_runtime_job(
+                job, category="graph", operation="lightrag_build", label="LightRAG 构建进度"
+            )
+        )
         try:
             await self._build_pause_gate(job, "reading_documents")
             job.status = "running"
@@ -3568,6 +3848,20 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     self._refresh_build_progress(job, label="document_error")
                     await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
                     logger.error("LightRAG build failed for doc %s: %s", doc.doc_id, exc)
+                    self._runtime_events.emit(
+                        category="graph",
+                        operation="lightrag_build",
+                        status="error",
+                        level="ERROR",
+                        msg="LightRAG 单文档构建失败",
+                        metadata={
+                            "operation_id": job.job_id,
+                            "job_id": job.job_id,
+                            "doc_id": doc.doc_id,
+                            "phase": "indexing",
+                            "error": str(exc),
+                        },
+                    )
             await self._build_pause_gate(job, "before_finalize")
             job.stage = "finalizing"
             self._refresh_build_progress(job, label="finalizing")
@@ -3600,6 +3894,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             job.recent_error = str(exc)
             logger.error("LightRAG build job %s failed: %s", job_id, exc)
         finally:
+            observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
             if job.status in TERMINAL_BUILD_STATUSES:
                 job.finished_at = job.finished_at or time.monotonic()
                 job.finished_at_iso = job.finished_at_iso or _now_iso()
@@ -3609,6 +3905,33 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 job.paused_at_iso = None
                 self._build_pause_events.pop(job_id, None)
                 self._refresh_build_progress(job, label=job.stage)
+                metadata = {
+                    "job_id": job.job_id,
+                    "collection": job.collection,
+                    "processed_docs": job.processed_docs,
+                    "total_docs": job.total_docs,
+                    "failed_docs": job.failed_docs,
+                    "chunks": job.processed_chunks,
+                }
+                if job.status in {"error", "interrupted"}:
+                    self._runtime_events.fail(
+                        operation_id=job.job_id,
+                        category="graph",
+                        operation="lightrag_build",
+                        msg="LightRAG 图谱构建失败或中断",
+                        error=job.recent_error or job.status,
+                        metadata=metadata,
+                    )
+                else:
+                    self._runtime_events.finish(
+                        operation_id=job.job_id,
+                        category="graph",
+                        operation="lightrag_build",
+                        msg="LightRAG 图谱构建完成",
+                        status="warning" if job.failed_docs else "ok",
+                        level="WARNING" if job.failed_docs else "INFO",
+                        metadata=metadata,
+                    )
             self._build_tasks.pop(job_id, None)
             await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
 
@@ -4021,6 +4344,20 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             if job is not None:
                 job.failed_docs += 1
                 job.errors.append(error)
+                self._runtime_events.emit(
+                    category="retrieval",
+                    operation="milvus_rebuild",
+                    status="error",
+                    level="ERROR",
+                    msg="Milvus 数据清洗失败，已跳过该文档",
+                    metadata={
+                        "operation_id": job.job_id,
+                        "doc_id": doc.doc_id,
+                        "phase": MILVUS_BUILD_STAGE_CLEANING,
+                        "error": str(exc),
+                    },
+                )
+                self._record_milvus_progress(job)
 
         for doc, exc in scan_failures:
             await record_failure(doc, exc)
@@ -4032,6 +4369,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     await rebuilt
                 if job is not None:
                     job.processed_clean_docs += 1
+                    self._record_milvus_progress(job)
             except Exception as exc:  # noqa: BLE001 - 单文档失败转 partial_failure
                 await record_failure(doc, exc)
 
@@ -4448,6 +4786,18 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
 
     async def _run_zotero_pull(self, job: ZoteroSyncJob, incremental: bool) -> None:
         """后台执行 pull，把终态与错误写回 job 及 `_last_zotero_sync`（后台任务不应抛出）。"""
+        self._runtime_events.start(
+            category="sync",
+            operation="zotero_pull",
+            operation_id=job.job_id,
+            msg="Zotero 拉取开始",
+            metadata={"incremental": incremental},
+        )
+        observer = asyncio.create_task(
+            self._observe_runtime_job(
+                job, category="sync", operation="zotero_pull", label="Zotero 拉取进度"
+            )
+        )
         try:
             assert self._zotero_pipeline is not None
             result = await self._zotero_pipeline.pull(incremental=incremental, progress=job)
@@ -4481,6 +4831,37 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             job.finish(ZOTERO_SYNC_ERROR)
             job.note_error(str(exc))
             self._last_zotero_sync = {"status": ZOTERO_SYNC_ERROR, "message": str(exc)}
+        finally:
+            observer.cancel()
+            await asyncio.gather(observer, return_exceptions=True)
+            snapshot = job.to_dict()
+            metadata = {
+                "job_id": job.job_id,
+                "processed_docs": int(snapshot.get("docs_processed") or 0),
+                "total_docs": int(snapshot.get("docs_total") or 0),
+                "failed_docs": int(snapshot.get("docs_failed") or 0),
+                "skipped_docs": int(snapshot.get("skipped_unchanged") or 0),
+                "incremental": incremental,
+            }
+            if job.status == ZOTERO_SYNC_ERROR:
+                self._runtime_events.fail(
+                    operation_id=job.job_id,
+                    category="sync",
+                    operation="zotero_pull",
+                    msg="Zotero 拉取失败",
+                    error=job.errors[0] if job.errors else "unknown error",
+                    metadata=metadata,
+                )
+            else:
+                self._runtime_events.finish(
+                    operation_id=job.job_id,
+                    category="sync",
+                    operation="zotero_pull",
+                    msg="Zotero 拉取完成",
+                    status="warning" if job.status == ZOTERO_SYNC_PARTIAL else "ok",
+                    level="WARNING" if job.status == ZOTERO_SYNC_PARTIAL else "INFO",
+                    metadata=metadata,
+                )
 
     def get_active_zotero_sync_job(self) -> dict[str, Any] | None:
         """返回当前需展示的 Zotero 同步任务快照（无则 None）。

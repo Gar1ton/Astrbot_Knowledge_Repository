@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [v1.0.10] — 2026-07-31
+
+### 修复 (Fixed)
+
+- **Web 终端时间线会静默断裂**：日志记录新增线程安全、严格递增的 `seq`，`/api/logs` 支持
+  `after_seq` 并继续兼容旧 `after` 时间戳；环形缓冲、HTTP 单次上限与前端持有量统一为 2000 条，
+  返回 `oldest_seq`、`latest_seq`、`dropped_count`，前端按序号去重并明确提示遗漏数量。
+- **前端 toast 存在但后端请求与拒绝过程缺失**：Web 应用直接向同一个内存处理器记录请求开始与结束，
+  不再依赖 `KRWebServer` logger 的启用或传播状态；变更请求、失败/慢 GET 均带规范化路由、HTTP 状态、
+  耗时与 `request_id`，响应头可用于反查，且不记录请求正文、密码、Cookie、API Key 或配置值。
+- **三方根因被噪声过滤一起吞掉**：aiohttp、grpc、网络与模型栈仅抑制低级别噪声，WARNING/ERROR
+  继续进入 Web 终端；异常在完整 traceback 之外增加异常类型、根因类型、诊断码与操作建议。
+- **Milvus 锁冲突缺少可执行诊断**：`DataDirLockedError` 标记为 `milvus_data_dir_locked`，提示检查并
+  正常停止重复 AstrBot/插件进程，确认无重复进程后再排查 ACL 或安全软件；明确禁止直接删除锁或数据目录。
+
+### 变更 (Changed)
+
+- **长任务结构化事件**：新增框架无关的 `RuntimeEventSink` 与节流记录器，通过组合根注入 Web 日志缓冲；
+  文档摄入、Milvus 重建、LightRAG、Zotero/Notion、R2 备份恢复、Ask、依赖安装和插件重启均记录开始、
+  阶段变化、每 10% 或 30 秒的节流进度及终态。逐文档成功不刷屏，单文档失败与任务摘要始终保留。
+- **终端元数据补强**：前端沿用既有布局，在 metadata 区域展示 `request_id`、`job_id`、`phase`、
+  `progress` 等字段；暂停、清屏、刷新、复制与下载行为保持不变，复制/下载会包含丢行警示。
+
+### 测试 (Tests)
+
+- 新增序号并发/轮转/游标兼容、遗漏计数、根因分类、请求观测脱离 logger、秘密脱敏、慢/异常请求、
+  阶段节流、终态与并发 ID 区分回归。全量后端 `719 passed, 1 skipped`；Ruff、mypy、TypeScript、
+  ESLint 与生产构建通过，`pages/` 已由 `tools/sync_frontend.py` 更新并通过逐字节一致性检查。
+
 ## [v1.0.9] — 2026-07-30
 
 ### 修复 (Fixed)

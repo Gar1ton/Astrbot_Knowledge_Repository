@@ -1676,12 +1676,15 @@ export async function deleteLocalModel(name: string): Promise<void> {
 // ─────────────────────────────────────────────────────────────
 
 export interface LogLine {
-  ts: number; level: string; name: string; msg: string;
+  seq: number; ts: number; level: string; name: string; msg: string;
   location?: string; exc?: string;
   source?: string; category?: string; operation?: string; status?: string;
   elapsed_ms?: number | null; metadata?: Record<string, unknown>;
 }
-export interface LogsResponse { lines: LogLine[]; server_ts: number; }
+export interface LogsResponse {
+  lines: LogLine[]; server_ts: number;
+  oldest_seq: number; latest_seq: number; dropped_count: number;
+}
 
 export async function postLogEvent(event: {
   type: "info" | "error" | "ok";
@@ -1696,9 +1699,12 @@ export async function postLogEvent(event: {
   });
 }
 
-export async function getLogs(after = 0, limit = 200): Promise<LogsResponse> {
-  if (isMock()) return { lines: [], server_ts: Date.now() / 1000 };
-  return apiFetch<LogsResponse>(`/api/logs?after=${after}&limit=${limit}`, { timeoutMs: 4_000 });
+export async function getLogs(afterSeq = 0, limit = 200): Promise<LogsResponse> {
+  if (isMock()) return {
+    lines: [], server_ts: Date.now() / 1000,
+    oldest_seq: 0, latest_seq: 0, dropped_count: 0,
+  };
+  return apiFetch<LogsResponse>(`/api/logs?after_seq=${afterSeq}&limit=${limit}`, { timeoutMs: 4_000 });
 }
 
 // ─────────────────────────────────────────────────────────────

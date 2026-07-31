@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -23,6 +24,7 @@ from kacore.domain.models import (
     SyncTargetKind,
 )
 from kacore.index_compatibility import IndexCompatibilityStore
+from kacore.log_capture import MemoryLogHandler
 from kacore.plugin_initializer import PluginInitializer
 from kacore.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
 from kacore.repository.source_store.memory import InMemorySourceDocumentStore
@@ -1999,5 +2001,136 @@ async def test_notion_active_route_returns_null_when_idle(tmp_path: Path) -> Non
         resp = await client.get("/api/sync/notion/active")
         assert resp.status == 200
         assert await resp.json() == {"job": None}
+    finally:
+        await client.close()
+
+
+# ── v1.0.10：Web 请求时间线与 seq 日志端点 ──────────────────────
+
+
+async def test_mutating_request_is_recorded_even_when_web_logger_disabled(tmp_path: Path) -> None:
+    api = await _make_api()
+    log_handler = MemoryLogHandler()
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+        log_handler=log_handler,
+    )
+    client = TestClient(TestServer(app))
+    web_logger = logging.getLogger("KRWebServer")
+    previous_disabled = web_logger.disabled
+    web_logger.disabled = True
+    await client.start_server()
+    try:
+        resp = await client.post("/api/documents/rebuild-index")
+        assert resp.status == 503
+        request_id = resp.headers["X-KA-Request-ID"]
+        events = [
+            line for line in log_handler.get_lines()
+            if line["operation"] == "http_request"
+            and line["metadata"].get("route") == "/api/documents/rebuild-index"
+        ]
+        assert [line["status"] for line in events] == ["started", "error"]
+        assert {line["metadata"]["request_id"] for line in events} == {request_id}
+        assert events[-1]["metadata"]["http_status"] == 503
+        assert isinstance(events[-1]["elapsed_ms"], float)
+    finally:
+        web_logger.disabled = previous_disabled
+        await client.close()
+
+
+async def test_successful_poll_get_is_quiet_but_failed_mutation_is_not(tmp_path: Path) -> None:
+    api = await _make_api()
+    log_handler = MemoryLogHandler()
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+        log_handler=log_handler,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        assert (await client.get("/api/documents/rebuild-index/active")).status == 200
+        assert log_handler.get_lines() == []
+        assert (await client.post("/api/documents/rebuild-index")).status == 503
+        assert len(log_handler.get_lines()) == 2
+    finally:
+        await client.close()
+
+
+async def test_request_observability_never_logs_login_body_or_password(tmp_path: Path) -> None:
+    api = await _make_api()
+    log_handler = MemoryLogHandler()
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=True,
+        username="admin",
+        password="correct-password",
+        log_handler=log_handler,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        secret = "must-not-appear-in-terminal"
+        resp = await client.post("/api/login", json={"username": "admin", "password": secret})
+        assert resp.status == 401
+        serialized = str(log_handler.get_lines())
+        assert secret not in serialized
+        assert "correct-password" not in serialized
+    finally:
+        await client.close()
+
+
+async def test_logs_endpoint_exposes_sequence_cursor_and_gap_fields(tmp_path: Path) -> None:
+    api = await _make_api()
+    log_handler = MemoryLogHandler(maxlen=3)
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+        log_handler=log_handler,
+    )
+    for i in range(5):
+        log_handler.add_event(
+            source="test", category="system", operation="seed",
+            status="ok", msg=f"line-{i}",
+        )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        body = await (await client.get("/api/logs?after_seq=0&limit=2")).json()
+        assert [line["seq"] for line in body["lines"]] == [4, 5]
+        assert body["oldest_seq"] == 3
+        assert body["latest_seq"] == 5
+        assert body["dropped_count"] == 3
+    finally:
+        await client.close()
+
+async def test_http_exception_response_carries_request_id(tmp_path: Path) -> None:
+    api = await _make_api()
+    log_handler = MemoryLogHandler()
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+        log_handler=log_handler,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/route-that-does-not-exist")
+        assert resp.status == 404
+        request_id = resp.headers["X-KA-Request-ID"]
+        event = log_handler.get_lines()[-1]
+        assert event["metadata"]["request_id"] == request_id
+        assert event["metadata"]["http_status"] == 404
     finally:
         await client.close()

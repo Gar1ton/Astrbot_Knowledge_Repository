@@ -250,8 +250,32 @@ class CapabilitiesApiMixin:
         Milvus Lite 3.0 起是纯 Python 包，全平台可装，显式列出即可绕开那条失效标记。
         """
         specs = resolve_install_specs(package)
+        operation_id = self._runtime_events.start(
+            category="system",
+            operation="dependency_install",
+            msg="可选依赖安装开始",
+            metadata={"package": package, "spec_count": len(specs)},
+        )
         result = await self._run_pip_install(*specs)
-        return self._verify_install_runtime(specs, result)
+        verified = self._verify_install_runtime(specs, result)
+        if verified.get("status") == "ok":
+            self._runtime_events.finish(
+                operation_id=operation_id,
+                category="system",
+                operation="dependency_install",
+                msg="可选依赖安装完成",
+                metadata={"package": package, "returncode": verified.get("returncode")},
+            )
+        else:
+            self._runtime_events.fail(
+                operation_id=operation_id,
+                category="system",
+                operation="dependency_install",
+                msg="可选依赖安装失败",
+                error=str(verified.get("message") or "unknown error"),
+                metadata={"package": package, "returncode": verified.get("returncode")},
+            )
+        return verified
 
     def _verify_install_runtime(
         self, specs: tuple[str, ...], result: dict[str, Any]

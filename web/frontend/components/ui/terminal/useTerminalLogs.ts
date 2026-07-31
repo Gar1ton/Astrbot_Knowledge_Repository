@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getLogs, type LogLine } from "@/lib/api";
 import { LEVELS, normalizeLevel, type LevelKey } from "./format";
 
-export const LOG_LIMIT = 1000;
+export const LOG_LIMIT = 2000;
 const POLL_MS = 2500;
 
 /** 默认隐藏 DEBUG：root logger 为 DEBUG 级，不过滤会淹没有效信息。 */
@@ -31,6 +31,8 @@ export interface TerminalLogs {
   categories: string[];
   /** 累计追加的行数，随每次增量拉取单调递增（供"N 条新日志"pill 计数）。 */
   appendedTotal: number;
+  /** 服务端确认已因缓冲轮转或单次上限无法返回的最少日志数。 */
+  droppedCount: number;
   hasAnyLines: boolean;
   loading: boolean;
   available: boolean;
@@ -52,12 +54,13 @@ export function useTerminalLogs(active: boolean): TerminalLogs {
   const [available, setAvailable] = useState(true);
   const [paused, setPaused] = useState(false);
   const [appendedTotal, setAppendedTotal] = useState(0);
+  const [droppedCount, setDroppedCount] = useState(0);
   const [levels, setLevels] = useState<Record<LevelKey, boolean>>(DEFAULT_LEVELS);
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
-  const lastTsRef = useRef(0);
-  /** 清屏基线：之后的所有拉取（含刷新）只取该时刻以后的日志，清掉的不复活。 */
-  const clearedTsRef = useRef(0);
+  const lastSeqRef = useRef(0);
+  /** 清屏基线：之后的所有拉取（含刷新）只取该序号以后的日志，清掉的不复活。 */
+  const clearedSeqRef = useRef(0);
   const loadInFlightRef = useRef(false);
 
   const loadLogs = useCallback(async (mode: "replace" | "append") => {
@@ -65,16 +68,29 @@ export function useTerminalLogs(active: boolean): TerminalLogs {
     loadInFlightRef.current = true;
     if (mode === "replace") setLoading(true);
     try {
-      const after = mode === "append" ? lastTsRef.current : clearedTsRef.current;
-      const result = await getLogs(after, LOG_LIMIT);
+      const afterSeq = mode === "append" ? lastSeqRef.current : clearedSeqRef.current;
+      let result = await getLogs(afterSeq, LOG_LIMIT);
+      const serverReset = result.latest_seq < afterSeq;
+      if (serverReset) {
+        lastSeqRef.current = 0;
+        clearedSeqRef.current = 0;
+        setDroppedCount(0);
+        result = await getLogs(0, LOG_LIMIT);
+      }
       setAvailable(true);
       if (result.lines.length > 0) {
-        lastTsRef.current = Math.max(lastTsRef.current, ...result.lines.map((line) => line.ts));
+        lastSeqRef.current = Math.max(lastSeqRef.current, ...result.lines.map((line) => line.seq));
+      }
+      if (result.dropped_count > 0) {
+        setDroppedCount((n) => Math.max(n, result.dropped_count));
       }
       setLines((prev) => {
-        if (mode === "replace") return result.lines;
+        if (mode === "replace" || serverReset) return result.lines;
         if (result.lines.length === 0) return prev;
-        return [...prev, ...result.lines].slice(-LOG_LIMIT);
+        const merged = new Map<number, LogLine>();
+        for (const line of prev) merged.set(line.seq, line);
+        for (const line of result.lines) merged.set(line.seq, line);
+        return [...merged.values()].sort((a, b) => a.seq - b.seq).slice(-LOG_LIMIT);
       });
       if (mode === "append" && result.lines.length > 0) {
         setAppendedTotal((n) => n + result.lines.length);
@@ -135,8 +151,9 @@ export function useTerminalLogs(active: boolean): TerminalLogs {
   }, [loadLogs]);
 
   const clear = useCallback(() => {
-    clearedTsRef.current = lastTsRef.current;
+    clearedSeqRef.current = lastSeqRef.current;
     setLines([]);
+    setDroppedCount(0);
   }, []);
 
   return {
@@ -144,6 +161,7 @@ export function useTerminalLogs(active: boolean): TerminalLogs {
     errorCount,
     categories,
     appendedTotal,
+    droppedCount,
     hasAnyLines: lines.length > 0,
     loading,
     available,

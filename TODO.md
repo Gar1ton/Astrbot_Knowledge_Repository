@@ -18,11 +18,23 @@
   （不取消后台任务 + 完成回调补日志/诊断 + 纳入 teardown），超时走中文诊断。
   技术理由：裸 await 卡在 HuggingFace 下载时，旧 Web 控制台已关、新端口永不启动。
 - [x] **Phase 2 — Milvus 真实就绪度与精确诊断**：`capabilities.py` 把 `milvus_lite` 纳入探测与
-  依赖卡（含 Windows 平台不支持判定）；组合根 gate 收严并区分「pymilvus 缺失 / milvus-lite 缺失 /
-  embedding 未就绪」；`api.py` 两处固定文案改为按运行态派生的真实原因；`_run_pip_install` 装完
-  校验 import 名可用，Windows 装 milvus 前置拒绝并给替代方案。技术理由：`pymilvus[milvus_lite]`
-  的 extra 带 `sys_platform != 'win32'` 标记，Windows 上 pip 静默跳过 milvus-lite 且退出码为 0，
-  依赖面板却显示已安装，用户陷入「装了也没用、提示还叫你再装」的死循环。
+  依赖卡；组合根 gate 收严并区分「pymilvus 缺失 / milvus-lite 缺失 / embedding 未就绪」；
+  `api.py` 两处固定文案改为按运行态派生的真实原因；`_run_pip_install` 支持多规格且装完校验
+  import 名可用。技术理由：`pymilvus[milvus_lite]` 的 extra 带 `sys_platform != 'win32'` 标记，
+  Windows 上 pip 静默跳过 milvus-lite 且退出码为 0，依赖面板却显示已安装，用户陷入「装了也没用、
+  提示还叫你再装」的死循环。
+- [x] **Phase 2.1 — 修正「Windows 装不上 milvus-lite」的错误结论**：初版按平台前置拒绝安装是错的。
+  Milvus Lite 3.0（2026-05-13）起整包用纯 Python 重写、wheel 为 `py3-none-any`，**Windows 完全
+  装得上**；失效的是 pymilvus 那条为 2.x C++ wheel 写的 extra 标记。改为删除平台判定、把
+  `milvus-lite>=3.0,<4.0` 作为 companion spec 显式安装（`OptionalDependency.companion_specs`
+  + `resolve_install_specs()`），并在 `requirements.txt` 显式列出，使「重新安装插件」在 Windows
+  上也能真正补齐运行时。同时把 pymilvus 下限从 `>=2.5` 提到 `>=2.6`——实测 2.5.x 搭 milvus-lite
+  3.x 能建集合能写入，但 search 抛 `MilvusException: function_score`。
+- [x] **Phase 2.2 — 旧向量库迁移**：milvus-lite 3.x 用目录存数据、2.x 是单文件，直接开旧文件会抛
+  `FileExistsError` → `ConnectionConfigException: Open local milvus failed`。`MilvusLiteVectorStore`
+  开库前把单文件旧库重命名为 `<name>.legacy-<时间戳>`，由 3.x 重建空索引并触发既有的全量待重建标记。
+  技术理由：抬高依赖版本会打到现有 Linux/macOS 安装，必须自带迁移路径；Milvus 只是 SQLite 分块的
+  可重建投影索引，挪走旧文件不丢数据。
 - [x] **Phase 3 — 日志与进度可观测性**：`initialize/teardown/reload` 逐步骤 INFO + 耗时 + 跳过原因；
   本地模型加载心跳；`LLMAdapter` 失败带 traceback、空响应显式 WARNING（不再静默返回离线占位）、
   每次调用记耗时；`ask` 各阶段耗时；`log_capture` 放行 `sentence_transformers`/`huggingface_hub`
@@ -37,7 +49,7 @@
 ### Verification
 
 - 基线（改动前）：scratchpad venv `python -m pytest -q` → 686 passed, 2 skipped。
-- 改动后：`python -m pytest -q` → 704 passed, 1 skipped（新增 18 条；装齐
+- 改动后：`python -m pytest -q` → 707 passed, 1 skipped（新增 21 条；装齐
   `pymilvus[milvus_lite]` 后原本 skip 的 Milvus Lite 生命周期用例已实际执行）。
 - `ruff check .` → All checks passed；`mypy` → Success（3 source files）。
 - 前端：`node node_modules/typescript/bin/tsc --noEmit --incremental false` → 无输出（通过）；
@@ -45,8 +57,16 @@
 - 实测确认 Milvus 根因：干净 venv 只装 `pymilvus>=2.5,<3.0` →
   `milvus_lite installed: False`、extra 标记 `(sys_platform != 'win32')`、
   `MilvusClient('<local>.db')` 抛 `ConnectionConfigException: milvus-lite is required for
-  local database connections`；用户侧「重新安装插件后恢复正常」与该结论一致
-  （AstrBot 重装会重跑 requirements.txt 补回 milvus-lite）。
+  local database connections`。
+- PyPI 一手数据（推翻「Windows 装不上」的初版结论）：milvus-lite ≤2.5.1 只有
+  macOS/manylinux wheel；**3.0（2026-05-13）起为 `py3-none-any` 纯 Python 包**，3.1.1
+  发布于 2026-07-27；其依赖 faiss-cpu / pyarrow / grpcio / numpy 均有 Windows wheel。
+- 版本兼容边界实测（决定 `>=2.6` 下限）：pymilvus 2.5.18 + milvus-lite 3.1.1 →
+  create/upsert/load 正常但 `search` 抛 `MilvusException: function_score`；
+  pymilvus 2.6.0 与 2.6.5 + milvus-lite 3.1.1 → search/query 全部通过。
+- 旧库迁移实测：用 pymilvus 2.5.18 + milvus-lite 2.5.1 真实写出单文件旧库，再用
+  pymilvus 2.6.17 + milvus-lite 3.1.1 经本项目适配器打开 → 旧文件自动备份为 `.legacy-<ts>`、
+  3.x 以目录重建、`created_collection=True`（触发全量待重建标记）。
 - 新增回归用例：探针超时后 `initialize()` 仍走完并保留后台探针任务（`test_lifecycle_and_cli.py`）、
   本地模型加载超时/已加载不加闸/加载中快速失败（`test_embedding.py`）、
   只装 pymilvus 时 Milvus 判未就绪与 Windows 提示（`test_capabilities.py`）、

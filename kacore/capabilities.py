@@ -17,7 +17,6 @@ from __future__ import annotations
 import importlib.metadata
 import importlib.util
 import os
-import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -41,22 +40,25 @@ def module_available(name: str) -> bool:
 
 # ── Milvus Lite 运行时就绪度（唯一真相源）─────────────────────────
 
-# 为何单独一套判断：`pymilvus[milvus_lite]` 的 extra 带 `sys_platform != "win32"` 标记，
-# Windows 上 pip 会静默跳过 milvus-lite 并以退出码 0 “安装成功”。只探测 pymilvus 会把
-# 「装了也用不了」误报为就绪——依赖面板显示已安装、装配却抛
-# `ConnectionConfigException: milvus-lite is required for local database connections`，
-# 用户于是陷入「装了再装」的死循环。故就绪 = pymilvus ∧ milvus_lite。
+# 为何单独一套判断：Milvus Lite 从 3.0（2026-05）起用纯 Python 重写，wheel 是
+# `py3-none-any`，**全平台（含 Windows）都装得上**；但 pymilvus 的 `milvus_lite` extra
+# 至今仍带着 2.x C++ wheel 时代遗留的 `sys_platform != "win32"` 标记，于是
+# `pip install pymilvus[milvus_lite]` 在 Windows 上会静默跳过 milvus-lite 并以退出码 0
+# “安装成功”。只探测 pymilvus 就会把「装了也用不了」误报为就绪——面板显示已安装、装配却抛
+# `ConnectionConfigException: milvus-lite is required for local database connections`。
+# 故：就绪 = pymilvus ∧ milvus_lite；缺 milvus-lite 时**显式**安装它绕开那条失效标记。
 MILVUS_IMPORT_NAME = "pymilvus"
 MILVUS_LITE_IMPORT_NAME = "milvus_lite"
 
+# milvus-lite 3.x 的 gRPC 层要求较新的 search 请求字段（function_score）：
+# pymilvus 2.5.x + milvus-lite 3.x 可以建集合、可以写入，但 search 会抛
+# `MilvusException: function_score`。实测 pymilvus 2.6.0 起正常，故安装规格钉在 >=2.6。
+MILVUS_PIP_SPEC = "pymilvus[milvus_lite]>=2.6,<3.0"
+MILVUS_LITE_PIP_SPEC = "milvus-lite>=3.0,<4.0"
+
 _MILVUS_REINSTALL_HINT = (
-    "在数据流页重新安装该依赖，或重新安装插件让 AstrBot 重跑 requirements.txt；装好后重启插件。"
+    "在数据流页点「一键安装」，或重新安装插件让 AstrBot 重跑 requirements.txt；装好后重启插件。"
 )
-
-
-def milvus_lite_supported() -> bool:
-    """当前平台是否存在 milvus-lite 发行版（Windows 没有）。"""
-    return sys.platform != "win32"
 
 
 def milvus_runtime_status() -> dict[str, Any]:
@@ -68,39 +70,30 @@ def milvus_runtime_status() -> dict[str, Any]:
     """
     has_pymilvus = module_available(MILVUS_IMPORT_NAME)
     has_lite = module_available(MILVUS_LITE_IMPORT_NAME)
-    supported = milvus_lite_supported()
 
     if has_pymilvus and has_lite:
         return {
             "ready": True,
             "missing": "",
-            "platform_supported": supported,
             "pymilvus_installed": True,
             "milvus_lite_installed": True,
             "hint": "",
         }
 
-    if not supported:
-        missing = MILVUS_LITE_IMPORT_NAME
-        hint = (
-            "当前系统（Windows）没有 milvus-lite 发行版，Milvus 本地向量库无法启用："
-            "请把数据流的向量库切换为 astr（AstrBot/SQLite 基础召回），"
-            "或在 WSL/Linux/Docker 中运行 AstrBot。"
-        )
-    elif not has_pymilvus:
+    if not has_pymilvus:
         missing = MILVUS_IMPORT_NAME
         hint = f"未安装 pymilvus。{_MILVUS_REINSTALL_HINT}"
     else:
         missing = MILVUS_LITE_IMPORT_NAME
         hint = (
-            "已安装 pymilvus，但缺少 milvus-lite（本地向量库真正的运行时）。"
-            f"{_MILVUS_REINSTALL_HINT}"
+            "已安装 pymilvus，但缺少 milvus-lite（本地向量库真正的运行时）——"
+            "pymilvus 的 milvus_lite extra 带着已过时的 win32 排除标记，"
+            f"Windows 上 pip 会静默跳过它。{_MILVUS_REINSTALL_HINT}"
         )
 
     return {
         "ready": False,
         "missing": missing,
-        "platform_supported": supported,
         "pymilvus_installed": has_pymilvus,
         "milvus_lite_installed": has_lite,
         "hint": hint,
@@ -139,6 +132,13 @@ class OptionalDependency:
     feature: str
     stages: tuple[str, ...]
     required: bool = False
+    # 必须与 pip_spec 一起装的附加规格：用于 extra 标记不可靠的依赖（见 milvus_runtime_status）。
+    companion_specs: tuple[str, ...] = ()
+
+    @property
+    def install_specs(self) -> tuple[str, ...]:
+        """实际交给 pip 的全部规格（主规格 + 附加规格）。"""
+        return (self.pip_spec, *self.companion_specs)
 
 
 # 仅收录「用户可见可选功能」的依赖；核心安装依赖（如 pymupdf4llm）不在手动安装面板内。
@@ -156,10 +156,12 @@ OPTIONAL_DEPENDENCIES: tuple[OptionalDependency, ...] = (
         key="milvus",
         import_name="pymilvus",
         dist_name="pymilvus",
-        pip_spec="pymilvus[milvus_lite]>=2.5,<3.0",
+        pip_spec=MILVUS_PIP_SPEC,
         feature="milvus",
         stages=("vector_store", "retrieval"),
         required=True,
+        # extra 的 win32 标记已失效，必须显式带上 milvus-lite，否则 Windows 装了等于没装。
+        companion_specs=(MILVUS_LITE_PIP_SPEC,),
     ),
     OptionalDependency(
         key="lightrag",
@@ -194,6 +196,19 @@ def resolve_install_spec(package: str) -> str:
     if package in ALLOWED_INSTALL_SPECS:
         return package
     raise ValueError(f"package is not in the optional-dependency allowlist: {package!r}")
+
+
+def resolve_install_specs(package: str) -> tuple[str, ...]:
+    """解析出「实际要交给 pip 的全部规格」（主规格 + 必需的附加规格）。
+
+    与 `resolve_install_spec` 共用同一白名单：先按主规格校验入参合法性，再补上该依赖声明的
+    companion（如 milvus 必须显式带上 milvus-lite，否则 Windows 上 pip 会跳过它）。
+    """
+    spec = resolve_install_spec(package)
+    for dep in OPTIONAL_DEPENDENCIES:
+        if dep.pip_spec == spec:
+            return dep.install_specs
+    return (spec,)
 
 
 def dependency_statuses() -> list[dict[str, Any]]:
@@ -490,14 +505,16 @@ def detect_capabilities(config: Config) -> dict[str, Any]:
 
 __all__ = [
     "module_available",
-    "milvus_lite_supported",
     "milvus_runtime_status",
     "MILVUS_IMPORT_NAME",
     "MILVUS_LITE_IMPORT_NAME",
+    "MILVUS_PIP_SPEC",
+    "MILVUS_LITE_PIP_SPEC",
     "OptionalDependency",
     "OPTIONAL_DEPENDENCIES",
     "ALLOWED_INSTALL_SPECS",
     "resolve_install_spec",
+    "resolve_install_specs",
     "dependency_statuses",
     "detect_pipeline",
     "detect_capabilities",

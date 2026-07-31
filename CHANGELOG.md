@@ -27,19 +27,37 @@
   `milvus-lite` 并以退出码 0「安装成功」。于是依赖面板显示绿灯、装配却抛
   `ConnectionConfigException: milvus-lite is required for local database connections`，
   重建入口再回一句「请安装 Milvus 并重启插件」。现在就绪判定收口为
-  `capabilities.milvus_runtime_status()`（`pymilvus ∧ milvus_lite` + 平台可行性），依赖状态新增
+  `capabilities.milvus_runtime_status()`（`pymilvus ∧ milvus_lite`），依赖状态新增
   `runtime_ready`/`runtime_hint`（前端据此显示「依赖已安装但运行时不可用」并给出具体修复建议），
   组合根 gate、`config.get_diagnostics()` 与数据流环节共用同一真相源
   （`kacore/capabilities.py`、`kacore/plugin_initializer.py`、`kacore/config.py`、
   `web/frontend/components/flow/FlowNode.tsx`、`web/frontend/lib/{api,i18n}.ts`）。
+- **Windows 上「一键安装 Milvus」现在真的能装上**：那条失效的 extra 标记不是平台限制——
+  Milvus Lite 自 3.0（2026-05-13）起整包用纯 Python 重写、wheel 为 `py3-none-any`，
+  依赖（faiss-cpu / pyarrow / grpcio / numpy）也都有 Windows wheel，**全平台可装**；
+  只是 pymilvus 的 extra 至今仍带着 2.x C++ wheel 时代的 `sys_platform != "win32"` 排除标记。
+  故 `OptionalDependency` 新增 `companion_specs`，milvus 的安装规格变为
+  `pymilvus[milvus_lite]>=2.6,<3.0` **+ 显式的** `milvus-lite>=3.0,<4.0`（新增
+  `resolve_install_specs()`，`_run_pip_install` 支持多规格），`requirements.txt` 同步显式列出，
+  让 AstrBot 重装插件时在 Windows 上也能补齐运行时。pymilvus 下限由 `>=2.5` 提到 `>=2.6`：
+  实测 2.5.x 搭 milvus-lite 3.x 可建集合、可写入，但 `search` 会抛
+  `MilvusException: function_score`；2.6.0 / 2.6.5 均正常（`kacore/capabilities.py`、
+  `kacore/api_capabilities.py`、`requirements.txt`）。
 - **重建索引失败只会回一句放之四海皆准的错误**：`rebuild_index_pending()` 与
   `start_milvus_rebuild()` 原本对所有情况都返回「VectorStore 未配置（请安装 Milvus 并重启插件，
   或配置 embedding provider）」。新增唯一真相源 `vector_store_unavailable_reason()`，按排查顺序
   区分四类原因并给出下一步：后端选的是 `astr`、milvus-lite 缺失、embedding 探针失败/超时、
   依赖齐全但装配报错（`kacore/api.py`、`kacore/api_capabilities.py`）。
-- **依赖面板「安装成功」但功能仍不可用**：`install_dependency()` 现在在不支持的平台上前置拒绝安装
-  milvus 并给出替代路径（切 `astr` 后端 / WSL / Linux / Docker），且 pip 退出码为 0 后会再校验一次
-  真实 import 名，未就绪时报错而不是提示「重启即可生效」（`kacore/api_capabilities.py`）。
+- **升级到 Milvus Lite 3.x 后打不开老向量库**：3.x 用**目录**存数据，2.x 是**单文件**，直接对旧
+  文件开库会在 `os.makedirs(data_dir)` 抛 `FileExistsError`，对外表现为
+  `ConnectionConfigException: Open local milvus failed`，整个向量库不可用。`MilvusLiteVectorStore`
+  现在在开库前检测这种单文件旧库并重命名为 `<name>.legacy-<时间戳>`，让 3.x 重建空索引；因
+  `created_collection=True` 且 SQLite 仍有文档，组合根会按既有逻辑标记全量 needs_reindex 并提示重建。
+  安全性由本类契约保证：Milvus 只是 SQLite 分块的可重建投影索引，挪走旧文件不丢原始数据
+  （`kacore/repository/vector_store/milvus_lite.py`）。
+- **依赖面板「安装成功」但功能仍不可用**：`install_dependency()` 在 pip 退出码为 0 之后会再校验一次
+  真实 import 名，运行时仍缺失时报错并给出原因，而不是提示「重启即可生效」
+  （`kacore/api_capabilities.py`）。
 - **正常的长问答被误报为超时**：前端 `apiFetch` 的 30s 默认时限套在了所有长任务上——`/api/ask`
   超过 30s 即弹「请求超时，请稍后重试」，而后端仍在生成。现在按最坏情况给足时限：ask 600s、
   文档上传 300s、依赖安装 900s、embedding 连通性测试 300s；`/api/capabilities` 心跳从 1.5s 放宽到
@@ -67,13 +85,17 @@
 
 ### 测试 (Tests)
 
-- 新增 18 条回归：探针超时后 `initialize()` 仍走完、诊断为中文且后台探针任务保留至 teardown
+- 新增 21 条回归：探针超时后 `initialize()` 仍走完、诊断为中文且后台探针任务保留至 teardown
   （`test_lifecycle_and_cli.py`）；本地模型首调超时 / 已加载不加闸 / 加载中快速失败 / `0`=不限
-  （`test_embedding.py`）；只装 pymilvus 时 Milvus 判未就绪、Windows 提示给替代方案而非重复安装
-  （`test_capabilities.py`）；重建入口四类精确原因、Windows 前置拒绝安装、pip 成功但运行时仍不可用
-  （`test_api.py`）；主 LLM 超时闸与离线占位 WARNING、provider 异常带 traceback
+  （`test_embedding.py`）；只装 pymilvus 时 Milvus 判未就绪、安装规格必须显式含 milvus-lite
+  （`test_capabilities.py`）；重建入口四类精确原因、一键安装带上 milvus-lite、pip 成功但运行时仍不可用
+  （`test_api.py`）；2.x 单文件旧库自动挪开、3.x 目录与全新安装不受影响
+  （`test_retrieval_orchestrator.py`）；主 LLM 超时闸与离线占位 WARNING、provider 异常带 traceback
   （`test_llm_adapter.py`）；模型下载栈 WARNING+ 不再被丢弃（`test_log_capture.py`）。
-- 验证：`python -m pytest -q` → 704 passed, 1 skipped；`ruff check .` → All checks passed；
+- 版本兼容边界经实测确定（不是查文档得来）：pymilvus 2.5.18 + milvus-lite 3.1.1 的 `search` 抛
+  `function_score`，2.6.0 / 2.6.5 正常；milvus-lite 3.x 的 wheel 为 `py3-none-any`；
+  用 milvus-lite 2.5.1 真实写出一个旧库，再用新组合打开，验证自动迁移与空库重建。
+- 验证：`python -m pytest -q` → 707 passed, 1 skipped；`ruff check .` → All checks passed；
   `mypy` → Success；前端 `tsc --noEmit` 通过、`npm run build` 通过、`tools/sync_frontend.py`
   同步 357 个文件到 `pages/`。
 

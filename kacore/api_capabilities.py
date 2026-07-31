@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING, Any
 from kacore.capabilities import (
     dependency_statuses,
     detect_capabilities,
-    milvus_lite_supported,
     milvus_runtime_status,
     resolve_install_spec,
+    resolve_install_specs,
 )
 from kacore.milvus_build import (
     MILVUS_BUILD_RUNNING,
@@ -245,31 +245,24 @@ class CapabilitiesApiMixin:
     async def install_dependency(self, package: str) -> dict[str, Any]:
         """安装白名单内可选依赖，并把 pip 输出转发到 logger。
 
-        milvus 在不支持的平台上直接前置拒绝：`pymilvus[milvus_lite]` 的 extra 带
-        `sys_platform != "win32"` 标记，在 Windows 上 pip 会「成功」但什么都没装，
-        再报告一句「已安装，需重启插件生效」只会把用户送进死循环。
+        milvus 会同时装上 `milvus-lite`：pymilvus 的 `milvus_lite` extra 仍带着 2.x C++ wheel
+        时代的 `sys_platform != "win32"` 标记，Windows 上 pip 会静默跳过它（退出码仍是 0）。
+        Milvus Lite 3.0 起是纯 Python 包，全平台可装，显式列出即可绕开那条失效标记。
         """
-        spec = resolve_install_spec(package)
-        if spec == _MILVUS_INSTALL_SPEC and not milvus_lite_supported():
-            hint = str(milvus_runtime_status()["hint"])
-            logger.error("拒绝安装 %s：当前平台没有 milvus-lite 发行版", spec)
-            return {
-                "status": "error",
-                "package": spec,
-                "restart_required": False,
-                "message": hint,
-            }
-        result = await self._run_pip_install(spec)
-        return self._verify_install_runtime(spec, result)
+        specs = resolve_install_specs(package)
+        result = await self._run_pip_install(*specs)
+        return self._verify_install_runtime(specs, result)
 
-    def _verify_install_runtime(self, spec: str, result: dict[str, Any]) -> dict[str, Any]:
+    def _verify_install_runtime(
+        self, specs: tuple[str, ...], result: dict[str, Any]
+    ) -> dict[str, Any]:
         """pip 退出码为 0 不等于功能可用：装完再验一次真实 import 名。
 
         典型反例：`pip install pymilvus[milvus_lite]` 在 Windows 上跳过 milvus-lite 仍返回 0，
         依赖面板于是显示「已安装」，而任何本地向量库操作都会抛
         `ConnectionConfigException: milvus-lite is required for local database connections`。
         """
-        if result.get("status") != "ok" or spec != _MILVUS_INSTALL_SPEC:
+        if result.get("status") != "ok" or _MILVUS_INSTALL_SPEC not in specs:
             return result
         import importlib
 
@@ -285,10 +278,11 @@ class CapabilitiesApiMixin:
             "message": f"pip 安装已完成，但 Milvus 仍不可用：{runtime['hint']}",
         }
 
-    async def _run_pip_install(self, spec: str) -> dict[str, Any]:
-        """以当前解释器运行 pip install。"""
+    async def _run_pip_install(self, *specs: str) -> dict[str, Any]:
+        """以当前解释器运行 pip install（可一次传多个规格）。"""
         import sys
 
+        spec = " ".join(specs)
         logger.info("Installing optional dependency: %s", spec)
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -296,7 +290,7 @@ class CapabilitiesApiMixin:
                 "-m",
                 "pip",
                 "install",
-                spec,
+                *specs,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

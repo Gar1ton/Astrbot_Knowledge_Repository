@@ -2339,28 +2339,33 @@ async def test_rebuild_reports_astr_backend_without_telling_user_to_install_milv
     assert "安装" not in message
 
 
-async def test_install_dependency_rejects_milvus_on_unsupported_platform(
+async def test_install_dependency_installs_milvus_lite_explicitly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Windows 上 pip 会「成功」但不装 milvus-lite：前置拒绝并给替代方案。"""
-    monkeypatch.setattr("kacore.capabilities.sys.platform", "win32")
-    monkeypatch.setattr(
-        "kacore.capabilities.module_available", lambda name: name == "pymilvus"
-    )
+    """回归 v1.0.9：一键安装 Milvus 必须显式带上 milvus-lite。
+
+    pymilvus 的 milvus_lite extra 仍带着 2.x C++ wheel 时代的 `sys_platform != "win32"`
+    标记，只写 `pymilvus[milvus_lite]` 在 Windows 上等于什么都没装（退出码仍是 0）。
+    Milvus Lite 3.0 起是纯 Python 包，全平台可装，显式列出即可绕开那条失效标记。
+    """
     api = KnowledgeRepositoryApi(
         source_store=InMemorySourceDocumentStore(),
         kb_reader=InMemoryKnowledgeBaseReader({}),
     )
+    seen: list[tuple[str, ...]] = []
 
-    async def _fail_install(spec: str) -> dict:
-        raise AssertionError(f"pip 不应被调用：{spec}")
+    async def _capture(*specs: str) -> dict:
+        seen.append(specs)
+        return {"status": "ok", "package": " ".join(specs), "returncode": 0,
+                "restart_required": True, "message": "ok"}
 
-    monkeypatch.setattr(api, "_run_pip_install", _fail_install)
+    monkeypatch.setattr(api, "_run_pip_install", _capture)
+    monkeypatch.setattr("kacore.capabilities.module_available", lambda name: True)
 
     result = await api.install_dependency("milvus")
-    assert result["status"] == "error"
-    assert result["restart_required"] is False
-    assert "WSL" in result["message"]
+    assert result["status"] == "ok"
+    assert any("milvus-lite" in spec for spec in seen[0])
+    assert any(spec.startswith("pymilvus[milvus_lite]") for spec in seen[0])
 
 
 async def test_install_dependency_flags_pip_success_that_left_milvus_unusable(
@@ -2375,10 +2380,10 @@ async def test_install_dependency_flags_pip_success_that_left_milvus_unusable(
         kb_reader=InMemoryKnowledgeBaseReader({}),
     )
 
-    async def _ok_install(spec: str) -> dict:
+    async def _ok_install(*specs: str) -> dict:
         return {
             "status": "ok",
-            "package": spec,
+            "package": " ".join(specs),
             "returncode": 0,
             "restart_required": True,
             "message": "已安装，需重启插件生效；Docker 部署请注意依赖持久化。",

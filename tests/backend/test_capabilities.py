@@ -8,14 +8,16 @@ from __future__ import annotations
 import pytest
 
 from kacore.capabilities import (
+    MILVUS_LITE_PIP_SPEC,
+    MILVUS_PIP_SPEC,
     OPTIONAL_DEPENDENCIES,
     STATUS_DEGRADED,
     STATUS_OFF,
     STATUS_READY,
     dependency_statuses,
     detect_pipeline,
-    milvus_runtime_status,
     resolve_install_spec,
+    resolve_install_specs,
 )
 from kacore.config import Config
 
@@ -42,7 +44,7 @@ def _patch_modules(monkeypatch: pytest.MonkeyPatch, available: set[str]) -> None
 
 
 def test_resolve_install_spec_accepts_key_and_full_spec() -> None:
-    assert resolve_install_spec("milvus") == "pymilvus[milvus_lite]>=2.5,<3.0"
+    assert resolve_install_spec("milvus") == "pymilvus[milvus_lite]>=2.6,<3.0"
     spec = OPTIONAL_DEPENDENCIES[0].pip_spec
     assert resolve_install_spec(spec) == spec
 
@@ -142,18 +144,24 @@ def test_milvus_not_ready_when_only_pymilvus_installed(
     assert "milvus-lite" in milvus_dep["runtime_hint"]
 
 
-def test_milvus_hint_points_to_platform_fallback_on_windows(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Windows 上 milvus-lite 根本没有发行版：提示必须给替代路径，而不是叫用户再装一次。"""
-    _patch_modules(monkeypatch, {"pymilvus"})
-    monkeypatch.setattr("kacore.capabilities.sys.platform", "win32")
+def test_milvus_install_specs_carry_milvus_lite_explicitly() -> None:
+    """安装 milvus 必须显式带上 milvus-lite，否则 Windows 上 pip 会跳过它。
 
-    status = milvus_runtime_status()
-    assert status["ready"] is False
-    assert status["platform_supported"] is False
-    assert "astr" in status["hint"]
-    assert "WSL" in status["hint"]
+    Milvus Lite 3.0（2026-05）起是纯 Python 包（py3-none-any），全平台可装；
+    但 pymilvus 的 milvus_lite extra 仍带着 2.x C++ wheel 时代的 `sys_platform != "win32"`
+    标记，只写 `pymilvus[milvus_lite]` 在 Windows 上等于什么都没装。
+    """
+    specs = resolve_install_specs("milvus")
+    assert specs[0] == MILVUS_PIP_SPEC
+    assert MILVUS_LITE_PIP_SPEC in specs
+    # milvus-lite 3.x 的 search 要求 pymilvus>=2.6（2.5.x 会抛 function_score）。
+    assert ">=2.6" in MILVUS_PIP_SPEC
+    assert ">=3.0" in MILVUS_LITE_PIP_SPEC
+
+
+def test_non_milvus_install_specs_stay_single() -> None:
+    """其余依赖没有 companion，安装规格保持单条。"""
+    assert resolve_install_specs("lightrag") == ("lightrag-hku>=1.5.0rc1,<2.0.0",)
 
 
 def test_graph_off_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

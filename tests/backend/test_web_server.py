@@ -1518,7 +1518,7 @@ async def test_dependencies_route_lists_optional_packages(tmp_path: Path) -> Non
         assert resp.status == 200
         deps = (await resp.json())["dependencies"]
         milvus = next(d for d in deps if d["key"] == "milvus")
-        assert milvus["pip_spec"] == "pymilvus[milvus_lite]>=2.5,<3.0"
+        assert milvus["pip_spec"] == "pymilvus[milvus_lite]>=2.6,<3.0"
         assert "installed" in milvus
     finally:
         await client.close()

@@ -62,6 +62,7 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._zitem_tags: dict[tuple[str, str], list[ZoteroTag]] = {}
         self._zrelations: set[tuple[str, str, str, str]] = set()
         self._source_account_bindings: dict[str, dict[str, str]] = {}
+        self._zotero_account_identities: dict[str, dict[str, str]] = {}
         self._page_chunks: dict[str, list[PageChunk]] = {}
         self._notes: dict[str, ScopedNote] = {}
         self._chat_history: dict[str, list[dict]] = {}
@@ -263,18 +264,35 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
     # ── LightRAG 索引状态 ───────────────────────────────────────
 
     async def set_lightrag_index_status(
-        self, doc_id: str, collection: str, status: str, last_error: str = ""
+        self,
+        doc_id: str,
+        collection: str,
+        status: str,
+        last_error: str = "",
+        *,
+        job_id: str | None = None,
     ) -> None:
         self._lightrag_status[doc_id] = {
             "doc_id": doc_id,
             "collection": collection,
             "status": status,
             "last_error": last_error,
+            "job_id": job_id or "",
         }
 
     async def get_lightrag_index_status(self, doc_id: str) -> dict[str, str] | None:
         value = self._lightrag_status.get(doc_id)
         return copy.deepcopy(value) if value else None
+
+    async def delete_lightrag_index_status_by_job(self, job_id: str) -> int:
+        to_remove = [
+            doc_id
+            for doc_id, value in self._lightrag_status.items()
+            if value.get("job_id") == job_id
+        ]
+        for doc_id in to_remove:
+            del self._lightrag_status[doc_id]
+        return len(to_remove)
 
     # ── 同步状态 ──────────────────────────────────────────────────
 
@@ -650,6 +668,19 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._source_account_bindings[source] = {
             "account_id": account_id,
             "account_name": account_name,
+        }
+
+    async def get_zotero_account_identity(self, namespace: str) -> dict[str, str] | None:
+        value = self._zotero_account_identities.get(namespace)
+        return copy.deepcopy(value) if value else None
+
+    async def link_zotero_account_identity(
+        self, namespace: str, account_key: str, library_id: str, access_mode: str
+    ) -> None:
+        self._zotero_account_identities[namespace] = {
+            "account_key": account_key,
+            "library_id": library_id,
+            "access_mode": access_mode,
         }
 
     async def purge_zotero_mirror(self) -> None:

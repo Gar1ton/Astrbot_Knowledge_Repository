@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,7 @@ from kacore.api import KnowledgeRepositoryApi
 from kacore.ask_progress import ProgressStore
 
 # 依赖探测收口至能力注册表；保留模块内 _module_available 名以兼容既有测试的 monkeypatch。
+from kacore.capabilities import milvus_runtime_status
 from kacore.capabilities import module_available as _module_available
 from kacore.config import Config, merge_config_dicts
 from kacore.domain.models import Collection, SyncTargetKind
@@ -44,6 +46,13 @@ if TYPE_CHECKING:
     from kacore.repository.vector_store.base import VectorStore
 
 logger = logging.getLogger("PluginInitializer")
+
+# 维度探针文本：内容无所谓，只为拿到一条真实向量的长度。
+_EMBEDDING_PROBE_TEXT = "knowledge-repository-dimension-probe"
+
+
+class _EmbeddingProbeTimeout(RuntimeError):
+    """维度探针在配置时限内未返回；消息已是面向用户的中文说明。"""
 
 
 def _load_plugin_web_build_app() -> Any:
@@ -75,9 +84,12 @@ class PluginInitializer:
         self._backup_task: asyncio.Task[Any] | None = None
         self._zotero_sync_task: asyncio.Task[Any] | None = None
         self._notion_sync_task: asyncio.Task[Any] | None = None
+        # 超时后仍在后台跑的维度探针（模型下载不可中断，只能让它跑完再补记结果）。
+        self._pending_probe_task: asyncio.Task[Any] | None = None
         self.zotero_sync_pipeline: Any | None = None
         self.notion_sync_pipeline: Any | None = None
         self._web_runner: Any | None = None
+        self._log_handler: Any | None = None
 
         # 子系统句柄 —— 在 initialize() 中按依赖顺序赋值，供 event_handler / web 引用。
         self.source_store: SourceDocumentStore | None = None
@@ -119,8 +131,18 @@ class PluginInitializer:
     async def initialize(self) -> None:
         # 0) 最优先安装日志 handler，确保后续所有启动日志可被终端页捕获。
         from kacore.log_capture import install as _install_log_capture
-        _install_log_capture()
+
+        self._log_handler = _install_log_capture()
         logger.info("PluginInitializer.initialize() 开始")
+
+        # 启动是一条长链路，任何一环卡住都表现为「重启没反应」。逐段落记累计耗时，
+        # 让终端页最后一条 INFO 直接指出卡在哪一步。
+        init_started = time.monotonic()
+
+        def _stage_done(stage: str) -> None:
+            logger.info(
+                "初始化步骤完成：%s（累计 %.1fs）", stage, time.monotonic() - init_started
+            )
 
         # 完整恢复必须发生在 SQLite/Milvus/LightRAG 建立连接之前。
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -172,6 +194,7 @@ class PluginInitializer:
         from kacore.repository.kb_reader.astrbot import AstrBotKnowledgeBaseReader
 
         self.kb_reader = AstrBotKnowledgeBaseReader(self._context)
+        _stage_done(f"SQLite 迁移与仓储（{db_path.name}）")
 
         # 3) 构造同步目标
         from kacore.repository.sync_targets.base import SyncTarget
@@ -207,10 +230,14 @@ class PluginInitializer:
             db_path=db_path,
         )
 
+        _stage_done("同步目标与编排层（managers/pipelines）")
+
         # 4.5) 官方 LightRAG Core 是唯一图谱实现。
         from kacore.adapters.llm import LLMAdapter
 
-        llm_adapter = LLMAdapter(self._context)
+        llm_adapter = LLMAdapter(
+            self._context, timeout_seconds=_ask_cfg.llm_timeout_seconds
+        )
 
         # 4.6) 构造共享 Embedding，并用真实探针维度装配 Milvus/LightRAG。
         vdb_cfg = self._config.get_vector_db_config()
@@ -236,12 +263,20 @@ class PluginInitializer:
         if (vdb_cfg.backend == "milvus" or graph_cfg.enabled) and embedding_runtime_available:
             from kacore.repository.embedding.factory import EmbeddingProviderFactory
 
+            logger.info(
+                "开始 Embedding 维度探针：provider=%s model=%s 超时上限 %ss",
+                embedding_cfg.provider,
+                embedding_cfg.model,
+                embedding_cfg.load_timeout_seconds or "不限",
+            )
+
+            probe_started = time.monotonic()
             try:
                 self.embedding_provider = EmbeddingProviderFactory.create_provider(
                     self._config, db_dir=str(self._data_dir)
                 )
-                probe = await self.embedding_provider.embed_query(
-                    "knowledge-repository-dimension-probe"
+                probe = await self._probe_embedding_dimension(
+                    self.embedding_provider, embedding_cfg
                 )
                 if not probe:
                     raise RuntimeError("Embedding dimension probe returned an empty vector")
@@ -250,6 +285,21 @@ class PluginInitializer:
                     embedding_cfg, self.embedding_dimension
                 )
                 self._config.set_embedding_dimension(self.embedding_dimension)
+                logger.info(
+                    "Embedding 维度探针完成：provider=%s model=%s dim=%d 耗时 %.1fs",
+                    embedding_cfg.provider,
+                    embedding_cfg.model,
+                    self.embedding_dimension,
+                    time.monotonic() - probe_started,
+                )
+            except _EmbeddingProbeTimeout as exc:
+                logger.error(
+                    "Embedding 维度探针超时（%ss），跳过向量/图谱继续启动：%s",
+                    embedding_cfg.load_timeout_seconds,
+                    exc,
+                )
+                self._config.add_diagnostic(str(exc))
+                self.embedding_provider = None
             except NotImplementedError as exc:
                 logger.warning(
                     "Embedding provider 初始化失败，图谱/向量检索功能已禁用：%s", exc
@@ -262,12 +312,16 @@ class PluginInitializer:
                 )
                 self._config.add_diagnostic(f"Embedding dimension probe failed: {exc}")
                 self.embedding_provider = None
+            _stage_done("Embedding 探针")
 
+        # 就绪判定收口至 capabilities（pymilvus ∧ milvus_lite）：只探 pymilvus 会在 Windows
+        # 上放行一个必然抛 ConnectionConfigException 的装配，并让依赖面板显示假绿灯。
+        milvus_runtime = milvus_runtime_status()
         if (
             vdb_cfg.backend == "milvus"
             and self.embedding_provider is not None
             and self.embedding_dimension is not None
-            and _module_available("pymilvus")
+            and milvus_runtime["ready"]
         ):
             from kacore.repository.vector_store.milvus_lite import (
                 MilvusLiteVectorStore,
@@ -333,8 +387,12 @@ class PluginInitializer:
             and self.embedding_provider is not None
             and self.embedding_dimension is not None
         ):
-            logger.warning(
-                "未安装 Milvus Lite 可选依赖；AstrBot/SQLite 基础召回保持可用。"
+            # 缺什么、怎么修，一次说清；不再笼统地说「未安装 Milvus Lite 可选依赖」。
+            logger.warning("Milvus 本地向量库不可用：%s", milvus_runtime["hint"])
+            self._config.add_diagnostic(f"Milvus 不可用：{milvus_runtime['hint']}")
+        if vdb_cfg.backend == "milvus":
+            _stage_done(
+                f"Milvus 向量库（{'已装配' if self.vector_store is not None else '未激活'}）"
             )
 
         # 4.6.5) 构造官方 LightRAG Core registry（按 collection 懒加载实例）。
@@ -505,6 +563,7 @@ class PluginInitializer:
             db_path=db_path,
             quiesce_indexes=self._quiesce_indexes_for_backup,
             reload_callback=self.reload,
+            runtime_event_sink=self._log_handler,
         )
 
         # 5) 业务门面（依赖已装配的仓储/managers）。
@@ -535,6 +594,7 @@ class PluginInitializer:
             secret_store=self.secret_store,
             reload_callback=self.reload,
             r2_backup_manager=self.r2_backup_manager,
+            runtime_event_sink=self._log_handler,
         )
         await self.api.restore_paused_build_job()
 
@@ -568,6 +628,7 @@ class PluginInitializer:
         from kacore.research_skill import ResearchService
 
         self.research_service = ResearchService(api=self.api, flags=self)
+        _stage_done("业务门面 API 与检索编排")
 
         # 6) 周期任务（如 R2 周期备份，v0.3.0 起注册）。
         if r2_cfg.enabled and r2_cfg.backup_interval_sec > 0:
@@ -597,17 +658,84 @@ class PluginInitializer:
         vdb_backend = self._config.get_vector_db_config().backend if self._config else None
         if self.vector_store is None and vdb_backend == "milvus":
             logger.warning(
-                "VectorStore 未激活——Milvus 安装后需重启插件才能加载，重建索引操作在此之前将失败"
+                "VectorStore 未激活——重建索引在此之前会失败。原因：%s",
+                self.api.vector_store_unavailable_reason()
+                if self.api is not None
+                else milvus_runtime["hint"],
             )
 
         # 7) 独立 Web 控制台（enabled=true 时自动启动，端口/认证由 web_console 配置管辖）。
         web_cfg = self._config.get_web_console_config()
         if web_cfg.enabled:
             await self._start_web_console(web_cfg)
+            _stage_done("Web 控制台")
+        else:
+            logger.info("web_console.enabled=false，未启动 Web 控制台。")
 
         from kacore.managers.r2_backup_manager import commit_applied_restore
 
         await asyncio.to_thread(commit_applied_restore, self._data_dir)
+        logger.info(
+            "PluginInitializer.initialize() 完成，总耗时 %.1fs", time.monotonic() - init_started
+        )
+
+    # ── Embedding 维度探针 ──────────────────────────────────────
+    async def _probe_embedding_dimension(
+        self, provider: EmbeddingProvider, embedding_cfg: Any
+    ) -> list[float]:
+        """探一次真实向量维度，最多等 `embedding.load_timeout_seconds` 秒。
+
+        为何不用 `asyncio.wait_for`：超时时它会取消探针任务，而本地 provider 的权重下载跑在
+        `asyncio.to_thread` 的线程里、根本无法取消，取消只会丢掉「已下载一半」的进度信息。
+        故改为 `asyncio.wait`——放弃等待但保留任务，完成时由回调补记日志与诊断。
+
+        超时抛 `_EmbeddingProbeTimeout`（消息即用户可读的中文说明），由 `initialize()`
+        按既有失败兜底路径降级：embedding_provider 置空、写诊断、继续把 Web 控制台拉起来。
+        """
+        timeout_seconds = float(getattr(embedding_cfg, "load_timeout_seconds", 0) or 0)
+        if timeout_seconds <= 0:
+            return await provider.embed_query(_EMBEDDING_PROBE_TEXT)
+
+        task = asyncio.create_task(provider.embed_query(_EMBEDDING_PROBE_TEXT))
+        done, _pending = await asyncio.wait({task}, timeout=timeout_seconds)
+        if task in done:
+            return list(task.result())
+
+        self._pending_probe_task = task
+        task.add_done_callback(self._on_late_embedding_probe)
+        if str(getattr(embedding_cfg, "provider", "")) == "local":
+            raise _EmbeddingProbeTimeout(
+                f"本地 Embedding 模型 {embedding_cfg.model} 加载超时（{timeout_seconds:g}s）："
+                "首次使用需从 HuggingFace 下载权重，下载仍在后台继续。"
+                "本次启动已跳过向量检索与知识图谱（AstrBot/SQLite 基础召回仍可用）；"
+                "下载完成后请再次点击「重启插件」。"
+            )
+        raise _EmbeddingProbeTimeout(
+            f"Embedding 接口探测超时（{timeout_seconds:g}s，model={embedding_cfg.model}）："
+            "请检查 base_url、网络与 KR_EMBEDDING_API_KEY 后重启插件。"
+            "本次启动已跳过向量检索与知识图谱（AstrBot/SQLite 基础召回仍可用）。"
+        )
+
+    def _on_late_embedding_probe(self, task: asyncio.Task[Any]) -> None:
+        """超时后仍在后台跑的探针有了结果时补记一条日志/诊断。
+
+        用户据此知道「模型已经下完了，现在重启就能用」，而不是反复盲试。
+        """
+        self._pending_probe_task = None
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("后台 Embedding 探针最终失败：%s", exc)
+            return
+        vector = task.result() or []
+        logger.info(
+            "后台 Embedding 探针已完成（维度 %d）：模型已就绪，点击「重启插件」即可启用向量检索。",
+            len(vector),
+        )
+        self._config.add_diagnostic(
+            "Embedding 模型已在后台就绪，点击「重启插件」即可启用向量检索与知识图谱。"
+        )
 
     async def _quiesce_indexes_for_backup(self) -> None:
         """完成索引落盘并释放文件锁；后续访问会按现有懒初始化契约重新打开。"""
@@ -728,6 +856,7 @@ class PluginInitializer:
                 auth_required=True,
                 username=web_cfg.username,
                 password=web_cfg.password,
+                log_handler=self._log_handler,
             )
             runner = aiohttp_web.AppRunner(app)
             await runner.setup()
@@ -800,6 +929,8 @@ class PluginInitializer:
 
     # ── 关闭：与构造顺序相反释放 ────────────────────────────────
     async def teardown(self) -> None:
+        teardown_started = time.monotonic()
+        logger.info("PluginInitializer.teardown() 开始释放子系统")
         if self.api is not None:
             await self.api.cancel_build_tasks()
 
@@ -829,6 +960,12 @@ class PluginInitializer:
                 pass
             self._notion_sync_task = None
 
+        # 后台探针：取消任务本身（不等待）。底层模型下载线程无法中断，会继续跑完写入
+        # HuggingFace 缓存——这正是我们要的：下次 initialize 直接命中缓存。
+        if self._pending_probe_task is not None:
+            self._pending_probe_task.cancel()
+            self._pending_probe_task = None
+
         if self._web_runner is not None:
             try:
                 await self._web_runner.cleanup()
@@ -853,6 +990,9 @@ class PluginInitializer:
         if self._exit_stack is not None:
             await self._exit_stack.aclose()
             self._exit_stack = None
+        logger.info(
+            "PluginInitializer.teardown() 完成，耗时 %.1fs", time.monotonic() - teardown_started
+        )
 
     async def reload(self) -> None:
         """软重启：teardown 全部子系统后，重读持久化配置重建 Config 并重新 initialize。
@@ -860,19 +1000,28 @@ class PluginInitializer:
         供 Web 控制台「重启插件」按钮经 api.restart_plugin 触发；不杀 AstrBot 进程，
         但会重建 Web 控制台（端口不变）。重启期间触发请求的连接会短暂断开，由前端轮询重连。
         """
+        reload_started = time.monotonic()
         logger.info("PluginInitializer.reload() 触发插件软重启")
         await self.teardown()
         self._config = Config(self._runtime_config.merged_with(self._raw_config))
         try:
             await self.initialize()
         except Exception:
+            logger.error(
+                "软重启的 initialize() 阶段失败（耗时 %.1fs），尝试回滚待应用的 R2 恢复",
+                time.monotonic() - reload_started,
+                exc_info=True,
+            )
             from kacore.managers.r2_backup_manager import rollback_applied_restore
 
             if await asyncio.to_thread(rollback_applied_restore, self._data_dir):
                 self._config = Config(self._runtime_config.merged_with(self._raw_config))
                 await self.initialize()
             raise
-        logger.info("PluginInitializer.reload() 软重启完成")
+        logger.info(
+            "PluginInitializer.reload() 软重启完成，总耗时 %.1fs",
+            time.monotonic() - reload_started,
+        )
 
 
 __all__ = ["PluginInitializer"]

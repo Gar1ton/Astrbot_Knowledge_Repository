@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING, Any
 from kacore.capabilities import (
     dependency_statuses,
     detect_capabilities,
+    milvus_runtime_status,
     resolve_install_spec,
+    resolve_install_specs,
 )
 from kacore.milvus_build import (
     MILVUS_BUILD_RUNNING,
@@ -32,6 +34,9 @@ if TYPE_CHECKING:
     from kacore.repository.vector_store.base import VectorStore
 
 logger = logging.getLogger("KnowledgeRepositoryApi")
+
+# Milvus 的安装规格（取自白名单，唯一真相源），用于识别「这次装的是 Milvus」。
+_MILVUS_INSTALL_SPEC = resolve_install_spec("milvus")
 
 
 class CapabilitiesApiMixin:
@@ -142,6 +147,38 @@ class CapabilitiesApiMixin:
             elif stage.get("id") == "ask" and health["rebuild_required"]:
                 detail["fallback_reason"] = health["reason"]
 
+    def vector_store_unavailable_reason(self) -> str:
+        """向量库不可用时的确切原因 + 下一步；可用时返回空串。
+
+        为何存在：旧文案对所有情况都说「请安装 Milvus 并重启插件，或配置 embedding provider」，
+        而真实原因可能是①后端根本没选 milvus ②milvus-lite 缺失（装了 pymilvus 也没用）
+        ③embedding 探针失败/超时 ④依赖齐全但装配报错。用户照着一句话去装，往往完全无效。
+        判断顺序即排查顺序：先看配置，再看依赖，最后看运行态。
+        """
+        if self._config is not None and self._config.get_vector_db_config().backend != "milvus":
+            return (
+                "当前向量库后端为 astr（AstrBot/SQLite 基础召回），没有可重建的 Milvus 索引；"
+                "如需向量检索请在数据流页把向量库切换为 milvus 后重启插件。"
+            )
+
+        runtime = milvus_runtime_status()
+        if not runtime["ready"]:
+            return f"Milvus 本地向量库不可用：{runtime['hint']}"
+
+        if self._embedding_provider is None:
+            return (
+                "Embedding provider 未就绪（启动探针失败或超时），向量索引无法重建："
+                "请在数据流页查看诊断信息，修正 embedding 配置、或等本地模型下载完成后重启插件。"
+            )
+
+        if self._vector_store is None:
+            return (
+                "Milvus 依赖已就绪，但向量库在启动时装配失败："
+                "请在终端日志中查看 Milvus 初始化报错，修复后重启插件。"
+            )
+
+        return ""
+
     async def _milvus_runtime_health(self) -> dict[str, Any]:
         stats = await self._source_store.get_corpus_stats()
         pending_count = int(stats.get("pending_reindex_count", 0))
@@ -206,14 +243,70 @@ class CapabilitiesApiMixin:
         }
 
     async def install_dependency(self, package: str) -> dict[str, Any]:
-        """安装白名单内可选依赖，并把 pip 输出转发到 logger。"""
-        spec = resolve_install_spec(package)
-        return await self._run_pip_install(spec)
+        """安装白名单内可选依赖，并把 pip 输出转发到 logger。
 
-    async def _run_pip_install(self, spec: str) -> dict[str, Any]:
-        """以当前解释器运行 pip install。"""
+        milvus 会同时装上 `milvus-lite`：pymilvus 的 `milvus_lite` extra 仍带着 2.x C++ wheel
+        时代的 `sys_platform != "win32"` 标记，Windows 上 pip 会静默跳过它（退出码仍是 0）。
+        Milvus Lite 3.0 起是纯 Python 包，全平台可装，显式列出即可绕开那条失效标记。
+        """
+        specs = resolve_install_specs(package)
+        operation_id = self._runtime_events.start(
+            category="system",
+            operation="dependency_install",
+            msg="可选依赖安装开始",
+            metadata={"package": package, "spec_count": len(specs)},
+        )
+        result = await self._run_pip_install(*specs)
+        verified = self._verify_install_runtime(specs, result)
+        if verified.get("status") == "ok":
+            self._runtime_events.finish(
+                operation_id=operation_id,
+                category="system",
+                operation="dependency_install",
+                msg="可选依赖安装完成",
+                metadata={"package": package, "returncode": verified.get("returncode")},
+            )
+        else:
+            self._runtime_events.fail(
+                operation_id=operation_id,
+                category="system",
+                operation="dependency_install",
+                msg="可选依赖安装失败",
+                error=str(verified.get("message") or "unknown error"),
+                metadata={"package": package, "returncode": verified.get("returncode")},
+            )
+        return verified
+
+    def _verify_install_runtime(
+        self, specs: tuple[str, ...], result: dict[str, Any]
+    ) -> dict[str, Any]:
+        """pip 退出码为 0 不等于功能可用：装完再验一次真实 import 名。
+
+        典型反例：`pip install pymilvus[milvus_lite]` 在 Windows 上跳过 milvus-lite 仍返回 0，
+        依赖面板于是显示「已安装」，而任何本地向量库操作都会抛
+        `ConnectionConfigException: milvus-lite is required for local database connections`。
+        """
+        if result.get("status") != "ok" or _MILVUS_INSTALL_SPEC not in specs:
+            return result
+        import importlib
+
+        importlib.invalidate_caches()
+        runtime = milvus_runtime_status()
+        if runtime["ready"]:
+            return result
+        logger.error("pip install 已完成，但 Milvus 运行时仍不可用：%s", runtime["hint"])
+        return {
+            **result,
+            "status": "error",
+            "restart_required": False,
+            "message": f"pip 安装已完成，但 Milvus 仍不可用：{runtime['hint']}",
+        }
+
+    async def _run_pip_install(self, *specs: str) -> dict[str, Any]:
+        """以当前解释器运行 pip install（可一次传多个规格）。"""
         import sys
 
+        spec = " ".join(specs)
         logger.info("Installing optional dependency: %s", spec)
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -221,7 +314,7 @@ class CapabilitiesApiMixin:
                 "-m",
                 "pip",
                 "install",
-                spec,
+                *specs,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

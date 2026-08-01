@@ -2,6 +2,223 @@
 
 ## [Unreleased]
 
+## [v1.0.11] — 2026-07-31
+
+来源：一次真实 Windows + Zotero Web API + 本地 GPU Embedding + LightRAG 生产运行暴露的问题
+汇总（见 `KA_PLUGIN_DEVELOPER_ISSUE.md`），部分修复已在运行实例手工验证，本轮系统化落回源码
+并补齐测试。
+
+### 修复 (Fixed)
+
+- **LightRAG 初始化期 `cannot pickle '_thread.lock' object`**：`LightRAGLLMAdapter`/
+  `LightRAGEmbeddingAdapter` 新增身份保持的 `__deepcopy__`，修复 LightRAG 1.5.5rc1 构造
+  `global_config` 时对持有运行时 provider（间接含 `threading.Lock`）的适配器做深拷贝导致的
+  构造期失败（`kacore/lightrag_core.py`）。
+- **Zotero Web API 独立 PDF 附件被误判为「未归类」**：`_collection_items()` 此前无条件排除
+  `itemType == "attachment"`，导致直接放入集合、无 parent item 的独立附件丢失归属信息、落入
+  合成的 `__unfiled__`；改为只排除 `note`/`annotation`，与本地 SQLite reader 的行为对齐
+  （`kacore/adapters/zotero/web_api.py`）。
+- **本地 Embedding 批量编码超过 180s 被误报「模型加载超时」**：`_run_guarded()` 此前把「模型
+  加载」与「encode」当作一个整体计入 `load_timeout`；现改为轮询式拆分，超时闸只约束「等到模型
+  加载完成」这一段等待，模型加载完毕后 encode 不再设超时，符合模块自身 docstring 一贯的设计
+  意图（`kacore/repository/embedding/local.py`）。
+- **LightRAG 主 LLM/Embedding 未就绪时任务已标记 running、深埋在逐文档循环里才失败**：
+  `build_graph()`/`build_graph_with_codex()` 启动前新增就绪度探针（真实短探测调用，非仅检查
+  对象是否为 None），未就绪同步拒绝、不创建任务、不写任何持久化行；逐文档循环新增连续失败熔断
+  （阈值 3），命中后提前终止而不是把剩余文档全部跑坏才暴露同一个 provider 问题
+  （`kacore/api.py`、`kacore/lightrag_core.py`）。
+
+### 新增 (Added)
+
+- **本地 Embedding 设备选择**：新增 `embedding.device`（`auto`/`cpu`/`cuda`/`cuda:N`，已登记
+  `_conf_schema.json`），显式选择 `cuda` 但环境不支持 CUDA 时加载前直接报错，不静默退化为 CPU
+  （与 rerank 的「不可用即软回退」刻意不同——这里是主向量索引路径，静默降级会让批量 embedding
+  在用户不知情的情况下慢上数十倍）；加载成功追加诊断日志（torch 版本、cuda 可用性、解析后设备、
+  GPU 名称）（`kacore/repository/embedding/local.py`、`kacore/config.py`）。**上线前审计发现并
+  修正**：`embedding.device` 最初漏登记进 `CONFIG_KEY_POLICY`，虽然写进了 `_conf_schema.json`
+  能被 AstrBot 原生配置编辑器改到，但本插件自己 Web 控制台的设置页（走 `/api/config/update` →
+  `update_config_value()`）会拒绝写入；已登记为 `consequence=restart`（改设备不改变向量数值，
+  重启生效即可，同 `load_timeout_seconds`），并同步更新
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 里为避免技能脚本
+  直接依赖 `kacore` 而维护的独立 `CONFIG_POLICIES` 快照（有专门的一致性测试兜底）。
+- **Zotero 跨源（local/Web API）重复文档识别与手动确认合并**：本地 SQLite 与 Web API 对同一
+  账号给出不同 `library_id`，切换同步源后同一条目会产生两份文档。新增
+  `detect_zotero_duplicate_documents()`/`preview_zotero_account_merge()`/
+  `confirm_zotero_account_merge()`：按 `(item_key, attachment_key)` 跨 `library_id` 识别重复，
+  预览匹配文档/受影响集合/chunk 数，确认后删除非 canonical 副本（复用既有单文档删除路径，不做
+  原地 `library_id`/`doc_id` 重写与向量迁移）并记录账号身份链接；`access_mode` **真正发生切换**
+  （新值与当前值不同）且已知存在未解决的跨源重复时，`update_config_value()` 抛 `ValueError`
+  同步拦截并指路到合并工具（新表 `zotero_account_identities`，`kacore/api.py`）——必须是异常而不
+  是一个「看起来正常」的返回 dict：前端两条既有调用路径（`SettingModal.tsx`/
+  `FlowPageContent.tsx`）都只检查 `rebuild_required`/`restart_required` 或吞掉非异常返回值，
+  不会识别一个新增的 `status` 字段，会把「已拦截」误报成「已保存」而配置其实没有落盘；只在值
+  真正变化时才检查，避免对已存在历史遗留重复的老实例，重新提交同一个值（如
+  `SettingModal.tsx` 标签点击没有「已是当前值」前置判断）也被误拦。**范围说明**：本轮三个新方法
+  未接 HTTP 路由也无前端 UI，Web 控制台目前完全不可达，只有后端可直接调用的方法（低频管理员
+  操作，非本次头号诉求，HTTP 层 + 确认弹窗留待后续版本）。
+- **取消 LightRAG 构建**：左上角进度条在图谱构建处于活跃状态（`queued`/`running`/
+  `pause_requested`/`paused`/`waiting_agent`）时，将「查看图谱」按钮改为「取消构建」，点击后二次
+  确认（明确提示不会删除 Zotero 文档、原文件、chunks、Embedding 缓存或 Milvus 向量）；新增
+  `cancel_build_job(job_id, cleanup=True)` 与 `POST /api/graph/build/{job_id}/cancel`，取消只
+  清理本次任务写入的 `lightrag_index_status`/`codex_graph_tasks` 记录与内存态任务句柄，幂等（重复
+  调用返回全零清理计数、不报错）；`lightrag_index_status` 新增 `job_id` 列以支持按任务精确清理
+  （`kacore/api.py`、`web/server.py`、`kacore/repository/source_store/*.py`，
+  `migrations/024_lightrag_index_status_job_id.sql`）。**已知限制**：本轮未实现 per-job
+  staging/active workspace 拆分——取消保证「不再处理后续文档」，但不回滚本次任务已写入现有
+  LightRAG workspace 的部分，语义与现有 pause/进程崩溃场景一致（同样不做回滚）；更强的原子性
+  保证留作后续版本演进。
+
+### 测试 (Tests)
+
+- 新增/延伸定向回归覆盖：LightRAG adapter 深拷贝安全（含不 mock `lightrag-hku`、直接构造真实
+  `LightRAG` 实例的烟雾测试）、Web API 独立附件归属、本地 Embedding 加载/编码超时解耦与设备选择、
+  构建前置探针拒绝路径与熔断提前终止、Zotero 跨源重复识别与合并（不触碰无关文档/Zotero 元数据）、
+  取消构建的任务信号/幂等/仅清理本任务残留、取消构建 HTTP 端点。全量后端
+  `751 passed`；`ruff check .`、`mypy`（domain 层严格检查）全部通过；前端 TypeScript 无错误、
+  `npm run build` 全部 11 条路由静态产出成功，`tools/sync_frontend.py` 同步 357 个文件到 `pages/`。
+
+## [v1.0.10] — 2026-07-31
+
+### 修复 (Fixed)
+
+- **Web 终端时间线会静默断裂**：日志记录新增线程安全、严格递增的 `seq`，`/api/logs` 支持
+  `after_seq` 并继续兼容旧 `after` 时间戳；环形缓冲、HTTP 单次上限与前端持有量统一为 2000 条，
+  返回 `oldest_seq`、`latest_seq`、`dropped_count`，前端按序号去重并明确提示遗漏数量。
+- **前端 toast 存在但后端请求与拒绝过程缺失**：Web 应用直接向同一个内存处理器记录请求开始与结束，
+  不再依赖 `KRWebServer` logger 的启用或传播状态；变更请求、失败/慢 GET 均带规范化路由、HTTP 状态、
+  耗时与 `request_id`，响应头可用于反查，且不记录请求正文、密码、Cookie、API Key 或配置值。
+- **三方根因被噪声过滤一起吞掉**：aiohttp、grpc、网络与模型栈仅抑制低级别噪声，WARNING/ERROR
+  继续进入 Web 终端；异常在完整 traceback 之外增加异常类型、根因类型、诊断码与操作建议。
+- **Milvus 锁冲突缺少可执行诊断**：`DataDirLockedError` 标记为 `milvus_data_dir_locked`，提示检查并
+  正常停止重复 AstrBot/插件进程，确认无重复进程后再排查 ACL 或安全软件；明确禁止直接删除锁或数据目录。
+
+### 变更 (Changed)
+
+- **长任务结构化事件**：新增框架无关的 `RuntimeEventSink` 与节流记录器，通过组合根注入 Web 日志缓冲；
+  文档摄入、Milvus 重建、LightRAG、Zotero/Notion、R2 备份恢复、Ask、依赖安装和插件重启均记录开始、
+  阶段变化、每 10% 或 30 秒的节流进度及终态。逐文档成功不刷屏，单文档失败与任务摘要始终保留。
+- **终端元数据补强**：前端沿用既有布局，在 metadata 区域展示 `request_id`、`job_id`、`phase`、
+  `progress` 等字段；暂停、清屏、刷新、复制与下载行为保持不变，复制/下载会包含丢行警示。
+
+### 测试 (Tests)
+
+- 新增序号并发/轮转/游标兼容、遗漏计数、根因分类、请求观测脱离 logger、秘密脱敏、慢/异常请求、
+  阶段节流、终态与并发 ID 区分回归。全量后端 `719 passed, 1 skipped`；Ruff、mypy、TypeScript、
+  ESLint 与生产构建通过，`pages/` 已由 `tools/sync_frontend.py` 更新并通过逐字节一致性检查。
+
+## [v1.0.9] — 2026-07-30
+
+### 修复 (Fixed)
+
+- **点「重启插件」后卡死、Web 控制台再也起不来**：`PluginInitializer.initialize()` 的 embedding
+  维度探针是一次裸 `await`，`provider=local` 时会触发 `SentenceTransformer()` 从 HuggingFace
+  下载权重（`BAAI/bge-large-en-v1.5` 约 1.3GB），底层无任何读超时，网络卡住即永不返回；而
+  `reload()` 先 `teardown()` 关掉旧 Web 控制台、新控制台的重建又排在探针之后，于是旧端口已关、
+  新端口永不启动。现在探针改为 `asyncio.wait(timeout=...)` 的**非破坏式**等待：超时只放弃等待，
+  **不取消**探针任务（`asyncio.to_thread` 的下载线程本就无法中断，取消只会丢掉已下载的进度），
+  启动流程照常走完把控制台拉起来；后台下载完成时补一条日志与诊断告知「模型已就绪，重启即可启用」，
+  该任务纳入 `teardown()` 生命周期。新增 `embedding.load_timeout_seconds`（默认 180s，钳制
+  30–3600，`0`=不限，已登记 `_conf_schema.json` 与 `CONFIG_KEY_POLICY`），超时写中文诊断而非
+  英文异常串（`kacore/plugin_initializer.py`、`kacore/config.py`、`_conf_schema.json`）。
+- **本地模型加载在正常使用阶段同样会挂死**：`LocalEmbeddingProvider._lazy_init()` 在每次
+  embed 的首调都可能触发同一条无超时下载路径（重启之外，空闲卸载后的再加载也会）。现在同一个
+  `load_timeout_seconds` 只在「模型尚未加载」时给该次调用加闸，超时抛中文 `RuntimeError` 走既有
+  降级路径；模型已加载后的 encode 不设超时（与 `bge_local.py` 既定理由一致：本地推理无法可靠中断）。
+  另加「加载进行中则后续调用快速失败」，避免被超时放弃的线程堆在 `_lock` 上耗尽默认 executor
+  （`kacore/repository/embedding/local.py`、`kacore/repository/embedding/factory.py`）。
+- **装了 Milvus 却一直提示「请安装 Milvus」的死循环**：全链路只探测 `pymilvus`，但
+  `pymilvus[milvus_lite]` 的 extra 带 `sys_platform != "win32"` 标记——Windows 上 pip 会静默跳过
+  `milvus-lite` 并以退出码 0「安装成功」。于是依赖面板显示绿灯、装配却抛
+  `ConnectionConfigException: milvus-lite is required for local database connections`，
+  重建入口再回一句「请安装 Milvus 并重启插件」。现在就绪判定收口为
+  `capabilities.milvus_runtime_status()`（`pymilvus ∧ milvus_lite`），依赖状态新增
+  `runtime_ready`/`runtime_hint`（前端据此显示「依赖已安装但运行时不可用」并给出具体修复建议），
+  组合根 gate、`config.get_diagnostics()` 与数据流环节共用同一真相源
+  （`kacore/capabilities.py`、`kacore/plugin_initializer.py`、`kacore/config.py`、
+  `web/frontend/components/flow/FlowNode.tsx`、`web/frontend/lib/{api,i18n}.ts`）。
+- **Windows 上「一键安装 Milvus」现在真的能装上**：那条失效的 extra 标记不是平台限制——
+  Milvus Lite 自 3.0（2026-05-13）起整包用纯 Python 重写、wheel 为 `py3-none-any`，
+  依赖（faiss-cpu / pyarrow / grpcio / numpy）也都有 Windows wheel，**全平台可装**；
+  只是 pymilvus 的 extra 至今仍带着 2.x C++ wheel 时代的 `sys_platform != "win32"` 排除标记。
+  故 `OptionalDependency` 新增 `companion_specs`，milvus 的安装规格变为
+  `pymilvus[milvus_lite]>=2.6,<3.0` **+ 显式的** `milvus-lite>=3.0,<4.0`（新增
+  `resolve_install_specs()`，`_run_pip_install` 支持多规格），`requirements.txt` 同步显式列出，
+  让 AstrBot 重装插件时在 Windows 上也能补齐运行时。pymilvus 下限由 `>=2.5` 提到 `>=2.6`：
+  实测 2.5.x 搭 milvus-lite 3.x 可建集合、可写入，但 `search` 会抛
+  `MilvusException: function_score`；2.6.0 / 2.6.5 均正常（`kacore/capabilities.py`、
+  `kacore/api_capabilities.py`、`requirements.txt`）。
+- **重建索引失败只会回一句放之四海皆准的错误**：`rebuild_index_pending()` 与
+  `start_milvus_rebuild()` 原本对所有情况都返回「VectorStore 未配置（请安装 Milvus 并重启插件，
+  或配置 embedding provider）」。新增唯一真相源 `vector_store_unavailable_reason()`，按排查顺序
+  区分四类原因并给出下一步：后端选的是 `astr`、milvus-lite 缺失、embedding 探针失败/超时、
+  依赖齐全但装配报错（`kacore/api.py`、`kacore/api_capabilities.py`）。
+- **升级到 Milvus Lite 3.x 后打不开老向量库**：3.x 用**目录**存数据，2.x 是**单文件**，直接对旧
+  文件开库会在 `os.makedirs(data_dir)` 抛 `FileExistsError`，对外表现为
+  `ConnectionConfigException: Open local milvus failed`，整个向量库不可用。`MilvusLiteVectorStore`
+  现在在开库前检测这种单文件旧库并重命名为 `<name>.legacy-<时间戳>`，让 3.x 重建空索引；因
+  `created_collection=True` 且 SQLite 仍有文档，组合根会按既有逻辑标记全量 needs_reindex 并提示重建。
+  安全性由本类契约保证：Milvus 只是 SQLite 分块的可重建投影索引，挪走旧文件不丢原始数据
+  （`kacore/repository/vector_store/milvus_lite.py`）。
+- **依赖面板「安装成功」但功能仍不可用**：`install_dependency()` 在 pip 退出码为 0 之后会再校验一次
+  真实 import 名，运行时仍缺失时报错并给出原因，而不是提示「重启即可生效」
+  （`kacore/api_capabilities.py`）。
+- **正常的长问答被误报为超时**：前端 `apiFetch` 的 30s 默认时限套在了所有长任务上——`/api/ask`
+  超过 30s 即弹「请求超时，请稍后重试」，而后端仍在生成。现在按最坏情况给足时限：ask 600s、
+  文档上传 300s、依赖安装 900s、embedding 连通性测试 300s；`/api/capabilities` 心跳从 1.5s 放宽到
+  8s（该端点会聚合 SQLite 统计与 Milvus 运行态，重建/加载模型时 1.5s 必超，数据流页会无征兆弹超时）。
+  `ApiError` 新增 `timedOut` 标志，数据流页的后台刷新不再把客户端抖动报成错误，Zotero「触发即轮询」
+  的 5s 放弃等待也改提示「已在后台进行」（`web/frontend/lib/api.ts`、
+  `web/frontend/components/panels/FlowPageContent.tsx`、`web/frontend/components/modals/SettingModal.tsx`）。
+- **AstrBot 主 LLM 调用没有任何上限**：provider 挂死时整条 ask 永不返回。新增
+  `ask.llm_timeout_seconds`（默认 300s，`0`=不限，可经 `/api/config/update` 修改），
+  超时记明确错误并放弃等待（`kacore/adapters/llm.py`、`kacore/config.py`、`kacore/plugin_initializer.py`）。
+
+### 变更 (Changed)
+
+- **后端可观测性补强（问题与进度都要看得见）**：`initialize()` 逐段落记「步骤完成 + 累计耗时」
+  （SQLite 迁移 → 编排层 → Embedding 探针 → Milvus → API → Web 控制台），终端页最后一条 INFO
+  直接指出卡在哪一步；`teardown()`/`reload()` 记总耗时，软重启失败带 traceback；本地模型加载期
+  每 30s 输出一次心跳（含已等待秒数与 HuggingFace 缓存目录），加载完成记维度与耗时；
+  `LLMAdapter` 记每次调用的路径/耗时/字符数，异常带 traceback，**空响应改 WARNING**——此前
+  降级为「离线占位答案」只记 INFO，用户看到的是一段看似正常实则虚构的回答却几乎无痕迹；
+  `ask` 收尾输出「检索 Xs + 生成 Ys = 总计 Zs、命中数、生效引擎」，受控降级单独 WARNING；
+  `log_capture` 不再整体丢弃 `sentence_transformers`，改为放行该栈（含 `huggingface_hub`/
+  `transformers`/`torch`）的 WARNING+ 并归类到 embedding——模型名写错时 huggingface_hub 的 401
+  是唯一的一手证据，此前被丢弃后终端页只剩「卡住」（`kacore/plugin_initializer.py`、
+  `kacore/adapters/llm.py`、`kacore/api.py`、`kacore/log_capture.py`）。
+
+### 测试 (Tests)
+
+- 新增 21 条回归：探针超时后 `initialize()` 仍走完、诊断为中文且后台探针任务保留至 teardown
+  （`test_lifecycle_and_cli.py`）；本地模型首调超时 / 已加载不加闸 / 加载中快速失败 / `0`=不限
+  （`test_embedding.py`）；只装 pymilvus 时 Milvus 判未就绪、安装规格必须显式含 milvus-lite
+  （`test_capabilities.py`）；重建入口四类精确原因、一键安装带上 milvus-lite、pip 成功但运行时仍不可用
+  （`test_api.py`）；2.x 单文件旧库自动挪开、3.x 目录与全新安装不受影响
+  （`test_retrieval_orchestrator.py`）；主 LLM 超时闸与离线占位 WARNING、provider 异常带 traceback
+  （`test_llm_adapter.py`）；模型下载栈 WARNING+ 不再被丢弃（`test_log_capture.py`）。
+- 版本兼容边界经实测确定（不是查文档得来）：pymilvus 2.5.18 + milvus-lite 3.1.1 的 `search` 抛
+  `function_score`，2.6.0 / 2.6.5 正常；milvus-lite 3.x 的 wheel 为 `py3-none-any`；
+  用 milvus-lite 2.5.1 真实写出一个旧库，再用新组合打开，验证自动迁移与空库重建。
+- 验证：`python -m pytest -q` → 707 passed, 1 skipped；`ruff check .` → All checks passed；
+  `mypy` → Success；前端 `tsc --noEmit` 通过、`npm run build` 通过、`tools/sync_frontend.py`
+  同步 357 个文件到 `pages/`。
+
+- **插件安装期 `NameError: AstrMessageEvent`**：`main.py`（真壳）曾把 `AstrMessageEvent`、
+  `ProviderRequest` 仅放进 `if TYPE_CHECKING:` 块。配合本文件顶部的 `from __future__ import
+  annotations`（PEP 563），AstrBot core（v4.26.8+）在注册 `@ka.command(...)` 时会对字符串
+  注解调用 `inspect.signature(handler, eval_str=True)`，被 `TYPE_CHECKING` 挡住的名字在模块
+  全局命名空间里找不到，插件加载即失败（Windows 安装日志复现；与操作系统无关，任意平台跑同一
+  版本 AstrBot core 都会触发）。修复为把两个类型提升为顶层真实导入（`main.py`）。
+
+### 测试 (Tests)
+
+- **补齐真壳装饰器注册的测试盲区**：`tests/backend/test_lifecycle_and_cli.py` 只测
+  `kacore/main.py`（假壳，装饰器均已注释），从未触达 `main.py` 真壳的框架装饰器注册路径，
+  上述 `NameError` 是结构性测不到的。新增
+  `tests/backend/test_main_shell_command_annotations.py`：进程内搭最小 astrbot SDK 桩（装饰器
+  原样透传），对真壳里全部方法直接调用 `inspect.signature(fn, eval_str=True)`，复现 AstrBot
+  core 同一条注解求值路径，防止同类问题再次悄悄漏网。
+
 ## [v1.0.8] — 2026-07-21
 
 ### 新增功能 (Added)

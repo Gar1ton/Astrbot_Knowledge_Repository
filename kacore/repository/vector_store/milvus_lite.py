@@ -5,6 +5,8 @@ import asyncio
 import logging
 import os
 import re
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kacore.repository.vector_store.base import VectorStore
@@ -55,6 +57,29 @@ class MilvusLiteVectorStore(VectorStore):
         """Eagerly validate dependencies and the existing collection schema."""
         self._init_client()
 
+    def _relocate_legacy_store(self) -> None:
+        """把 Milvus Lite 2.x 的单文件数据库挪开，让 3.x 以目录形式重建。
+
+        为何需要：Milvus Lite 3.0 起用目录存数据，直接对 2.x 留下的**文件**开库会在
+        `os.makedirs(data_dir)` 上抛 `FileExistsError`，对外表现为
+        `ConnectionConfigException: Open local milvus failed`，整个向量库就此不可用。
+
+        安全性：本类的契约是「SQLite 文档分块的可重建投影索引」，挪走旧文件不丢原始数据；
+        新库为空会让组合根按既有逻辑标记全量 needs_reindex，用户重建索引即可恢复检索。
+        """
+        path = Path(self._db_path)
+        if not path.is_file():  # 目录（3.x）或尚不存在：无需处理
+            return
+
+        backup = path.with_name(f"{path.name}.legacy-{int(time.time())}")
+        path.rename(backup)
+        logger.warning(
+            "检测到 Milvus Lite 2.x 单文件数据库 %s；3.x 改用目录存储，已重命名为 %s 并重建空索引。"
+            "原始分块保存在 SQLite 中，重建索引后检索即可恢复。",
+            path.name,
+            backup.name,
+        )
+
     def _init_client(self) -> None:
         if self._initialized:
             return
@@ -65,6 +90,7 @@ class MilvusLiteVectorStore(VectorStore):
         db_dir = os.path.dirname(os.path.abspath(self._db_path))
         os.makedirs(db_dir, exist_ok=True)
 
+        self._relocate_legacy_store()
         self._client = MilvusClient(self._db_path)
 
         # 如果集合不存在，则创建符合 VARCHAR 主键的 Collection Schema

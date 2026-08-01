@@ -39,8 +39,14 @@ READ_INTENTS = ("anchored", "full-text")
 # Keep this compact distribution-side snapshot synchronized with kacore.config.CONFIG_KEY_POLICY.
 CONFIG_POLICIES: dict[str, dict[str, str]] = {
     "vector_db": {"backend": "restart", "auto_index_enabled": "restart"},
-    "embedding": {"provider": "rebuild", "model": "rebuild", "base_url": "rebuild"},
-    "ask": {"answer_language": "none"},
+    "embedding": {
+        "provider": "rebuild",
+        "model": "rebuild",
+        "base_url": "rebuild",
+        "load_timeout_seconds": "restart",
+        "device": "restart",
+    },
+    "ask": {"answer_language": "none", "llm_timeout_seconds": "restart"},
     "graph": {
         "enabled": "restart",
         "query_mode": "restart",

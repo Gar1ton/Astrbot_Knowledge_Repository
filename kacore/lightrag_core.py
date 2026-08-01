@@ -127,6 +127,13 @@ class LightRAGLLMAdapter:
     def __init__(self, llm_adapter: LLMAdapter) -> None:
         self._llm_adapter = llm_adapter
 
+    def __deepcopy__(self, memo: dict[int, Any]) -> LightRAGLLMAdapter:
+        # LightRAG 构造 global_config 时会对可达对象做 deepcopy；本适配器持有的运行时
+        # provider 对象内部含 threading.Lock，不可 pickle/deepcopy，按身份返回自身即可
+        # （适配器本身无状态，深拷贝语义上等价于共享同一个实例）。
+        memo[id(self)] = self
+        return self
+
     async def __call__(
         self,
         prompt: str,
@@ -190,6 +197,11 @@ class LightRAGEmbeddingAdapter:
         self.max_token_size = max_token_size
         self.model_name = model_name
 
+    def __deepcopy__(self, memo: dict[int, Any]) -> LightRAGEmbeddingAdapter:
+        # 同 LightRAGLLMAdapter：self._provider 间接持有 threading.Lock，不可深拷贝。
+        memo[id(self)] = self
+        return self
+
     async def __call__(self, texts: list[str], **kwargs: Any) -> np.ndarray:
         del kwargs
         vectors = await self._provider.embed_documents(list(texts))
@@ -241,6 +253,16 @@ class LightRAGCoreRegistry:
     def has_workspace(self, collection: str) -> bool:
         safe = self._workspace_map.get(collection)
         return bool(safe and (self._root / safe).is_dir())
+
+    async def probe_llm_ready(self) -> None:
+        """构建前 LLM 就绪度探针：直接调用图谱构建实际会用的 LLM adapter。
+
+        为何不能让调用方直接探测 api._llm_adapter：graph.lightrag_llm_provider=local/api
+        时，图谱构建 LLM 与主答疑 LLM 是完全独立的两个 endpoint（见组合根
+        plugin_initializer.py 的 lightrag_llm_adapter 选择逻辑），只有 registry 自己知道
+        当前真正会被调用的是哪一个。探测失败（含超时/网络异常/空响应）直接向上抛异常。
+        """
+        await self._llm_adapter.generate("ping", allow_mock=False)
 
     def existing_collections(self) -> list[str]:
         return sorted(

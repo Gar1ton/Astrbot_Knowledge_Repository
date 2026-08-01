@@ -1,5 +1,77 @@
 # TODO
 
+## v1.0.11：Embedding 设备/超时、Zotero 跨源去重、LightRAG 健壮性与取消构建 (completed)
+
+### User constraints / 约束
+
+- 来源：`KA_PLUGIN_DEVELOPER_ISSUE.md` 汇总的一次真实 Windows + Zotero Web API + 本地 GPU
+  Embedding + LightRAG 生产运行暴露的问题，部分已在运行实例手工验证，需系统化落回源码。
+- 全部 6 类问题一并纳入 v1.0.11，不拆分到后续版本。
+- Zotero 跨源重复文档合并采用「确认后删除重复项，交给正常同步/重建索引补全」，不做原地
+  `library_id`/`doc_id` 重写与 chunks/向量迁移。
+- LightRAG 取消构建只清理本次任务残留（索引状态/任务记录/内存态句柄），绝不触碰 Zotero 文档、
+  原文件、chunks、Embedding 缓存或 Milvus 向量。
+
+### Technical implementation path
+
+- [x] **Phase 1 — LightRAG adapter deepcopy 安全**：`LightRAGLLMAdapter`/`LightRAGEmbeddingAdapter`
+  增加身份保持的 `__deepcopy__`，修复 LightRAG 1.5.5rc1 构造期 `cannot pickle '_thread.lock'
+  object`。回归含一条不 mock `lightrag-hku`、直接构造真实 `LightRAG` 实例的烟雾测试。
+- [x] **Phase 2 — Zotero Web API 独立附件集合归属修复**：`_collection_items()` 不再无条件排除
+  `itemType == "attachment"`，只排除 note/annotation，修复独立 PDF 附件误落 `__unfiled__`。
+- [x] **Phase 3 — 本地 Embedding 超时误判 + 设备选择**：`_run_guarded()` 改为轮询式拆分加载超时闸
+  与 encode 阶段，encode 不再被误判为加载超时；新增 `embedding.device`（auto/cpu/cuda/cuda:N，已
+  登记 `_conf_schema.json`），显式选 cuda 不可用时报错而非静默降级；补诊断日志（torch 版本/cuda 可
+  用性/解析设备/GPU 名称）。
+- [x] **Phase 4 — LightRAG 构建前置就绪度探针 + 熔断**：`build_graph()`/`build_graph_with_codex()`
+  启动前用真实短探测调用检查 LLM/Embedding 就绪度（探测的是 registry 实际持有的图谱构建 LLM，
+  与主答疑 LLM 在 `lightrag_llm_provider=local/api` 时可以是不同 endpoint），未就绪同步拒绝、不
+  创建任务；逐文档循环加连续失败熔断（阈值 3），命中后提前终止并标记 `error`/`partial_failure`。
+- [x] **Phase 5 — Zotero 跨源账号绑定 + 手动确认合并（后端）**：新增 `zotero_account_identities`
+  表；新增 `detect_zotero_duplicate_documents()`/`preview_zotero_account_merge()`/
+  `confirm_zotero_account_merge()`，按 `(item_key, attachment_key)` 跨 `library_id` 识别重复，
+  确认后删除非 canonical 副本（复用单文档删除路径）并记录账号身份链接；`update_config_value()` 对
+  `zotero_sync.access_mode` 真正切换（新值≠当前值）且已知存在未解决重复时抛 `ValueError` 拦截
+  并指路合并工具——**上线前审计发现并修正**：最初实现返回一个「看起来正常」的 dict，被前端两条
+  既有 `update_config_value` 调用路径（`SettingModal.tsx`/`FlowPageContent.tsx`）都只检查
+  `rebuild_required`/`restart_required`、不识别新 `status` 字段，会把「已拦截」误报成「已保存」
+  且配置实际未落盘；改为复用已有的 `ValueError` → HTTP 400 → toast 报错路径后两边都能正确显示
+  错误。同时只在值真正变化时才检查，避免对已存在历史遗留重复的老实例，重新提交同一个值（如
+  `SettingModal.tsx` 标签点击没有「已是当前值」前置判断）也被误拦。
+  **范围收窄（已在实现前与用户确认权衡）**：
+  - 三个新方法未接 HTTP 路由（`web/server.py` 无对应 endpoint），也无前端 UI——本轮只有
+    `kacore/api.py` 里可直接调用的后端方法，Web 控制台目前完全不可达；低频管理员操作，非本次
+    头号诉求，留给后续版本补 HTTP 层 + 确认弹窗。
+  - `_apply_removals()` 未按账号链接扩大跨命名空间自动清理范围——分析后判断这类自动删除的风险
+    超过收益（切换回旧 access_mode 时可能误删刚合并保留的 canonical 副本），选择只提供可重复
+    调用、只读预览、显式确认的合并工具作为安全兜底，而不是在同步管线里插入自动决策。
+- [x] **Phase 6 — 取消 LightRAG 构建（无 per-job staging workspace）**：新增
+  `cancel_build_job(job_id, cleanup=True)` 与 `POST /api/graph/build/{job_id}/cancel`，取消只清
+  理本 job 写入的 `lightrag_index_status`（新增 `job_id` 列）/`codex_graph_tasks` 行与内存态句柄，
+  幂等；前端进度条在活跃状态（`queued`/`running`/`pause_requested`/`paused`/`waiting_agent`）下把
+  「查看图谱」按钮改为「取消构建」+ 二次确认 + toast。
+  **范围收窄（已在实现前评估风险后决定）**：未实现 `LightRAGCoreRegistry` 的
+  `active/`/`staging/<job_id>/` workspace 拆分与原子提升——`build_graph()` 对已建图集合默认走
+  增量插入，真正的 staging 需要「先整份拷贝现有 workspace 再原子替换」，属于独立的高风险子系统
+  改造（涉及大目录拷贝、崩溃时的回滚路径）；本轮取消保证「不再处理后续文档」，与现有 pause/
+  进程崩溃场景的语义一致（同样不做部分写入回滚），更强的原子性保证留作后续版本单独评估。
+
+### Verification
+
+- 定向：`test_lightrag_core.py`（deepcopy + 真实 LightRAG 构造）、`test_zotero_server.py`（独立
+  附件归属）、`test_embedding.py`（加载/编码超时解耦 + 设备选择）、`test_build_hardening.py`（探针
+  拒绝、熔断、取消幂等与任务隔离）、`test_zotero_account_identity.py`（跨源重复识别与合并）、
+  `test_web_server.py`（取消构建 HTTP 端点）、`test_codex_graph_build.py`（Codex 路径就绪度探针
+  调整后的回归）。
+- 全量后端：`python -m pytest -q` → `751 passed`。
+- `ruff check .` → All checks passed；`mypy`（domain 层严格检查）→ Success。
+- 前端：`node node_modules/typescript/bin/tsc --noEmit --incremental false` → 无输出（通过）；
+  `npm run build` → 全部 11 条路由静态产出成功；`python tools/sync_frontend.py` → 同步 357 个
+  文件到 `pages/`。
+- 新增迁移：`migrations/023_zotero_account_identities.sql`、
+  `migrations/024_lightrag_index_status_job_id.sql`（均为追加式，无破坏性 schema 变更）。
+- 版本号同步：`metadata.yaml`/`main.py::_PLUGIN_VERSION`/`README.md` 徽章 → v1.0.11。
+
 ## v1.0.10：Web 终端日志完整性与可观测性增强 (completed)
 
 ### User constraints / 约束

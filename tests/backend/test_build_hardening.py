@@ -22,6 +22,20 @@ class _FakeSourceStore:
     async def mark_interrupted_build_jobs(self) -> int:
         return 0
 
+    async def replace_codex_graph_tasks(self, job_id: str, tasks: list[dict]) -> None:
+        pass
+
+    async def list_codex_graph_tasks(self, job_id: str, status: str | None = None) -> list[dict]:
+        return []
+
+    async def set_lightrag_index_status(
+        self, doc_id: str, collection: str, status: str, error: str = "", *, job_id=None
+    ) -> None:
+        pass
+
+    async def delete_lightrag_index_status_by_job(self, job_id: str) -> int:
+        return 0
+
 
 def _make_api():
     """Build a minimal KnowledgeRepositoryApi instance for testing build_graph()."""
@@ -34,9 +48,20 @@ def _make_api():
     api._build_tasks = {}
     api._lightrag_registry = MagicMock()
     api._lightrag_registry.enabled = True
+    api._lightrag_registry.probe_llm_ready = AsyncMock(return_value=None)
     api._source_store = source_store
     api._index_compatibility = None
     api._embedding_fingerprint = None
+    # Phase 4（v1.0.11）：build_graph()/build_graph_with_codex() 启动前会做就绪度探针，
+    # 默认给一套「一切正常」的假实现；需要测试探针失败的用例可自行覆盖这两个属性。
+    api._embedding_provider = AsyncMock()
+    api._embedding_provider.embed_query = AsyncMock(return_value=[0.1])
+    api._llm_adapter = AsyncMock()
+    api._llm_adapter.generate = AsyncMock(return_value="pong")
+
+    from kacore.runtime_events import RuntimeEventRecorder
+
+    api._runtime_events = RuntimeEventRecorder(None)
 
     async def _resolve_collection(col):
         return col or "papers"
@@ -147,6 +172,284 @@ async def test_cancel_build_tasks_clears_handles() -> None:
 
     assert len(api._build_tasks) == 0
     assert task.cancelled()
+
+
+# ─── Preflight readiness probe (v1.0.11) ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_build_graph_rejects_when_embedding_provider_missing() -> None:
+    """Embedding 未配置时同步拒绝，不创建任何 job。"""
+    api = _make_api()
+    api._embedding_provider = None
+
+    with patch.object(api, "_run_lightrag_build_job", new=AsyncMock()):
+        with pytest.raises(RuntimeError, match="Embedding"):
+            await api.build_graph(collection="papers", confirmed=True)
+
+    assert api._graph_build_jobs == {}
+
+
+@pytest.mark.asyncio
+async def test_build_graph_rejects_when_embedding_probe_fails() -> None:
+    """Embedding 探针调用失败（超时/异常）时同步拒绝，不创建任何 job。"""
+    api = _make_api()
+    api._embedding_provider.embed_query = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with patch.object(api, "_run_lightrag_build_job", new=AsyncMock()):
+        with pytest.raises(RuntimeError, match="Embedding"):
+            await api.build_graph(collection="papers", confirmed=True)
+
+    assert api._graph_build_jobs == {}
+
+
+@pytest.mark.asyncio
+async def test_build_graph_rejects_when_llm_probe_fails() -> None:
+    """图谱构建 LLM 未就绪时同步拒绝，不创建任何 job——而不是启动后才在逐文档循环里失败。"""
+    api = _make_api()
+    api._lightrag_registry.probe_llm_ready = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with patch.object(api, "_run_lightrag_build_job", new=AsyncMock()):
+        with pytest.raises(RuntimeError, match="LLM"):
+            await api.build_graph(collection="papers", confirmed=True)
+
+    assert api._graph_build_jobs == {}
+
+
+@pytest.mark.asyncio
+async def test_build_graph_with_codex_does_not_probe_llm() -> None:
+    """Codex 构建路径走 insert_custom_kg 官方非 LLM 接口，不应探测图谱构建 LLM。"""
+    api = _make_api()
+    api._lightrag_registry.probe_llm_ready = AsyncMock(
+        side_effect=AssertionError("Codex 路径不应探测 LLM")
+    )
+    api._config = None
+    api._index_compatibility = None
+
+    async def _lightrag_text_for_doc(doc):
+        return ""
+
+    api._lightrag_text_for_doc = _lightrag_text_for_doc
+
+    result = await api.build_graph_with_codex(collection="papers", confirmed=True)
+
+    assert result["status"] == "success"  # 无文档，直接完成
+
+
+@pytest.mark.asyncio
+async def test_build_graph_with_codex_still_rejects_when_embedding_missing() -> None:
+    """Codex 路径仍需要 Embedding 就绪（后续 entity/relationship 写入依赖它）。"""
+    api = _make_api()
+    api._embedding_provider = None
+
+    with pytest.raises(RuntimeError, match="Embedding"):
+        await api.build_graph_with_codex(collection="papers", confirmed=True)
+
+    assert api._graph_build_jobs == {}
+
+
+# ─── Circuit breaker on consecutive per-doc failures (v1.0.11) ─
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_stops_after_consecutive_failures() -> None:
+    """连续失败达阈值后提前终止，不把剩余文档全部跑坏才暴露问题。"""
+    from kacore.domain.models import SourceDocument
+
+    api = _make_api()
+
+    docs = [
+        SourceDocument(
+            doc_id=f"d{i}",
+            title=f"d{i}",
+            file_path=f"/tmp/d{i}.md",
+            content_type="text/markdown",
+            size_bytes=1,
+            content_hash=f"h{i}",
+            collection="papers",
+        )
+        for i in range(6)
+    ]
+
+    async def _lightrag_docs_for_build(col):
+        return docs
+
+    async def _lightrag_text_for_doc(doc):
+        return f"text for {doc.doc_id}"
+
+    class Registry:
+        enabled = True
+        calls: list[str] = []
+
+        def has_workspace(self, collection: str) -> bool:
+            return False
+
+        async def chunk_document(self, collection: str, text: str):
+            return [text], "lrag_chunks"
+
+        async def insert_document(self, collection, doc_id, text, **kwargs):
+            Registry.calls.append(doc_id)
+            raise RuntimeError("provider unreachable")
+
+    api._lightrag_docs_for_build = _lightrag_docs_for_build
+    api._lightrag_text_for_doc = _lightrag_text_for_doc
+    api._lightrag_registry = Registry()
+    api._config = None
+    api._index_compatibility = None
+    api._embedding_fingerprint = None
+
+    job_id = "job-1"
+    job = BuildJob(job_id=job_id, collection="papers", total_docs=len(docs))
+    api._graph_build_jobs[job_id] = job
+    event = asyncio.Event()
+    event.set()
+    api._build_pause_events[job_id] = event
+
+    await api._run_lightrag_build_job(job_id)
+
+    # 阈值为 3：应在第 3 篇失败后提前终止，未跑完全部 6 篇。
+    assert len(Registry.calls) == 3
+    assert job.failed_docs == 3
+    assert job.processed_docs == 0
+    assert job.status == "error"
+    assert "连续" in job.recent_error
+
+
+# ─── cancel_build_job (v1.0.11) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cancel_build_job_signals_task_and_marks_cancelled() -> None:
+    """取消一个正在跑的任务：任务被信号取消，最终落盘状态为 cancelled（不是 interrupted）。"""
+    api = _make_api()
+
+    async def _fake_build(job_id: str) -> None:
+        job = api._graph_build_jobs[job_id]
+        job.status = "running"
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            job.stage = "interrupted"
+            job.status = "interrupted"
+            raise
+
+    with patch.object(api, "_run_lightrag_build_job", side_effect=_fake_build):
+        result = await api.build_graph(collection="papers", confirmed=True)
+    job_id = result["job_id"]
+    await asyncio.sleep(0)
+
+    cancel_result = await api.cancel_build_job(job_id)
+
+    assert cancel_result["job_id"] == job_id
+    assert cancel_result["status"] == "cancelled"
+    assert cancel_result["cleanup"]["active_state_removed"] is True
+    job = api._graph_build_jobs[job_id]
+    assert job.status == "cancelled"
+    assert job_id not in api._build_tasks
+    assert job_id not in api._build_pause_events
+
+
+@pytest.mark.asyncio
+async def test_cancel_build_job_is_idempotent() -> None:
+    """对已取消的 job 再次调用 cancel：不报错，返回全零清理计数。"""
+    api = _make_api()
+    job = BuildJob(job_id="job-1", collection="papers", status="running")
+    api._graph_build_jobs["job-1"] = job
+
+    async def _long() -> None:
+        await asyncio.sleep(60)
+
+    api._build_tasks["job-1"] = asyncio.create_task(_long())
+
+    first = await api.cancel_build_job("job-1")
+    second = await api.cancel_build_job("job-1")
+
+    assert first["status"] == "cancelled"
+    assert second["status"] == "cancelled"
+    assert second["cleanup"]["index_status_rows"] == 0
+    assert second["cleanup"]["codex_tasks"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_build_job_unknown_id_raises_keyerror() -> None:
+    api = _make_api()
+
+    with pytest.raises(KeyError):
+        await api.cancel_build_job("does-not-exist")
+
+
+@pytest.mark.asyncio
+async def test_cancel_build_job_rejects_already_terminal_non_cancelled_job() -> None:
+    """取消一个已经成功完成的任务应报错，不能把 success 回退为 cancelled。"""
+    api = _make_api()
+    job = BuildJob(job_id="job-done", collection="papers", status="success")
+    api._graph_build_jobs["job-done"] = job
+
+    with pytest.raises(ValueError, match="already finished"):
+        await api.cancel_build_job("job-done")
+
+
+@pytest.mark.asyncio
+async def test_cancel_build_job_removes_job_scoped_artifacts_only() -> None:
+    """取消 job A 只删 A 写入的 lightrag_index_status/codex_graph_tasks 行，B 的不受影响。
+
+    这是本 Phase 最核心的正确性断言：取消一个任务绝不能牵连另一个任务/另一次构建轮次
+    的记录，更不能触碰文档本身。
+    """
+    from kacore.api import KnowledgeRepositoryApi
+    from kacore.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
+    from kacore.repository.source_store.memory import InMemorySourceDocumentStore
+
+    store = InMemorySourceDocumentStore()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        lightrag_registry=MagicMock(),  # type: ignore[arg-type]
+    )
+
+    await store.set_lightrag_index_status("doc-a", "papers", "indexed", job_id="job-A")
+    await store.set_lightrag_index_status("doc-b", "papers", "indexed", job_id="job-B")
+    await store.replace_codex_graph_tasks(
+        "job-A",
+        [
+            {
+                "task_id": "t-a1",
+                "job_id": "job-A",
+                "collection": "papers",
+                "doc_id": "doc-a",
+                "chunk_index": 0,
+                "chunk_hash": "h1",
+                "content": "c1",
+            }
+        ],
+    )
+    await store.replace_codex_graph_tasks(
+        "job-B",
+        [
+            {
+                "task_id": "t-b1",
+                "job_id": "job-B",
+                "collection": "papers",
+                "doc_id": "doc-b",
+                "chunk_index": 0,
+                "chunk_hash": "h2",
+                "content": "c2",
+            }
+        ],
+    )
+    api._graph_build_jobs["job-A"] = BuildJob(job_id="job-A", collection="papers", status="running")
+    api._graph_build_jobs["job-B"] = BuildJob(job_id="job-B", collection="papers", status="running")
+
+    result = await api.cancel_build_job("job-A")
+
+    assert result["cleanup"]["index_status_rows"] == 1
+    assert result["cleanup"]["codex_tasks"] == 1
+    assert await store.get_lightrag_index_status("doc-a") is None
+    assert (await store.get_lightrag_index_status("doc-b"))["job_id"] == "job-B"
+    assert await store.list_codex_graph_tasks("job-A") == []
+    assert len(await store.list_codex_graph_tasks("job-B")) == 1
+    # job-B 自身的任务记录（BuildJob）完全未被本次取消触碰。
+    assert api._graph_build_jobs["job-B"].status == "running"
 
 
 # ─── Pause / resume persistence ───────────────────────────────────────────────

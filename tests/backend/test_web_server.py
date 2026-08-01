@@ -419,6 +419,21 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
                 "debug": {"query_mode": "mix"},
             }
 
+        async def probe_llm_ready(self) -> None:
+            # build_graph() 启动前的就绪度探针（v1.0.11）；本测试的图谱构建 LLM 本身
+            # 不是被测对象，直接放行即可。
+            return None
+
+    class StubEmbeddingProvider:
+        async def embed_query(self, text: str) -> list[float]:
+            return [0.1]
+
+        async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [[0.1] for _ in texts]
+
+        def get_dimension(self) -> int:
+            return 1
+
     store = InMemorySourceDocumentStore()
     await store.upsert_collection(Collection(name="papers", description="d"))
     await store.add_document(
@@ -434,6 +449,7 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         lightrag_registry=StubLightRAGRegistry(),  # type: ignore[arg-type]
         index_compatibility=compatibility,
         embedding_fingerprint="fp",
+        embedding_provider=StubEmbeddingProvider(),  # type: ignore[arg-type]
     )
 
     app = build_app(
@@ -477,6 +493,36 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         assert body2["context"] == "LightRAG context"
         assert body2["engine"] == "lightrag_core"
         assert body2["debug"]["query_mode"] == "mix"
+    finally:
+        await client.close()
+
+
+async def test_graph_build_cancel_endpoint_returns_200(tmp_path: Path) -> None:
+    """POST /api/graph/build/{job_id}/cancel 取消一个活跃任务并返回清理摘要。"""
+    from kacore.lightrag_core import BuildJob
+
+    api = await _make_api()
+    job = BuildJob(job_id="job-1", collection="papers", status="running")
+    api._graph_build_jobs["job-1"] = job
+
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/graph/build/job-1/cancel", json={"cleanup": True})
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["status"] == "cancelled"
+        assert body["job_id"] == "job-1"
+        assert "cleanup" in body
+
+        missing = await client.post("/api/graph/build/does-not-exist/cancel", json={})
+        assert missing.status == 404
     finally:
         await client.close()
 

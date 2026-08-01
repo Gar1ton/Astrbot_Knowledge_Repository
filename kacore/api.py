@@ -91,7 +91,12 @@ MILVUS_INDEX_MAX_ATTEMPTS = 3
 MILVUS_INDEX_RETRY_DELAYS = (0.5, 1.5)
 ZOTERO_SERVER_KEY_SECRET = "zotero.server_api_key"
 ACTIVE_BUILD_STATUSES = {"queued", "running", "pause_requested", "paused", "waiting_agent"}
-TERMINAL_BUILD_STATUSES = {"success", "partial_failure", "error", "interrupted"}
+TERMINAL_BUILD_STATUSES = {"success", "partial_failure", "error", "interrupted", "cancelled"}
+# 构建启动前就绪度探针（Embedding/主 LLM）单次探测的超时上限（秒）。
+LIGHTRAG_PREFLIGHT_PROBE_TIMEOUT_SECONDS = 15.0
+# 逐文档循环内连续失败达到此阈值即提前终止：疑似 provider 未就绪，
+# 不再把剩余文档全部跑坏才暴露问题。
+LIGHTRAG_BUILD_CIRCUIT_BREAKER_THRESHOLD = 3
 CODEX_GRAPH_TASK_FINAL = "completed"
 CODEX_GRAPH_TASK_RETRYABLE = ("pending", "error", "processing")
 ZOTERO_SYNC_TERMINAL_VISIBLE_SECONDS = 30.0
@@ -2947,6 +2952,39 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
     _CONFIG_UPDATE_KEYS: dict[str, frozenset[str]] = api_writable_keys()
     _STRUCTURAL_KEYS: dict[str, frozenset[str]] = structural_keys()
 
+    async def _check_zotero_access_mode_switch(self, new_mode: str) -> None:
+        """access_mode 切换前的守卫：已知未解决的跨命名空间重复时拦截切换。
+
+        不在此处做「探测目标命名空间 library_id」这种前瞻性判断——那需要在切换前
+        建立到目标源（本地 Zotero / Web API）的真实连接，误报/漏报都有代价。改为更
+        可靠的事后信号：如果当前已经存在 `detect_zotero_duplicate_documents()` 能识别
+        出的跨 library_id 重复，说明之前至少切换过一次且未清理，此时再切换只会让重复
+        继续累积，直接拦截并指路到 preview/confirm_zotero_account_merge。
+
+        必须抛 `ValueError`、不能返回一个「看起来正常」的 dict：`update_config_value()`
+        的现有前端调用方（`SettingModal.tsx`/`FlowPageContent.tsx`）只检查
+        `rebuild_required`/`restart_required` 或吞掉 catch 之外的返回值，不会检查一个
+        新的 `status` 字段——返回 dict 会被两条既有前端路径都误报成「已保存」，而实际
+        上配置根本没有被持久化。抛异常才能复用 `update_config_value()` 已有的、被两条
+        前端路径正确处理的 `ValueError` → HTTP 400 → toast 报错路径。
+
+        真正切换（值变化）时才检查：不能对「重新提交同一个值」也拦截——`SettingModal.tsx`
+        的标签点击没有「已是当前值就不发请求」的前置判断（`ZoteroQuickConfig.tsx` 有），
+        对已存在历史遗留重复的老实例来说，点一下当前已选中的 tab 就会莫名其妙报错，
+        而用户实际上什么都没打算改。
+        """
+        if str(self._current_config_value("zotero_sync", "access_mode") or "") == new_mode:
+            return
+        duplicates = await self.detect_zotero_duplicate_documents()
+        if duplicates["total_duplicate_groups"] <= 0:
+            return
+        raise ValueError(
+            "检测到 Zotero 条目在多个 library_id 命名空间下重复（通常是此前切换过"
+            "同步源、未清理导致）。请先用 preview_zotero_account_merge/"
+            "confirm_zotero_account_merge 确认并清理重复，再切换同步源，"
+            "避免重复继续累积。"
+        )
+
     async def update_config_value(self, section: str, key: str, value: Any) -> dict[str, Any]:
         """Persist a safe config value without hot-swapping embedding-backed runtime state."""
         logger.info("update_config: %s.%s", section, key)
@@ -2972,6 +3010,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             "strict",
         }:
             raise ValueError("notion_sync.sync_mode must be 'preserve' or 'strict'.")
+        if section == "zotero_sync" and key == "access_mode":
+            await self._check_zotero_access_mode_switch(str(value))
 
         changed = self._current_config_value(section, key) != value
         self._persist_config_value(section, key, value)
@@ -3164,14 +3204,47 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         )
         return {"collection": col, **estimate}
 
+    async def _preflight_lightrag_build_ready(self, *, require_llm: bool = True) -> None:
+        """构建启动前的就绪度探针：registry / Embedding / （可选）LLM 均可用才放行。
+
+        契约：任一环节未就绪直接抛 RuntimeError（清晰中文提示），调用方据此同步拒绝
+        本次 build_graph()/build_graph_with_codex()，不创建 job、不写任何持久化行。
+        与「任务已标记 running，深埋在逐文档循环里才失败、还看不出是 provider 未就绪」
+        的旧行为相比，这里用一次真实的短探针调用换取立即、可诊断的拒绝。
+
+        require_llm=False 用于 Codex 构建路径：该路径走 `insert_custom_kg` 官方非 LLM
+        接口（Codex 在外部完成实体/关系抽取），完全不调用图谱构建 LLM，探测它没有意义。
+        """
+        if self._lightrag_registry is None:
+            raise RuntimeError("LightRAG Core registry is not configured")
+        if self._embedding_provider is None:
+            raise RuntimeError("Embedding provider 未配置，无法开始构建。")
+        try:
+            await asyncio.wait_for(
+                self._embedding_provider.embed_query("ping"),
+                timeout=LIGHTRAG_PREFLIGHT_PROBE_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Embedding 服务未就绪，无法开始构建：{exc}") from exc
+        if not require_llm:
+            return
+        try:
+            # 注意：探测的是 registry 实际持有的图谱构建 LLM adapter，而非
+            # self._llm_adapter（主答疑 LLM）——两者在 graph.lightrag_llm_provider=
+            # local/api 时可以是完全不同的 endpoint（见 plugin_initializer.py）。
+            await asyncio.wait_for(
+                self._lightrag_registry.probe_llm_ready(),
+                timeout=LIGHTRAG_PREFLIGHT_PROBE_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"图谱构建 LLM Provider 未就绪，无法开始构建：{exc}") from exc
+
     async def build_graph(self, collection: str | None = None, *, confirmed: bool = False) -> dict:
         """Start a manually confirmed LightRAG Core build job."""
         if not confirmed:
             raise ValueError(
                 "LightRAG build requires confirmed=true because it triggers LLM indexing"
             )
-        if self._lightrag_registry is None:
-            raise RuntimeError("LightRAG Core registry is not configured")
 
         from kacore.lightrag_core import BuildJob
 
@@ -3183,6 +3256,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 raise RuntimeError(
                     f"已有构建任务正在进行中（collection={job.collection!r}, job_id={job.job_id}）"
                 )
+
+        await self._preflight_lightrag_build_ready()
 
         job_id = uuid.uuid4().hex
         docs = await self._lightrag_docs_for_build(col)
@@ -3210,8 +3285,6 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             raise ValueError(
                 "Codex LightRAG build requires confirmed=true because embeddings are written"
             )
-        if self._lightrag_registry is None:
-            raise RuntimeError("LightRAG Core registry is not configured")
 
         from kacore.lightrag_core import BuildJob
 
@@ -3222,6 +3295,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                     f"已有构建任务正在进行中（collection={active.collection!r}, "
                     f"job_id={active.job_id}）"
                 )
+
+        await self._preflight_lightrag_build_ready(require_llm=False)
 
         if (
             self._index_compatibility is not None
@@ -3246,7 +3321,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             if not text.strip():
                 empty_docs += 1
                 await self._source_store.set_lightrag_index_status(
-                    doc.doc_id, col, "indexed"
+                    doc.doc_id, col, "indexed", job_id=job_id
                 )
                 continue
             chunks, basis = await self._lightrag_registry.chunk_document(col, text)
@@ -3462,7 +3537,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         job.failed_docs = len(error_docs)
         for doc_id in completed_docs:
             await self._source_store.set_lightrag_index_status(
-                doc_id, job.collection, "indexed"
+                doc_id, job.collection, "indexed", job_id=job.job_id
             )
 
         if tasks and job.processed_chunks == len(tasks):
@@ -3492,6 +3567,74 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 except (asyncio.CancelledError, Exception):
                     pass
         self._build_tasks.clear()
+
+    async def cancel_build_job(self, job_id: str, cleanup: bool = True) -> dict[str, Any]:
+        """取消单个构建任务，并（默认）清理本次任务写入的残留。
+
+        只清理本次任务的记账——内存中的任务句柄/暂停事件、本 job_id 写入的
+        `lightrag_index_status`/`codex_graph_tasks` 行。绝不触碰 Zotero 文档、原文件、
+        chunks、Embedding 缓存或 Milvus 向量：这些是知识库内容，不是「本次构建任务的
+        残留」，删掉它们不是取消构建该做的事。
+
+        已知限制：本次实现没有做 per-job staging/active workspace 拆分（即取消不会把
+        本 job 已经写入现有 LightRAG workspace 的部分「回滚」）——`build_graph()` 对已
+        建图集合默认走增量插入，取消只保证「不再处理后续文档」，与现有 pause/进程崩溃
+        场景下的语义一致（同样不做回滚）。若需要更强的原子性保证，需要引入独立的
+        staging workspace 目录与提升流程，留作后续版本演进。
+
+        幂等：对已经是 `cancelled` 的 job 再次调用，直接走同一套清理逻辑，自然得到
+        全零清理计数，不会抛异常/500。
+        """
+        job = self._graph_build_jobs.get(job_id)
+        if job is None:
+            raise KeyError(f"Build job {job_id!r} not found")
+
+        if job.status not in TERMINAL_BUILD_STATUSES:
+            task = self._build_tasks.get(job_id)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            job.in_llm_call = False
+            job.stage = "cancelled"
+            job.status = "cancelled"
+            job.finished_at = job.finished_at or time.monotonic()
+            job.finished_at_iso = job.finished_at_iso or _now_iso()
+            self._refresh_build_progress(job, label="cancelled")
+            await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
+        elif job.status != "cancelled":
+            raise ValueError(
+                f"Job {job_id!r} already finished with status={job.status!r}; "
+                "nothing to cancel"
+            )
+
+        self._build_tasks.pop(job_id, None)
+        self._build_pause_events.pop(job_id, None)
+
+        index_status_rows = 0
+        codex_task_count = 0
+        if cleanup:
+            existing_codex_tasks = await self._source_store.list_codex_graph_tasks(job_id)
+            codex_task_count = len(existing_codex_tasks)
+            await self._source_store.replace_codex_graph_tasks(job_id, [])
+            index_status_rows = await self._source_store.delete_lightrag_index_status_by_job(
+                job_id
+            )
+
+        return {
+            "job_id": job_id,
+            "status": "cancelled",
+            "cleanup": {
+                # 本次实现无 per-job staging workspace，故没有独立 workspace 目录可删；
+                # 见方法 docstring「已知限制」。
+                "workspace": False,
+                "index_status_rows": index_status_rows,
+                "codex_tasks": codex_task_count,
+                "active_state_removed": True,
+            },
+        }
 
     async def get_graph_build_job(self, job_id: str) -> dict | None:
         job = self._graph_build_jobs.get(job_id)
@@ -3762,6 +3905,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
             self._refresh_build_progress(job, label="indexing")
             await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
 
+            # 连续失败熔断：达到阈值即提前终止，不再把剩余文档全部跑坏才暴露
+            # 「provider 未就绪」这一类系统性问题（构建前 preflight 通常已挡住，
+            # 这里防的是 preflight 之后、构建过程中 provider 掉线的情形）。
+            consecutive_failures = 0
+            circuit_broken = False
             for doc, text, lrag_chunks, _basis in prepared:
                 await self._build_pause_gate(job, "before_document")
                 job.stage = "indexing"
@@ -3770,9 +3918,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                 await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
                 if not text.strip():
                     await self._source_store.set_lightrag_index_status(
-                        doc.doc_id, job.collection, "indexed"
+                        doc.doc_id, job.collection, "indexed", job_id=job.job_id
                     )
                     job.processed_docs += 1
+                    consecutive_failures = 0
                     self._refresh_build_progress(job, label="document_indexed")
                     await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
                     await self._build_pause_gate(job, "after_document")
@@ -3830,20 +3979,22 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                         job.processed_chunks = chunk_target
                         job.current_chunk_index = job.processed_chunks
                     await self._source_store.set_lightrag_index_status(
-                        doc.doc_id, job.collection, "indexed"
+                        doc.doc_id, job.collection, "indexed", job_id=job.job_id
                     )
                     job.processed_docs += 1
+                    consecutive_failures = 0
                     self._refresh_build_progress(job, label="document_indexed")
                     await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
                     await self._build_pause_gate(job, "after_document")
                 except Exception as exc:
                     job.in_llm_call = False
                     job.failed_docs += 1
+                    consecutive_failures += 1
                     remaining = max(0, chunk_target - job.processed_chunks)
                     job.failed_chunks += remaining
                     job.recent_error = str(exc)
                     await self._source_store.set_lightrag_index_status(
-                        doc.doc_id, job.collection, "error", str(exc)
+                        doc.doc_id, job.collection, "error", str(exc), job_id=job.job_id
                     )
                     self._refresh_build_progress(job, label="document_error")
                     await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
@@ -3862,13 +4013,31 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
                             "error": str(exc),
                         },
                     )
+                    if consecutive_failures >= LIGHTRAG_BUILD_CIRCUIT_BREAKER_THRESHOLD:
+                        circuit_broken = True
+                        job.recent_error = (
+                            f"连续 {consecutive_failures} 篇文档失败，疑似 LLM/Embedding "
+                            f"provider 未就绪或已掉线，提前终止本次构建：{exc}"
+                        )
+                        logger.error(
+                            "LightRAG build job %s: 连续 %d 篇文档失败，提前终止"
+                            "（最后一次错误：%s）",
+                            job.job_id,
+                            consecutive_failures,
+                            exc,
+                        )
+                        break
             await self._build_pause_gate(job, "before_finalize")
             job.stage = "finalizing"
             self._refresh_build_progress(job, label="finalizing")
             await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
             await self._build_pause_gate(job, "before_compatibility")
 
-            final_status = "success" if job.failed_docs == 0 else "partial_failure"
+            if circuit_broken and job.processed_docs == 0:
+                # 熔断且一篇都没成功：不是「部分失败」，是系统性不可用，用更严格的 error。
+                final_status = "error"
+            else:
+                final_status = "success" if job.failed_docs == 0 else "partial_failure"
             if (
                 final_status in ("success", "partial_failure")
                 and job.processed_docs > 0
@@ -4720,6 +4889,178 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin):
         if self._index_compatibility is not None:
             for collection in collections:
                 self._index_compatibility.remove_lightrag_collection(collection)
+
+    # ── Zotero 跨源（local/Web API）重复文档识别与合并 ──────────────
+
+    async def detect_zotero_duplicate_documents(self) -> dict[str, Any]:
+        """按 (item_key, attachment_key) 跨 library_id 找重复的 Zotero 文档。
+
+        根因：本地 SQLite 与 Web API 对同一账号给出不同 library_id（local 通常为 '1'，
+        server 为数字 user_id），`doc_id` 里编了 library_id，导致同一条 Zotero 条目在
+        切换同步源后产生两份文档。这里不解析 doc_id 字符串（下划线拼接不可逆），直接用
+        `SourceDocument.zotero_item_key`/`attachment_key` 字段分组。只读，不做任何修改。
+        """
+        docs = [
+            doc
+            for doc in await self._source_store.list_documents()
+            if doc.origin is DocumentOrigin.ZOTERO and doc.zotero_item_key and doc.attachment_key
+        ]
+        groups: dict[tuple[str, str], list[SourceDocument]] = {}
+        for doc in docs:
+            groups.setdefault((doc.zotero_item_key, doc.attachment_key), []).append(doc)
+
+        duplicate_groups: list[dict[str, Any]] = []
+        for (item_key, attachment_key), group_docs in groups.items():
+            library_ids = {doc.library_id for doc in group_docs}
+            if len(library_ids) <= 1:
+                continue
+            entries = []
+            for doc in group_docs:
+                chunks = await self._source_store.list_chunks(doc.doc_id)
+                entries.append(
+                    {
+                        "doc_id": doc.doc_id,
+                        "library_id": doc.library_id,
+                        "collection": doc.collection,
+                        "title": doc.title,
+                        "chunk_count": len(chunks),
+                    }
+                )
+            duplicate_groups.append(
+                {
+                    "item_key": item_key,
+                    "attachment_key": attachment_key,
+                    "docs": entries,
+                }
+            )
+        return {
+            "groups": duplicate_groups,
+            "total_duplicate_groups": len(duplicate_groups),
+        }
+
+    async def preview_zotero_account_merge(
+        self, library_id_a: str, library_id_b: str
+    ) -> dict[str, Any]:
+        """只读预览：两个 library_id 之间的重复文档、受影响集合与 chunk/向量数量。
+
+        供确认合并前展示统计，不做任何修改。
+        """
+        detection = await self.detect_zotero_duplicate_documents()
+        pair = {library_id_a, library_id_b}
+        matched_groups = [
+            group
+            for group in detection["groups"]
+            if {doc["library_id"] for doc in group["docs"]} & pair == pair
+        ]
+        total_chunks = sum(
+            doc["chunk_count"]
+            for group in matched_groups
+            for doc in group["docs"]
+            if doc["library_id"] in pair
+        )
+        affected_collections = sorted(
+            {
+                doc["collection"]
+                for group in matched_groups
+                for doc in group["docs"]
+                if doc["library_id"] in pair and doc["collection"]
+            }
+        )
+        return {
+            "library_id_a": library_id_a,
+            "library_id_b": library_id_b,
+            "matched_groups": len(matched_groups),
+            "matched_docs": sum(len(group["docs"]) for group in matched_groups),
+            "affected_collections": affected_collections,
+            "total_chunks": total_chunks,
+            "groups": matched_groups,
+        }
+
+    async def confirm_zotero_account_merge(
+        self,
+        library_id_a: str,
+        library_id_b: str,
+        *,
+        keep: str,
+        access_mode_a: str = "",
+        access_mode_b: str = "",
+    ) -> dict[str, Any]:
+        """确认合并：保留 `keep` 一侧的 library_id，删除另一侧的重复文档。
+
+        不做「原地重写 library_id/doc_id 并迁移 chunks/向量」——那需要跨表改主键、改
+        Milvus payload key，出错半径更大。改为「确认哪份权威，删掉确认重复的那份」：
+        复用既有单文档删除代码路径（chunks + 向量 + LightRAG 贡献 + source_store 行），
+        保留侧如有缺失内容，交给正常 Zotero 同步 + build_graph() 增量补齐。
+        合并完成后把两个命名空间链接到同一逻辑账号，供后续 access_mode 切换识别。
+        """
+        if keep not in ("a", "b"):
+            raise ValueError("keep must be 'a' or 'b'")
+        canonical_lib = library_id_a if keep == "a" else library_id_b
+        losing_lib = library_id_b if keep == "a" else library_id_a
+
+        preview = await self.preview_zotero_account_merge(library_id_a, library_id_b)
+        removed_doc_ids: list[str] = []
+        errors: list[str] = []
+        for group in preview["groups"]:
+            losing_doc = next(
+                (doc for doc in group["docs"] if doc["library_id"] == losing_lib), None
+            )
+            if losing_doc is None:
+                continue
+            try:
+                await self._delete_zotero_duplicate_document(losing_doc["doc_id"])
+                removed_doc_ids.append(losing_doc["doc_id"])
+            except Exception as exc:
+                errors.append(f"{losing_doc['doc_id']}: {exc}")
+
+        account_key = f"zotero-merge-{canonical_lib}-{uuid.uuid4().hex[:8]}"
+        existing = await self._source_store.get_zotero_account_identity(
+            f"{access_mode_a or 'local'}:{canonical_lib}"
+        ) or await self._source_store.get_zotero_account_identity(
+            f"{access_mode_b or 'server'}:{canonical_lib}"
+        )
+        if existing is not None:
+            account_key = existing["account_key"]
+        for lib_id, mode in (
+            (library_id_a, access_mode_a or "local"),
+            (library_id_b, access_mode_b or "server"),
+        ):
+            await self._source_store.link_zotero_account_identity(
+                f"{mode}:{lib_id}", account_key, lib_id, mode
+            )
+
+        return {
+            "status": "merged" if not errors else "partial_failure",
+            "canonical_library_id": canonical_lib,
+            "removed_document_ids": removed_doc_ids,
+            "removed_count": len(removed_doc_ids),
+            "errors": errors,
+            "account_key": account_key,
+        }
+
+    async def _delete_zotero_duplicate_document(self, doc_id: str) -> None:
+        """删除单个确认重复的 Zotero 文档（chunks/向量/LightRAG 贡献/source_store 行）。
+
+        与 `delete_document()` 不同：本方法绕开 `_assert_doc_writable` 的用户侧只读保护
+        ——这不是用户删内容，是系统在用户显式确认合并后清理确认重复的副本，语义与
+        `_reset_local_zotero_mirror()` 里的单文档清理一致，只是把范围收窄到一份文档。
+        """
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return
+        chunks = await self._source_store.list_chunks(doc_id)
+        if self._vector_store is not None and chunks:
+            try:
+                await self._vector_store.delete_chunks([c.chunk_id for c in chunks])
+            except Exception as exc:
+                logger.warning("Zotero merge: Milvus cleanup failed for %s: %s", doc_id, exc)
+        if self._lightrag_registry is not None:
+            try:
+                await self._lightrag_registry.delete_doc(doc.collection, doc_id)
+            except Exception as exc:
+                logger.warning("Zotero merge: LightRAG cleanup failed for %s: %s", doc_id, exc)
+        await self._source_store.delete_document(doc_id)
+        self._unlink_managed_document(doc.file_path, doc.doc_id)
 
     async def delete_zotero_server_key(self) -> dict[str, Any]:
         """Remove stored Zotero Web API key."""

@@ -2,6 +2,81 @@
 
 ## [Unreleased]
 
+## [v1.0.11] — 2026-07-31
+
+来源：一次真实 Windows + Zotero Web API + 本地 GPU Embedding + LightRAG 生产运行暴露的问题
+汇总（见 `KA_PLUGIN_DEVELOPER_ISSUE.md`），部分修复已在运行实例手工验证，本轮系统化落回源码
+并补齐测试。
+
+### 修复 (Fixed)
+
+- **LightRAG 初始化期 `cannot pickle '_thread.lock' object`**：`LightRAGLLMAdapter`/
+  `LightRAGEmbeddingAdapter` 新增身份保持的 `__deepcopy__`，修复 LightRAG 1.5.5rc1 构造
+  `global_config` 时对持有运行时 provider（间接含 `threading.Lock`）的适配器做深拷贝导致的
+  构造期失败（`kacore/lightrag_core.py`）。
+- **Zotero Web API 独立 PDF 附件被误判为「未归类」**：`_collection_items()` 此前无条件排除
+  `itemType == "attachment"`，导致直接放入集合、无 parent item 的独立附件丢失归属信息、落入
+  合成的 `__unfiled__`；改为只排除 `note`/`annotation`，与本地 SQLite reader 的行为对齐
+  （`kacore/adapters/zotero/web_api.py`）。
+- **本地 Embedding 批量编码超过 180s 被误报「模型加载超时」**：`_run_guarded()` 此前把「模型
+  加载」与「encode」当作一个整体计入 `load_timeout`；现改为轮询式拆分，超时闸只约束「等到模型
+  加载完成」这一段等待，模型加载完毕后 encode 不再设超时，符合模块自身 docstring 一贯的设计
+  意图（`kacore/repository/embedding/local.py`）。
+- **LightRAG 主 LLM/Embedding 未就绪时任务已标记 running、深埋在逐文档循环里才失败**：
+  `build_graph()`/`build_graph_with_codex()` 启动前新增就绪度探针（真实短探测调用，非仅检查
+  对象是否为 None），未就绪同步拒绝、不创建任务、不写任何持久化行；逐文档循环新增连续失败熔断
+  （阈值 3），命中后提前终止而不是把剩余文档全部跑坏才暴露同一个 provider 问题
+  （`kacore/api.py`、`kacore/lightrag_core.py`）。
+
+### 新增 (Added)
+
+- **本地 Embedding 设备选择**：新增 `embedding.device`（`auto`/`cpu`/`cuda`/`cuda:N`，已登记
+  `_conf_schema.json`），显式选择 `cuda` 但环境不支持 CUDA 时加载前直接报错，不静默退化为 CPU
+  （与 rerank 的「不可用即软回退」刻意不同——这里是主向量索引路径，静默降级会让批量 embedding
+  在用户不知情的情况下慢上数十倍）；加载成功追加诊断日志（torch 版本、cuda 可用性、解析后设备、
+  GPU 名称）（`kacore/repository/embedding/local.py`、`kacore/config.py`）。**上线前审计发现并
+  修正**：`embedding.device` 最初漏登记进 `CONFIG_KEY_POLICY`，虽然写进了 `_conf_schema.json`
+  能被 AstrBot 原生配置编辑器改到，但本插件自己 Web 控制台的设置页（走 `/api/config/update` →
+  `update_config_value()`）会拒绝写入；已登记为 `consequence=restart`（改设备不改变向量数值，
+  重启生效即可，同 `load_timeout_seconds`），并同步更新
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 里为避免技能脚本
+  直接依赖 `kacore` 而维护的独立 `CONFIG_POLICIES` 快照（有专门的一致性测试兜底）。
+- **Zotero 跨源（local/Web API）重复文档识别与手动确认合并**：本地 SQLite 与 Web API 对同一
+  账号给出不同 `library_id`，切换同步源后同一条目会产生两份文档。新增
+  `detect_zotero_duplicate_documents()`/`preview_zotero_account_merge()`/
+  `confirm_zotero_account_merge()`：按 `(item_key, attachment_key)` 跨 `library_id` 识别重复，
+  预览匹配文档/受影响集合/chunk 数，确认后删除非 canonical 副本（复用既有单文档删除路径，不做
+  原地 `library_id`/`doc_id` 重写与向量迁移）并记录账号身份链接；`access_mode` **真正发生切换**
+  （新值与当前值不同）且已知存在未解决的跨源重复时，`update_config_value()` 抛 `ValueError`
+  同步拦截并指路到合并工具（新表 `zotero_account_identities`，`kacore/api.py`）——必须是异常而不
+  是一个「看起来正常」的返回 dict：前端两条既有调用路径（`SettingModal.tsx`/
+  `FlowPageContent.tsx`）都只检查 `rebuild_required`/`restart_required` 或吞掉非异常返回值，
+  不会识别一个新增的 `status` 字段，会把「已拦截」误报成「已保存」而配置其实没有落盘；只在值
+  真正变化时才检查，避免对已存在历史遗留重复的老实例，重新提交同一个值（如
+  `SettingModal.tsx` 标签点击没有「已是当前值」前置判断）也被误拦。**范围说明**：本轮三个新方法
+  未接 HTTP 路由也无前端 UI，Web 控制台目前完全不可达，只有后端可直接调用的方法（低频管理员
+  操作，非本次头号诉求，HTTP 层 + 确认弹窗留待后续版本）。
+- **取消 LightRAG 构建**：左上角进度条在图谱构建处于活跃状态（`queued`/`running`/
+  `pause_requested`/`paused`/`waiting_agent`）时，将「查看图谱」按钮改为「取消构建」，点击后二次
+  确认（明确提示不会删除 Zotero 文档、原文件、chunks、Embedding 缓存或 Milvus 向量）；新增
+  `cancel_build_job(job_id, cleanup=True)` 与 `POST /api/graph/build/{job_id}/cancel`，取消只
+  清理本次任务写入的 `lightrag_index_status`/`codex_graph_tasks` 记录与内存态任务句柄，幂等（重复
+  调用返回全零清理计数、不报错）；`lightrag_index_status` 新增 `job_id` 列以支持按任务精确清理
+  （`kacore/api.py`、`web/server.py`、`kacore/repository/source_store/*.py`，
+  `migrations/024_lightrag_index_status_job_id.sql`）。**已知限制**：本轮未实现 per-job
+  staging/active workspace 拆分——取消保证「不再处理后续文档」，但不回滚本次任务已写入现有
+  LightRAG workspace 的部分，语义与现有 pause/进程崩溃场景一致（同样不做回滚）；更强的原子性
+  保证留作后续版本演进。
+
+### 测试 (Tests)
+
+- 新增/延伸定向回归覆盖：LightRAG adapter 深拷贝安全（含不 mock `lightrag-hku`、直接构造真实
+  `LightRAG` 实例的烟雾测试）、Web API 独立附件归属、本地 Embedding 加载/编码超时解耦与设备选择、
+  构建前置探针拒绝路径与熔断提前终止、Zotero 跨源重复识别与合并（不触碰无关文档/Zotero 元数据）、
+  取消构建的任务信号/幂等/仅清理本任务残留、取消构建 HTTP 端点。全量后端
+  `751 passed`；`ruff check .`、`mypy`（domain 层严格检查）全部通过；前端 TypeScript 无错误、
+  `npm run build` 全部 11 条路由静态产出成功，`tools/sync_frontend.py` 同步 357 个文件到 `pages/`。
+
 ## [v1.0.10] — 2026-07-31
 
 ### 修复 (Fixed)

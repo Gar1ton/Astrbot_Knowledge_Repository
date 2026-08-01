@@ -1,6 +1,6 @@
 1:"$Sreact.fragment"
 2:I[8616,[],"ClientSegmentRoot"]
-3:I[6038,["674","static/chunks/674-45a064d2237589cf.js","870","static/chunks/app/(console)/layout-71746c91d7abe79d.js"],"default"]
+3:I[6038,["674","static/chunks/674-45a064d2237589cf.js","870","static/chunks/app/(console)/layout-fec0c519fe5f7f0c.js"],"default"]
 4:I[7121,[],""]
 5:I[4581,[],""]
 :HL["/_next/static/css/984371c43dfb0b74.css","style"]

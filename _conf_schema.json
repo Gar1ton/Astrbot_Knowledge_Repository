@@ -169,6 +169,12 @@
         "type": "int",
         "default": 180,
         "hint": "启动时的维度探针与 local 模式首次加载的最长等待时间；超时不会中止后台下载，只是本次启动降级为 AstrBot/SQLite 基础召回，避免重启卡死、Web 控制台起不来。取值钳制在 30–3600，填 0 表示不限"
+      },
+      "device": {
+        "description": "运行设备（仅 local 模式）",
+        "type": "string",
+        "default": "auto",
+        "hint": "auto：自动探测，有可用 CUDA 则用 GPU，否则 CPU；cpu：强制 CPU；cuda 或 cuda:0/cuda:1 等：强制指定 GPU。显式选择 cuda 但环境不支持 CUDA 时会直接报错、不会静默退化为 CPU，避免批量向量化在不知情的情况下慢上数十倍"
       }
     }
   }

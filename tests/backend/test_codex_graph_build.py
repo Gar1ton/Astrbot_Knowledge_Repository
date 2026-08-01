@@ -40,6 +40,19 @@ class FakeLightRAGRegistry:
         self.inserted.append((collection, doc_id, custom_kg))
 
 
+class FakeEmbeddingProvider:
+    """build_graph_with_codex() 启动前的就绪度探针需要一个可用的 Embedding provider。"""
+
+    async def embed_query(self, text: str) -> list[float]:
+        return [0.1]
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1] for _ in texts]
+
+    def get_dimension(self) -> int:
+        return 1
+
+
 async def _make_api(
     registry: FakeLightRAGRegistry,
 ) -> tuple[KnowledgeRepositoryApi, InMemorySourceDocumentStore]:
@@ -71,6 +84,7 @@ async def _make_api(
         source_store=store,
         kb_reader=InMemoryKnowledgeBaseReader({}),
         lightrag_registry=registry,  # type: ignore[arg-type]
+        embedding_provider=FakeEmbeddingProvider(),  # type: ignore[arg-type]
     )
     return api, store
 

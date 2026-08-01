@@ -203,6 +203,11 @@ class EmbeddingConfig:
     max_token_size: int = 512
     # 本地模型空闲卸载超时（秒），0 = 永不自动卸载；仅对 provider=local 生效
     local_idle_timeout_seconds: int = 420
+    # 本地模型运行设备：auto（有 CUDA 则用 CUDA，否则 CPU）| cpu | cuda | cuda:N。
+    # 仅对 provider=local 生效。与 rerank.device 的「不可用静默回退」刻意不同：这里是
+    # 主向量索引路径，用户显式选 cuda 但环境不支持时必须报错，不能悄悄退化到 CPU 拖慢批量
+    # embedding 而不被察觉。
+    device: str = "auto"
     # 「模型就绪」的最长等待时间（秒），0 = 不限。覆盖两处：组合根的维度探针，以及本地
     # provider 首次调用触发的模型下载/加载。超时不会中止后台下载线程（to_thread 不可取消），
     # 只放弃等待让启动流程走完——否则 HuggingFace 卡住会让 Web 控制台永远起不来。
@@ -440,6 +445,7 @@ class Config:
                 "base_url": embedding.base_url,
                 "max_token_size": embedding.max_token_size,
                 "load_timeout_seconds": embedding.load_timeout_seconds,
+                "device": embedding.device,
                 "actual_dimension": self.runtime_embedding_dimension,
                 "api_key": _mask(_secret("", ENV_EMBEDDING_API_KEY)),
             },
@@ -741,6 +747,7 @@ class Config:
             load_timeout_seconds=_clamp_load_timeout(
                 current.get("load_timeout_seconds", EmbeddingConfig.load_timeout_seconds)
             ),
+            device=str(current.get("device", EmbeddingConfig.device)).strip() or "auto",
         )
 
     def get_ask_agent_config(self) -> AskAgentConfig:
@@ -904,6 +911,9 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         # 只影响「等多久」，不影响向量本身，故为 RESTART 而非 REBUILD。
         "load_timeout_seconds": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        # 只影响本地模型跑在 CPU 还是 GPU，向量数值本身不变，故为 RESTART 而非 REBUILD
+        # （provider 实例在启动时构造一次，运行期切换设备需要重启才能生效）。
+        "device": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
     },
     "ask": {
         "persona_enabled": ConfigKeyPolicy(False, True),

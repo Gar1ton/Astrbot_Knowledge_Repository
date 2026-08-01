@@ -255,3 +255,136 @@ async def test_local_provider_fails_fast_while_another_load_is_in_flight() -> No
     with pytest.raises(RuntimeError) as excinfo:
         await provider.embed_query("hello")
     assert "仍在后台加载" in str(excinfo.value)
+
+
+# ── 加载超时闸 / encode 阶段解耦 + 设备选择（v1.0.11）──────────────────
+
+
+@pytest.mark.asyncio
+async def test_local_provider_fast_load_then_slow_encode_is_not_timed_out() -> None:
+    """加载很快、但批量 encode 耗时超过 load_timeout 时，不应被误判为「加载超时」。
+
+    复现 KA_PLUGIN_DEVELOPER_ISSUE.md 报告的场景：模型很快加载完成，随后 CPU 编码
+    1000+ 段文本超过 180s，旧实现把整段 load+encode 一起计入 load_timeout，误报「加载超时」。
+    """
+
+    provider = LocalEmbeddingProvider(
+        model_name="intfloat/multilingual-e5-small",
+        idle_timeout=0,
+        load_timeout=0.2,
+    )
+
+    def _fast_load_slow_encode(texts: list[str]) -> list[list[float]]:
+        provider._model = object()  # 模拟「加载」瞬间完成
+        time.sleep(0.5)  # encode 耗时超过 load_timeout，不应被算作加载超时
+        return [[0.1] * 384 for _ in texts]
+
+    provider._embed_documents_sync = _fast_load_slow_encode  # type: ignore[method-assign]
+
+    result = await provider.embed_documents(["a", "b"])
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_local_provider_never_loads_still_times_out() -> None:
+    """加载本身一直不完成（self._model 始终为 None）时，仍应按 load_timeout 超时。
+
+    防止把「只约束加载阶段」改过头成「什么都不超时」。
+    """
+
+    def _never_loads(texts: list[str]) -> list[list[float]]:
+        time.sleep(5)  # 模拟卡在下载，self._model 始终不被赋值
+        return [[0.1] * 384 for _ in texts]
+
+    provider = LocalEmbeddingProvider(model_name="BAAI/bge-large-en-v1.5", load_timeout=0.2)
+    provider._embed_documents_sync = _never_loads  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await provider.embed_documents(["a", "b"])
+
+    assert "加载超时" in str(excinfo.value)
+
+
+def test_local_provider_device_auto_resolves_to_none() -> None:
+    """device='auto'（默认）转为 None，交给 SentenceTransformer 自行探测。"""
+    provider = LocalEmbeddingProvider(model_name="intfloat/multilingual-e5-small")
+    assert provider._device is None
+
+
+def test_local_provider_device_explicit_value_is_kept_verbatim() -> None:
+    """显式 device（如 cuda:0）原样保留，供加载时传给 SentenceTransformer。"""
+    provider = LocalEmbeddingProvider(
+        model_name="intfloat/multilingual-e5-small", device="cuda:0"
+    )
+    assert provider._device == "cuda:0"
+
+
+def test_local_provider_passes_device_to_sentence_transformer() -> None:
+    """_lazy_init 应把解析后的 device 原样传给 SentenceTransformer 构造函数。"""
+    import unittest.mock as mock
+
+    # 提前真实 import 一次 torch：_lazy_init 内部的 _torch_diagnostics() 会在下面的
+    # sys.modules patch 窗口内真实 import torch；若窗口内是第一次导入，mock.patch.dict
+    # 退出时会把 import 过程中新增的 torch 子模块一并回滚出 sys.modules，导致进程后续
+    # 任何 import torch 都当作「首次导入」重跑 C 扩展初始化，抛 SystemError。提前在
+    # patch 窗口外导入一次即可让 torch 在快照里，patch 退出不会动它。
+    import torch  # noqa: F401
+
+    provider = LocalEmbeddingProvider(model_name="intfloat/multilingual-e5-small", device="cpu")
+
+    fake_st_cls = mock.MagicMock()
+    fake_instance = mock.MagicMock()
+    fake_instance.get_sentence_embedding_dimension.return_value = 384
+    fake_st_cls.return_value = fake_instance
+
+    with mock.patch.dict(
+        "sys.modules", {"sentence_transformers": mock.MagicMock(SentenceTransformer=fake_st_cls)}
+    ):
+        provider._lazy_init()
+
+    fake_st_cls.assert_called_once_with("intfloat/multilingual-e5-small", device="cpu")
+
+
+def test_local_provider_explicit_cuda_without_hardware_fails_fast() -> None:
+    """显式选 cuda 但环境不支持 CUDA 时，加载前直接报错，不静默退化为 CPU。"""
+    import unittest.mock as mock
+
+    provider = LocalEmbeddingProvider(model_name="intfloat/multilingual-e5-small", device="cuda")
+
+    fake_torch = mock.MagicMock()
+    fake_torch.cuda.is_available.return_value = False
+    fake_st_cls = mock.MagicMock()
+
+    with mock.patch.dict(
+        "sys.modules",
+        {
+            "torch": fake_torch,
+            "sentence_transformers": mock.MagicMock(SentenceTransformer=fake_st_cls),
+        },
+    ):
+        with pytest.raises(RuntimeError) as excinfo:
+            provider._lazy_init()
+
+    assert "CUDA 不可用" in str(excinfo.value) or "cuda" in str(excinfo.value).lower()
+    fake_st_cls.assert_not_called()
+
+
+def test_local_provider_device_cpu_skips_cuda_check() -> None:
+    """device='cpu' 不应触发 CUDA 可用性检查（无论环境是否有 GPU 都能正常加载）。"""
+    import unittest.mock as mock
+
+    import torch  # noqa: F401  # 见上一条测试里对 sys.modules patch 时序的说明
+
+    provider = LocalEmbeddingProvider(model_name="intfloat/multilingual-e5-small", device="cpu")
+
+    fake_st_cls = mock.MagicMock()
+    fake_instance = mock.MagicMock()
+    fake_instance.get_sentence_embedding_dimension.return_value = 384
+    fake_st_cls.return_value = fake_instance
+
+    with mock.patch.dict(
+        "sys.modules", {"sentence_transformers": mock.MagicMock(SentenceTransformer=fake_st_cls)}
+    ):
+        provider._lazy_init()
+
+    assert provider._model is fake_instance

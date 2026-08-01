@@ -1025,6 +1025,19 @@ async def handle_graph_build_resume(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "message": str(exc)}, status=404)
 
 
+async def handle_graph_build_cancel(request: web.Request) -> web.Response:
+    job_id = request.match_info["job_id"]
+    body = await request.json() if request.can_read_body else {}
+    cleanup = bool(body.get("cleanup", True)) if isinstance(body, dict) else True
+    try:
+        result = await _api(request).cancel_build_job(job_id, cleanup=cleanup)
+        return web.json_response(result)
+    except KeyError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=404)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
 async def handle_graph_probe(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     if not isinstance(body, dict) or body.get("confirmed") is not True:
@@ -1677,6 +1690,7 @@ def build_app(
     app.router.add_get("/api/graph/build/{job_id}", handle_graph_build_job)
     app.router.add_post("/api/graph/build/{job_id}/pause", handle_graph_build_pause)
     app.router.add_post("/api/graph/build/{job_id}/resume", handle_graph_build_resume)
+    app.router.add_post("/api/graph/build/{job_id}/cancel", handle_graph_build_cancel)
     app.router.add_post("/api/graph/probe", handle_graph_probe)
     app.router.add_get("/api/graph/query", handle_graph_query)
     app.router.add_get("/api/graph/stats", handle_graph_stats)

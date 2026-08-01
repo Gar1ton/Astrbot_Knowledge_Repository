@@ -44,6 +44,7 @@ CONFIG_POLICIES: dict[str, dict[str, str]] = {
         "model": "rebuild",
         "base_url": "rebuild",
         "load_timeout_seconds": "restart",
+        "device": "restart",
     },
     "ask": {"answer_language": "none", "llm_timeout_seconds": "restart"},
     "graph": {

@@ -1342,6 +1342,32 @@ export async function resumeBuildJob(jobId: string): Promise<void> {
   await apiFetch(`/api/graph/build/${encodeURIComponent(jobId)}/resume`, { method: "POST" });
 }
 
+export interface CancelBuildResult {
+  job_id: string;
+  status: string;
+  cleanup: {
+    workspace: boolean;
+    index_status_rows: number;
+    codex_tasks: number;
+    active_state_removed: boolean;
+  };
+}
+
+export async function cancelBuildJob(jobId: string, cleanup = true): Promise<CancelBuildResult> {
+  if (isMock()) {
+    return {
+      job_id: jobId,
+      status: "cancelled",
+      cleanup: { workspace: false, index_status_rows: 0, codex_tasks: 0, active_state_removed: true },
+    };
+  }
+  return apiFetch<CancelBuildResult>(`/api/graph/build/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cleanup }),
+  });
+}
+
 // ─────────────────────────────────────────────────────────────
 // 同步 / 备份 / Notion
 // ─────────────────────────────────────────────────────────────

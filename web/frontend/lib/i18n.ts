@@ -642,6 +642,15 @@ const zh = {
   build_widget_error: "构建失败",
   build_widget_interrupted: "上次构建被中断",
   build_widget_resume_hint: "新建构建将从断点续建",
+  build_widget_cancel: "取消构建",
+  build_widget_cancel_confirm_body:
+    "确定取消本次 LightRAG 构建吗？将停止当前任务并清理本次未完成的图谱、索引状态和任务记录。" +
+    "不会删除 Zotero 文档、原文件、chunks、Embedding 缓存或 Milvus 向量。",
+  build_widget_cancel_confirm_yes: "确定取消",
+  build_widget_cancel_confirm_no: "再想想",
+  build_widget_cancelling: "正在取消并清理…",
+  build_widget_cancel_success: "构建已取消，残留已清理",
+  build_widget_cancel_error: "取消构建失败，请重试",
   progress_dock_title: "进度",
   progress_dock_zotero: "Zotero 同步",
   progress_dock_notion: "Notion 同步",
@@ -1274,6 +1283,16 @@ const en: Record<keyof typeof zh, string> = {
   build_widget_error: "Build Failed",
   build_widget_interrupted: "Last build was interrupted",
   build_widget_resume_hint: "New build will resume from checkpoint",
+  build_widget_cancel: "Cancel Build",
+  build_widget_cancel_confirm_body:
+    "Cancel this LightRAG build? This stops the current task and cleans up this build's " +
+    "unfinished graph, index status, and task records. It will NOT delete Zotero documents, " +
+    "original files, chunks, embedding cache, or Milvus vectors.",
+  build_widget_cancel_confirm_yes: "Cancel build",
+  build_widget_cancel_confirm_no: "Keep running",
+  build_widget_cancelling: "Cancelling and cleaning up…",
+  build_widget_cancel_success: "Build cancelled, leftovers cleaned up",
+  build_widget_cancel_error: "Failed to cancel build, please retry",
   progress_dock_title: "Progress",
   progress_dock_zotero: "Zotero sync",
   progress_dock_notion: "Notion sync",

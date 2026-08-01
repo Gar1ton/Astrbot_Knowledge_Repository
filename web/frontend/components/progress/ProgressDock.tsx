@@ -8,6 +8,7 @@
 
 import React, { useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
+  cancelBuildJob,
   getActiveBuildJob,
   getActiveIngestJob,
   getActiveMilvusBuildJob,
@@ -180,7 +181,10 @@ function useProgressJobs(): DockJob[] {
             ? `${graph.processed_chunks}/${graph.total_chunks} chunks`
             : graph.collection || "",
         status: graph.status,
-        active: graph.status === "queued" || graph.status === "running" || !!graph.paused,
+        active:
+          ["queued", "running", "pause_requested", "paused", "waiting_agent"].includes(
+            graph.status
+          ) || !!graph.paused,
         paused: !!graph.paused,
         recentError: graph.recent_error || "",
         collection: graph.collection || "",
@@ -304,6 +308,9 @@ function ProgressRow({
   onGotoGraph: () => void;
 }) {
   const { t } = useContext(I18nContext);
+  const { toast } = useToast();
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const terminal = job.status === "error" || job.status === "partial_failure";
   const color = job.status === "error"
     ? "var(--danger)"
@@ -318,6 +325,18 @@ function ProgressRow({
   }
   async function handleResume() {
     try { await resumeBuildJob(job.jobId); } catch { /* ignore */ }
+  }
+  async function handleCancelConfirmed() {
+    setCancelling(true);
+    try {
+      await cancelBuildJob(job.jobId, true);
+      toast(t("build_widget_cancel_success"), "ok");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : t("build_widget_cancel_error"), "error");
+    } finally {
+      setCancelling(false);
+      setConfirmingCancel(false);
+    }
   }
 
   return (
@@ -365,16 +384,45 @@ function ProgressRow({
         </span>
       )}
 
-      {job.kind === "graph_build" && (
+      {job.kind === "graph_build" && job.active && confirmingCancel && (
+        <div
+          style={{
+            fontSize: 10, color: "var(--fg-muted)", background: "var(--surface)",
+            border: "1px solid var(--border)", borderRadius: 8, padding: "6px 8px",
+            display: "flex", flexDirection: "column", gap: 6,
+          }}
+        >
+          <span>{t("build_widget_cancel_confirm_body")}</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <RowButton
+              onClick={handleCancelConfirmed}
+              label={cancelling ? t("build_widget_cancelling") : t("build_widget_cancel_confirm_yes")}
+              disabled={cancelling}
+              primary
+            />
+            <RowButton
+              onClick={() => setConfirmingCancel(false)}
+              label={t("build_widget_cancel_confirm_no")}
+              disabled={cancelling}
+            />
+          </div>
+        </div>
+      )}
+
+      {job.kind === "graph_build" && !confirmingCancel && (
         <div style={{ display: "flex", gap: 6 }}>
-          {job.active && (
-            job.paused ? (
-              <RowButton onClick={handleResume} label={t("build_widget_resume")} primary />
-            ) : (
-              <RowButton onClick={handlePause} label={t("build_widget_pause")} />
-            )
+          {job.active ? (
+            <>
+              {job.paused ? (
+                <RowButton onClick={handleResume} label={t("build_widget_resume")} primary />
+              ) : (
+                <RowButton onClick={handlePause} label={t("build_widget_pause")} />
+              )}
+              <RowButton onClick={() => setConfirmingCancel(true)} label={t("build_widget_cancel")} />
+            </>
+          ) : (
+            <RowButton onClick={onGotoGraph} label={t("build_widget_goto_graph")} />
           )}
-          <RowButton onClick={onGotoGraph} label={t("build_widget_goto_graph")} />
         </div>
       )}
     </div>
@@ -385,20 +433,24 @@ function RowButton({
   onClick,
   label,
   primary,
+  disabled,
 }: {
   onClick: () => void;
   label: string;
   primary?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       style={{
         flex: 1, padding: "3px 0", fontSize: 11, fontWeight: primary ? 600 : 500,
         background: primary ? "var(--accent)" : "transparent",
         color: primary ? "var(--accent-fg)" : "var(--fg-muted)",
         border: primary ? "none" : "1px solid var(--border)",
-        borderRadius: 999, cursor: "pointer",
+        borderRadius: 999, cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.6 : 1,
       }}
     >
       {label}

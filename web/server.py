@@ -42,6 +42,104 @@ _LOG_HANDLER_KEY = web.AppKey("log_handler", object)
 # ── 中间件 ──────────────────────────────────────────────────────
 
 _mw_logger = _logging.getLogger("KRWebServer")
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_SLOW_REQUEST_SECONDS = 2.0
+_LOG_ENDPOINTS = frozenset({"/api/logs", "/api/logs/events"})
+
+
+def _canonical_route(request: web.Request) -> str:
+    """返回不含用户实参的路由模板，避免日志泄露标题、路径或查询参数。"""
+    try:
+        resource = request.match_info.route.resource
+        canonical = getattr(resource, "canonical", "")
+        if canonical:
+            return str(canonical)
+    except (AttributeError, RuntimeError):
+        pass
+    return request.path
+
+
+def _request_category(route: str) -> str:
+    if any(part in route for part in ("rebuild-index", "search")):
+        return "retrieval"
+    if "/graph" in route:
+        return "graph"
+    if any(part in route for part in ("zotero", "notion", "backup", "restore", "sync")):
+        return "sync"
+    if any(part in route for part in ("documents", "collections")):
+        return "ingest"
+    if any(part in route for part in ("ask", "research")):
+        return "llm"
+    return "web"
+
+
+@web.middleware
+async def _request_observability_middleware(
+    request: web.Request, handler: web.Handler
+) -> web.StreamResponse:
+    """直接记录 Web 请求时间线，不依赖宿主 logging 的 logger 配置。"""
+    started = time.monotonic()
+    request_id = secrets.token_hex(4)
+    route = _canonical_route(request)
+    category = _request_category(route)
+    log_handler = cast("MemoryLogHandler | None", request.app.get(_LOG_HANDLER_KEY))
+    is_api = request.path.startswith(_API_PREFIX)
+    is_mutating = request.method in _MUTATING_METHODS and request.path not in _LOG_ENDPOINTS
+    base_metadata = {"request_id": request_id, "method": request.method, "route": route}
+    if log_handler is not None and is_mutating:
+        log_handler.add_event(
+            source="web",
+            category=category,
+            operation="http_request",
+            status="started",
+            msg=f"Web 请求开始：{request.method} {route}",
+            metadata=base_metadata,
+        )
+    try:
+        response = await handler(request)
+    except web.HTTPException as exc:
+        elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+        if log_handler is not None and is_api and request.path not in _LOG_ENDPOINTS:
+            level = "ERROR" if exc.status >= 500 else "WARNING"
+            log_handler.add_event(
+                source="web",
+                category=category,
+                operation="http_request",
+                status="error" if exc.status >= 500 else "warning",
+                level=level,
+                msg=f"Web 请求结束：{request.method} {route} → HTTP {exc.status}",
+                metadata={**base_metadata, "http_status": exc.status, "elapsed_ms": elapsed_ms},
+            )
+        exc.headers["X-KA-Request-ID"] = request_id
+        raise
+    elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+    response.headers["X-KA-Request-ID"] = request_id
+    should_log = (
+        is_api
+        and request.path not in _LOG_ENDPOINTS
+        and (is_mutating or response.status >= 400 or elapsed_ms >= _SLOW_REQUEST_SECONDS * 1000)
+    )
+    if log_handler is not None and should_log:
+        level = (
+            "ERROR" if response.status >= 500
+            else "WARNING" if response.status >= 400
+            else "INFO"
+        )
+        status = (
+            "error" if response.status >= 500
+            else "warning" if response.status >= 400
+            else "ok"
+        )
+        log_handler.add_event(
+            source="web",
+            category=category,
+            operation="http_request",
+            status=status,
+            level=level,
+            msg=f"Web 请求结束：{request.method} {route} → HTTP {response.status}",
+            metadata={**base_metadata, "http_status": response.status, "elapsed_ms": elapsed_ms},
+        )
+    return response
 
 
 @web.middleware
@@ -927,6 +1025,19 @@ async def handle_graph_build_resume(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "message": str(exc)}, status=404)
 
 
+async def handle_graph_build_cancel(request: web.Request) -> web.Response:
+    job_id = request.match_info["job_id"]
+    body = await request.json() if request.can_read_body else {}
+    cleanup = bool(body.get("cleanup", True)) if isinstance(body, dict) else True
+    try:
+        result = await _api(request).cancel_build_job(job_id, cleanup=cleanup)
+        return web.json_response(result)
+    except KeyError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=404)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
 async def handle_graph_probe(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     if not isinstance(body, dict) or body.get("confirmed") is not True:
@@ -1231,14 +1342,26 @@ async def handle_logs(request: web.Request) -> web.Response:
     """GET /api/logs?after=<float>&limit=<int> — 返回内存日志缓冲区中的最新日志行。"""
     handler = cast("MemoryLogHandler | None", request.app.get(_LOG_HANDLER_KEY))
     if handler is None:
-        return web.json_response({"lines": [], "server_ts": time.time()})
+        return web.json_response(
+            {
+                "lines": [],
+                "server_ts": time.time(),
+                "oldest_seq": 0,
+                "latest_seq": 0,
+                "dropped_count": 0,
+            }
+        )
     try:
         after_ts = float(request.query.get("after", "0"))
-        limit = min(int(request.query.get("limit", "200")), 1000)
+        after_seq_raw = request.query.get("after_seq")
+        after_seq = int(after_seq_raw) if after_seq_raw is not None else None
+        limit = min(int(request.query.get("limit", "200")), 2000)
+        if after_seq is not None and after_seq < 0:
+            raise ValueError
     except ValueError:
         return web.json_response({"error": "invalid params"}, status=400)
-    lines = handler.get_lines(after_ts=after_ts, limit=limit)
-    return web.json_response({"lines": lines, "server_ts": time.time()})
+    batch = handler.get_batch(after_seq=after_seq, after_ts=after_ts, limit=limit)
+    return web.json_response({**batch, "server_ts": time.time()})
 
 
 async def handle_ask(request: web.Request) -> web.Response:
@@ -1470,6 +1593,7 @@ def build_app(
     auth_required: bool = True,
     username: str = "admin",
     password: str = "",
+    log_handler: MemoryLogHandler | None = None,
 ) -> web.Application:
     """构造 aiohttp 应用：注入 api、配置认证与静态目录。
 
@@ -1480,13 +1604,19 @@ def build_app(
             "web console password is empty; set a password or pass auth_required=False"
         )
 
-    app = web.Application(middlewares=[_error_middleware, _auth_middleware])
+    app = web.Application(
+        middlewares=[_request_observability_middleware, _error_middleware, _auth_middleware]
+    )
     app[_API_KEY] = api
     app[_UPLOAD_DIR_KEY] = upload_dir
     app[_AUTH_REQUIRED_KEY] = auth_required
     app[_USERNAME_KEY] = username
     app[_PASSWORD_KEY] = password
     app[_SESSIONS_KEY] = set()
+
+    from kacore.log_capture import install as _install_log_handler
+
+    app[_LOG_HANDLER_KEY] = log_handler or _install_log_handler()
 
     app.router.add_get("/api/auth", handle_auth)
     app.router.add_post("/api/login", handle_login)
@@ -1560,6 +1690,7 @@ def build_app(
     app.router.add_get("/api/graph/build/{job_id}", handle_graph_build_job)
     app.router.add_post("/api/graph/build/{job_id}/pause", handle_graph_build_pause)
     app.router.add_post("/api/graph/build/{job_id}/resume", handle_graph_build_resume)
+    app.router.add_post("/api/graph/build/{job_id}/cancel", handle_graph_build_cancel)
     app.router.add_post("/api/graph/probe", handle_graph_probe)
     app.router.add_get("/api/graph/query", handle_graph_query)
     app.router.add_get("/api/graph/stats", handle_graph_stats)
@@ -1588,10 +1719,7 @@ def build_app(
         "/api/chat/history/{conv_id}/messages/{msg_idx}/lock", handle_chat_message_lock
     )
 
-    # 安装内存日志 handler（幂等，重复调用安全）
-    from kacore.log_capture import install as _install_log_handler
-
-    app[_LOG_HANDLER_KEY] = _install_log_handler(maxlen=500)
+    # 日志 handler 已在路由装配前注入；生产由组合根传入，独立测试/开发则幂等安装默认实例。
 
     # 静态文件服务：兼容 Next.js export 产物（pages/ 下存在子目录 index.html）
     # 和旧的单文件 HTML 产物。

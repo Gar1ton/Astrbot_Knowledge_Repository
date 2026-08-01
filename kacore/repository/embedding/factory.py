@@ -43,6 +43,8 @@ class EmbeddingProviderFactory:
             inner_provider = LocalEmbeddingProvider(
                 model_name=embedding.model,
                 idle_timeout=embedding.local_idle_timeout_seconds,
+                load_timeout=embedding.load_timeout_seconds,
+                device=embedding.device,
             )
         elif provider_type == "external":
             # 云端 API 兼容接口

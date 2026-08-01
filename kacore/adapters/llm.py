@@ -151,10 +151,16 @@ class LMStudioLLMAdapter:
 
 
 class LLMAdapter:
-    """运行态 LLM 通用调用适配器（结构化抽取 + 问答生成）。"""
+    """运行态 LLM 通用调用适配器（结构化抽取 + 问答生成）。
 
-    def __init__(self, context: Any = None) -> None:
+    timeout_seconds：单次主 LLM 调用的上限。AstrBot provider 自身不保证有超时，
+    provider 挂死时整条 ask 会永远不返回——前端只能看到「请求超时」，后端却仍占着连接。
+    <=0 表示不设限（保留旧行为）。
+    """
+
+    def __init__(self, context: Any = None, timeout_seconds: int = 300) -> None:
         self._context = context
+        self._timeout_seconds = max(0, int(timeout_seconds))
 
     async def generate(
         self, prompt: str, system_prompt: str = "", *, allow_mock: bool = True
@@ -167,31 +173,94 @@ class LLMAdapter:
 
         if not raw or not raw.strip():
             if not allow_mock:
+                # 具体原因（超时 / 异常 / 空响应）已由 _call_context_llm 记进日志；
+                # 这里指路而不复述，避免多线并发时把别人的失败原因贴到本次异常上。
                 raise RuntimeError(
-                    "No real AstrBot LLM provider response; mock fallback is disabled"
+                    "No real AstrBot LLM provider response (超时/异常/空响应，"
+                    "详见终端日志中 LLMAdapter 的上一条 ERROR/WARNING)；"
+                    "mock fallback is disabled"
                 )
-            logger.info("[Offline Stub] generate: returning placeholder answer.")
+            # 降级到离线占位答案是「回答看起来正常、内容其实是假的」，必须是 WARNING 级：
+            # 此前记 INFO，用户在终端页几乎不可能注意到主 LLM 根本没被调通。
+            logger.warning(
+                "AstrBot 主 LLM 未返回内容，本次回答使用离线占位文本（非真实回答）；"
+                "请检查 AstrBot 的 LLM Provider 配置与上方错误日志。"
+            )
             raw = self._mock_generate(prompt)
 
         return raw.strip()
 
     async def _call_context_llm(self, prompt: str, system_prompt: str = "") -> str:
-        """按 AstrBot 新旧 SDK 顺序调用主 LLM，并统一抽取纯文本。"""
+        """按 AstrBot 新旧 SDK 顺序调用主 LLM，并统一抽取纯文本。
+
+        契约：本方法不抛异常（返回空串即失败），但失败/空响应必须留下可诊断的日志——
+        调用方拿到空串后会静默降级为离线占位答案，日志是唯一线索。
+        """
         if self._context is None:
+            logger.warning("LLMAdapter 未拿到 AstrBot context，无法调用主 LLM。")
             return ""
 
+        started = time.monotonic()
         try:
-            raw = await self._call_astrbot_llm_generate(prompt, system_prompt)
+            raw, path = await self._await_provider(
+                self._call_provider_paths(prompt, system_prompt)
+            )
             if raw:
+                self._log_call_done(path, started, prompt, raw)
                 return raw
-
-            raw = await self._call_legacy_context_llm(prompt, system_prompt)
-            if raw:
-                return raw
+        except TimeoutError:
+            logger.error(
+                "AstrBot 主 LLM 调用超时（%ss，prompt %d 字符）：本次回答放弃等待。"
+                "请检查 LLM Provider 的可达性与并发限制，或调大 ask.llm_timeout_seconds。",
+                self._timeout_seconds,
+                len(prompt),
+            )
+            return ""
         except Exception as e:
-            logger.error(f"LLMAdapter context invocation failed: {e}")
+            logger.error(
+                "AstrBot 主 LLM 调用失败（耗时 %.1fs）：%s: %s",
+                time.monotonic() - started,
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+            return ""
 
+        logger.warning(
+            "AstrBot 主 LLM 返回空响应（耗时 %.1fs，prompt %d 字符）："
+            "provider 可能未配置、被限流或输出被过滤。",
+            time.monotonic() - started,
+            len(prompt),
+        )
         return ""
+
+    async def _await_provider(self, call: Any) -> tuple[str, str]:
+        """给一次 provider 调用套上超时闸；<=0 表示不限。"""
+        if self._timeout_seconds <= 0:
+            return await call
+        return await asyncio.wait_for(call, timeout=self._timeout_seconds)
+
+    async def _call_provider_paths(
+        self, prompt: str, system_prompt: str
+    ) -> tuple[str, str]:
+        """按 AstrBot 新旧 SDK 顺序尝试，返回 (文本, 命中的调用路径)。"""
+        raw = await self._call_astrbot_llm_generate(prompt, system_prompt)
+        if raw:
+            return raw, "llm_generate"
+        raw = await self._call_legacy_context_llm(prompt, system_prompt)
+        if raw:
+            return raw, "legacy_provider"
+        return "", "none"
+
+    def _log_call_done(self, path: str, started: float, prompt: str, raw: str) -> None:
+        """记一次成功调用的路径与耗时：慢在 LLM 还是慢在检索，日志里要能直接分辨。"""
+        logger.info(
+            "AstrBot 主 LLM 调用完成 path=%s 耗时 %.1fs prompt=%d 字符 response=%d 字符",
+            path,
+            time.monotonic() - started,
+            len(prompt),
+            len(raw),
+        )
 
     async def _call_astrbot_llm_generate(self, prompt: str, system_prompt: str) -> str:
         """适配 AstrBot 4.5.7+ 的 context.llm_generate()。"""

@@ -362,6 +362,18 @@ export interface AskSource {
   ordinal: number;
   text: string;
   rrf_score?: number;
+  // v1.1.0 书目字段：Zotero 与本地文档一视同仁（此前只有 Zotero 文档能拿到）。
+  creators?: string[];
+  author?: string;
+  year?: string;
+  venue?: string;
+  doi?: string;
+  url?: string;
+  pages?: number[];
+  // 后端渲染好的 Harvard 串。harvard_in_text 是正文里出现的**内层**串（不含括号），
+  // 前端据它还原「点击引用 → 跳来源卡片」。
+  harvard_in_text?: string;
+  harvard_reference?: string;
 }
 
 export interface ThinkingChecklistItem {
@@ -398,6 +410,8 @@ export interface AskResult {
   answer: string;
   // 证据不足/未验证提示（结构化字段，v0.30.0 起不再拼在正文开头）。
   answer_notice?: string;
+  // Harvard 参考文献表（已去重排序）。答案正文尾部已含同一份，此字段供非 Web 调用方使用。
+  references?: string[];
   sources: AskSource[];
   requested_retrieval_mode:
     | "default"
@@ -447,6 +461,22 @@ export class ApiError extends Error {
   ) {
     super(message);
     this.name = "ApiError";
+  }
+}
+
+/**
+ * 后端 ask.task_timeout_seconds 到点（HTTP 202 status="ask_task_timeout"）：请求没有失败，
+ * 只是后端放弃了「等它跑完再回」，任务仍在后台继续运行、完成后会正常写入 chat_history。
+ * 与 ApiError.timedOut（客户端主动放弃等待）语义相近但成因不同，调用方通常一并处理
+ * （见 ChatPanel 的补轮询逻辑）。
+ */
+export class AskTaskTimeoutError extends Error {
+  constructor(
+    public readonly conversationId: string,
+    public readonly timeoutSeconds: number,
+  ) {
+    super(`ask 任务超过后端总超时 ${timeoutSeconds}s，仍在后台运行`);
+    this.name = "AskTaskTimeoutError";
   }
 }
 
@@ -1590,7 +1620,7 @@ export async function ask(opts: {
       retrieval_engines: requested === "graph_mixed" ? ["milvus", "sqlite_lexical", "lightrag"] : requested === "graph_only" ? ["lightrag"] : requested === "fulltext" ? ["sqlite_lexical"] : ["milvus", "sqlite_lexical"],
     };
   }
-  return apiFetch<AskResult>("/api/ask", {
+  const result = await apiFetch<AskResult | AskTaskTimeoutBody>("/api/ask", {
     method: "POST",
     timeoutMs: ASK_TIMEOUT_MS,
     headers: { "Content-Type": "application/json" },
@@ -1606,6 +1636,20 @@ export async function ask(opts: {
       answer_language: opts.answer_language ?? "auto",
     }),
   });
+  // HTTP 202：后端 task_timeout_seconds 到点，任务仍在后台跑——不是失败，但也不是
+  // 正常结果，转成一个专门的异常，调用方（ChatPanel）据此转入补轮询而不是当作答案渲染。
+  if ((result as AskTaskTimeoutBody).status === "ask_task_timeout") {
+    const body = result as AskTaskTimeoutBody;
+    throw new AskTaskTimeoutError(body.conversation_id, body.timeout_seconds);
+  }
+  return result as AskResult;
+}
+
+interface AskTaskTimeoutBody {
+  status: "ask_task_timeout";
+  message: string;
+  conversation_id: string;
+  timeout_seconds: number;
 }
 
 // deep thinking 实时进度：检索/校验进行中轮询时携带的逐轮增量 trace（与最终 thinking_trace 同形）。
@@ -1631,6 +1675,37 @@ export async function getAskProgress(conversationId: string): Promise<AskProgres
   } catch {
     return null;
   }
+}
+
+/**
+ * 客户端超时（ApiError.timedOut）或后端 task_timeout_seconds 到点（AskTaskTimeoutError）后
+ * 的补轮询：任务并未被取消，仍在后台跑，跑完会正常写入 chat_history——这里持续轮询
+ * /api/ask/progress 直到看到 stage="done"（或进度记录已过期/不存在，说明早就跑完了），
+ * 再拉一次 chat_history 找回迟到的答案。找不到时返回 null，调用方兜底提示手动刷新。
+ */
+export async function waitForLateAskAnswer(
+  conversationId: string,
+  opts?: { maxWaitMs?: number; intervalMs?: number },
+): Promise<ChatMessage[] | null> {
+  if (isMock()) return null;
+  const maxWaitMs = opts?.maxWaitMs ?? 15 * 60_000;
+  const intervalMs = opts?.intervalMs ?? 3_000;
+  const deadline = Date.now() + maxWaitMs;
+
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const progress = await getAskProgress(conversationId);
+    if (progress !== null && progress.stage !== "done") continue; // 仍在跑，继续等
+    // stage="done" 或进度记录已不存在（TTL 过期，大概率早已跑完）：去历史里找答案。
+    try {
+      const history = await getChatHistory(conversationId);
+      if (history.some((m) => m.role === "assistant")) return history;
+    } catch {
+      /* 网络抖动，下一轮再试 */
+    }
+    if (progress === null) return null; // 没有进度可依据、历史里也没有答案：放弃轮询
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1809,6 +1884,81 @@ export async function getCapabilities(): Promise<CapabilitiesData> {
   // 8s 而非 1.5s：该端点会聚合 SQLite 统计与 Milvus 运行态，重建/加载模型时 1.5s 必超，
   // 于是数据流页会毫无征兆地弹「请求超时」。
   return apiFetch<CapabilitiesData>("/api/capabilities", { timeoutMs: 8_000 });
+}
+
+// ── 本地模型驻留 / 显存 ────────────────────────────────────────
+
+export type ModelRuntimeState = "idle" | "loading" | "ready" | "failed" | "external";
+
+export interface AcceleratorInfo {
+  device: string;
+  total_bytes: number;
+  free_bytes: number;
+  used_bytes: number;
+  allocated_bytes: number;
+  reserved_bytes: number;
+  torch_version: string;
+}
+
+export interface ModelRuntimeEntry {
+  kind: "embedding" | "rerank";
+  provider: string;
+  state: ModelRuntimeState;
+  model: string | null;
+  device?: string;
+  enabled?: boolean;
+  idle_timeout_seconds?: number;
+  last_error?: string | null;
+}
+
+export interface ModelRuntime {
+  /** 无 torch / 无 CUDA 时为 null——面板据此降级为「CPU 模式」，不是错误。 */
+  accelerator: AcceleratorInfo | null;
+  models: ModelRuntimeEntry[];
+  resident_count: number;
+  unloaded?: string[];
+  errors?: Record<string, string>;
+}
+
+const MOCK_MODEL_RUNTIME: ModelRuntime = {
+  accelerator: {
+    device: "NVIDIA GeForce RTX 4090",
+    total_bytes: 25_757_220_864,
+    free_bytes: 17_179_869_184,
+    used_bytes: 8_577_351_680,
+    allocated_bytes: 2_147_483_648,
+    reserved_bytes: 2_684_354_560,
+    torch_version: "2.4.0",
+  },
+  models: [
+    { kind: "embedding", provider: "local", state: "ready", model: "BAAI/bge-m3", device: "cuda" },
+    { kind: "rerank", provider: "cross_encoder", state: "idle", model: "BAAI/bge-reranker-v2-m3", enabled: true },
+  ],
+  resident_count: 1,
+};
+
+export async function getModelRuntime(): Promise<ModelRuntime> {
+  if (isMock()) return JSON.parse(JSON.stringify(MOCK_MODEL_RUNTIME));
+  return apiFetch<ModelRuntime>("/api/system/models", { timeoutMs: 8_000 });
+}
+
+export async function unloadModels(kinds?: string[]): Promise<ModelRuntime> {
+  if (isMock()) {
+    return {
+      ...JSON.parse(JSON.stringify(MOCK_MODEL_RUNTIME)),
+      models: MOCK_MODEL_RUNTIME.models.map((m) => ({ ...m, state: "idle" as const })),
+      resident_count: 0,
+      unloaded: kinds ?? ["embedding", "rerank"],
+      errors: {},
+    };
+  }
+  return apiFetch<ModelRuntime>("/api/system/models/unload", {
+    method: "POST",
+    // 卸载要等 CUDA 缓存回收，比普通 GET 慢；沿用能力探测那档超时。
+    timeoutMs: 8_000,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kinds: kinds ?? [] }),
+  });
 }
 
 export async function listDependencies(): Promise<DependencyStatus[]> {

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from kacore.domain.llm_generation import STATUS_EMPTY, GenerationResult
+
 if TYPE_CHECKING:
     from kacore.adapters.llm import LLMAdapter
     from kacore.domain.models import DocumentChunk
@@ -97,16 +99,18 @@ async def synthesize_answer(
     answer_language: str = "auto",
     style: str = "default",
     source_labels: dict[str, str] | None = None,
-) -> str:
+) -> GenerationResult:
     """用证据合成带 [n] 引用的答案。
 
-    契约：[n] 按 evidence 顺序编号（调用方据同序拼 sources）；evidence 为空返回空串
-    （由调用方决定兜底）；LLM 调用异常向上抛（由调用方处理，禁用 mock 兜底）。
+    契约：[n] 按 evidence 顺序编号（调用方据同序拼 sources）；evidence 为空返回
+    `GenerationResult(text="", status=STATUS_EMPTY)`（由调用方决定兜底）；LLM 调用异常
+    向上抛（由调用方处理，禁用 mock 兜底）。返回结构化结果而非裸字符串——调用方需要按
+    status（reasoning_only/length/content_filter/…）分流，而不是只看 text 是否为空。
     style="deep" 选用机制级/分维度/带对比的 deep 合成模板，否则用通用模板。
     source_labels（doc_id→来源标签）给每条证据标注来源文档，防跨文档串线；None 时不标注。
     """
     if not evidence:
-        return ""
+        return GenerationResult(text="", status=STATUS_EMPTY)
     base = _SYNTH_SYSTEM_DEEP if style == "deep" else _SYNTH_SYSTEM_BASE
     system = base + _lang_instruction(answer_language)
     context = "\n\n---\n\n".join(
@@ -114,7 +118,7 @@ async def synthesize_answer(
         for i, chunk in enumerate(evidence)
     )
     user = f"Context:\n\n{context}\n\nQuestion: {question}"
-    return await llm.generate(user, system_prompt=system, allow_mock=False)
+    return await llm.generate_result(user, system_prompt=system, allow_mock=False)
 
 
 __all__ = ["synthesize_answer", "source_tag"]

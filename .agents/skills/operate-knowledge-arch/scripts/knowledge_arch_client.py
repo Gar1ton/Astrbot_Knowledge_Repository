@@ -46,7 +46,11 @@ CONFIG_POLICIES: dict[str, dict[str, str]] = {
         "load_timeout_seconds": "restart",
         "device": "restart",
     },
-    "ask": {"answer_language": "none", "llm_timeout_seconds": "restart"},
+    "ask": {
+        "answer_language": "none",
+        "llm_timeout_seconds": "restart",
+        "task_timeout_seconds": "none",
+    },
     "graph": {
         "enabled": "restart",
         "query_mode": "restart",

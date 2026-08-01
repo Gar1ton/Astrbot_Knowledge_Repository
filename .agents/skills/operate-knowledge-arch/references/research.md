@@ -66,7 +66,23 @@ allowed reading intent still requires more text.
 
 ## 5. Answer from evidence
 
-- Put citations directly after supported claims, using available title, author/year, page, and `doc_id`.
+Cite in Harvard style. Every evidence item returned by `ask-evidence` carries two server-computed
+strings; use them verbatim and never hand-roll a citation format:
+
+- `harvard_in_text` — e.g. `Vaswani et al., 2017, p. 3`. Wrap it in parentheses and place it directly
+  after the claim it supports: `(Vaswani et al., 2017, p. 3)`. Merge adjacent citations into one pair
+  of parentheses separated by `; `.
+- `harvard_reference` — e.g. `Vaswani, A. et al. (2017) 'Attention is all you need', NeurIPS. doi: …`.
+  Collect the distinct values, sort them alphabetically, and list them under a final `References`
+  heading.
+
+Documents with no bibliographic metadata degrade to `Anon.` and `n.d.` — that is correct output, not an
+error. Do not substitute the `doc_id`, chunk id, or a bare `[n]` for a citation, and do not repair a
+degraded citation by guessing the author or year.
+
+When troubleshooting via the low-level `search` command, hits carry raw `title` / `authors` / `year` /
+`doi` / `page` instead of the two rendered strings; assemble the same Harvard forms from those fields.
+
 - Distinguish the source's claim from your inference. Label cross-source synthesis as synthesis.
 - Note conflicting evidence and uncertainty.
 - Do not invent page numbers, bibliographic fields, or findings.

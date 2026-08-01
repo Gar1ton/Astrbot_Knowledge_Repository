@@ -225,6 +225,11 @@ class AskAgentConfig:
     # 单次主 LLM 调用上限（秒），0 = 不限。AstrBot provider 挂死时，没有这道闸整条 ask
     # 会永不返回；前端只看到「请求超时」，服务端却仍在等。
     llm_timeout_seconds: int = 300
+    # 整条 ask() 任务（检索 + Deep Thinking/Enhanced 多轮编排 + 最终答案合成）的总上限
+    # （秒），0 = 不限。Deep Thinking 允许多次 LLM 调用，即便每次都在 llm_timeout_seconds
+    # 内完成，累计仍可能远超前端的 ASK_TIMEOUT_MS——这道闸保证后端自己也会放弃，而不是
+    # 一直跑到用户早已断开连接之后。
+    task_timeout_seconds: int = 900
 
     agent_enabled: bool = False  # ka↔astrbot 回复关联（RAG 上下文注入）总开关。
     research_enabled: bool = False  # knowledge_research skill 是否响应自然语言调用。
@@ -389,6 +394,7 @@ class Config:
                 # 与前端 askAI 的 answer_language 同一参数；召回恒英文，仅决定回答语言。
                 "answer_language": ask.answer_language,
                 "llm_timeout_seconds": ask.llm_timeout_seconds,
+                "task_timeout_seconds": ask.task_timeout_seconds,
             },
             "source_store": {
                 "db_filename": source.db_filename,
@@ -759,6 +765,9 @@ class Config:
             llm_timeout_seconds=max(
                 0, int(s.get("llm_timeout_seconds", AskAgentConfig.llm_timeout_seconds))
             ),
+            task_timeout_seconds=max(
+                0, int(s.get("task_timeout_seconds", AskAgentConfig.task_timeout_seconds))
+            ),
             agent_enabled=bool(s.get("agent_enabled", AskAgentConfig.agent_enabled)),
             research_enabled=bool(s.get("research_enabled", AskAgentConfig.research_enabled)),
             persona_enabled=bool(s.get("persona_enabled", AskAgentConfig.persona_enabled)),
@@ -924,6 +933,8 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "answer_language": ConfigKeyPolicy(True, True),
         # 主 LLM 单次调用上限：LLMAdapter 在组合根构造，改后需重启生效。
         "llm_timeout_seconds": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        # 整条 ask() 任务总上限：api.ask() 每次调用时从 Config 现读，无需重启生效。
+        "task_timeout_seconds": ConfigKeyPolicy(True, True),
     },
     "web_console": {
         # /ka webui on|off 实时启停并持久化；不走 update_config（避免 RESTART 后果误判）。

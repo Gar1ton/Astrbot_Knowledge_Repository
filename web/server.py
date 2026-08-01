@@ -1205,6 +1205,31 @@ async def handle_system_info(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=500)
 
 
+async def handle_model_runtime(request: web.Request) -> web.Response:
+    """GET /api/system/models — 本地模型驻留状态 + 尽力而为的显存读数（模型面板轮询）。"""
+    try:
+        return web.json_response(await _api(request).get_model_runtime())
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def handle_model_unload(request: web.Request) -> web.Response:
+    """POST /api/system/models/unload — 立即卸载本地模型并清空显存缓存。
+
+    body: `{"kinds": ["embedding", "rerank"]}`，缺省或空表示全部。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw_kinds = body.get("kinds") if isinstance(body, dict) else None
+    kinds = [str(k) for k in raw_kinds] if isinstance(raw_kinds, list) else None
+    try:
+        return web.json_response(await _api(request).unload_models(kinds))
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 async def handle_files_list(request: web.Request) -> web.Response:
     """GET /api/files/list?dir=<subdir> — 列出 data_dir 内文件（路径穿越防护）。"""
     subdir = request.query.get("dir", "")
@@ -1380,7 +1405,7 @@ async def handle_ask(request: web.Request) -> web.Response:
     retrieval_mode = body.get("retrieval_mode") or "default"
     use_english_retrieval = bool(body.get("use_english_retrieval") or False)
     answer_language = str(body.get("answer_language") or "auto")
-    from kacore.api import GraphMixedQueryError, LightRAGNotReadyError
+    from kacore.api import AskTaskTimeoutError, GraphMixedQueryError, LightRAGNotReadyError
 
     try:
         result = await _api(request).ask(
@@ -1414,6 +1439,18 @@ async def handle_ask(request: web.Request) -> web.Response:
                 "collection": exc.collection,
             },
             status=502,
+        )
+    except AskTaskTimeoutError as exc:
+        # 202：请求仍在后台运行（未取消），不是失败——前端据此改为轮询
+        # /api/ask/progress + /api/chat/history 找回迟到的答案，而不是弹错误后放弃。
+        return web.json_response(
+            {
+                "status": "ask_task_timeout",
+                "message": str(exc),
+                "conversation_id": exc.conversation_id,
+                "timeout_seconds": exc.timeout_seconds,
+            },
+            status=202,
         )
     except ValueError as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
@@ -1698,6 +1735,8 @@ def build_app(
     app.router.add_get("/api/metrics", handle_metrics)
     app.router.add_get("/api/ask/progress/{cid}", handle_ask_progress)
     app.router.add_get("/api/system/info", handle_system_info)
+    app.router.add_get("/api/system/models", handle_model_runtime)
+    app.router.add_post("/api/system/models/unload", handle_model_unload)
     app.router.add_get("/api/files/list", handle_files_list)
     app.router.add_get("/api/fs/browse", handle_fs_browse)
     app.router.add_get("/api/models/local", handle_list_local_models)

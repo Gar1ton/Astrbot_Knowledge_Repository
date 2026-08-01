@@ -2180,3 +2180,43 @@ async def test_http_exception_response_carries_request_id(tmp_path: Path) -> Non
         assert event["metadata"]["http_status"] == 404
     finally:
         await client.close()
+
+
+# ── /api/system/models ────────────────────────────────────────────
+
+
+async def test_model_runtime_route_returns_accelerator_and_models(tmp_path: Path) -> None:
+    """GET /api/system/models 应委派 api.get_model_runtime() 并返回稳定形状。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.get("/api/system/models")
+        assert resp.status == 200
+        body = await resp.json()
+        assert "accelerator" in body  # 无 CUDA 时为 null，不是错误
+        assert isinstance(body["models"], list)
+        assert isinstance(body["resident_count"], int)
+    finally:
+        await client.close()
+
+
+async def test_model_unload_route_accepts_empty_body(tmp_path: Path) -> None:
+    """POST /api/system/models/unload 无 body 表示「全部卸载」，不得 400/500。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post("/api/system/models/unload")
+        assert resp.status == 200
+        body = await resp.json()
+        assert isinstance(body["unloaded"], list)
+        assert isinstance(body["errors"], dict)
+    finally:
+        await client.close()
+
+
+async def test_model_unload_route_passes_kinds_through(tmp_path: Path) -> None:
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post("/api/system/models/unload", json={"kinds": ["rerank"]})
+        assert resp.status == 200
+        assert "models" in await resp.json()
+    finally:
+        await client.close()

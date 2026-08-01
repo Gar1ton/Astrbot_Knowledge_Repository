@@ -19,6 +19,7 @@ from collections.abc import Callable
 from typing import Any
 
 from kacore.repository.embedding.base import EmbeddingProvider
+from kacore.utils.torch_memory import release_accelerator_cache
 
 logger = logging.getLogger("LocalEmbeddingProvider")
 
@@ -208,14 +209,48 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 
     def _unload(self) -> None:
         """空闲超时后卸载模型以释放内存，下次调用时自动重新加载。"""
+        self._release("idle timeout")
+
+    def _release(self, reason: str) -> None:
+        """置空模型引用并把显存真正还给驱动。
+
+        只 `del` 引用不够：torch 缓存分配器会把显存留在自己的池子里，`nvidia-smi` 上看不到
+        回落。手动卸载的意义正是把这块让给同时运行的本地大模型，故必须清空缓存分配器。
+        """
         with self._lock:
-            if self._model is not None:
+            had_model = self._model is not None
+            if had_model:
                 logger.info(
-                    f"Local model '{self._model_name}' idle for {self._idle_timeout}s, "
-                    "unloading to free memory."
+                    f"Local model '{self._model_name}' unloading to free memory ({reason})."
                 )
                 self._model = None
         self._idle_timer = None
+        if had_model:
+            release_accelerator_cache()
+
+    def unload(self) -> None:
+        """手动卸载（模型面板的「卸载」按钮）；幂等，未加载时是空操作。"""
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+        self._release("manual unload")
+
+    @property
+    def runtime_status(self) -> dict[str, Any]:
+        """运行态快照。刻意只读已有字段，绝不触发加载——面板每几秒轮询一次。"""
+        if self._loading:
+            state = "loading"
+        elif self._model is not None:
+            state = "ready"
+        else:
+            state = "idle"
+        return {
+            "provider": "local",
+            "state": state,
+            "model": self._model_name,
+            "device": self._device or "auto",
+            "idle_timeout_seconds": self._idle_timeout,
+            "last_error": None,
+        }
 
     async def embed_query(self, text: str) -> list[float]:
         # 阻塞计算投递到线程池

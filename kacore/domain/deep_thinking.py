@@ -93,6 +93,9 @@ class DeepThinkingOutcome:
     est_total_tokens: int = 0
     # verification 启用时由 orchestrator 合成并校验后产出；否则 None，由 api.ask 合成。
     answer: str | None = None
+    # answer 对应的 GenerationResult.status（kacore.domain.llm_generation 的 STATUS_*）；
+    # 空字符串 = 未知/不适用（如 answer 为 None、或走 api.ask 侧合成时未回填）。
+    answer_generation_status: str = ""
     verified: bool = False
     # 硬缺失（臆造/矛盾/跨来源错配/关键项未满足）——驱动正文告警与 verified=False。
     verify_missing: list[str] = field(default_factory=list)

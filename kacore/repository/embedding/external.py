@@ -133,5 +133,16 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
     def get_dimension(self) -> int:
         return self._dimension
 
+    @property
+    def runtime_status(self) -> dict:
+        """远端 provider 本地无模型可驻留，故无 `unload()` 可做（沿用基类空操作）。"""
+        return {
+            "provider": "external",
+            "state": "external",
+            "model": self._model_name,
+            "device": "",
+            "last_error": None,
+        }
+
 
 __all__ = ["ExternalEmbeddingProvider"]

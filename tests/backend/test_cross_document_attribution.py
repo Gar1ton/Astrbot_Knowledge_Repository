@@ -11,6 +11,7 @@ import pytest
 
 from kacore.config import Config
 from kacore.domain.deep_thinking import Checklist, ChecklistItem, EvidenceItem
+from kacore.domain.llm_generation import GenerationResult
 from kacore.domain.models import DocumentChunk, SourceDocument
 from kacore.pipelines.answer_synthesis import source_tag, synthesize_answer
 from kacore.pipelines.deep_thinking_prompts import build_sea_prompt, build_verify_prompt
@@ -41,11 +42,11 @@ class _CaptureLLM:
     def __init__(self) -> None:
         self.last_user = ""
 
-    async def generate(
+    async def generate_result(
         self, prompt: str, *, system_prompt: str = "", allow_mock: bool = True
-    ) -> str:
+    ) -> GenerationResult:
         self.last_user = prompt
-        return "answer [1] [2]"
+        return GenerationResult(text="answer [1] [2]")
 
 
 def _evidence() -> list[EvidenceItem]:

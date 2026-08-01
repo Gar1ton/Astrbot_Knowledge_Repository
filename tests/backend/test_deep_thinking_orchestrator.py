@@ -128,13 +128,19 @@ class ScriptedLLM:
         self.system_prompts: list[str] = []
 
     async def generate(self, prompt, system_prompt="", *, allow_mock=True):
+        result = await self.generate_result(prompt, system_prompt, allow_mock=allow_mock)
+        return result.text
+
+    async def generate_result(self, prompt, system_prompt="", *, allow_mock=True):
+        from kacore.domain.llm_generation import GenerationResult
+
         self.calls += 1
         self.prompts.append(prompt)
         self.system_prompts.append(system_prompt)
         item = self._responses.pop(0)
         if isinstance(item, Exception):
             raise item
-        return item
+        return GenerationResult(text=item)
 
 
 def _make(outcome, responses, **cfg_over):

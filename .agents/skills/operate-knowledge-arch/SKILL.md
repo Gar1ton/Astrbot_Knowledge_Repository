@@ -37,7 +37,7 @@ For a one-command development override, set both `KNOWLEDGE_ARCH_URL` and `KNOWL
 
 ## Route the request
 
-- For research, source discovery, comparison, synthesis, or citation questions, read [references/research.md](references/research.md) and follow it.
+- For research, source discovery, comparison, synthesis, or citation questions, read [references/research.md](references/research.md) and follow it. Answers cite in Harvard style using the `harvard_in_text` and `harvard_reference` strings the server returns with every evidence item — never a `doc_id`, chunk id, or bare `[n]`.
 - For a user-requested LightRAG build, read [references/lightrag.md](references/lightrag.md) and follow it.
 - For configuration inspection, adjustment, restart, or consequences, read [references/settings.md](references/settings.md) and follow it.
 - For a user-requested save of one or more conversation questions/answers to Notion, follow [Save conversation Q&A to Notion](#save-conversation-qa-to-notion).

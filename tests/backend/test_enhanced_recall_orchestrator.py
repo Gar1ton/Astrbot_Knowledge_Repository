@@ -52,12 +52,15 @@ class MockRetrieval:
     def __init__(self, outcome: RetrievalOutcome) -> None:
         self._outcome = outcome
         self.queries: list[str] = []
+        # 按 query 文本覆盖返回值（未命中退回默认 outcome）。按调用序号覆盖会踩坑：
+        # 首轮的 sub_queries 会发起多次检索，个数随 PLAN 脚本变化。
+        self.outcome_by_query: dict[str, RetrievalOutcome] = {}
 
     async def retrieve_with_outcome(
         self, collection, query, top_k, scope=None, candidate_k=None, reranker=None
     ):
         self.queries.append(query)
-        return self._outcome
+        return self.outcome_by_query.get(query, self._outcome)
 
     async def document_labels(self, doc_ids):
         return {d: d for d in doc_ids if d}
@@ -71,13 +74,19 @@ class ScriptedLLM:
         self.system_prompts: list[str] = []
 
     async def generate(self, prompt, system_prompt="", *, allow_mock=True):
+        result = await self.generate_result(prompt, system_prompt, allow_mock=allow_mock)
+        return result.text
+
+    async def generate_result(self, prompt, system_prompt="", *, allow_mock=True):
+        from kacore.domain.llm_generation import GenerationResult
+
         self.calls += 1
         self.prompts.append(prompt)
         self.system_prompts.append(system_prompt)
         item = self._responses.pop(0)
         if isinstance(item, Exception):
             raise item
-        return item
+        return GenerationResult(text=item)
 
 
 def _make(outcome, responses, **cfg_over):
@@ -233,6 +242,27 @@ async def test_resynthesis_failure_keeps_first_answer():
     assert llm.calls == 3
     assert result.answer == "draft answer [1]"  # 重合成挂 → 保留首轮答案。
     assert result.verified is True
+
+
+@pytest.mark.asyncio
+async def test_resynthesis_failure_rolls_back_evidence_to_match_kept_answer():
+    """保留首轮答案就必须一并回滚证据池：`[n]` 是按纠正前池编号的。
+
+    v1.1.0 起 `[n]` 会被 `citation_rendering` 改写成含作者姓名的 Harvard 短引，错位不再只是
+    「点错来源卡片」，而是正文明文把 A 的结论归给 B。
+    """
+    outcome = _outcome([_chunk("c1")])
+    orch, retrieval, _llm = _make(
+        outcome, [PLAN_OK, SYNTH_INSUFFICIENT, RuntimeError("resynth down")]
+    )
+    # 纠正轮（SYNTH_INSUFFICIENT 指定的 query）引入一条全新证据；
+    # 它绝不能出现在与首轮答案一起返回的证据池里。
+    retrieval.outcome_by_query = {"Paper Y Table 2": _outcome([_chunk("c9")])}
+
+    result = await orch.run("papers", "原始问题")
+
+    assert result.answer == "draft answer [1]"
+    assert [c.chunk_id for c in result.evidence] == ["c1"]
 
 
 @pytest.mark.asyncio

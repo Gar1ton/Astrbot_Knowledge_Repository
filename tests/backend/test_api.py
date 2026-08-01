@@ -526,9 +526,11 @@ async def test_ask_with_mock_llm_calls_generate() -> None:
     class MockLLM:
         called: bool = False
 
-        async def generate(self, prompt: str, system_prompt: str = "") -> str:
+        async def generate_result(self, prompt: str, system_prompt: str = "", **_kw):
+            from kacore.domain.llm_generation import GenerationResult
+
             MockLLM.called = True
-            return "Mock answer [1]"
+            return GenerationResult(text="Mock answer [1]")
 
     store = InMemorySourceDocumentStore()
     await store.add_document(_doc("d1", "kb1"))
@@ -540,7 +542,9 @@ async def test_ask_with_mock_llm_calls_generate() -> None:
     )
     result = await api.ask(question="relevant", collection="kb1")
     assert MockLLM.called
-    assert result["answer"] == "Mock answer [1]"
+    # v1.1.0：[n] 被确定性改写为 Harvard 短引；测试文档无书目元数据故降级为 Anon./n.d.。
+    assert result["answer"].startswith("Mock answer (Anon., n.d.)")
+    assert result["references"] == ["Anon. (n.d.) d1."]
     assert len(result["sources"]) == 1
 
 
@@ -558,10 +562,12 @@ async def test_ask_with_persona_enabled() -> None:
         def __init__(self) -> None:
             self._context = MockContext()
 
-        async def generate(self, prompt: str, system_prompt: str = "") -> str:
+        async def generate_result(self, prompt: str, system_prompt: str = "", **_kw):
+            from kacore.domain.llm_generation import GenerationResult
+
             MockLLM.called = True
             self.captured_system_prompt = system_prompt
-            return "Mock answer [1]"
+            return GenerationResult(text="Mock answer [1]")
 
     store = InMemorySourceDocumentStore()
     await store.add_document(_doc("d1", "kb1"))
@@ -634,11 +640,13 @@ async def test_graph_mixed_uses_context_and_one_outer_llm_call(
     class LLM:
         calls = 0
 
-        async def generate(self, prompt: str, system_prompt: str = "") -> str:
+        async def generate_result(self, prompt: str, system_prompt: str = "", **_kw):
+            from kacore.domain.llm_generation import GenerationResult
+
             self.calls += 1
             assert "graph context" in prompt
             assert "chunk evidence" in prompt
-            return "answer"
+            return GenerationResult(text="answer")
 
     store = InMemorySourceDocumentStore()
     await store.add_document(_doc("d1", "papers"))
@@ -837,10 +845,12 @@ async def test_graph_mixed_can_answer_with_only_lightrag_context(tmp_path: Path)
     class LLM:
         calls = 0
 
-        async def generate(self, prompt: str, system_prompt: str = "") -> str:
+        async def generate_result(self, prompt: str, system_prompt: str = "", **_kw):
+            from kacore.domain.llm_generation import GenerationResult
+
             self.calls += 1
             assert "only graph context" in prompt
-            return "answer"
+            return GenerationResult(text="answer")
 
     store = InMemorySourceDocumentStore()
     await store.add_document(_doc("d1", "papers"))
@@ -1707,10 +1717,66 @@ async def test_query_graph_delegates_to_registry_when_ready(tmp_path: Path) -> N
 
 # ── Deep Thinking 模式端到端 ────────────────────────────────
 class _MockSynthLLM:
-    async def generate(
+    async def generate_result(
         self, prompt: str, system_prompt: str = "", *, allow_mock: bool = True
-    ) -> str:
-        return "deep answer [1]"
+    ):
+        from kacore.domain.llm_generation import GenerationResult
+
+        return GenerationResult(text="deep answer [1]")
+
+
+async def test_ask_task_timeout_lets_background_task_finish_and_persist() -> None:
+    """总超时到点时 ask() 抛 AskTaskTimeoutError，但不取消后台任务——它会跑完并正常写入
+    chat_history；前端据此改为轮询 /api/ask/progress + /api/chat/history 找回迟到的答案
+    （而不是像旧行为那样，前端超时后这份答案就再也回不到页面上）。
+    """
+    import asyncio
+
+    from kacore.api import AskTaskTimeoutError
+    from kacore.domain.deep_thinking import DeepThinkingOutcome
+
+    class _SlowDeepThinking:
+        async def run(
+            self,
+            collection,
+            query,
+            scope=None,
+            progress=None,
+            answer_language="auto",
+            answer_question=None,
+        ):
+            await asyncio.sleep(0.15)
+            return DeepThinkingOutcome(
+                evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
+                answer="迟到的答案 [1]",
+                verified=True,
+                actual_mode="milvus_deep",
+            )
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    kb = InMemoryKnowledgeBaseReader({"papers": []})
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=kb,
+        deep_thinking_orchestrator=_SlowDeepThinking(),  # type: ignore[arg-type]
+    )
+    # 绕开 config 只接受整秒的限制，直接把总超时压到远小于 orchestrator 的 0.15s 耗时。
+    api._ask_task_timeout_seconds = lambda: 0.02  # type: ignore[method-assign]
+
+    with pytest.raises(AskTaskTimeoutError) as exc_info:
+        await api.ask(question="q", collection="papers", retrieval_mode="deep_thinking")
+    assert exc_info.value.timeout_seconds == 0.02
+
+    conversation_id = exc_info.value.conversation_id
+    assert await store.get_chat_messages(conversation_id) == []  # 超时那一刻还没写库
+
+    await asyncio.sleep(0.3)  # 放弃等待≠取消：后台任务应已跑完并落库。
+    history = await store.get_chat_messages(conversation_id)
+    assert any(
+        m["role"] == "assistant" and "迟到的答案 (Anon., n.d.)" in m["content"]
+        for m in history
+    )
 
 
 class _MockDeepThinking:
@@ -1828,7 +1894,7 @@ async def test_deep_thinking_returns_trace_and_synthesizes() -> None:
     )
     assert result["actual_retrieval_mode"] == "milvus_deep"
     # v0.30.0：告警不再拼在正文开头，改为结构化 answer_notice 字段（正文保持连贯）。
-    assert result["answer"] == "deep answer [1]"
+    assert result["answer"].startswith("deep answer (Anon., n.d.)")
     assert result["answer_notice"].startswith("**提示：以下回答尚未完成证据校验。**")
     assert len(result["sources"]) == 1
     trace = result["thinking_trace"]
@@ -1889,9 +1955,11 @@ async def test_deep_thinking_verify_disabled_uses_deep_synth_fallback() -> None:
         def __init__(self) -> None:
             self.system_prompts: list[str] = []
 
-        async def generate(self, prompt, system_prompt="", *, allow_mock=True):
+        async def generate_result(self, prompt, system_prompt="", *, allow_mock=True):
+            from kacore.domain.llm_generation import GenerationResult
+
             self.system_prompts.append(system_prompt)
-            return "deep fallback answer [1]"
+            return GenerationResult(text="deep fallback answer [1]")
 
     outcome = DeepThinkingOutcome(
         evidence=[DocumentChunk("c0", "d1", 0, "ev", "h0")],
@@ -1910,7 +1978,7 @@ async def test_deep_thinking_verify_disabled_uses_deep_synth_fallback() -> None:
         deep_thinking_orchestrator=_MockDeepThinking(outcome),  # type: ignore[arg-type]
     )
     result = await api.ask(question="综述", collection="papers", retrieval_mode="deep_thinking")
-    assert result["answer"].endswith("deep fallback answer [1]")
+    assert result["answer"].startswith("deep fallback answer (Anon., n.d.)")
     assert any("mechanism" in s.lower() for s in llm.system_prompts)
 
 
@@ -1975,7 +2043,7 @@ async def test_enhanced_mode_returns_trace_and_verified_answer() -> None:
         enhanced_recall_orchestrator=orch,  # type: ignore[arg-type]
     )
     result = await api.ask(question="q", collection="papers", retrieval_mode="enhanced")
-    assert result["answer"] == "enhanced answer [1]"
+    assert result["answer"].startswith("enhanced answer (Anon., n.d.)")
     assert result["actual_retrieval_mode"] == "enhanced_recall"
     assert "enhanced_recall" in result["retrieval_engines"]
     assert len(result["sources"]) == 1
@@ -2033,7 +2101,7 @@ async def test_deep_thinking_english_retrieval_keeps_original_answer_question() 
         use_english_retrieval=True,
     )
 
-    assert result["answer"] == "verified answer [1]"
+    assert result["answer"].startswith("verified answer (Anon., n.d.)")
     assert deep.query == "translated retrieval query"
     assert deep.answer_question == "用户原始问题"
 
@@ -2075,7 +2143,7 @@ async def test_english_retrieval_skips_translation_for_non_cjk_question() -> Non
         use_english_retrieval=True,
     )
 
-    assert result["answer"] == "verified answer [1]"
+    assert result["answer"].startswith("verified answer (Anon., n.d.)")
     assert llm.translate_calls == 0
     assert deep.query == "english only question"  # 检索 query 保持原文。
 
@@ -2104,7 +2172,7 @@ async def test_deep_thinking_uses_verified_answer_when_present() -> None:
         deep_thinking_orchestrator=_MockDeepThinking(outcome),  # type: ignore[arg-type]
     )
     result = await api.ask(question="q", collection="papers", retrieval_mode="deep_thinking")
-    assert result["answer"] == "verified answer [1]"
+    assert result["answer"].startswith("verified answer (Anon., n.d.)")
     assert result["thinking_trace"]["verified"] is True
 
 
@@ -2112,8 +2180,10 @@ async def test_deep_thinking_degraded_answer_gets_notice_field() -> None:
     from kacore.domain.deep_thinking import DeepThinkingOutcome
 
     class _SynthLLM:
-        async def generate(self, prompt, system_prompt="", *, allow_mock=True):
-            return "有限回答 [1]"
+        async def generate_result(self, prompt, system_prompt="", *, allow_mock=True):
+            from kacore.domain.llm_generation import GenerationResult
+
+            return GenerationResult(text="有限回答 [1]")
 
     outcome = DeepThinkingOutcome(
         evidence=[DocumentChunk("c0", "d1", 0, "baseline text", "h0")],
@@ -2133,14 +2203,14 @@ async def test_deep_thinking_degraded_answer_gets_notice_field() -> None:
     result = await api.ask(question="综述问题", collection="papers", retrieval_mode="deep_thinking")
 
     # v0.30.0：正文不再被告警前缀打断，降级说明进结构化 answer_notice。
-    assert result["answer"] == "有限回答 [1]"
+    assert result["answer"].startswith("有限回答 (Anon., n.d.)")
     assert result["answer_notice"].startswith("**提示：深度思考证据不足")
     assert "关键检查项未满足" in result["answer_notice"]
-    # 存库版自包含：notice 以分隔线追加在答案尾部，历史回放不丢提示。
+    # 存库版自包含：v1.1.0 起 notice 以分隔线**前置**在答案之前，历史回放与实时渲染同序。
     history = await store.get_chat_messages(result["conversation_id"])
     stored = [m for m in history if m["role"] == "assistant"][-1]["content"]
-    assert stored.startswith("有限回答 [1]")
-    assert "深度思考证据不足" in stored
+    assert stored.startswith("**提示：深度思考证据不足")
+    assert stored.index("深度思考证据不足") < stored.index("有限回答")
 
 
 async def test_deep_thinking_unverified_missing_gets_notice_field() -> None:
@@ -2165,7 +2235,7 @@ async def test_deep_thinking_unverified_missing_gets_notice_field() -> None:
     result = await api.ask(question="综述问题", collection="papers", retrieval_mode="deep_thinking")
 
     # v0.30.0：正文纯净；notice 只留缺口计数（告警瘦身沿袭 v0.25.9），明细在 thinking_trace。
-    assert result["answer"] == "草稿回答 [1]"
+    assert result["answer"].startswith("草稿回答 (Anon., n.d.)")
     assert result["answer_notice"].startswith("**提示：以下回答未完全通过证据校验。**")
     assert "共 2 项" in result["answer_notice"]
     assert "缺少定义" not in result["answer_notice"]
@@ -2395,3 +2465,187 @@ async def test_install_dependency_flags_pip_success_that_left_milvus_unusable(
     assert result["status"] == "error"
     assert result["restart_required"] is False
     assert "milvus-lite" in result["message"]
+
+
+# ── v1.1.0 Harvard 引用：书目元数据打通与改写落点 ──────────────
+
+
+class _HarvardLLM:
+    async def generate_result(self, prompt: str, system_prompt: str = "", **_kw):
+        from kacore.domain.llm_generation import GenerationResult
+
+        return GenerationResult(text="核心结论见 [1]。")
+
+
+def _local_doc_with_meta(doc_id: str, collection: str, meta: dict) -> SourceDocument:
+    doc = _doc(doc_id, collection)
+    doc.title = str(meta.get("title") or doc_id)
+    doc.local_meta = dict(meta)
+    return doc
+
+
+async def test_ask_enriches_local_document_from_local_meta() -> None:
+    """回归 v1.1.0 前的门控缺陷：书目富化曾只对 origin=zotero 开放，本地文档永远拿不到作者年份。"""
+    store = InMemorySourceDocumentStore()
+    await store.add_document(
+        _local_doc_with_meta(
+            "d1",
+            "kb1",
+            {
+                "title": "本地讲义",
+                "creators": ["Vaswani, Ashish", "Shazeer, Noam"],
+                "year": "2017",
+                "venue": "NeurIPS",
+                "doi": "10.5555/aaa",
+            },
+        )
+    )
+    kb = InMemoryKnowledgeBaseReader(
+        {"kb1": [DocumentChunk("c0", "d1", 0, "relevant text", "h0", metadata={"pages": [4]})]}
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=store, kb_reader=kb, llm_adapter=_HarvardLLM()  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(question="relevant", collection="kb1")
+
+    source = result["sources"][0]
+    assert source["creators"] == ["Vaswani, Ashish", "Shazeer, Noam"]
+    assert source["year"] == "2017"
+    assert source["harvard_in_text"] == "Vaswani and Shazeer, 2017, p. 4"
+    # venue/doi 曾被读出后直接丢弃，现在必须进到参考文献条目里。
+    assert result["references"] == [
+        "Vaswani, A. and Shazeer, N. (2017) '本地讲义', NeurIPS. doi: 10.5555/aaa."
+    ]
+    assert "(Vaswani and Shazeer, 2017, p. 4)" in result["answer"]
+    assert "[1]" not in result["answer"]
+
+
+async def test_ask_enriches_zotero_document_with_full_bibliography() -> None:
+    from kacore.domain.models import ZoteroItem
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("z1", "kb1")
+    doc.title = "Attention is all you need"
+    doc.origin = DocumentOrigin.ZOTERO
+    doc.library_id = "1"
+    doc.zotero_item_key = "K1"
+    await store.add_document(doc)
+    await store.upsert_zotero_item(
+        ZoteroItem(
+            item_key="K1",
+            library_id="1",
+            item_type="journalArticle",
+            title="Attention is all you need",
+            creators=["Vaswani, Ashish", "Shazeer, Noam", "Parmar, Niki", "Uszkoreit, Jakob"],
+            year="2017",
+            venue="NeurIPS",
+            doi="10.5555/bbb",
+        )
+    )
+    kb = InMemoryKnowledgeBaseReader(
+        {"kb1": [DocumentChunk("c0", "z1", 0, "relevant text", "h0", metadata={"pages": [3, 4]})]}
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=store, kb_reader=kb, llm_adapter=_HarvardLLM()  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(question="relevant", collection="kb1")
+
+    # 正文内 4 位作者缩写为 et al.，参考文献表仍列全。
+    assert "(Vaswani et al., 2017, pp. 3-4)" in result["answer"]
+    assert result["references"] == [
+        "Vaswani, A., Shazeer, N., Parmar, N. and Uszkoreit, J. (2017) "
+        "'Attention is all you need', NeurIPS. doi: 10.5555/bbb."
+    ]
+
+
+async def test_ask_references_are_embedded_in_stored_history() -> None:
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_local_doc_with_meta("d1", "kb1", {"title": "T", "year": "2020"}))
+    chunk = DocumentChunk("c0", "d1", 0, "relevant text", "h0")
+    kb = InMemoryKnowledgeBaseReader({"kb1": [chunk]})
+    api = KnowledgeRepositoryApi(
+        source_store=store, kb_reader=kb, llm_adapter=_HarvardLLM()  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(question="relevant", collection="kb1")
+
+    history = await store.get_chat_messages(result["conversation_id"])
+    stored = [m for m in history if m["role"] == "assistant"][-1]["content"]
+    assert "**参考文献**" in stored
+    assert "Anon. (2020) T." in stored
+
+
+async def test_ask_without_llm_keeps_excerpt_headers_unrewritten() -> None:
+    """无-LLM 摘录分支自己排版 `**[1] 标题**`，那不是引用。
+
+    改写会把版式毁成 `**(Anon., n.d.) 标题**`，故该分支必须置 citable=False。
+    """
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "kb1"))
+    kb = InMemoryKnowledgeBaseReader({"kb1": [DocumentChunk("c0", "d1", 0, "relevant text", "h0")]})
+    api = KnowledgeRepositoryApi(source_store=store, kb_reader=kb)
+
+    result = await api.ask(question="relevant", collection="kb1")
+
+    assert "**[1] " in result["answer"]
+    assert result["references"] == []
+    # 即便不改写正文，sources 仍需带上 harvard 字段供前端与 skill 使用。
+    assert result["sources"][0]["harvard_in_text"] == "Anon., n.d."
+
+
+async def test_agent_evidence_carries_harvard_strings() -> None:
+    """codex skill 出口：agent 自己写正文，需要成品 Harvard 串而非原始 creators。"""
+
+    class _MockAgentEvidence:
+        def limits(self, mode: str) -> dict:
+            return {"max_rounds": 3, "top_k": 8}
+
+        async def run(self, **_kw):
+            class _Outcome:
+                evidence = [
+                    DocumentChunk("c0", "d1", 0, "text", "h0", metadata={"pages": [9]})
+                ]
+                queries = ["q"]
+                kept_chunk_ids = ["c0"]
+                engines: list[str] = []
+                fallback_reasons: list[str] = []
+
+            return _Outcome()
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(
+        _local_doc_with_meta(
+            "d1", "kb1", {"title": "讲义", "creators": ["Li, Ming"], "year": "2025"}
+        )
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({"kb1": []}),
+        agent_evidence_orchestrator=_MockAgentEvidence(),  # type: ignore[arg-type]
+    )
+
+    result = await api.retrieve_agent_evidence(
+        question="q", collection="kb1", retrieval_mode="deep_thinking"
+    )
+
+    item = result["evidence"][0]
+    assert item["harvard_in_text"] == "Li, 2025, p. 9"
+    assert item["harvard_reference"] == "Li, M. (2025) 讲义."
+
+
+async def test_update_document_meta_normalizes_creators_and_year() -> None:
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "kb1"))
+    api = KnowledgeRepositoryApi(
+        source_store=store, kb_reader=InMemoryKnowledgeBaseReader({"kb1": []})
+    )
+
+    doc = await api.update_document_meta(
+        "d1", {"creators": "Li, Ming\nWang, Wei", "year": 2020, "abstract": "a"}
+    )
+
+    assert doc is not None
+    assert doc.local_meta["creators"] == ["Li, Ming", "Wang, Wei"]
+    assert doc.local_meta["year"] == "2020"

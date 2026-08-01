@@ -410,7 +410,9 @@ class ResearchService:
             "answer": answer,
             # v0.30.0：告警为结构化字段（不再拼在正文开头），聊天端渲染为引用后的尾注。
             "answer_notice": str(result.get("answer_notice") or ""),
-            "citations": _build_citations(sources),
+            # v1.1.0：优先透传 api.ask 生成的 Harvard 参考文献表（与正文内的 in-text 短引同源）；
+            # 只有旧路径/无引用可生成时才退回 `Author - Year - Title` 拼装。
+            "citations": list(result.get("references") or []) or _build_citations(sources),
             "citation_doc_ids": _citation_doc_ids(sources),
             "scope": collection or "全局",
             "searched_scope": scope_label,

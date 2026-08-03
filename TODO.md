@@ -1,5 +1,84 @@
 # TODO
 
+## v1.1.1：全文检索端到端实装 · 显存面板对齐 DS · 版本落版 (completed)
+
+### User constraints / 约束
+
+- **全文检索取消硬上限**，但单篇超过 **60000 字符**时，WebUI Ask 面板与 codex skill 两个入口
+  都必须**先明确警告并询问，硬同意之后才能执行**。低于阈值零摩擦，不得多一次点击/往返。
+- 显存面板「内外的颜色」参考 AstrBot 配置面板，做成 **block（Card）样式**。
+- GPU/显存数据必须是**识别系统**的，不能是为特定机器优化的。核实结论：`torch_memory.py` 本就是
+  `torch.cuda` 实时读取、零硬编码；用户明确指示**不涉及多卡就不改**，故本轮不动该文件。
+- 版本号从 v1.1.0 落到 **v1.1.1**。
+
+### 核实到的前提偏差（必须先记录）
+
+- Ask 面板的「全文检索」**今天是坏的**，不是「有上限」而是「根本跑不通」：
+  `kacore/retrieval_modes.py:17-25` 的 `VALID_RETRIEVAL_MODES` 不含 `fulltext`，
+  `web/server.py` 的 `handle_ask` 从不读 `body["doc_id"]`（前端 `ChatPanel.tsx:888` 一直在发），
+  选中后提问必然 400。「60 000 字符上限」只是 `lib/i18n.ts:246` 的一句文案，全链路无强制点。
+  因此第 4 项不是「调上限」而是「端到端实装 + 加确认门」。
+- codex skill 侧的硬上限是真实存在的两处静默夹取：`knowledge_arch_client.py` 的
+  `MAX_READ_CHARS = 40000` 与 `web/server.py` 的 `_query_int(..., 1, 40000)`。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 模式常量**（`kacore/retrieval_modes.py`）：新增 `MODE_FULLTEXT`、并入
+  `VALID_RETRIEVAL_MODES`；新增 `STRICT_DOCUMENT_MODES`（与 `STRICT_COLLECTION_MODES` 对称，
+  表达「本模式必须绑定一个具体文档」）；新增 `FULLTEXT_CONFIRM_THRESHOLD_CHARS = 60_000`——
+  **全项目唯一真相源**，`web/server.py`／前端／skill 一律不得复制该数字。连带修
+  `kacore/research_skill.py`：AstrBot 的 `research_execute` 没有 doc_id 概念，收到
+  `mode="fulltext"` 必须降级为 `default`，否则撞 ValueError。
+- [x] **Phase 2 — 整篇文档合成**（`kacore/pipelines/answer_synthesis.py`）：新增
+  `synthesize_from_document()`，内部 `allow_mock=False`（`adapters/llm.py` 的 `allow_mock=True`
+  会在拿不到文本时返回**离线占位文本**——用户确认了 18 万字却拿到一段假答案是最坏结果）。
+  复用 `_FLUENT_PROSE_RULE`，**不用** `_SOURCE_ISOLATION_RULE`（防跨文档串线，单文档场景无意义）。
+  `_lang_instruction` 去下划线导出：这段 if/elif 已在 `api.py` 出现两次，加第四份即踩中
+  CONVENTIONS §4「重复 3 次 → 提取」。
+- [x] **Phase 3 — 业务门面**（`kacore/api.py`）：新增 `FullTextConfirmationRequiredError`(409)／
+  `FullTextDocumentUnavailableError`(404)／`FullTextGenerationFailedError`(502)；
+  `_est_context_tokens()`（CJK ~1 token/字，**不用** `llm_json.est_tokens` 的 `len//4`——对中文
+  低估 4~6 倍，而低估恰恰发生在最危险的场景）；`_load_fulltext_document()`（顺带修掉现存隐患：
+  今天 clean.md 缺失时 `FileNotFoundError` 逃出 `ask()` 会变成裸 500）；
+  `_require_fulltext_confirmation()` 作为唯一阈值比较点；`get_document_markdown_page` 拆掉
+  40000 上限、`max_chars == 0` 语义改为「读到文末」；`_build_source_entry` 拆出
+  `_build_document_source_entry`（`citation_rendering.build_citation_refs` 只读书目键、
+  从不碰 `chunk_id`，故整条 Harvard 机器可原样复用）；`ask()` 新增 fulltext 分支。
+  **回归红线**：`source["text"]` 绝不能放整篇正文——`sources` 会随 `add_chat_message` 落库，
+  几十万字符会撑爆每行 chat_history，必须用 `clip_at_sentence(content, 300)`。
+- [x] **Phase 4 — HTTP 层**（`web/server.py`）：`handle_ask` 透传 `doc_id` / `confirmed`
+  （即「前端一直在发、后端从不读」这个 bug 的正式修复点）+ 三条带 `status` 判别字段的异常映射；
+  `handle_document_content_page` 拆掉 40000 静默夹取、新增 `_query_flag()` 解析 `confirmed`。
+- [x] **Phase 5 — 前端**：`Card`/`Field` 从 `AstrBotModal` 提到 `components/ds/Card.tsx`
+  （`SettingModal` 里还有一份逐字拷贝，一并改为 import，**视觉必须零变化**）；
+  `ModelRuntimePanel` 重样式（补 `18px 22px` 内容 padding、两张 Card、行改 Field、
+  卸载按钮移入 `Modal footer`、字号归位 DS 刻度、丢掉 `--bg-inset`+`--border-strong` 这套
+  输入槽配方）；新增 `FullTextConfirmDialog`；`ChatPanel` 接线并修两个既有 bug
+  （`:856` 错用 `chat_graph_requires_collection`、`retrievalModeLabel` 缺 fulltext 分支会把
+  全文检索标成「Milvus 语义检索」）；`api.ts` 加 `confirmed` 并修 mock 分支；i18n zh+en 双份。
+- [x] **Phase 6 — codex skill**：删 `MAX_READ_CHARS`；新增 `StructuredApiError`（`ApiError`
+  子类，既有 catch 点与 exit_code 行为不变）；`read` 支持 `--whole` 与 `--confirm-large-read`，
+  超阈值返回 **preview 且不含任何正文**。刻意**不复用 `--apply`**：`SKILL.md` 把 `--apply`
+  定义为变更类门禁，read 是纯读操作，混用会稀释变更门禁的严肃性；preview 用 `content_returned`
+  而非 `mutation_performed`。同步 `SKILL.md` 与 `references/research.md`。
+- [x] **Phase 7 — 测试**：`test_api.py` / `test_web_server.py` /
+  `test_knowledge_arch_skill_client.py` / `test_research_skill.py`。关键回归锁：超阈值时
+  **LLM 一次都没被调用且 chat_history 没落任何消息**；确认后 prompt 含文档**末尾哨兵字符串**
+  （证明无截断）；`sources[0]["text"]` 长度 < 1000；LLM 失败时**不返回离线占位文本**。
+- [x] **Phase 8 — 版本与治理**：全绿后 `python bump_version.py 1.1.1`，写 CHANGELOG。
+
+### Known limitations（本轮有意不解决，不假装已解决）
+
+- **多卡显存错配**：`kacore/utils/torch_memory.py` 的 `accelerator_snapshot()` 设备名取自
+  `get_device_name(0)`，显存数字取自 `mem_get_info()` 的**当前设备**。单卡环境两者同源、
+  数据完全正确；多卡环境会出现「0 号卡的名字配 1 号卡的显存」。按用户指示本轮不处理。
+- **codex skill 分页累计读取不受门禁约束**：门禁按「单次调用返回多少字符」判定，agent 仍可
+  连续 `read --start N --max-chars 12000` 读满整篇。客户端无状态、无法可靠累计；要真正封死
+  需服务端按会话累计，是另一个量级的改动。现阶段靠 `references/research.md` §4 的阅读纪律约束。
+- **`kacore/api.py` 拆分计划（CONVENTIONS §4 登记）**：该文件已 5572 行，是 600 行红线的 9 倍，
+  本轮再加约 120 行。后续应把 `ask()` 的各 mode 分支（graph_only / deep_thinking / enhanced /
+  fulltext）逐一迁往 `kacore/pipelines/`，`api.py` 只留门面与装配。
+
 ## v1.1.0：Harvard 引用统一 · 校验告警前置 · 模型驻留面板 · README 重写 (completed)
 
 ### User constraints / 约束

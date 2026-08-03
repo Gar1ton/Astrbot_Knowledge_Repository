@@ -426,6 +426,24 @@ export interface AskResult {
   thinking_trace?: ThinkingTrace | null;
 }
 
+/**
+ * `/api/ask` 与文档分页读在正文超阈值时返回的 409 体（`status:
+ * "fulltext_confirmation_required"`）。
+ *
+ * 不是失败而是一次询问：把这些数字展示给用户，取得同意后带 `confirmed: true` 重发同一请求。
+ * 阈值由后端回传，前端**不复制**这个数字——阈值只有一个真相源（kacore/retrieval_modes.py）。
+ */
+export interface FullTextConfirmation {
+  status: "fulltext_confirmation_required";
+  message: string;
+  doc_id: string;
+  title: string;
+  total_chars: number;
+  requested_chars: number;
+  threshold_chars: number;
+  estimated_tokens: number;
+}
+
 export interface ReservedResult {
   reserved: true;
   available_in: string;
@@ -1608,6 +1626,8 @@ export async function ask(opts: {
     | "deep_thinking";
   use_english_retrieval?: boolean;
   answer_language?: "auto" | "zh" | "en";
+  /** 全文检索确认门：正文超阈值时后端返回 409，用户同意后带 true 重发同一请求。 */
+  confirmed?: boolean;
 }): Promise<AskResult> {
   if (isMock()) {
     await new Promise((r) => setTimeout(r, 800));
@@ -1616,8 +1636,8 @@ export async function ask(opts: {
       ...MOCK_ASK,
       conversation_id: `conv-${Date.now()}`,
       requested_retrieval_mode: requested,
-      actual_retrieval_mode: requested === "graph_mixed" ? "milvus_lightrag" : requested === "graph_only" ? "lightrag_only" : requested === "fulltext" ? "sqlite_lexical" : requested === "enhanced" ? "enhanced_recall" : "milvus",
-      retrieval_engines: requested === "graph_mixed" ? ["milvus", "sqlite_lexical", "lightrag"] : requested === "graph_only" ? ["lightrag"] : requested === "fulltext" ? ["sqlite_lexical"] : ["milvus", "sqlite_lexical"],
+      actual_retrieval_mode: requested === "graph_mixed" ? "milvus_lightrag" : requested === "graph_only" ? "lightrag_only" : requested === "fulltext" ? "fulltext" : requested === "enhanced" ? "enhanced_recall" : "milvus",
+      retrieval_engines: requested === "graph_mixed" ? ["milvus", "sqlite_lexical", "lightrag"] : requested === "graph_only" ? ["lightrag"] : requested === "fulltext" ? ["fulltext"] : ["milvus", "sqlite_lexical"],
     };
   }
   const result = await apiFetch<AskResult | AskTaskTimeoutBody>("/api/ask", {
@@ -1634,6 +1654,7 @@ export async function ask(opts: {
       retrieval_mode: opts.retrieval_mode ?? "default",
       use_english_retrieval: opts.use_english_retrieval ?? false,
       answer_language: opts.answer_language ?? "auto",
+      confirmed: opts.confirmed ?? false,
     }),
   });
   // HTTP 202：后端 task_timeout_seconds 到点，任务仍在后台跑——不是失败，但也不是

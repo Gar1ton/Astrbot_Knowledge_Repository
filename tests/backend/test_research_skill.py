@@ -420,3 +420,11 @@ def test_build_citations_dedup_and_fallback() -> None:
         ]
     )
     assert out == ["A - 2020 - T1", "T2"]
+
+
+async def test_execute_downgrades_fulltext_mode_to_default() -> None:
+    """research 调令模型没有 doc_id 概念，fulltext 必须降级而不是透传下去撞 ValueError。"""
+    api = FakeApi([("ml", "")], {"ml": ["X"]}, ask_result={"answer": "ANS", "sources": []})
+    result = await _svc(api).execute("q", "ml", mode="fulltext")
+    assert api.ask_calls[0]["retrieval_mode"] == "default"
+    assert result.get("status") != "needs_scope"

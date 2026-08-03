@@ -767,7 +767,54 @@ async def test_document_page_route_returns_only_requested_page(tmp_path: Path) -
         resp = await client.get("/api/documents/d1/content/page?start=10&max_chars=10")
         assert resp.status == 200
         assert (await resp.json())["content"] == "0123456789"
-        page.assert_awaited_once_with("d1", start=10, max_chars=10)
+        page.assert_awaited_once_with("d1", start=10, max_chars=10, confirmed=False)
+
+        # v1.1.1：max_chars 不再被静默夹取到 40000，0 表示读到文末，confirmed 可透传。
+        page.reset_mock()
+        await client.get("/api/documents/d1/content/page?max_chars=60001")
+        page.assert_awaited_once_with("d1", start=0, max_chars=60001, confirmed=False)
+
+        page.reset_mock()
+        await client.get("/api/documents/d1/content/page?max_chars=0&confirmed=1")
+        page.assert_awaited_once_with("d1", start=0, max_chars=0, confirmed=True)
+    finally:
+        await client.close()
+
+
+async def test_document_page_route_returns_409_when_confirmation_required(
+    tmp_path: Path,
+) -> None:
+    """超阈值单次读取返回 409 询问体，且**不含任何正文**。"""
+    from kacore.api import FullTextConfirmationRequiredError
+
+    api = await _make_api()
+    api.get_document_markdown_page = AsyncMock(  # type: ignore[method-assign]
+        side_effect=FullTextConfirmationRequiredError(
+            "d1",
+            title="Long Paper",
+            total_chars=183421,
+            requested_chars=183421,
+            threshold_chars=60000,
+            estimated_tokens=172530,
+        )
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/documents/d1/content/page?max_chars=0")
+        assert resp.status == 409
+        body = await resp.json()
+        assert body["status"] == "fulltext_confirmation_required"
+        assert body["total_chars"] == 183421
+        assert body["threshold_chars"] == 60000
+        assert body["estimated_tokens"] == 172530
+        assert "content" not in body
     finally:
         await client.close()
 
@@ -864,6 +911,100 @@ async def test_ask_route_returns_answer_and_sources(tmp_path: Path) -> None:
         assert "metadata" in src and src["metadata"]
         assert "locator" in src["metadata"] and src["metadata"]["locator"] == "page_1_p1"
         assert "conversation_id" in body and body["conversation_id"]
+    finally:
+        await client.close()
+
+
+async def test_ask_route_forwards_doc_id_and_confirmed(tmp_path: Path) -> None:
+    """doc_id / confirmed 必须透传给 api.ask()。
+
+    回归锁：前端从 v1.0.x 起就一直在 body 里发 doc_id，但 handle_ask 从未读取过——
+    全文检索因此始终跑不通。这条断言防止它再次被静默丢弃。
+    """
+    api = await _make_api()
+    ask = AsyncMock(return_value={"conversation_id": "c1", "answer": "ok", "sources": []})
+    api.ask = ask  # type: ignore[method-assign]
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/ask",
+            json={
+                "question": "q",
+                "retrieval_mode": "fulltext",
+                "doc_id": "d1",
+                "confirmed": True,
+            },
+        )
+        assert resp.status == 200
+        assert ask.await_args.kwargs["doc_id"] == "d1"
+        assert ask.await_args.kwargs["confirmed"] is True
+
+        # 缺省时 doc_id 为 None、confirmed 为 False（确认类 flag 必须默认关）。
+        ask.reset_mock()
+        await client.post("/api/ask", json={"question": "q"})
+        assert ask.await_args.kwargs["doc_id"] is None
+        assert ask.await_args.kwargs["confirmed"] is False
+    finally:
+        await client.close()
+
+
+async def test_ask_route_maps_fulltext_errors_to_status_codes(tmp_path: Path) -> None:
+    """全文检索三类领域异常各自映射到 409 / 404 / 502，且都带 status 判别串。"""
+    from kacore.api import (
+        FullTextConfirmationRequiredError,
+        FullTextDocumentUnavailableError,
+        FullTextGenerationFailedError,
+    )
+
+    api = await _make_api()
+    ask = AsyncMock()
+    api.ask = ask  # type: ignore[method-assign]
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    payload = {"question": "q", "retrieval_mode": "fulltext", "doc_id": "d1"}
+    try:
+        ask.side_effect = FullTextConfirmationRequiredError(
+            "d1",
+            title="Long Paper",
+            total_chars=183421,
+            requested_chars=183421,
+            threshold_chars=60000,
+            estimated_tokens=172530,
+        )
+        resp = await client.post("/api/ask", json=payload)
+        assert resp.status == 409
+        body = await resp.json()
+        assert body["status"] == "fulltext_confirmation_required"
+        assert body["title"] == "Long Paper"
+        assert body["total_chars"] == 183421
+        assert body["threshold_chars"] == 60000
+
+        ask.side_effect = FullTextDocumentUnavailableError("d1", "artifact_missing")
+        resp = await client.post("/api/ask", json=payload)
+        assert resp.status == 404
+        body = await resp.json()
+        assert body["status"] == "fulltext_document_unavailable"
+        assert body["reason"] == "artifact_missing"
+
+        ask.side_effect = FullTextGenerationFailedError("d1", 183421, "context overflow")
+        resp = await client.post("/api/ask", json=payload)
+        assert resp.status == 502
+        body = await resp.json()
+        assert body["status"] == "fulltext_generation_failed"
+        assert body["total_chars"] == 183421
     finally:
         await client.close()
 

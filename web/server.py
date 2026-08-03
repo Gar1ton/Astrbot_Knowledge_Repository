@@ -15,7 +15,7 @@ import logging as _logging
 import secrets
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import web
 
@@ -197,6 +197,36 @@ def _parse_int(raw: object, name: str, default: int, lo: int, hi: int) -> int:
 
 def _query_int(request: web.Request, name: str, default: int, lo: int, hi: int) -> int:
     return _parse_int(request.query.get(name), name, default, lo, hi)
+
+
+def _query_flag(request: web.Request, name: str) -> bool:
+    """解析布尔查询参数（`1` / `true` / `yes`，大小写不敏感）；缺省为 False。
+
+    显式确认类的 flag 必须「默认关」：拼错值只会退回未确认，绝不会意外放行门禁。
+    """
+    return str(request.query.get(name) or "").strip().lower() in {"1", "true", "yes"}
+
+
+# 字符偏移/长度类查询参数的解析上界，纯粹用来挡住荒谬输入，不表达任何业务上限。
+_CHAR_OFFSET_CEILING = 2_000_000_000
+
+
+def _fulltext_confirmation_payload(exc: Any) -> dict[str, Any]:
+    """把全文确认门异常拍平成 409 响应体（`/api/ask` 与文档分页读共用同一形状）。
+
+    刻意把展示所需的数字全带上：调用方据此直接渲染确认界面，不必再打一次 estimate 请求。
+    阈值也一并回传——前端与 skill 因此不需要各自复制 60000 这个字面量。
+    """
+    return {
+        "status": "fulltext_confirmation_required",
+        "message": str(exc),
+        "doc_id": exc.doc_id,
+        "title": exc.title,
+        "total_chars": exc.total_chars,
+        "requested_chars": exc.requested_chars,
+        "threshold_chars": exc.threshold_chars,
+        "estimated_tokens": exc.estimated_tokens,
+    }
 
 
 async def handle_auth(request: web.Request) -> web.Response:
@@ -469,16 +499,28 @@ async def handle_document_content(request: web.Request) -> web.Response:
 
 
 async def handle_document_content_page(request: web.Request) -> web.Response:
-    """GET 文档 Markdown 的单个字符页；供具备明确阅读意图的 agent 使用。"""
+    """GET 文档 Markdown 的单个字符页；供具备明确阅读意图的 agent 使用。
+
+    v1.1.1：`max_chars` 不再有 40000 硬上限（旧实现是**静默夹取**，请求 6 万字会被悄悄砍到
+    4 万，调用方毫不知情）。`max_chars=0` 表示读到文末；单次返回量超阈值且无 `confirmed`
+    时返回 409，形状与 `/api/ask` 的全文确认门完全一致。
+    """
+    from kacore.api import FullTextConfirmationRequiredError, FullTextDocumentUnavailableError
+
     doc_id = request.match_info["doc_id"]
-    start = _query_int(request, "start", 0, 0, 2_000_000_000)
-    max_chars = _query_int(request, "max_chars", 12000, 1, 40000)
+    start = _query_int(request, "start", 0, 0, _CHAR_OFFSET_CEILING)
+    max_chars = _query_int(request, "max_chars", 12000, 0, _CHAR_OFFSET_CEILING)
     try:
         result = await _api(request).get_document_markdown_page(
-            doc_id, start=start, max_chars=max_chars
+            doc_id,
+            start=start,
+            max_chars=max_chars,
+            confirmed=_query_flag(request, "confirmed"),
         )
-    except FileNotFoundError as exc:
-        return web.json_response({"error": str(exc)}, status=404)
+    except FullTextConfirmationRequiredError as exc:
+        return web.json_response(_fulltext_confirmation_payload(exc), status=409)
+    except FullTextDocumentUnavailableError as exc:
+        return web.json_response({"error": str(exc), "reason": exc.reason}, status=404)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     if result is None:
@@ -1405,7 +1447,18 @@ async def handle_ask(request: web.Request) -> web.Response:
     retrieval_mode = body.get("retrieval_mode") or "default"
     use_english_retrieval = bool(body.get("use_english_retrieval") or False)
     answer_language = str(body.get("answer_language") or "auto")
-    from kacore.api import AskTaskTimeoutError, GraphMixedQueryError, LightRAGNotReadyError
+    # doc_id / confirmed 服务于 retrieval_mode="fulltext"。前端从 v1.0.x 起就一直在发
+    # doc_id，但这里从未读取过——全文检索因此始终跑不通（模式名也不在白名单里）。
+    doc_id = str(body.get("doc_id") or "") or None
+    confirmed = bool(body.get("confirmed") or False)
+    from kacore.api import (
+        AskTaskTimeoutError,
+        FullTextConfirmationRequiredError,
+        FullTextDocumentUnavailableError,
+        FullTextGenerationFailedError,
+        GraphMixedQueryError,
+        LightRAGNotReadyError,
+    )
 
     try:
         result = await _api(request).ask(
@@ -1417,9 +1470,35 @@ async def handle_ask(request: web.Request) -> web.Response:
             retrieval_mode=retrieval_mode,
             use_english_retrieval=use_english_retrieval,
             answer_language=answer_language,
+            doc_id=doc_id,
+            confirmed=confirmed,
             scope_type=str(body.get("scope_type") or ""),
             scope_key=str(body.get("scope_key") or ""),
             scope_library_id=str(body.get("scope_library_id") or ""),
+        )
+    except FullTextConfirmationRequiredError as exc:
+        # 409 不是失败，是一次询问：正文超过确认阈值，前端据此弹窗，用户同意后带
+        # confirmed=true 重发同一请求。此时后端尚未调用 LLM、尚未写任何 chat_history。
+        return web.json_response(_fulltext_confirmation_payload(exc), status=409)
+    except FullTextDocumentUnavailableError as exc:
+        return web.json_response(
+            {
+                "status": "fulltext_document_unavailable",
+                "message": str(exc),
+                "doc_id": exc.doc_id,
+                "reason": exc.reason,
+            },
+            status=404,
+        )
+    except FullTextGenerationFailedError as exc:
+        return web.json_response(
+            {
+                "status": "fulltext_generation_failed",
+                "message": exc.reason,
+                "doc_id": exc.doc_id,
+                "total_chars": exc.total_chars,
+            },
+            status=502,
         )
     except LightRAGNotReadyError as exc:
         return web.json_response(

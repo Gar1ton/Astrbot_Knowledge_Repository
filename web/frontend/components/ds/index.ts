@@ -7,6 +7,7 @@ export { Select } from "./Select";
 export { Tag } from "./Tag";
 export { Toggle } from "./Toggle";
 export { Panel } from "./Panel";
+export { Card, Field } from "./Card";
 export { Modal } from "./Modal";
 export { Popover } from "./Popover";
 export { Eyebrow } from "./Eyebrow";

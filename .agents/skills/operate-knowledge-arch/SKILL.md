@@ -79,6 +79,7 @@ On success, report the number pushed. A `partial` result means the local outbox 
 - If local evidence is insufficient, report the searched local scope and the missing evidence, then ask whether external supplementation is allowed. Do not answer from model memory.
 - Use only `ask-evidence` for Ask retrieval; never call the answer-producing `/api/ask` route. Codex, not the plugin, performs planning, adequacy judgments, corrective queries, and final synthesis.
 - Select `default`, `enhanced`, or `deep_thinking` by question complexity and obey returned limits. Use `read` only after a unique paper is anchored or when the user explicitly requests full text, always with the matching `--intent`.
+- `read` has no character cap, but a single read larger than the server's `confirm_threshold_chars` returns `status: "preview"` with **no document text**. Report that document's `total_chars` to the user, get explicit consent, then rerun with `--confirm-large-read`. Never pass that flag pre-emptively. It is a read gate and is deliberately separate from `--apply`, which remains the mutation gate.
 - For a user-specified paper verification flow: `catalog` first, then `ask-evidence`; only read anchored pages when necessary. If the local library does not contain sufficient evidence and external access is not authorized, state that the claim cannot be verified.
 
 ## Windows sandbox and connection failures

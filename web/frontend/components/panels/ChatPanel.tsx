@@ -12,8 +12,9 @@ import { useConsole } from "@/lib/ConsoleContext";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n, type I18nKey } from "@/lib/i18n";
 import { buildCitationIndex, splitByCitations } from "@/lib/citationIndex";
+import { FullTextConfirmDialog } from "@/components/panels/FullTextConfirmDialog";
 import {
-  AskResult, AskSource, ApiError, AskTaskTimeoutError, GraphBuildEstimate, ThinkingTrace,
+  AskResult, AskSource, ApiError, AskTaskTimeoutError, FullTextConfirmation, GraphBuildEstimate, ThinkingTrace,
   ChatMessage, ask, buildGraph, estimateGraphBuild,
   getChatHistory, clearChatHistory, lockChatAnswer,
   createDocumentNote, createCollectionNote,
@@ -51,6 +52,12 @@ interface GraphBuildDialogState {
   building?: boolean;
 }
 
+interface FullTextConfirmDialogState {
+  question: string;
+  info: FullTextConfirmation;
+  running?: boolean;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────
 
 function retrievalModeLabel(
@@ -67,6 +74,8 @@ function retrievalModeLabel(
   if (mode === "deep_degraded_to_default") return t("chat_retrieval_deep_degraded");
   if (mode === "enhanced_recall") return t("chat_retrieval_enhanced_mode");
   if (mode === "enhanced_degraded_to_default") return t("chat_retrieval_enhanced_degraded");
+  // 缺这条会让全文检索的答案（以及历史回放）被兜底标成「Milvus 语义检索」。
+  if (mode === "fulltext") return t("chat_retrieval_fulltext");
   return t("chat_retrieval_milvus");
 }
 
@@ -712,6 +721,7 @@ export function ChatPanel({ width }: { width?: number }) {
   const [answerLanguage, setAnswerLanguage] = useState<"auto" | "zh" | "en">("auto");
   const [showSettings, setShowSettings] = useState(false);
   const [graphBuildDialog, setGraphBuildDialog] = useState<GraphBuildDialogState | null>(null);
+  const [fullTextDialog, setFullTextDialog] = useState<FullTextConfirmDialogState | null>(null);
   const [notionEnabled, setNotionEnabled] = useState(false);
   // 卸载时兜底清除轮询定时器，避免组件被销毁后仍在轮询。
   useEffect(
@@ -850,10 +860,15 @@ export function ChatPanel({ width }: { width?: number }) {
     setMessages((prev) => prev.filter((m) => m.pinned));
   }
 
-  async function submitQuestion(question: string, mode: RetrievalMode, appendUser: boolean) {
+  async function submitQuestion(
+    question: string,
+    mode: RetrievalMode,
+    appendUser: boolean,
+    confirmed = false,
+  ) {
     if (loading) return;
     if (mode === "fulltext" && !selectedDocId) {
-      toast(t("chat_graph_requires_collection"), "info");
+      toast(t("chat_fulltext_requires_doc"), "info");
       return;
     }
     if (appendUser) {
@@ -892,7 +907,9 @@ export function ChatPanel({ width }: { width?: number }) {
         retrieval_mode: mode,
         use_english_retrieval: useEnglishRetrieval,
         answer_language: answerLanguage,
+        confirmed,
       });
+      setFullTextDialog(null);
       setConversationId(result.conversation_id);
       if (typeof window !== "undefined") localStorage.setItem(CONV_KEY, result.conversation_id);
       setMessages((prev) => [
@@ -919,6 +936,17 @@ export function ChatPanel({ width }: { width?: number }) {
           try { estimate = await estimateGraphBuild(collectionName); } catch { /* ignore */ }
         }
         setGraphBuildDialog({ question, collection: collectionName, reason: err.message, estimate, canBuild });
+      } else if (
+        mode === "fulltext" &&
+        err instanceof ApiError &&
+        err.body?.status === "fulltext_confirmation_required"
+      ) {
+        // 409 = 后端在问「这篇有 N 字符，确定要整篇送进去吗」。此刻后端尚未调用 LLM、
+        // 也没写任何 chat_history，用户确认后原样重发即可，不是续跑。
+        setFullTextDialog({
+          question,
+          info: err.body as unknown as FullTextConfirmation,
+        });
       } else if (err instanceof AskTaskTimeoutError || (err instanceof ApiError && err.timedOut)) {
         // 后端 task_timeout_seconds 到点，或前端自己先放弃等待：请求没有失败，任务仍在
         // 后台跑并会正常写库——转入补轮询找回迟到的答案，而不是弹错误后直接放弃。
@@ -943,6 +971,9 @@ export function ChatPanel({ width }: { width?: number }) {
       stopPolling();
       setLiveProgress(null);
       setLoading(false);
+      // 已确认的那次重发无论成败都要收起确认框，否则失败时它会永远停在 loading 态。
+      // 刚被 409 打开的（running 未置位）不受影响。
+      setFullTextDialog((prev) => (prev?.running ? null : prev));
     }
   }
 
@@ -1004,6 +1035,18 @@ export function ChatPanel({ width }: { width?: number }) {
           onBuild={handleGraphBuild}
           onFallback={handleGraphFallback}
           onCancel={() => setGraphBuildDialog(null)}
+        />
+      )}
+
+      {fullTextDialog && (
+        <FullTextConfirmDialog
+          info={fullTextDialog.info}
+          running={fullTextDialog.running}
+          onConfirm={() => {
+            setFullTextDialog((prev) => (prev ? { ...prev, running: true } : prev));
+            void submitQuestion(fullTextDialog.question, "fulltext", false, true);
+          }}
+          onCancel={() => setFullTextDialog(null)}
         />
       )}
 

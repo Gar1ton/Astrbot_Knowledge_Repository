@@ -2649,3 +2649,214 @@ async def test_update_document_meta_normalizes_creators_and_year() -> None:
     assert doc is not None
     assert doc.local_meta["creators"] == ["Li, Ming", "Wang, Wei"]
     assert doc.local_meta["year"] == "2020"
+
+
+# ── 全文检索（fulltext）────────────────────────────────────────
+
+_FULLTEXT_TAIL = "SENTINEL_DOCUMENT_TAIL"
+
+
+class _RecordingFullTextLLM:
+    """记录送入的 prompt，用于断言正文未被截断。"""
+
+    def __init__(self, text: str = "全文答案 [1]", status: str = "") -> None:
+        self.prompts: list[str] = []
+        self.system_prompts: list[str] = []
+        self._text = text
+        self._status = status
+
+    async def generate_result(self, prompt, system_prompt="", *, allow_mock=True):
+        from kacore.domain.llm_generation import GenerationResult
+
+        assert allow_mock is False, "全文合成必须禁用 mock 兜底，否则超窗会返回假答案"
+        self.prompts.append(prompt)
+        self.system_prompts.append(system_prompt)
+        return GenerationResult(text=self._text, status=self._status)
+
+
+async def _make_fulltext_api(
+    tmp_path: Path, body: str, llm: object | None = None
+) -> KnowledgeRepositoryApi:
+    """构造一个 d1 带 clean.md 制品的 api；body 尾部自动追加哨兵串。"""
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "papers")
+    bundle = tmp_path / "d1"
+    bundle.mkdir(parents=True, exist_ok=True)
+    (bundle / "clean.md").write_text(f"{body}{_FULLTEXT_TAIL}", encoding="utf-8")
+    doc.file_path = str(bundle / "original.pdf")
+    doc.markdown_rel_path = "clean.md"
+    await store.add_document(doc)
+    return KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({"papers": []}),
+        llm_adapter=llm,  # type: ignore[arg-type]
+    )
+
+
+async def test_ask_fulltext_requires_doc_id(tmp_path: Path) -> None:
+    api = await _make_fulltext_api(tmp_path, "short body")
+    with pytest.raises(ValueError, match="requires a doc_id"):
+        await api.ask(question="q", retrieval_mode="fulltext")
+
+
+async def test_ask_fulltext_under_threshold_runs_without_confirmation(tmp_path: Path) -> None:
+    """低于阈值零摩擦：不需要 confirmed 即可直接出答案。"""
+    llm = _RecordingFullTextLLM()
+    api = await _make_fulltext_api(tmp_path, "short body ", llm)
+
+    result = await api.ask(question="q", retrieval_mode="fulltext", doc_id="d1")
+
+    assert result["actual_retrieval_mode"] == "fulltext"
+    assert result["retrieval_engines"] == ["fulltext"]
+    assert result["fallback_reason"] is None
+    assert len(result["sources"]) == 1
+    assert result["sources"][0]["chunk_id"] == ""
+    assert result["sources"][0]["doc_id"] == "d1"
+
+
+async def test_ask_fulltext_over_threshold_requires_confirmation(tmp_path: Path) -> None:
+    """超阈值时抛确认门，且**未调用 LLM、未写入任何 chat_history**。"""
+    from kacore.api import FullTextConfirmationRequiredError
+    from kacore.retrieval_modes import FULLTEXT_CONFIRM_THRESHOLD_CHARS
+
+    llm = _RecordingFullTextLLM()
+    body = "x" * (FULLTEXT_CONFIRM_THRESHOLD_CHARS + 1)
+    api = await _make_fulltext_api(tmp_path, body, llm)
+
+    with pytest.raises(FullTextConfirmationRequiredError) as excinfo:
+        await api.ask(question="q", retrieval_mode="fulltext", doc_id="d1")
+
+    exc = excinfo.value
+    assert exc.total_chars == len(body) + len(_FULLTEXT_TAIL)
+    assert exc.requested_chars == exc.total_chars
+    assert exc.threshold_chars == FULLTEXT_CONFIRM_THRESHOLD_CHARS
+    assert exc.estimated_tokens > 0
+    assert llm.prompts == [], "被确认门拦下时绝不能已经烧掉一次 LLM 调用"
+    assert api._source_store._chat_history == {}, "被拦下时不得留下任何聊天记录"
+
+
+async def test_ask_fulltext_confirmed_sends_whole_document_to_llm(tmp_path: Path) -> None:
+    """确认后整篇送入：prompt 必须含文档**末尾**哨兵串，证明没有被截断。"""
+    from kacore.retrieval_modes import FULLTEXT_CONFIRM_THRESHOLD_CHARS
+
+    llm = _RecordingFullTextLLM()
+    body = "x" * (FULLTEXT_CONFIRM_THRESHOLD_CHARS + 5000)
+    api = await _make_fulltext_api(tmp_path, body, llm)
+
+    result = await api.ask(
+        question="q", retrieval_mode="fulltext", doc_id="d1", confirmed=True
+    )
+
+    assert result["answer"]
+    assert len(llm.prompts) == 1
+    # 整篇原样入 prompt：首尾都在，且完整 body 是一个连续子串（没有中间被砍）。
+    assert _FULLTEXT_TAIL in llm.prompts[0]
+    assert f"{body}{_FULLTEXT_TAIL}" in llm.prompts[0]
+
+
+async def test_ask_fulltext_renders_harvard_reference_for_whole_document(
+    tmp_path: Path,
+) -> None:
+    """整篇文档答案走同一条 Harvard 机器：[1] 被改写、参考文献表恰好一条。"""
+    llm = _RecordingFullTextLLM(text="结论如此 [1]")
+    api = await _make_fulltext_api(tmp_path, "body ", llm)
+    doc = await api._source_store.get_document("d1")
+    assert doc is not None
+    doc.local_meta = {"creators": ["Li, Ming"], "year": "2025"}
+    await api._source_store.update_document(doc)
+
+    result = await api.ask(question="q", retrieval_mode="fulltext", doc_id="d1")
+
+    assert "(Li, 2025)" in result["answer"]
+    assert "[1]" not in result["answer"]
+    assert len(result["references"]) == 1
+
+
+async def test_ask_fulltext_source_text_is_clipped_not_whole_document(
+    tmp_path: Path,
+) -> None:
+    """回归锁：sources 会随 chat_history 落库，正文绝不能整篇塞进 source['text']。"""
+    llm = _RecordingFullTextLLM()
+    api = await _make_fulltext_api(tmp_path, "句子。" * 5000, llm)
+
+    result = await api.ask(question="q", retrieval_mode="fulltext", doc_id="d1")
+
+    assert len(result["sources"][0]["text"]) < 1000
+
+
+async def test_ask_fulltext_missing_document_and_missing_artifact(tmp_path: Path) -> None:
+    from kacore.api import FullTextDocumentUnavailableError
+
+    api = await _make_fulltext_api(tmp_path, "body")
+
+    with pytest.raises(FullTextDocumentUnavailableError) as missing:
+        await api.ask(question="q", retrieval_mode="fulltext", doc_id="nope")
+    assert missing.value.reason == "document_not_found"
+
+    (tmp_path / "d1" / "clean.md").unlink()
+    with pytest.raises(FullTextDocumentUnavailableError) as broken:
+        await api.ask(question="q", retrieval_mode="fulltext", doc_id="d1")
+    assert broken.value.reason == "artifact_missing"
+
+
+async def test_ask_fulltext_llm_failure_does_not_return_mock_answer(tmp_path: Path) -> None:
+    """LLM 报错/空返回一律转成明确错误，绝不返回离线占位文本或半篇答案。"""
+    from kacore.api import FullTextGenerationFailedError
+
+    class _BoomLLM:
+        async def generate_result(self, prompt, system_prompt="", *, allow_mock=True):
+            raise RuntimeError("context length exceeded")
+
+    api = await _make_fulltext_api(tmp_path, "body ", _BoomLLM())
+    with pytest.raises(FullTextGenerationFailedError) as boom:
+        await api.ask(question="q", retrieval_mode="fulltext", doc_id="d1")
+    assert boom.value.total_chars > 0
+
+    empty_api = await _make_fulltext_api(tmp_path, "body ", _RecordingFullTextLLM(text=""))
+    with pytest.raises(FullTextGenerationFailedError, match="context window"):
+        await empty_api.ask(question="q", retrieval_mode="fulltext", doc_id="d1")
+
+
+async def test_document_markdown_page_accepts_more_than_40000_chars(tmp_path: Path) -> None:
+    """v1.1.1：40000 硬上限已拆除（旧实现还会静默夹取）。"""
+    api = await _make_fulltext_api(tmp_path, "y" * 50000)
+
+    page = await api.get_document_markdown_page("d1", max_chars=50000)
+
+    assert page is not None
+    assert len(page["content"]) == 50000
+
+
+async def test_document_markdown_page_zero_max_chars_reads_to_end(tmp_path: Path) -> None:
+    api = await _make_fulltext_api(tmp_path, "z" * 100)
+
+    page = await api.get_document_markdown_page("d1", max_chars=0)
+
+    assert page is not None
+    assert page["has_more"] is False
+    assert len(page["content"]) == page["total_chars"] == 100 + len(_FULLTEXT_TAIL)
+
+
+async def test_document_markdown_page_gate_and_confirmed_bypass(tmp_path: Path) -> None:
+    """门禁按**本次返回量**判定：小分页零摩擦，整篇读需确认。"""
+    from kacore.api import FullTextConfirmationRequiredError
+    from kacore.retrieval_modes import FULLTEXT_CONFIRM_THRESHOLD_CHARS
+
+    api = await _make_fulltext_api(tmp_path, "w" * (FULLTEXT_CONFIRM_THRESHOLD_CHARS + 100))
+
+    # 一篇超长文档，但这次只取 12000 字符 → 不触发门禁。
+    small = await api.get_document_markdown_page("d1", max_chars=12000)
+    assert small is not None and len(small["content"]) == 12000
+
+    with pytest.raises(FullTextConfirmationRequiredError):
+        await api.get_document_markdown_page("d1", max_chars=0)
+
+    whole = await api.get_document_markdown_page("d1", max_chars=0, confirmed=True)
+    assert whole is not None
+    assert whole["content"].endswith(_FULLTEXT_TAIL)
+
+
+async def test_document_markdown_page_rejects_negative_max_chars(tmp_path: Path) -> None:
+    api = await _make_fulltext_api(tmp_path, "body")
+    with pytest.raises(ValueError, match="zero or greater"):
+        await api.get_document_markdown_page("d1", max_chars=-1)

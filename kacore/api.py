@@ -81,6 +81,8 @@ from kacore.pipelines.citation_rendering import (
 )
 from kacore.pipelines.retrieval_orchestrator import ChunkSignal, RetrievalScope
 from kacore.retrieval_modes import (
+    FULLTEXT_CONFIRM_THRESHOLD_CHARS,
+    MODE_FULLTEXT,
     MODE_GRAPH_MIXED,
     MODE_GRAPH_ONLY,
     VALID_RETRIEVAL_MODES,
@@ -232,6 +234,17 @@ def _serialize_deep_thinking(outcome: Any) -> dict:
 def _uses_chinese(text: str) -> bool:
     """粗略判断文本是否包含中文，用于 answer_language=auto 的警告语言。"""
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
+def _est_context_tokens(text: str) -> int:
+    """粗估整篇正文送入模型的 token 数，仅用于确认弹窗/preview 的「约 N tokens」展示。
+
+    刻意不复用 `pipelines/llm_json.est_tokens` 的 `len // 4`：那个比例按英文定，
+    对中文文档**低估 4~6 倍**，而低估恰恰发生在最危险的场景（用户以为不长就点了
+    确认）。这里按 CJK ~1 token/字、其余 ~0.25 token/字分别计，宁可高估不可低估。
+    """
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return int(cjk + (len(text) - cjk) * 0.25)
 
 
 def _deep_warning_prefix(outcome: Any, answer_language: str, question: str) -> str:
@@ -539,6 +552,66 @@ class AskTaskTimeoutError(RuntimeError):
         )
         self.conversation_id = conversation_id
         self.timeout_seconds = timeout_seconds
+
+
+class FullTextConfirmationRequiredError(RuntimeError):
+    """全文读取量超过确认阈值，且调用方尚未显式确认。
+
+    **不是失败，是一次询问**：调用方（web 层 → 前端弹窗 / codex skill → preview）应把
+    `total_chars` 等数字原样展示给用户，取得明确同意后带 `confirmed=True` 重发同一请求。
+    抛出时保证**尚未调用 LLM、尚未写入任何 chat_history**，重发是干净的重试而非续跑。
+
+    刻意携带全部展示所需数字：调用方据此直接渲染，无需再打一次 estimate 请求。
+    """
+
+    def __init__(
+        self,
+        doc_id: str,
+        *,
+        title: str,
+        total_chars: int,
+        requested_chars: int,
+        threshold_chars: int,
+        estimated_tokens: int,
+    ) -> None:
+        super().__init__(
+            f"full-text read of {requested_chars} chars exceeds the "
+            f"{threshold_chars}-char confirmation threshold; resend with confirmed=true"
+        )
+        self.doc_id = doc_id
+        self.title = title
+        self.total_chars = total_chars
+        self.requested_chars = requested_chars
+        self.threshold_chars = threshold_chars
+        self.estimated_tokens = estimated_tokens
+
+
+class FullTextDocumentUnavailableError(RuntimeError):
+    """全文检索指定的文档不可读：库里没有，或 clean.md 制品缺失。
+
+    分两种 reason 是因为用户能做的补救不同：`document_not_found` 是选错了文档，
+    `artifact_missing` 是文档在库但解析产物丢了（需要重新入库）。
+    """
+
+    def __init__(self, doc_id: str, reason: str) -> None:
+        super().__init__(f"full-text document unavailable ({reason}): {doc_id}")
+        self.doc_id = doc_id
+        self.reason = reason
+
+
+class FullTextGenerationFailedError(RuntimeError):
+    """整篇正文已成功读出，但 LLM 生成失败（最常见原因是超出上下文窗口）。
+
+    单列一类而不是复用通用错误：这条路径的失败几乎总是「文档太长」，用户需要的不是
+    「生成失败」四个字，而是**实际字符数**加一句可执行的建议（改用 default/enhanced）。
+    契约：绝不返回截断后的半篇答案冒充完整回答。
+    """
+
+    def __init__(self, doc_id: str, total_chars: int, reason: str) -> None:
+        super().__init__(reason)
+        self.doc_id = doc_id
+        self.total_chars = total_chars
+        self.reason = reason
 
 
 # v0.30.1 兼容导出；v0.31.0 移除。活跃代码统一使用 GraphMixedQueryError。
@@ -991,19 +1064,74 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             raise FileNotFoundError(f"Markdown artifact not found for {doc_id}: {rel_path}")
         return await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
 
+    async def _load_fulltext_document(self, doc_id: str) -> tuple[SourceDocument, str]:
+        """读出文档实体与整篇 clean.md；任一环节缺失统一转成可分类的领域异常。
+
+        存在的理由：`get_document_markdown_content` 对「文档不存在」返回 None、对「制品丢失」
+        抛 `FileNotFoundError`，两种失败形状不一。裸 `FileNotFoundError` 逃出 `ask()` 会在
+        web 层变成 500——那是本函数顺带修掉的既有隐患。
+        """
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            raise FullTextDocumentUnavailableError(doc_id, "document_not_found")
+        try:
+            content = await self.get_document_markdown_content(doc_id)
+        except FileNotFoundError as exc:
+            raise FullTextDocumentUnavailableError(doc_id, "artifact_missing") from exc
+        if content is None:
+            raise FullTextDocumentUnavailableError(doc_id, "document_not_found")
+        return doc, content
+
+    def _require_fulltext_confirmation(
+        self,
+        doc: SourceDocument,
+        content: str,
+        requested_chars: int,
+        confirmed: bool,
+    ) -> None:
+        """全项目唯一的全文阈值比较点（ask 门禁与分页读门禁共用）。
+
+        比较的是「本次实际会返回/送入多少字符」而不是调用方填的数字——所以对一篇 3000 字的
+        文档请求 `max_chars=999999` 不会有任何摩擦，「低于阈值零摩擦」由此保证。
+        """
+        if confirmed or requested_chars <= FULLTEXT_CONFIRM_THRESHOLD_CHARS:
+            return
+        raise FullTextConfirmationRequiredError(
+            doc.doc_id,
+            title=doc.title or doc.doc_id,
+            total_chars=len(content),
+            requested_chars=requested_chars,
+            threshold_chars=FULLTEXT_CONFIRM_THRESHOLD_CHARS,
+            estimated_tokens=_est_context_tokens(content[:requested_chars]),
+        )
+
     async def get_document_markdown_page(
-        self, doc_id: str, *, start: int = 0, max_chars: int = 12000
+        self,
+        doc_id: str,
+        *,
+        start: int = 0,
+        max_chars: int = 12000,
+        confirmed: bool = False,
     ) -> dict[str, Any] | None:
-        """按字符页读取 clean.md；仅向调用方返回当前页，避免客户端接收整篇正文。"""
+        """按字符页读取 clean.md；文档不存在返回 None。
+
+        契约（v1.1.1 起）：**没有字符硬上限**。`max_chars == 0` 表示「从 start 读到文末」。
+        单次返回量超过 `FULLTEXT_CONFIRM_THRESHOLD_CHARS` 且未 `confirmed` 时抛
+        `FullTextConfirmationRequiredError`（询问而非失败，调用方确认后原样重发即可）。
+        """
         if start < 0:
             raise ValueError("start must be zero or greater")
-        if max_chars < 1 or max_chars > 40000:
-            raise ValueError("max_chars must be between 1 and 40000")
-        content = await self.get_document_markdown_content(doc_id)
-        if content is None:
-            return None
+        if max_chars < 0:
+            raise ValueError("max_chars must be zero or greater (0 reads to the end)")
+        try:
+            doc, content = await self._load_fulltext_document(doc_id)
+        except FullTextDocumentUnavailableError as exc:
+            if exc.reason == "document_not_found":
+                return None
+            raise
         bounded_start = min(start, len(content))
-        end = min(len(content), bounded_start + max_chars)
+        end = len(content) if max_chars == 0 else min(len(content), bounded_start + max_chars)
+        self._require_fulltext_confirmation(doc, content, end - bounded_start, confirmed)
         return {
             "doc_id": doc_id,
             "start": bounded_start,
@@ -1244,25 +1372,27 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             return dict(meta) if meta else {}
         return dict(doc.local_meta or {})
 
-    async def _build_source_entry(
+    async def _build_document_source_entry(
         self,
-        chunk: DocumentChunk,
+        doc_id: str,
         n: int,
         doc_cache: dict[str, SourceDocument | None],
         meta_cache: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        """把一条召回 chunk 组装为带书目字段的 source dict（ask 与 agent 证据端点共用）。
+        """把一个**文档**组装为带书目字段的 source dict（不含任何 chunk 专属字段）。
+
+        单列这一层是为了全文检索：它的答案没有 chunk，但仍要走同一条 Harvard 引用机器。
+        可行性在于 `citation_rendering.build_citation_refs` 只读书目键，从不碰 chunk_id。
+        chunk 专属键（chunk_id/ordinal/text/metadata/pages）在此留空，由调用方覆盖。
 
         两级缓存按 doc_id 复用：同一文档命中多个 chunk 时，文档与书目元数据各只读一次
         （改造前是逐 chunk 各读一次，8 个 chunk 即 8 次存储往返）。
         """
-        doc_id = chunk.doc_id
         if doc_id not in doc_cache:
             doc_cache[doc_id] = await self.get_document(doc_id)
             meta_cache[doc_id] = await self._document_biblio_meta(doc_cache[doc_id])
         doc = doc_cache[doc_id]
         biblio = meta_cache.get(doc_id) or {}
-        meta = chunk.metadata or {}
         creators = biblio.get("creators") or []
         year = str(biblio.get("year") or "").strip()
         source: dict[str, Any] = {
@@ -1270,11 +1400,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             "doc_id": doc_id,
             "document_id": doc_id,
             "title": doc.title if doc else doc_id,
-            "chunk_id": chunk.chunk_id,
-            "ordinal": chunk.ordinal,
-            "text": chunk.text,
-            "metadata": meta,
-            "pages": meta.get("pages", []),
+            "chunk_id": "",
+            "ordinal": 0,
+            "text": "",
+            "metadata": {},
+            "pages": [],
             "origin": doc.origin.value if doc else "local",
             # 书目字段对 Zotero 与本地文档一视同仁（v1.1.0 前只有 Zotero 文档能拿到）。
             # abstract 刻意不带出——每行 chat_history 都会被它撑大。
@@ -1290,6 +1420,28 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         first_author = str(creators[0]).split(",")[0].strip() if creators else ""
         source["author"] = first_author
         source["citation"] = " ".join(x for x in [first_author, year] if x).strip()
+        return source
+
+    async def _build_source_entry(
+        self,
+        chunk: DocumentChunk,
+        n: int,
+        doc_cache: dict[str, SourceDocument | None],
+        meta_cache: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        """把一条召回 chunk 组装为带书目字段的 source dict（ask 与 agent 证据端点共用）。
+
+        书目字段全部来自 `_build_document_source_entry`，这里只叠加 chunk 专属信息。
+        """
+        doc_id = chunk.doc_id
+        source = await self._build_document_source_entry(doc_id, n, doc_cache, meta_cache)
+        meta = chunk.metadata or {}
+        source["chunk_id"] = chunk.chunk_id
+        source["ordinal"] = chunk.ordinal
+        source["text"] = chunk.text
+        source["metadata"] = meta
+        source["pages"] = meta.get("pages", [])
+        doc = doc_cache.get(doc_id)
         if doc and doc.origin is DocumentOrigin.ZOTERO:
             source["zotero_item_uri"] = meta.get("zotero_item_uri", "")
             source["zotero_pdf_uri"] = meta.get("zotero_pdf_uri", "")
@@ -2108,6 +2260,118 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             retrieval_mode,
         )
 
+    async def _answer_from_fulltext(
+        self,
+        *,
+        cid: str,
+        question: str,
+        doc: SourceDocument,
+        content: str,
+        answer_language: str,
+        ask_start: float,
+        progress: Any,
+        record: Any,
+    ) -> dict:
+        """全文检索分支：整篇正文 → 答案 + 单条 Harvard 引用 + 落库（供 ask 内部调用）。
+
+        与其他模式的结构性差异：没有 chunk，故 sources 恒为一条**文档级**条目，in-text 短引
+        不带页码。契约见 `synthesize_from_document`——正文不截断，超窗时让调用失败而非返回
+        半篇答案。
+        """
+        from kacore.pipelines.answer_synthesis import synthesize_from_document
+
+        progress("fulltext_load", 30)
+        doc_id = doc.doc_id
+        title = doc.title or doc_id
+        progress("llm_generate", 60)
+        t_llm = time.monotonic()
+
+        generation_status = ""
+        if self._llm_adapter is None:
+            # 明确告知无法作答，绝不把整篇正文当答案倒回去（那既没回答问题，又会撑爆存库）。
+            answer = "⚠️ LLM 暂不可用，无法基于全文作答。请检查 LLM 配置后重试。"
+            citable = False
+        else:
+            try:
+                result = await synthesize_from_document(
+                    self._llm_adapter,
+                    question,
+                    content,
+                    title=title,
+                    answer_language=answer_language,
+                )
+            except Exception as exc:
+                raise FullTextGenerationFailedError(doc_id, len(content), str(exc)) from exc
+            answer = result.text
+            citable = True
+            if result.status in (STATUS_LENGTH, STATUS_CONTENT_FILTER):
+                generation_status = result.status
+            if not answer.strip():
+                raise FullTextGenerationFailedError(
+                    doc_id,
+                    len(content),
+                    f"LLM returned no answer for a {len(content)}-char document "
+                    f"(status={result.status or 'empty'}); the full text likely exceeds "
+                    "the model's context window",
+                )
+
+        # sources 恒一条。text 用 clip_at_sentence 而非整篇正文——sources 会随
+        # add_chat_message 落库，几十万字符会把每行 chat_history 撑爆。
+        sources = [await self._build_document_source_entry(doc_id, 1, {}, {})]
+        sources[0]["text"] = clip_at_sentence(content, 300)
+        references: list[str] = []
+        if citable:
+            answer, references = render_answer_with_references(answer, sources)
+        else:
+            annotate_sources(sources)
+        answer_notice = _compute_answer_notice(None, answer_language, question, generation_status)
+
+        record("llm_generate", t_llm)
+        record("ask_total", ask_start, sources=1)
+        progress("done", 100)
+        logger.info(
+            "ask 完成 mode=fulltext doc_id=%s 正文=%d 字符 生成 %.1fs",
+            doc_id,
+            len(content),
+            time.monotonic() - t_llm,
+        )
+
+        stored_answer = f"{answer_notice}\n\n---\n\n{answer}" if answer_notice else answer
+        try:
+            await self._source_store.add_chat_message(cid, "user", question)
+            await self._source_store.add_chat_message(
+                cid, "assistant", stored_answer, sources=sources, retrieval_mode=MODE_FULLTEXT
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist chat history: %s", exc)
+
+        self._runtime_events.finish(
+            operation_id=cid,
+            category="llm",
+            operation="ask",
+            msg="Ask 问答完成",
+            metadata={
+                "conversation_id": cid,
+                "mode": MODE_FULLTEXT,
+                "engines": MODE_FULLTEXT,
+                "sources": 1,
+                "doc_id": doc_id,
+                "total_chars": len(content),
+            },
+        )
+        return {
+            "conversation_id": cid,
+            "answer": answer,
+            "answer_notice": answer_notice,
+            "references": references,
+            "sources": sources,
+            "requested_retrieval_mode": MODE_FULLTEXT,
+            "actual_retrieval_mode": MODE_FULLTEXT,
+            "retrieval_engines": [MODE_FULLTEXT],
+            "fallback_reason": None,
+            "thinking_trace": None,
+        }
+
     async def ask(
         self,
         question: str,
@@ -2123,11 +2387,18 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         scope_library_id: str = "",
         candidate_k: int | None = None,
         use_reranker: bool = False,
+        doc_id: str | None = None,
+        confirmed: bool = False,
     ) -> dict:
         """Retrieve evidence and generate one final answer.
 
         candidate_k / use_reranker：研究路径用——候选池宽召回 + cross-encoder 重排再取 top_k
         （仅 default 模式生效；默认 answer top_k 不变）。reranker 为 passthrough 时自动退回 RRF。
+
+        doc_id / confirmed：全文检索（`retrieval_mode="fulltext"`）用——把该文档整篇 clean.md
+        送入 LLM，**不截断**。正文超过 `FULLTEXT_CONFIRM_THRESHOLD_CHARS` 且未 `confirmed`
+        时抛 `FullTextConfirmationRequiredError`（询问而非失败），调用方取得用户明确同意后
+        带 `confirmed=True` 原样重发。其他模式忽略这两个参数。
         """
         scope = _build_scope(scope_type, scope_key, scope_library_id)
         # 未显式传 scope 但选了集合：默认按「选中集合 + 所有子目录」检索（含后代），
@@ -2148,7 +2419,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         if retrieval_mode not in VALID_RETRIEVAL_MODES:
             raise ValueError(
                 "retrieval_mode must be 'default', 'enhanced', 'graph_mixed', "
-                "'graph_only', or 'deep_thinking'"
+                "'graph_only', 'deep_thinking', or 'fulltext'"
             )
         # graph_mixed / graph_only 走图谱 workspace，必须有具体 collection；
         # deep_thinking / enhanced 允许 collection 为空（全局证据链，跨所有 active 集合）。
@@ -2156,6 +2427,19 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             raise ValueError(f"{retrieval_mode} retrieval requires a collection")
         if answer_language not in {"auto", "zh", "en"}:
             answer_language = "auto"
+
+        # 全文门禁刻意放在 runtime_events.start() 之前：① 被确认门拦下时不留一个永不结束的
+        # 「Ask 已开始」事件；② 不白跑下面那次 use_english_retrieval 翻译调用（全文模式不做
+        # 向量召回，retrieval_question 无意义）；③ 确认属于入参校验语义，不是检索结果。
+        fulltext_doc: SourceDocument | None = None
+        fulltext_content = ""
+        if retrieval_mode == MODE_FULLTEXT:
+            if not doc_id:
+                raise ValueError("fulltext retrieval requires a doc_id")
+            fulltext_doc, fulltext_content = await self._load_fulltext_document(doc_id)
+            self._require_fulltext_confirmation(
+                fulltext_doc, fulltext_content, len(fulltext_content), confirmed
+            )
 
         cid = conversation_id or uuid.uuid4().hex
         ask_start = time.monotonic()
@@ -2206,8 +2490,14 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
 
         # 翻译召回查询（当 use_english_retrieval=True 时，将用户问题翻译为英语再送入向量检索）。
         # 仅含中文才翻译：与聊天路径的 _has_cjk 门一致，英文 query 不白耗一次 LLM 调用。
+        # fulltext 不做向量召回，retrieval_question 无处可用，翻译纯属白烧一次 LLM 调用。
         retrieval_question = question
-        if use_english_retrieval and self._llm_adapter is not None and _uses_chinese(question):
+        if (
+            use_english_retrieval
+            and retrieval_mode != MODE_FULLTEXT
+            and self._llm_adapter is not None
+            and _uses_chinese(question)
+        ):
             try:
                 prompt = (
                     "Translate the following query to English for document retrieval."
@@ -2240,6 +2530,20 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             等待」，见 plugin_initializer._probe_embedding_dimension）；前端超时/断线后
             可通过 /api/ask/progress 与 /api/chat/history 找回这份迟到的答案。
             """
+            # fulltext: 不做任何召回，整篇 clean.md 直接送 LLM。门禁与读盘已在 ask() 入口
+            # 完成（fulltext_doc / fulltext_content 已就绪），这里只负责生成与落库。
+            if retrieval_mode == MODE_FULLTEXT and fulltext_doc is not None:
+                return await self._answer_from_fulltext(
+                    cid=cid,
+                    question=question,
+                    doc=fulltext_doc,
+                    content=fulltext_content,
+                    answer_language=answer_language,
+                    ask_start=ask_start,
+                    progress=_progress,
+                    record=_record,
+                )
+
             if retrieval_mode in {MODE_GRAPH_MIXED, MODE_GRAPH_ONLY}:
                 readiness = await self.get_lightrag_readiness(collection or "")
                 if not readiness["ready"]:

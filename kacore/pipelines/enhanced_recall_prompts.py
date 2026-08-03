@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from kacore.pipelines.answer_synthesis import (
     _SYNTH_SYSTEM_DEEP,
-    _lang_instruction,
+    lang_instruction,
     source_tag,
 )
 from kacore.pipelines.deep_thinking_prompts import JsonContractError, extract_json_object
@@ -91,7 +91,7 @@ def build_synth_check_system(answer_language: str, max_corrective_queries: int) 
     """以 deep 合成模板为基底，追加尾部 verdict 契约（CRAG 式充分性自检内嵌于合成调用）。"""
     return (
         _SYNTH_SYSTEM_DEEP
-        + _lang_instruction(answer_language)
+        + lang_instruction(answer_language)
         + f" After you finish the answer, output a line containing exactly {VERDICT_MARKER} "
         "followed by ONE JSON object on the lines after it: "
         '{"sufficient":true|false,"insufficiency_reasons":["what evidence is missing"],'

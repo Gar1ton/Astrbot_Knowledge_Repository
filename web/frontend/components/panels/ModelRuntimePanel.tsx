@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ds/Badge";
 import { Button } from "@/components/ds/Button";
+import { Card, Field } from "@/components/ds/Card";
 import { Icon } from "@/components/ds/Icon";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
@@ -16,66 +17,13 @@ const STATE_TONE: Record<string, "ok" | "warn" | "danger" | "neutral"> = {
   external: "neutral",
 };
 
-function ModelCard({
-  entry,
-  busy,
-  onUnload,
-}: {
-  entry: ModelRuntimeEntry;
-  busy: boolean;
-  onUnload: () => void;
-}) {
-  const { t } = useI18n();
-  const resident = entry.state === "ready" || entry.state === "loading";
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "10px 12px",
-        borderRadius: "var(--radius-md)",
-        border: "1px solid var(--border)",
-        background: "var(--surface)",
-        marginBottom: 8,
-      }}
-    >
-      <Icon name="chip" size={16} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-          <span style={{ fontSize: 12, fontWeight: 700, color: "var(--heading)" }}>
-            {t(entry.kind === "embedding" ? "models_kind_embedding" : "models_kind_rerank")}
-          </span>
-          <Badge tone={STATE_TONE[entry.state] ?? "neutral"}>
-            {t(`models_state_${entry.state}` as never)}
-          </Badge>
-        </div>
-        <div
-          style={{
-            fontSize: 11,
-            color: "var(--fg-muted)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {entry.model || "—"}
-          {entry.device ? ` · ${entry.device}` : ""}
-        </div>
-        {entry.last_error && (
-          <div style={{ fontSize: 10.5, color: "var(--danger)", marginTop: 2 }}>
-            {entry.last_error}
-          </div>
-        )}
-      </div>
-      <Button size="sm" variant="tab" disabled={busy || !resident} onClick={onUnload}>
-        {t("models_unload_one")}
-      </Button>
-    </div>
-  );
-}
-
-export function ModelRuntimePanel() {
+/**
+ * 显存与模型驻留状态的拉取与卸载动作。
+ *
+ * 单列成 hook 是因为「全部卸载」按钮按 DS 惯例属于 Modal 的 footer，而正文在 body——
+ * 两处需要同一份 runtime/busy 状态，状态因此必须由 ModelsModal 持有。
+ */
+export function useModelRuntime() {
   const { t } = useI18n();
   const { toast } = useToast();
   const [runtime, setRuntime] = useState<ModelRuntime | null>(null);
@@ -115,70 +63,139 @@ export function ModelRuntimePanel() {
     [t, toast],
   );
 
+  return { runtime, busy, error, doUnload };
+}
+
+function ModelRow({
+  entry,
+  busy,
+  onUnload,
+}: {
+  entry: ModelRuntimeEntry;
+  busy: boolean;
+  onUnload: () => void;
+}) {
+  const { t } = useI18n();
+  const resident = entry.state === "ready" || entry.state === "loading";
+  const label = t(entry.kind === "embedding" ? "models_kind_embedding" : "models_kind_rerank");
+  const hint = `${entry.model || "—"}${entry.device ? ` · ${entry.device}` : ""}`;
+  return (
+    <Field
+      label={label}
+      hint={entry.last_error ? `${hint} · ${entry.last_error}` : hint}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <Badge tone={STATE_TONE[entry.state] ?? "neutral"}>
+          {t(`models_state_${entry.state}` as never)}
+        </Badge>
+        <Button size="sm" variant="tab" disabled={busy || !resident} onClick={onUnload}>
+          {t("models_unload_one")}
+        </Button>
+      </div>
+    </Field>
+  );
+}
+
+export function ModelRuntimePanel({
+  runtime,
+  busy,
+  error,
+  onUnload,
+}: {
+  runtime: ModelRuntime | null;
+  busy: boolean;
+  error: string;
+  onUnload: (kinds?: string[]) => void;
+}) {
+  const { t } = useI18n();
   const accelerator = runtime?.accelerator ?? null;
+  const models = runtime?.models ?? [];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <div style={{ padding: "18px 22px" }}>
+      {error && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 8,
+            background: "color-mix(in srgb, var(--danger) 10%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--danger) 28%, transparent)",
+            borderRadius: "var(--radius-lg)",
+            marginBottom: 16,
+            padding: "11px 13px",
+          }}
+        >
+          <Icon name="spark2" size={16} style={{ color: "var(--danger)", flexShrink: 0 }} />
+          <span style={{ fontSize: 12, lineHeight: 1.55, color: "var(--fg)" }}>{error}</span>
+        </div>
+      )}
+
       {/* 显存概览：读不到加速器时整块降级为「CPU 模式」，而不是报错。 */}
-      <div
-        style={{
-          padding: "12px 14px",
-          borderRadius: "var(--radius-md)",
-          border: "1px solid var(--border-strong)",
-          background: "var(--bg-inset)",
-        }}
+      <Card
+        title={t("models_vram_section")}
+        icon="chip"
+        badge={
+          <Badge tone={accelerator ? "accent" : "neutral"}>
+            {accelerator ? t("models_vram_badge_gpu") : t("models_vram_badge_cpu")}
+          </Badge>
+        }
       >
         {accelerator ? (
           <>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--heading)", marginBottom: 6 }}>
-              {accelerator.device}
-            </div>
-            <div style={{ display: "flex", gap: 18, fontSize: 11.5, color: "var(--fg-muted)" }}>
-              <span>
-                {t("models_vram_used")}{" "}
-                <strong style={{ color: "var(--fg)" }}>
-                  {formatBytes(accelerator.used_bytes)} / {formatBytes(accelerator.total_bytes)}
-                </strong>
+            <Field label={t("models_vram_device")}>
+              <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--fg)" }}>
+                {accelerator.device}
               </span>
-              <span>
-                {t("models_vram_process")}{" "}
-                <strong style={{ color: "var(--fg)" }}>
-                  {formatBytes(accelerator.reserved_bytes)}
-                </strong>
+            </Field>
+            <Field label={t("models_vram_used")} hint={t("models_vram_used_hint")}>
+              <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--fg)" }}>
+                {formatBytes(accelerator.used_bytes)} / {formatBytes(accelerator.total_bytes)}
               </span>
-            </div>
+            </Field>
+            <Field label={t("models_vram_process")} hint={t("models_vram_process_hint")}>
+              <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--fg)" }}>
+                {formatBytes(accelerator.reserved_bytes)}
+              </span>
+            </Field>
           </>
         ) : (
-          <div style={{ fontSize: 11.5, color: "var(--fg-muted)" }}>{t("models_cpu_mode")}</div>
+          <div
+            style={{
+              fontSize: 12,
+              lineHeight: 1.55,
+              color: "var(--fg-muted)",
+              padding: "4px 0 8px",
+            }}
+          >
+            {t("models_cpu_mode")}
+          </div>
         )}
-      </div>
+      </Card>
 
-      {error && <div style={{ fontSize: 11.5, color: "var(--danger)" }}>{error}</div>}
-
-      <div>
-        {(runtime?.models ?? []).map((entry) => (
-          <ModelCard
-            key={entry.kind}
-            entry={entry}
-            busy={busy}
-            onUnload={() => void doUnload([entry.kind])}
-          />
-        ))}
-        {runtime && runtime.models.length === 0 && (
-          <div style={{ fontSize: 11.5, color: "var(--fg-subtle)" }}>{t("models_none")}</div>
+      <Card title={t("models_list_section")} icon="layers">
+        {models.length > 0 ? (
+          models.map((entry) => (
+            <ModelRow
+              key={entry.kind}
+              entry={entry}
+              busy={busy}
+              onUnload={() => onUnload([entry.kind])}
+            />
+          ))
+        ) : (
+          <div
+            style={{
+              fontSize: 12,
+              lineHeight: 1.55,
+              color: "var(--fg-subtle)",
+              padding: "4px 0 8px",
+            }}
+          >
+            {runtime ? t("models_none") : t("models_loading")}
+          </div>
         )}
-      </div>
-
-      <Button
-        variant="primary"
-        disabled={busy || (runtime?.resident_count ?? 0) === 0}
-        onClick={() => void doUnload()}
-      >
-        {t("models_unload_all")}
-      </Button>
-      <div style={{ fontSize: 10.5, lineHeight: 1.6, color: "var(--fg-subtle)" }}>
-        {t("models_unload_hint")}
-      </div>
+      </Card>
     </div>
   );
 }

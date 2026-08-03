@@ -21,8 +21,10 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from kacore.retrieval_modes import (
+    MODE_DEFAULT,
     MODE_GRAPH_MIXED,
     STRICT_COLLECTION_MODES,
+    STRICT_DOCUMENT_MODES,
     VALID_RETRIEVAL_MODES,
     normalize_retrieval_mode,
 )
@@ -41,6 +43,9 @@ _BREADTH_PLAN = {
 _VALID_MODES = VALID_RETRIEVAL_MODES
 # enhanced 不在严格集合模式内：与 default/deep 全局证据链一致，允许 collection 为空全局检索。
 _STRICT_COLLECTION_MODES = STRICT_COLLECTION_MODES
+# fulltext 一类模式必须绑定 doc_id，而 research 工具的调令模型里根本没有「单篇文档」这个
+# 概念（主 LLM 只能给 query + collection + breadth）。见到就降级为 default，不透传下去。
+_STRICT_DOCUMENT_MODES = STRICT_DOCUMENT_MODES
 
 # probe 结果上限，控制喂给 LLM 的 token。
 _MAX_COLLECTIONS = 8
@@ -319,7 +324,12 @@ class ResearchService:
                 "research mode='high_precision' is deprecated; use 'graph_mixed' instead"
             )
         if mode not in _VALID_MODES:
-            mode = "default"
+            mode = MODE_DEFAULT
+        if mode in _STRICT_DOCUMENT_MODES:
+            # 降级而非报错：主 LLM 偶尔会把「读这篇」误表达成一个模式名，但它给不出 doc_id。
+            # default 仍能召回该文档的相关 chunk，是最接近用户意图的可执行行为。
+            logger.info("research mode=%r requires a doc_id; downgrading to default", mode)
+            mode = MODE_DEFAULT
         if mode in _STRICT_COLLECTION_MODES and not collection:
             return _mode_failure_result(
                 query=query,

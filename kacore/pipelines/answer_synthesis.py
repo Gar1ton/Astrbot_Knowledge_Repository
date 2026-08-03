@@ -73,7 +73,27 @@ _SYNTH_SYSTEM_DEEP = (
 )
 
 
-def _lang_instruction(answer_language: str) -> str:
+# 全文检索专用：上下文是**一整篇**文档，不是拼接的证据池。
+# 故意不含 _SOURCE_ISOLATION_RULE——那条规则是防多篇证据张冠李戴的，单文档场景下没有可串的线，
+# 硬塞进来只会让模型误以为还有别的来源。反过来要强调「覆盖全篇、别只答开头」。
+_SYNTH_SYSTEM_FULLTEXT = (
+    "You are a helpful academic assistant. The context below is the COMPLETE text of a single "
+    "document. Answer the question based solely on this document; do not use outside knowledge. "
+    "Draw on the whole document rather than only its opening sections, and when the question "
+    "spans several parts of the text, cover each of them. "
+    "If the document genuinely does not address the question, say so plainly instead of "
+    "inventing an answer. "
+    "Cite the document using [1] notation. "
+    + _FLUENT_PROSE_RULE
+)
+
+
+def lang_instruction(answer_language: str) -> str:
+    """把 answer_language（auto/zh/en）翻成给 LLM 的一句语言指令。
+
+    公开导出而非私有：同一段 if/elif 在 api.ask 的 graph_only 与 deep 兜底分支各有一份，
+    加第三、四份即踩中 CONVENTIONS §4「重复 3 次 → 提取」。
+    """
     if answer_language == "zh":
         return "Answer in Chinese (中文)."
     if answer_language == "en":
@@ -112,7 +132,7 @@ async def synthesize_answer(
     if not evidence:
         return GenerationResult(text="", status=STATUS_EMPTY)
     base = _SYNTH_SYSTEM_DEEP if style == "deep" else _SYNTH_SYSTEM_BASE
-    system = base + _lang_instruction(answer_language)
+    system = base + lang_instruction(answer_language)
     context = "\n\n---\n\n".join(
         f"[{i + 1}]{source_tag(chunk.doc_id, source_labels)} {chunk.text}"
         for i, chunk in enumerate(evidence)
@@ -121,4 +141,34 @@ async def synthesize_answer(
     return await llm.generate_result(user, system_prompt=system, allow_mock=False)
 
 
-__all__ = ["synthesize_answer", "source_tag"]
+async def synthesize_from_document(
+    llm: LLMAdapter,
+    question: str,
+    document_text: str,
+    *,
+    title: str,
+    answer_language: str = "auto",
+) -> GenerationResult:
+    """用**整篇文档**合成答案（全文检索模式）。
+
+    契约：`document_text` **原样入 prompt，绝不截断**——全文检索的全部意义就在于模型看到全篇，
+    在这里悄悄截断等于把功能变成一个更差的召回。因此超出模型上下文窗口时正确行为是**让调用
+    失败**（`allow_mock=False` 保证不会掉进离线占位文本），由调用方转成明确错误告知用户，
+    而不是返回半篇答案冒充完整回答。
+
+    正文为空返回 `GenerationResult(text="", status=STATUS_EMPTY)`；LLM 调用异常向上抛。
+    引用恒为 [1]（只有一个来源），调用方据此拼单条 sources。
+    """
+    if not document_text.strip():
+        return GenerationResult(text="", status=STATUS_EMPTY)
+    system = _SYNTH_SYSTEM_FULLTEXT + lang_instruction(answer_language)
+    user = f"Document [1]: {title}\n\nFull text:\n\n{document_text}\n\nQuestion: {question}"
+    return await llm.generate_result(user, system_prompt=system, allow_mock=False)
+
+
+__all__ = [
+    "lang_instruction",
+    "source_tag",
+    "synthesize_answer",
+    "synthesize_from_document",
+]

@@ -2,6 +2,78 @@
 
 ## [Unreleased]
 
+## [v1.1.1] — 2026-08-03
+
+来源：用户提出的四项改进。核实后其中两项的前提与实际代码不符，本轮按实际情况处理。
+
+### 新增功能 (Added)
+
+- **全文检索（fulltext）端到端实装**。此前 Ask 面板的「全文检索」选项**根本跑不通**：
+  `kacore/retrieval_modes.py` 的 `VALID_RETRIEVAL_MODES` 不含 `fulltext`，`web/server.py`
+  的 `handle_ask` 也从不读取 `body["doc_id"]`（前端 `ChatPanel.tsx` 一直在发），选中后提问
+  必然 400；所谓「文档上限 60 000 字符」只是 `lib/i18n.ts` 的一句文案，全链路无任何强制点。
+  现在它是一条真实的检索模式：按 `doc_id` 读出整篇 `clean.md` 送入 LLM，**不做任何截断**。
+  新增 `kacore/retrieval_modes.py` 的 `MODE_FULLTEXT` / `STRICT_DOCUMENT_MODES` /
+  `FULLTEXT_CONFIRM_THRESHOLD_CHARS`、`kacore/pipelines/answer_synthesis.py` 的
+  `synthesize_from_document()`、`kacore/api.py` 的 `_answer_from_fulltext()` /
+  `_load_fulltext_document()` / `_require_fulltext_confirmation()` / `_est_context_tokens()`。
+  答案带**恰好一条**文档级 Harvard 引用（无 chunk 故不带页码），复用既有引用机器——为此把
+  `_build_source_entry` 拆出 `_build_document_source_entry`。
+- **超长文档的显式确认门（两个入口同一套契约）**。正文超过 60 000 字符且未确认时，后端抛
+  `FullTextConfirmationRequiredError`，`web/server.py` 映射为 **409
+  `status="fulltext_confirmation_required"`**，响应体自带 `total_chars` / `threshold_chars` /
+  `estimated_tokens` 等全部展示所需数字（调用方无需再打一次 estimate）。
+  WebUI 新增 `components/panels/FullTextConfirmDialog.tsx`（视觉对齐既有 GraphBuildDialog），
+  用户同意后带 `confirmed: true` 重发同一请求；codex skill 的 `read` 则返回
+  `status: "preview"` 且**不含任何正文**，需显式加 `--confirm-large-read` 重跑。
+  阈值只在 `kacore/retrieval_modes.py` 定义一次，前端与 skill 均从响应里读取，不复制该数字。
+  抛出确认门时保证**尚未调用 LLM、尚未写入任何 chat_history**，确认后是干净的重试而非续跑。
+- `knowledge_arch_client.py` 新增 `read --whole`（读到文末）与 `StructuredApiError`
+  （`ApiError` 子类，既有 catch 点与 exit_code 行为不变）；`web/server.py` 新增
+  `_query_flag()` 与 `_fulltext_confirmation_payload()`。
+
+### 变更 (Changed)
+
+- **移除全文读取的字符硬上限**。`kacore/api.py::get_document_markdown_page` 的
+  `max_chars ≤ 40000` 限制与 `.agents/.../knowledge_arch_client.py` 的 `MAX_READ_CHARS = 40000`
+  一并删除；`max_chars == 0` 现在表示「读到文末」。原先这两处都是**静默夹取**——请求 6 万字
+  会被悄悄砍到 4 万且调用方毫不知情，这正是「设了上限却没人知道」的根因。
+  门禁改为按「本次实际返回量」判定，因此小分页读长文档零摩擦。
+- **显存与本地模型面板重样式**，对齐 AstrBot 配置面板的 block 观感：新增
+  `components/ds/Card.tsx`（`Card` / `Field` 此前在 `AstrBotModal.tsx` 与 `SettingModal.tsx`
+  各有一份逐字拷贝，本轮收敛为一份，两个既有面板**视觉零变化**）；`ModelRuntimePanel.tsx`
+  改为两张 Card + Field 行，补上 `18px 22px` 内容 padding，丢掉 `--bg-inset` + `--border-strong`
+  这套本属输入槽/进度条底的配方，字号归位 DS 刻度；「全部卸载并清空缓存」按 DS 惯例移入
+  `Modal footer`；状态与动作因此上提为 `useModelRuntime()` hook。
+- `chat_retrieval_fulltext_desc` 文案由「文档上限 60 000 字符」改为「整篇正文送入模型」——
+  语义已从「上限」变为「确认阈值」。
+- `kacore/research_skill.py`：AstrBot 的 research 工具没有 doc_id 概念，收到
+  `mode="fulltext"` 时降级为 `default`。
+- `kacore/pipelines/answer_synthesis.py` 的 `_lang_instruction` 导出为 `lang_instruction`
+  （同一段 if/elif 已在仓库出现三处），`enhanced_recall_prompts.py` 跟随改名。
+
+### 修复 (Fixed)
+
+- `handle_ask` 静默丢弃 `doc_id`（前端一直在发、后端从未读取）。
+- `ChatPanel.tsx` 的全文检索前置校验错用了 `chat_graph_requires_collection`（文案说的是
+  「集合」而非「文章」），改为新键 `chat_fulltext_requires_doc`。
+- `retrievalModeLabel()` 缺 `fulltext` 分支，会把全文检索的答案与历史回放标成
+  「Milvus 语义检索」。
+- `lib/api.ts` 的 mock 分支把 fulltext 伪造成 `sqlite_lexical`。
+- clean.md 制品缺失时 `FileNotFoundError` 会从 `ask()` 逃逸成裸 500，现统一为
+  `FullTextDocumentUnavailableError` → 404（带 `document_not_found` / `artifact_missing`）。
+- 全文合成一律 `allow_mock=False`：`adapters/llm.py` 的 mock 兜底会在拿不到文本时返回**离线
+  占位文本**，用户确认了十几万字却拿到一段假答案是最坏结果。超窗改为 502
+  `fulltext_generation_failed` 并带上实际字符数，绝不返回截断后的半篇答案冒充完整回答。
+
+### 已知限制 (Known limitations)
+
+- `kacore/utils/torch_memory.py` 的 GPU/显存读取**本就是系统实时识别**（`torch.cuda`，零硬编码），
+  本轮按用户指示未改动。遗留瑕疵：设备名取自 `get_device_name(0)` 而显存数字取自
+  `mem_get_info()` 的当前设备，单卡环境两者同源、数据正确，多卡环境会错配。
+- codex skill 的确认门按**单次调用返回量**判定，分页累计读取不受约束（客户端无状态，无法可靠
+  累计）。仍靠 `references/research.md` §4 的阅读纪律约束。
+
 ## [v1.1.0] — 2026-08-01
 
 来源：用户提出的四项改进。核心是引用可读性——deep thinking / enhanced 召回给用户看到的是

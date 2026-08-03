@@ -64,6 +64,31 @@ python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py re
 The server returns only the requested page. Continue from `end` only when `has_more` is true and the
 allowed reading intent still requires more text.
 
+### Large reads require explicit consent
+
+`--whole` reads from `--start` to the end of the document. There is no character cap, but any single
+read larger than the server's confirmation threshold comes back as a preview instead of text:
+
+```json
+{"status": "preview", "total_chars": 183421, "confirm_threshold_chars": 60000,
+ "estimated_tokens": 172530, "requires_explicit_confirmation": true, "content_returned": false}
+```
+
+Do not retry blindly. Tell the user how large the document is, then rerun with the confirmation flag
+only after they agree:
+
+```powershell
+python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py read `
+  --doc-id DOCUMENT_ID --intent full-text --whole --confirm-large-read
+```
+
+Read the threshold from `confirm_threshold_chars` in the response; never hardcode the number — it is
+defined once on the server and may change.
+
+The gate is evaluated per call, on the number of characters that call would return. Paging through a
+long document in 12 000-character requests therefore never trips it, which is exactly why the reading
+discipline above still binds: page only while the anchored reading intent genuinely requires more text.
+
 ## 5. Answer from evidence
 
 Cite in Harvard style. Every evidence item returned by `ask-evidence` carries two server-computed

@@ -202,9 +202,14 @@ class EnhancedRecallOrchestrator:
         corrective = synth.corrective_queries[: self._cfg.max_corrective_queries]
         _progress("enhanced_corrective", 78, live_detail("round", checklist, trace))
         query_outcomes.extend(await self._retrieve_many(collection, corrective, scope))
+        # 首轮答案的 [n] 是按**纠正前**证据池编号的；重合成失败时必须连同证据池一起回滚，
+        # 否则返回的答案与证据错位。v1.1.0 起 [n] 会被改写成含作者姓名的 Harvard 短引，
+        # 错位不再只是「点错来源卡片」，而是正文明文把 A 的结论归给 B。
+        first_round_evidence, first_round_kept_ids = evidence, kept_ids
         evidence, kept_ids = await self._rank_pool(query_outcomes)
         _progress("enhanced_resynthesize", 88, live_detail("finalize", checklist, trace))
         answer = synth.answer
+        answer_generation_status = ""
         resynth_calls = 0
         try:
             labels = await self._retrieval.document_labels(c.doc_id for c in evidence)
@@ -218,12 +223,14 @@ class EnhancedRecallOrchestrator:
             )
             resynth_calls = 1
             total_tokens += est_tokens(
-                final_question, draft, *(c.text for c in evidence)
+                final_question, draft.text, *(c.text for c in evidence)
             )
-            if draft:
-                answer = draft
-        except Exception as exc:  # 重合成不可用 → 保留首轮答案，不打崩。
+            if draft.text:
+                answer = draft.text
+                answer_generation_status = draft.status
+        except Exception as exc:  # 重合成不可用 → 保留首轮答案 + 首轮证据池，不打崩。
             logger.warning("enhanced_recall re-synthesis unavailable: %s", exc)
+            evidence, kept_ids = first_round_evidence, first_round_kept_ids
         trace.append(
             RoundTrace(
                 round=2,
@@ -242,6 +249,7 @@ class EnhancedRecallOrchestrator:
             base_mode,
             total_tokens,
             answer=answer,
+            answer_generation_status=answer_generation_status,
             verified=True,
             verify_notes=synth.insufficiency_reasons,
         )
@@ -306,6 +314,7 @@ class EnhancedRecallOrchestrator:
         est_total_tokens: int,
         *,
         answer: str | None,
+        answer_generation_status: str = "",
         verified: bool = False,
         verify_notes: list[str] | None = None,
     ) -> DeepThinkingOutcome:
@@ -317,6 +326,7 @@ class EnhancedRecallOrchestrator:
             actual_mode=actual_mode,
             est_total_tokens=est_total_tokens,
             answer=answer,
+            answer_generation_status=answer_generation_status,
             verified=verified,
             verify_missing=[],
             verify_notes=list(verify_notes or []),

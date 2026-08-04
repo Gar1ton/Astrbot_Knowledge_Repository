@@ -29,7 +29,6 @@ RRF_K = 60
 MAX_QUERIES = 4
 MAX_FINAL_HITS = 20
 MAX_HIT_CHARS = 4000
-MAX_READ_CHARS = 40000
 MAX_NOTION_QA_ITEMS = 20
 MAX_NOTION_QA_QUESTION_CHARS = 2000
 MAX_NOTION_QA_ANSWER_CHARS = 100000
@@ -46,7 +45,11 @@ CONFIG_POLICIES: dict[str, dict[str, str]] = {
         "load_timeout_seconds": "restart",
         "device": "restart",
     },
-    "ask": {"answer_language": "none", "llm_timeout_seconds": "restart"},
+    "ask": {
+        "answer_language": "none",
+        "llm_timeout_seconds": "restart",
+        "task_timeout_seconds": "none",
+    },
     "graph": {
         "enabled": "restart",
         "query_mode": "restart",
@@ -120,6 +123,20 @@ class ConnectionFailure(ClientError):
 class ApiError(ClientError):
     code = "api_error"
     exit_code = 5
+
+
+class StructuredApiError(ApiError):
+    """An API error whose JSON body carries a machine-readable ``status`` discriminator.
+
+    Subclasses ApiError on purpose: every existing ``except ApiError`` site and the
+    ``exit_code`` contract keep working untouched. Callers that care about a specific
+    gate (e.g. the full-text confirmation gate) can inspect ``http_status``/``payload``.
+    """
+
+    def __init__(self, message: str, http_status: int, payload: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.payload = payload
 
 
 class UsageError(ClientError):
@@ -478,9 +495,12 @@ class KnowledgeArchClient:
                 return response.read()
         except HTTPError as exc:
             payload = exc.read().decode("utf-8", errors="replace")
+            structured: dict[str, Any] | None = None
             try:
                 parsed = json.loads(payload)
                 detail = parsed.get("message") or parsed.get("error") or payload
+                if isinstance(parsed, dict):
+                    structured = parsed
             except (json.JSONDecodeError, AttributeError):
                 detail = payload or exc.reason
             message = self._protect_message(str(detail))
@@ -488,7 +508,10 @@ class KnowledgeArchClient:
                 raise AuthenticationError(
                     f"Knowledge Arch authentication failed: {message}"
                 ) from None
-            raise ApiError(f"Knowledge Arch API returned HTTP {exc.code}: {message}") from None
+            summary = f"Knowledge Arch API returned HTTP {exc.code}: {message}"
+            if structured is not None:
+                raise StructuredApiError(summary, exc.code, structured) from None
+            raise ApiError(summary) from None
         except (URLError, TimeoutError, OSError) as exc:
             reason = self._protect_message(str(getattr(exc, "reason", exc)))
             raise ConnectionFailure(
@@ -837,16 +860,53 @@ def read_document(
     max_chars: int,
     *,
     intent: str,
+    confirm_large_read: bool = False,
 ) -> dict[str, Any]:
+    """Read document Markdown. ``max_chars=0`` reads to the end of the document.
+
+    There is no client-side character cap. Reads whose returned size exceeds the
+    server's confirmation threshold come back as a preview carrying **no document
+    text**; surface ``total_chars`` to the user, obtain explicit consent, and only
+    then retry with ``confirm_large_read=True``.
+    """
     if intent not in READ_INTENTS:
         raise UsageError("read requires --intent anchored or --intent full-text")
     if start < 0:
         raise UsageError("--start must be zero or greater")
-    max_chars = _bounded(max_chars, 1, MAX_READ_CHARS)
-    payload = client.request_json(
-        f"/api/documents/{quote(doc_id, safe='')}/content/page",
-        query_params={"start": start, "max_chars": max_chars},
-    )
+    if max_chars < 0:
+        raise UsageError("--max-chars must be zero or greater (0 reads to the end)")
+    query: dict[str, Any] = {"start": start, "max_chars": max_chars}
+    if confirm_large_read:
+        query["confirmed"] = 1
+    try:
+        payload = client.request_json(
+            f"/api/documents/{quote(doc_id, safe='')}/content/page",
+            query_params=query,
+        )
+    except StructuredApiError as exc:
+        if (
+            exc.http_status == 409
+            and exc.payload.get("status") == "fulltext_confirmation_required"
+        ):
+            gate = redact_secrets(exc.payload)
+            return {
+                "status": "preview",
+                "doc_id": doc_id,
+                "start": start,
+                "total_chars": gate.get("total_chars"),
+                "requested_chars": gate.get("requested_chars"),
+                "confirm_threshold_chars": gate.get("threshold_chars"),
+                "estimated_tokens": gate.get("estimated_tokens"),
+                "title": gate.get("title"),
+                "message": gate.get("message"),
+                "requires_explicit_confirmation": True,
+                # Deliberately not `mutation_performed`: this is a read gate, not a
+                # write gate. What the caller needs to know is that no text came back.
+                "content_returned": False,
+                "full_text_used": False,
+                "read_intent": intent,
+            }
+        raise
     result = _expect_dict(payload, "document content page")
     result["read_intent"] = intent
     result["full_text_used"] = True
@@ -1199,11 +1259,26 @@ def build_parser() -> argparse.ArgumentParser:
     ask_scope.add_argument("--collection")
     ask_scope.add_argument("--all", dest="all_collections", action="store_true")
 
-    read_parser = subparsers.add_parser("read", help="Read one bounded page of document Markdown")
+    read_parser = subparsers.add_parser("read", help="Read one page of document Markdown")
     read_parser.add_argument("--doc-id", required=True)
     read_parser.add_argument("--start", type=int, default=0)
-    read_parser.add_argument("--max-chars", type=int, default=12000)
+    read_size_group = read_parser.add_mutually_exclusive_group()
+    read_size_group.add_argument("--max-chars", type=int, default=12000)
+    read_size_group.add_argument(
+        "--whole",
+        action="store_true",
+        help="Read from --start to the end of the document (no character cap)",
+    )
     read_parser.add_argument("--intent", choices=READ_INTENTS, required=True)
+    read_parser.add_argument(
+        "--confirm-large-read",
+        action="store_true",
+        help=(
+            "Proceed with a read whose size exceeds the server's confirmation threshold. "
+            "Only pass this after telling the user the document's total_chars and getting "
+            "explicit consent. This is a read gate; --apply remains the mutation gate."
+        ),
+    )
 
     notion_save_parser = subparsers.add_parser(
         "notion-save-qa", help="Save conversation QA records to the configured Notion QA database"
@@ -1294,8 +1369,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     client,
                     args.doc_id,
                     args.start,
-                    args.max_chars,
+                    0 if args.whole else args.max_chars,
                     intent=args.intent,
+                    confirm_large_read=args.confirm_large_read,
                 )
             elif args.command == "notion-save-qa":
                 result = notion_save_qa(client, args.input_file)

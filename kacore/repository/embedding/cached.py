@@ -133,6 +133,19 @@ class CachedEmbeddingProvider(EmbeddingProvider):
         # 4. 返回完整归并结果
         return [r for r in results if r is not None]
 
+    def unload(self) -> None:
+        """透传卸载给被包装的 provider。
+
+        必须透传：组合根注入给上层的是本装饰器实例，不透传的话「卸载模型」会静默失效
+        （向量缓存是磁盘 SQLite，与显存无关，这里无需清理）。
+        """
+        self._inner.unload()
+
+    @property
+    def runtime_status(self) -> dict:
+        """透传被包装 provider 的运行态——真正持有模型的是它，不是缓存层。"""
+        return self._inner.runtime_status
+
     def get_dimension(self) -> int:
         return self._inner.get_dimension()
 

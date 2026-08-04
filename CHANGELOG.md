@@ -1,6 +1,211 @@
 # CHANGELOG
 
-## [Unreleased]
+## [v1.1.1] — 2026-08-03
+
+### 新增功能 (Added)
+
+- **全文检索（fulltext）端到端实装**。此前 Ask 面板的「全文检索」选项**根本跑不通**：
+  `kacore/retrieval_modes.py` 的 `VALID_RETRIEVAL_MODES` 不含 `fulltext`，`web/server.py`
+  的 `handle_ask` 也从不读取 `body["doc_id"]`（前端 `ChatPanel.tsx` 一直在发），选中后提问
+  必然 400；所谓「文档上限 60 000 字符」只是 `lib/i18n.ts` 的一句文案，全链路无任何强制点。
+  现在它是一条真实的检索模式：按 `doc_id` 读出整篇 `clean.md` 送入 LLM，**不做任何截断**。
+  新增 `kacore/retrieval_modes.py` 的 `MODE_FULLTEXT` / `STRICT_DOCUMENT_MODES` /
+  `FULLTEXT_CONFIRM_THRESHOLD_CHARS`、`kacore/pipelines/answer_synthesis.py` 的
+  `synthesize_from_document()`、`kacore/api.py` 的 `_answer_from_fulltext()` /
+  `_load_fulltext_document()` / `_require_fulltext_confirmation()` / `_est_context_tokens()`。
+  答案带**恰好一条**文档级 Harvard 引用（无 chunk 故不带页码），复用既有引用机器——为此把
+  `_build_source_entry` 拆出 `_build_document_source_entry`。
+- **超长文档的显式确认门（两个入口同一套契约）**。正文超过 60 000 字符且未确认时，后端抛
+  `FullTextConfirmationRequiredError`，`web/server.py` 映射为 **409
+  `status="fulltext_confirmation_required"`**，响应体自带 `total_chars` / `threshold_chars` /
+  `estimated_tokens` 等全部展示所需数字（调用方无需再打一次 estimate）。
+  WebUI 新增 `components/panels/FullTextConfirmDialog.tsx`（视觉对齐既有 GraphBuildDialog），
+  用户同意后带 `confirmed: true` 重发同一请求；codex skill 的 `read` 则返回
+  `status: "preview"` 且**不含任何正文**，需显式加 `--confirm-large-read` 重跑。
+  阈值只在 `kacore/retrieval_modes.py` 定义一次，前端与 skill 均从响应里读取，不复制该数字。
+  抛出确认门时保证**尚未调用 LLM、尚未写入任何 chat_history**，确认后是干净的重试而非续跑。
+- `knowledge_arch_client.py` 新增 `read --whole`（读到文末）与 `StructuredApiError`
+  （`ApiError` 子类，既有 catch 点与 exit_code 行为不变）；`web/server.py` 新增
+  `_query_flag()` 与 `_fulltext_confirmation_payload()`。
+
+### 变更 (Changed)
+
+- **移除全文读取的字符硬上限**。`kacore/api.py::get_document_markdown_page` 的
+  `max_chars ≤ 40000` 限制与 `.agents/.../knowledge_arch_client.py` 的 `MAX_READ_CHARS = 40000`
+  一并删除；`max_chars == 0` 现在表示「读到文末」。原先这两处都是**静默夹取**——请求 6 万字
+  会被悄悄砍到 4 万且调用方毫不知情，这正是「设了上限却没人知道」的根因。
+  门禁改为按「本次实际返回量」判定，因此小分页读长文档零摩擦。
+- **显存与本地模型面板重样式**，对齐 AstrBot 配置面板的 block 观感：新增
+  `components/ds/Card.tsx`（`Card` / `Field` 此前在 `AstrBotModal.tsx` 与 `SettingModal.tsx`
+  各有一份逐字拷贝，本轮收敛为一份，两个既有面板**视觉零变化**）；`ModelRuntimePanel.tsx`
+  改为两张 Card + Field 行，补上 `18px 22px` 内容 padding，丢掉 `--bg-inset` + `--border-strong`
+  这套本属输入槽/进度条底的配方，字号归位 DS 刻度；「全部卸载并清空缓存」按 DS 惯例移入
+  `Modal footer`；状态与动作因此上提为 `useModelRuntime()` hook。
+- `chat_retrieval_fulltext_desc` 文案由「文档上限 60 000 字符」改为「整篇正文送入模型」——
+  语义已从「上限」变为「确认阈值」。
+- `kacore/research_skill.py`：AstrBot 的 research 工具没有 doc_id 概念，收到
+  `mode="fulltext"` 时降级为 `default`。
+- `kacore/pipelines/answer_synthesis.py` 的 `_lang_instruction` 导出为 `lang_instruction`
+  （同一段 if/elif 已在仓库出现三处），`enhanced_recall_prompts.py` 跟随改名。
+
+### 修复 (Fixed)
+
+- `handle_ask` 静默丢弃 `doc_id`（前端一直在发、后端从未读取）。
+- `ChatPanel.tsx` 的全文检索前置校验错用了 `chat_graph_requires_collection`（文案说的是
+  「集合」而非「文章」），改为新键 `chat_fulltext_requires_doc`。
+- `retrievalModeLabel()` 缺 `fulltext` 分支，会把全文检索的答案与历史回放标成
+  「Milvus 语义检索」。
+- `lib/api.ts` 的 mock 分支把 fulltext 伪造成 `sqlite_lexical`。
+- clean.md 制品缺失时 `FileNotFoundError` 会从 `ask()` 逃逸成裸 500，现统一为
+  `FullTextDocumentUnavailableError` → 404（带 `document_not_found` / `artifact_missing`）。
+- 全文合成一律 `allow_mock=False`：`adapters/llm.py` 的 mock 兜底会在拿不到文本时返回**离线
+  占位文本**，用户确认了十几万字却拿到一段假答案是最坏结果。超窗改为 502
+  `fulltext_generation_failed` 并带上实际字符数，绝不返回截断后的半篇答案冒充完整回答。
+
+### 已知限制 (Known limitations)
+
+- `mem_get_info()` 的当前设备，单卡环境两者同源、数据正确，多卡环境会错配。
+- codex skill 的确认门按**单次调用返回量**判定，分页累计读取不受约束（客户端无状态，无法可靠
+  累计）。仍靠 `references/research.md` §4 的阅读纪律约束。
+
+## [v1.1.0] — 2026-08-01
+
+来源：用户提出的四项改进。核心是引用可读性——deep thinking / enhanced 召回给用户看到的是
+`[n]` 数字标记，Codex Skill 侧更直接暴露 `doc_id`，既不可读也不可核。
+
+### 新增功能 (Added)
+
+- **Harvard 引用统一（三出口同格式）**：WebUI 问答、AstrBot 聊天、Codex Skill 三条出口统一为
+  Cite Them Right 风格的 Harvard 引用——正文内 `(Vaswani et al., 2017, p. 3)`（**页码取自 chunk
+  元数据**，跨页为 `pp. 3-5`，相邻引用合并为 `(A, 2020; B, 2021)`，4+ 作者缩写 `et al.`），
+  尾部附按首作者姓氏字母序、按文档去重的「参考文献」表。
+  引用**由代码确定性生成**而非 LLM 撰写：模型继续只输出 `[n]`（保留既有 `[n]`↔sources 同序
+  对齐契约，prompt 层与 `test_cross_document_attribution.py` 全不受影响），后端按 sources 的书目
+  元数据改写，从根上杜绝编造作者与年份。新增 `kacore/domain/citation.py`（零依赖值对象
+  `CitationRef` + `normalize_creators`/`format_pages`/`harvard_in_text`/`harvard_in_text_group`/
+  `harvard_reference`/`reference_sort_key`）与 `kacore/pipelines/citation_rendering.py`
+  （`build_citation_refs`/`strip_llm_reference_section`/`rewrite_citations`/`build_reference_list`/
+  `annotate_sources`/`render_answer_with_references`）。改写严格避开围栏代码块、行内代码、
+  Markdown 链接/图片、引用式链接定义与转义标记；越界编号整段原样保留（绝不渲染成
+  `(Anon., n.d.)`——那等于凭空捏造引用）；LLM 自写的参考文献尾块会被识别并剥离，避免双份书目。
+  `kacore/api.py` 响应新增 `references` 字段，`kacore/research_skill.py` 优先透传该字段，
+  `main.py` 相应移除会与正文内书目重复的 `引用：` 段。
+  前端新增 `web/frontend/lib/citationIndex.ts`（备选分支按串长**降序**排列，否则 `Smith, 2020`
+  会遮蔽 `Smith, 2020, p. 3` 导致每条带页引用链错 chunk；并保留 `[\d+]` 兜底分支，使 v1.1.0
+  之前落库的历史消息仍可点击），`ChatPanel.tsx` 的 `renderAnswer` 据此还原「点击引用 → 跳来源」。
+  Codex Skill 侧：`/api/ask/evidence` 每条证据新增 `harvard_in_text` / `harvard_reference` 成品串，
+  `references/research.md` 与 `SKILL.md` 的引用规则由「用 `doc_id`」改写为「原样使用这两个串」。
+- **本地模型驻留 / 显存面板**：顶栏在 AstrBot 与 数据流 之间新增「显存」按钮，沿用
+  `wf-pulse-*` 呼吸光效（绿=模型全部已卸载、显存已让出；紫=有模型驻留；红=加载失败或配置
+  cuda 却无可用加速器）。面板展示整卡已用/总量、本进程占用与 embedding/rerank 各自的驻留状态，
+  支持单个或全部卸载——对齐 LM Studio 的 eject，用于把显存临时让给同时运行的本地大模型。
+  新增 `kacore/utils/torch_memory.py`（`release_accelerator_cache`/`accelerator_snapshot`，
+  收敛此前散在 `reranker/bge_local.py` 与 `embedding/local.py` 的重复实现）、
+  `kacore/api_runtime_models.py`（`RuntimeModelsApiMixin`：`get_model_runtime`/`unload_models`）、
+  `web/server.py` 的 `GET /api/system/models` 与 `POST /api/system/models/unload`；
+  前端新增 `lib/modelHealth.ts`、`components/modals/ModelsModal.tsx`、
+  `components/panels/ModelRuntimePanel.tsx`，并在 `lib/api.ts`、`lib/ConsoleContext.tsx`、
+  `components/layout/TopBar.tsx`、`components/ds/Icon.tsx`、`lib/i18n.ts` 中接线。
+  显存读数为尽力而为（无 torch/无 CUDA 时 `accelerator` 为 null，面板降级为「CPU 模式」），
+  **不引入** `psutil` / `pynvml` 新依赖；也**未新增配置键**，故不涉及 `CONFIG_KEY_POLICY` 与
+  Skill 侧 `CONFIG_POLICIES` 快照同步。
+
+### 修复 (Fixed)
+
+- **书目富化不再只对 Zotero 文档开放**：`kacore/api.py` 此前把书目读取门控在
+  `origin is DocumentOrigin.ZOTERO`，本地上传文档即使已在文档界面填好作者/年份也永远拿不到；
+  且读出后只保留首作者姓氏与年份，把 `venue`/`doi`/`url`/`item_type` 和其余作者全部丢弃。
+  现抽出 `_document_biblio_meta()`（Zotero 走 `zotero_items` 镜像、本地走 `local_meta`，二者字段
+  同构）与 `_build_source_entry()`，保留全部作者与容器/定位符字段；`source["author"]`、`["year"]`、
+  `["citation"]` 的既有语义不变（`citation` 仍被 deep-fallback 合成的 `source_labels` 使用）。
+- **消除召回来源组装的 N+1**：`get_document` 与 `get_zotero_item_meta` 此前**逐 chunk** 调用，
+  同一文档命中 8 个 chunk 即 8 次存储往返；改为按 `doc_id` 两级缓存（`kacore/api.py`）。
+- **证据校验告警前置**：`answer_notice` 此前渲染在答案最末（`ChatPanel.tsx` 气泡尾、`main.py`
+  引用之后、`stored_answer` 尾部），用户读完整篇才知道结论未通过校验。现三处统一改为置于正文
+  **之前**（`kacore/api.py` 的 `stored_answer`、`main.py::_format_research_result`、
+  `ChatPanel.tsx` 的告警块），实时渲染与历史回放同序。
+- **enhanced 重合成失败时证据池与答案错位**：`enhanced_recall_orchestrator.py` 纠正轮会把
+  `evidence` 重绑为新池，但重合成抛异常时保留的是首轮答案——其 `[n]` 按**纠正前**池编号。
+  此前症状是引用角标链到错误 chunk；Harvard 改写后会升级为正文明文把 A 的结论归给 B。
+  现异常分支连同 `evidence`/`kept_ids` 一并回滚至纠正前状态。
+- **本地 embedding 卸载不释放显存**：`LocalEmbeddingProvider._unload()` 只置空 Python 引用，
+  torch 缓存分配器仍占着显存，`nvidia-smi` 上看不到回落。现新增公开 `unload()` 并在置空后调用
+  `release_accelerator_cache()`（`kacore/repository/embedding/local.py`）。
+- **`update_document_meta` 落库形态不一致**：前端曾把 `creators` 写成换行拼接字符串、`year` 写成
+  整数。现在白名单阶段统一归一化为 `list[str]` 与 `str`（`kacore/api.py`）。
+
+### 架构健康 (Refactor)
+
+- **接口先行补齐模型生命周期**：`EmbeddingProvider` 新增 `unload()` 与 `runtime_status`
+  （契约注明**不得触发模型加载**），`Reranker` 新增 `close()` 默认空实现；
+  `CachedEmbeddingProvider` 作为装饰器**透传**二者（组合根注入给上层的是缓存实例，不透传则
+  卸载静默失效），`ExternalEmbeddingProvider` 标记为 `external` 态。
+  `CrossEncoderReranker.close()` 此前全仓无人调用，现由模型面板接管。
+
+### 测试 (Tests)
+
+- 新增 `tests/backend/test_harvard_citation.py`（43 例：作者归一化涵盖 `Last, First` / 机构名 /
+  `van der Berg` / CJK / 换行拼接字符串 / 脏数据，et al. 阈值、`Anon.`/`n.d.` 降级、页码区间压缩、
+  参考文献逐级降级、排序键的 `Anon.` 归位与 `n.d.` 前置与 `doc_id` 确定性兜底）。
+- 新增 `tests/backend/test_citation_rendering.py`（28 例：改写规则表逐行、保护区、越界编号、
+  同文档多页、就地写回 harvard 字段、参考文献去重排序可重放）。
+- 新增 `tests/backend/test_model_runtime.py`（13 例：base 默认实现可直接调用、装饰器透传卸载、
+  分类卸载、未知类别忽略、幂等、单项失败不阻断另一项、无 CUDA 不抛异常）。
+- 新增 `tests/frontend/test_citation_index.py`（7 例：最长匹配优先、合并形式拆分、历史裸 `[n]`
+  兜底、空串跳过、重复串落最小 n）。
+- `tests/backend/test_api.py` 新增本地文档 `local_meta` 富化回归、Zotero 全量书目、
+  `references` 进存库答案、无-LLM 摘录分支不被改写、agent 证据带 harvard 串、
+  `update_document_meta` 归一化；`tests/backend/test_web_server.py` 新增两条路由形状测试；
+  `tests/backend/test_enhanced_recall_orchestrator.py` 新增证据池回滚测试。
+
+### 构建与工程 (Build/CI)
+
+- README 重写：新增 **Codex Skill** 主章节（定位、`requirements-codex-skill.txt`、
+  `connection-status`/`connection-setup` 交互式注册、凭据按 OS 分路径且密码仅入 keyring、
+  命令速查、安全边界、Windows 沙箱 ACL 提示）——此前 skill 已随
+  `release/published-files.txt` 发布给终端用户却零文档；新增「引用格式（Harvard）」、
+  「版本演进（v1.0 → v1.1）」与「许可证」章节；WebUI 面板导览补入显存面板；
+  补 `embedding.device`/`load_timeout_seconds`、`ask.llm_timeout_seconds`/`task_timeout_seconds`
+  调参表与四条新 FAQ。`metadata.yaml` 的 `short_desc`/`desc` 补上 Zotero、五档检索、WebUI 与
+  Codex Skill（`name` 为冻结机器名，未改）。
+
+## [v1.0.12] — 2026-08-01
+
+来源：用户提交的一份线上 API 异常报告（DeepSeek reasoning 模型 + Deep Thinking 模式），
+三个问题互为因果——reasoning-only 响应被误判触发级联重复调用是 Ask 超时的重要放大因素，
+而结构化生成结果又是让两者能被正确诊断的基础设施。
+
+### 修复 (Fixed)
+
+- **reasoning-only 响应被误判为空响应，触发无意义的重复调用**：`LLMAdapter._call_astrbot_llm_generate`
+  此前在 `llm_generate()` 返回文本为空时无条件调用 `text_chat()` 盲重试，reasoning 模型的
+  「只给 reasoning_content、不给 completion_text」响应会连续触发 `text_chat` → `_call_legacy_context_llm`
+  逐层再拨，每次都拖满 `llm_timeout_seconds`（默认 300s）——这是线上「十几分钟」超时的主要来源，
+  而不仅是 Deep Thinking 本身的多轮检索。改为识别 reasoning-only 后只对同一 `llm_generate` 路径
+  带「直接输出最终答案」的追加指令重试一次，仍失败才落到原有兜底链；日志区分「reasoning-only」
+  与「真空响应」（`kacore/adapters/llm.py`）。
+- **Ask 后端答案在前端超时后彻底丢失**：`kacore/api.py::ask()` 此前对 Deep Thinking/Enhanced
+  的多轮 LLM 编排没有任务级总超时，前端 600s 放弃等待后不再轮询，但后端仍在跑，跑完后照常写入
+  `chat_history`，用户刷新前完全看不到。新增 `ask.task_timeout_seconds`（默认 900s）：到点后
+  `ask()` 抛 `AskTaskTimeoutError`（HTTP 202，非失败）但**不取消**后台任务（镜像 v1.0.9 embedding
+  探针的「非破坏式等待」），任务继续跑完并正常落库；前端 `ChatPanel` 捕获超时后改为轮询
+  `/api/ask/progress` + `/api/chat/history` 自动补回迟到的答案（`kacore/api.py`、
+  `kacore/config.py`、`web/server.py`、`web/frontend/lib/api.ts`、
+  `web/frontend/components/panels/ChatPanel.tsx`）。
+
+### 新增 (Added)
+
+- **结构化生成结果 `GenerationResult`**：新增 `kacore/domain/llm_generation.py`，把 AstrBot
+  `LLMResponse` 的 `finish_reason`/token 用量/`reasoning_content` 是否存在/provider·model
+  从「压成裸字符串就丢失」改为结构化保留，`status` 区分 `ok`/`empty`/`reasoning_only`/
+  `timeout`/`error`/`length`/`content_filter`。`LLMAdapter` 新增 `generate_result()`（`generate()`
+  改为薄委派，对外签名不变）；`answer_synthesis.synthesize_answer`、`llm_json.llm_json_call`
+  改用 `generate_result()` 按状态分流而非只看文本是否为空；`api.ask()` 把
+  `reasoning_only`/`length`/`content_filter` 状态接到既有 `answer_notice` 字段，给用户一句
+  简短说明（`kacore/domain/llm_generation.py`、`kacore/adapters/llm.py`、
+  `kacore/pipelines/answer_synthesis.py`、`kacore/pipelines/llm_json.py`、
+  `kacore/pipelines/deep_thinking_orchestrator.py`、`kacore/pipelines/enhanced_recall_orchestrator.py`、
+  `kacore/domain/deep_thinking.py`、`kacore/api.py`）。
 
 ## [v1.0.11] — 2026-07-31
 

@@ -64,9 +64,50 @@ python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py re
 The server returns only the requested page. Continue from `end` only when `has_more` is true and the
 allowed reading intent still requires more text.
 
+### Large reads require explicit consent
+
+`--whole` reads from `--start` to the end of the document. There is no character cap, but any single
+read larger than the server's confirmation threshold comes back as a preview instead of text:
+
+```json
+{"status": "preview", "total_chars": 183421, "confirm_threshold_chars": 60000,
+ "estimated_tokens": 172530, "requires_explicit_confirmation": true, "content_returned": false}
+```
+
+Do not retry blindly. Tell the user how large the document is, then rerun with the confirmation flag
+only after they agree:
+
+```powershell
+python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py read `
+  --doc-id DOCUMENT_ID --intent full-text --whole --confirm-large-read
+```
+
+Read the threshold from `confirm_threshold_chars` in the response; never hardcode the number — it is
+defined once on the server and may change.
+
+The gate is evaluated per call, on the number of characters that call would return. Paging through a
+long document in 12 000-character requests therefore never trips it, which is exactly why the reading
+discipline above still binds: page only while the anchored reading intent genuinely requires more text.
+
 ## 5. Answer from evidence
 
-- Put citations directly after supported claims, using available title, author/year, page, and `doc_id`.
+Cite in Harvard style. Every evidence item returned by `ask-evidence` carries two server-computed
+strings; use them verbatim and never hand-roll a citation format:
+
+- `harvard_in_text` — e.g. `Vaswani et al., 2017, p. 3`. Wrap it in parentheses and place it directly
+  after the claim it supports: `(Vaswani et al., 2017, p. 3)`. Merge adjacent citations into one pair
+  of parentheses separated by `; `.
+- `harvard_reference` — e.g. `Vaswani, A. et al. (2017) 'Attention is all you need', NeurIPS. doi: …`.
+  Collect the distinct values, sort them alphabetically, and list them under a final `References`
+  heading.
+
+Documents with no bibliographic metadata degrade to `Anon.` and `n.d.` — that is correct output, not an
+error. Do not substitute the `doc_id`, chunk id, or a bare `[n]` for a citation, and do not repair a
+degraded citation by guessing the author or year.
+
+When troubleshooting via the low-level `search` command, hits carry raw `title` / `authors` / `year` /
+`doi` / `page` instead of the two rendered strings; assemble the same Harvard forms from those fields.
+
 - Distinguish the source's claim from your inference. Label cross-source synthesis as synthesis.
 - Note conflicting evidence and uncertainty.
 - Do not invent page numbers, bibliographic fields, or findings.

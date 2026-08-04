@@ -14,12 +14,12 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import logging
 import threading
 from typing import TYPE_CHECKING, Any
 
 from kacore.repository.reranker.base import Reranker, ScoredChunk
+from kacore.utils.torch_memory import release_accelerator_cache
 
 if TYPE_CHECKING:
     from kacore.domain.models import DocumentChunk
@@ -98,14 +98,7 @@ class CrossEncoderReranker(Reranker):
     def _release_model_memory(model: Any) -> None:
         """Release Python references and clear optional accelerator caches."""
         del model
-        gc.collect()
-        try:
-            import torch
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except (ImportError, RuntimeError):
-            return
+        release_accelerator_cache()
 
     def _unload(self) -> None:
         """Unload the model after an idle period; the next call lazy-loads it again."""

@@ -62,7 +62,7 @@ from kacore.utils import text_chunks
 # inspect.signature(handler, eval_str=True)，会在模块全局命名空间里对注解求值；
 # 放进 TYPE_CHECKING 会导致运行时 NameError，插件直接加载失败。
 
-_PLUGIN_VERSION = "v1.0.11"
+_PLUGIN_VERSION = "v1.1.1"
 logger = logging.getLogger(__name__)
 _RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
 _RESEARCH_PARAGRAPH_LIMIT = 700
@@ -247,10 +247,11 @@ class KnowledgeRepositoryPlugin(Star):
         mode: str = "default",
         breadth: str = "normal",
     ):
-        '''在确认范围后执行知识库召回并作答，返回答案 + 确定性引用列表(Author - Year - Title)。
+        '''在确认范围后执行知识库召回并作答，返回自带 Harvard 引用的答案正文。
 
-        通常在 research_scope_probe 之后、范围已明确或用户已确认时调用。把答案与引用列表
-        原样呈现给用户（引用列表勿改写）。本工具只读，绝不修改任何同步配置。
+        通常在 research_scope_probe 之后、范围已明确或用户已确认时调用。答案正文里的
+        in-text 短引 (Author, Year, p. N) 与尾部「参考文献」表均由插件确定性生成，
+        **必须原样呈现、勿改写勿重排、勿另行编造引用**。本工具只读，绝不修改任何同步配置。
 
         Args:
             query(string): 凝练后的自包含检索指令（调令）——把对话意图整理成一条完整、聚焦、
@@ -587,20 +588,18 @@ class KnowledgeRepositoryPlugin(Star):
             done_label = "纯图谱检索完成"
         else:
             done_label = "检索完成"
-        citations = [str(item) for item in (result.get("citations") or []) if item]
-
         parts = [
             f"✅ {done_label}",
             f"范围：{scope}；模式：{mode}",
-            "",
-            answer,
         ]
-        if citations:
-            parts.extend(["", "引用：", *[f"- {item}" for item in citations]])
-        # 告警尾注：置于引用之后，不打断正文开头（v0.30.0 流畅性）。
+        # v1.1.0：校验告警前置到正文之前——读完整篇才发现「未通过证据校验」为时已晚。
+        # 三个出口（WebUI 气泡 / 本聊天路径 / 存库回放）统一为「告警 → 正文」同序。
         notice = str(result.get("answer_notice") or "").strip()
         if notice:
             parts.extend(["", f"⚠️ {notice}"])
+        parts.extend(["", answer])
+        # 不再单独渲染「引用：」段：v1.1.0 起 api.ask 已把 Harvard 参考文献表拼进正文尾部，
+        # 这里再列一遍就是发两份书目。`citations` 字段本身保留，供 notion_push_note 等调用方使用。
         return "\n".join(parts)
 
     async def _send_plain_message_chunks(

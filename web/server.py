@@ -15,7 +15,7 @@ import logging as _logging
 import secrets
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import web
 
@@ -197,6 +197,36 @@ def _parse_int(raw: object, name: str, default: int, lo: int, hi: int) -> int:
 
 def _query_int(request: web.Request, name: str, default: int, lo: int, hi: int) -> int:
     return _parse_int(request.query.get(name), name, default, lo, hi)
+
+
+def _query_flag(request: web.Request, name: str) -> bool:
+    """解析布尔查询参数（`1` / `true` / `yes`，大小写不敏感）；缺省为 False。
+
+    显式确认类的 flag 必须「默认关」：拼错值只会退回未确认，绝不会意外放行门禁。
+    """
+    return str(request.query.get(name) or "").strip().lower() in {"1", "true", "yes"}
+
+
+# 字符偏移/长度类查询参数的解析上界，纯粹用来挡住荒谬输入，不表达任何业务上限。
+_CHAR_OFFSET_CEILING = 2_000_000_000
+
+
+def _fulltext_confirmation_payload(exc: Any) -> dict[str, Any]:
+    """把全文确认门异常拍平成 409 响应体（`/api/ask` 与文档分页读共用同一形状）。
+
+    刻意把展示所需的数字全带上：调用方据此直接渲染确认界面，不必再打一次 estimate 请求。
+    阈值也一并回传——前端与 skill 因此不需要各自复制 60000 这个字面量。
+    """
+    return {
+        "status": "fulltext_confirmation_required",
+        "message": str(exc),
+        "doc_id": exc.doc_id,
+        "title": exc.title,
+        "total_chars": exc.total_chars,
+        "requested_chars": exc.requested_chars,
+        "threshold_chars": exc.threshold_chars,
+        "estimated_tokens": exc.estimated_tokens,
+    }
 
 
 async def handle_auth(request: web.Request) -> web.Response:
@@ -469,16 +499,28 @@ async def handle_document_content(request: web.Request) -> web.Response:
 
 
 async def handle_document_content_page(request: web.Request) -> web.Response:
-    """GET 文档 Markdown 的单个字符页；供具备明确阅读意图的 agent 使用。"""
+    """GET 文档 Markdown 的单个字符页；供具备明确阅读意图的 agent 使用。
+
+    v1.1.1：`max_chars` 不再有 40000 硬上限（旧实现是**静默夹取**，请求 6 万字会被悄悄砍到
+    4 万，调用方毫不知情）。`max_chars=0` 表示读到文末；单次返回量超阈值且无 `confirmed`
+    时返回 409，形状与 `/api/ask` 的全文确认门完全一致。
+    """
+    from kacore.api import FullTextConfirmationRequiredError, FullTextDocumentUnavailableError
+
     doc_id = request.match_info["doc_id"]
-    start = _query_int(request, "start", 0, 0, 2_000_000_000)
-    max_chars = _query_int(request, "max_chars", 12000, 1, 40000)
+    start = _query_int(request, "start", 0, 0, _CHAR_OFFSET_CEILING)
+    max_chars = _query_int(request, "max_chars", 12000, 0, _CHAR_OFFSET_CEILING)
     try:
         result = await _api(request).get_document_markdown_page(
-            doc_id, start=start, max_chars=max_chars
+            doc_id,
+            start=start,
+            max_chars=max_chars,
+            confirmed=_query_flag(request, "confirmed"),
         )
-    except FileNotFoundError as exc:
-        return web.json_response({"error": str(exc)}, status=404)
+    except FullTextConfirmationRequiredError as exc:
+        return web.json_response(_fulltext_confirmation_payload(exc), status=409)
+    except FullTextDocumentUnavailableError as exc:
+        return web.json_response({"error": str(exc), "reason": exc.reason}, status=404)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     if result is None:
@@ -1205,6 +1247,31 @@ async def handle_system_info(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=500)
 
 
+async def handle_model_runtime(request: web.Request) -> web.Response:
+    """GET /api/system/models — 本地模型驻留状态 + 尽力而为的显存读数（模型面板轮询）。"""
+    try:
+        return web.json_response(await _api(request).get_model_runtime())
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def handle_model_unload(request: web.Request) -> web.Response:
+    """POST /api/system/models/unload — 立即卸载本地模型并清空显存缓存。
+
+    body: `{"kinds": ["embedding", "rerank"]}`，缺省或空表示全部。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw_kinds = body.get("kinds") if isinstance(body, dict) else None
+    kinds = [str(k) for k in raw_kinds] if isinstance(raw_kinds, list) else None
+    try:
+        return web.json_response(await _api(request).unload_models(kinds))
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 async def handle_files_list(request: web.Request) -> web.Response:
     """GET /api/files/list?dir=<subdir> — 列出 data_dir 内文件（路径穿越防护）。"""
     subdir = request.query.get("dir", "")
@@ -1380,7 +1447,18 @@ async def handle_ask(request: web.Request) -> web.Response:
     retrieval_mode = body.get("retrieval_mode") or "default"
     use_english_retrieval = bool(body.get("use_english_retrieval") or False)
     answer_language = str(body.get("answer_language") or "auto")
-    from kacore.api import GraphMixedQueryError, LightRAGNotReadyError
+    # doc_id / confirmed 服务于 retrieval_mode="fulltext"。前端从 v1.0.x 起就一直在发
+    # doc_id，但这里从未读取过——全文检索因此始终跑不通（模式名也不在白名单里）。
+    doc_id = str(body.get("doc_id") or "") or None
+    confirmed = bool(body.get("confirmed") or False)
+    from kacore.api import (
+        AskTaskTimeoutError,
+        FullTextConfirmationRequiredError,
+        FullTextDocumentUnavailableError,
+        FullTextGenerationFailedError,
+        GraphMixedQueryError,
+        LightRAGNotReadyError,
+    )
 
     try:
         result = await _api(request).ask(
@@ -1392,9 +1470,35 @@ async def handle_ask(request: web.Request) -> web.Response:
             retrieval_mode=retrieval_mode,
             use_english_retrieval=use_english_retrieval,
             answer_language=answer_language,
+            doc_id=doc_id,
+            confirmed=confirmed,
             scope_type=str(body.get("scope_type") or ""),
             scope_key=str(body.get("scope_key") or ""),
             scope_library_id=str(body.get("scope_library_id") or ""),
+        )
+    except FullTextConfirmationRequiredError as exc:
+        # 409 不是失败，是一次询问：正文超过确认阈值，前端据此弹窗，用户同意后带
+        # confirmed=true 重发同一请求。此时后端尚未调用 LLM、尚未写任何 chat_history。
+        return web.json_response(_fulltext_confirmation_payload(exc), status=409)
+    except FullTextDocumentUnavailableError as exc:
+        return web.json_response(
+            {
+                "status": "fulltext_document_unavailable",
+                "message": str(exc),
+                "doc_id": exc.doc_id,
+                "reason": exc.reason,
+            },
+            status=404,
+        )
+    except FullTextGenerationFailedError as exc:
+        return web.json_response(
+            {
+                "status": "fulltext_generation_failed",
+                "message": exc.reason,
+                "doc_id": exc.doc_id,
+                "total_chars": exc.total_chars,
+            },
+            status=502,
         )
     except LightRAGNotReadyError as exc:
         return web.json_response(
@@ -1414,6 +1518,18 @@ async def handle_ask(request: web.Request) -> web.Response:
                 "collection": exc.collection,
             },
             status=502,
+        )
+    except AskTaskTimeoutError as exc:
+        # 202：请求仍在后台运行（未取消），不是失败——前端据此改为轮询
+        # /api/ask/progress + /api/chat/history 找回迟到的答案，而不是弹错误后放弃。
+        return web.json_response(
+            {
+                "status": "ask_task_timeout",
+                "message": str(exc),
+                "conversation_id": exc.conversation_id,
+                "timeout_seconds": exc.timeout_seconds,
+            },
+            status=202,
         )
     except ValueError as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
@@ -1698,6 +1814,8 @@ def build_app(
     app.router.add_get("/api/metrics", handle_metrics)
     app.router.add_get("/api/ask/progress/{cid}", handle_ask_progress)
     app.router.add_get("/api/system/info", handle_system_info)
+    app.router.add_get("/api/system/models", handle_model_runtime)
+    app.router.add_post("/api/system/models/unload", handle_model_unload)
     app.router.add_get("/api/files/list", handle_files_list)
     app.router.add_get("/api/fs/browse", handle_fs_browse)
     app.router.add_get("/api/models/local", handle_list_local_models)

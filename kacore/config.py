@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # 依赖探测收口至能力注册表；保留模块内 _module_available 名以兼容既有测试的 monkeypatch。
+from kacore.capabilities import milvus_runtime_status
 from kacore.capabilities import module_available as _module_available
 
 # ── 环境变量名（机密来源）────────────────────────────────────────
@@ -43,6 +44,23 @@ def _secret(raw_value: Any, env_name: str) -> str:
     if env_value:
         return env_value
     return raw_value if isinstance(raw_value, str) else ""
+
+
+# embedding.load_timeout_seconds 的取值边界：0 = 不限（保留旧的裸等待行为）；
+# 其余值钳到 [30, 3600]——低于 30s 会把「已缓存模型的正常加载」误判为卡死。
+_LOAD_TIMEOUT_MIN_SECONDS: int = 30
+_LOAD_TIMEOUT_MAX_SECONDS: int = 3600
+
+
+def _clamp_load_timeout(value: Any) -> int:
+    """把配置值归一化为合法的加载超时秒数；非法输入回退默认值。"""
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return EmbeddingConfig.load_timeout_seconds
+    if seconds <= 0:
+        return 0
+    return max(_LOAD_TIMEOUT_MIN_SECONDS, min(_LOAD_TIMEOUT_MAX_SECONDS, seconds))
 
 
 # ── 各子系统专属 typed config ────────────────────────────────────
@@ -185,6 +203,15 @@ class EmbeddingConfig:
     max_token_size: int = 512
     # 本地模型空闲卸载超时（秒），0 = 永不自动卸载；仅对 provider=local 生效
     local_idle_timeout_seconds: int = 420
+    # 本地模型运行设备：auto（有 CUDA 则用 CUDA，否则 CPU）| cpu | cuda | cuda:N。
+    # 仅对 provider=local 生效。与 rerank.device 的「不可用静默回退」刻意不同：这里是
+    # 主向量索引路径，用户显式选 cuda 但环境不支持时必须报错，不能悄悄退化到 CPU 拖慢批量
+    # embedding 而不被察觉。
+    device: str = "auto"
+    # 「模型就绪」的最长等待时间（秒），0 = 不限。覆盖两处：组合根的维度探针，以及本地
+    # provider 首次调用触发的模型下载/加载。超时不会中止后台下载线程（to_thread 不可取消），
+    # 只放弃等待让启动流程走完——否则 HuggingFace 卡住会让 Web 控制台永远起不来。
+    load_timeout_seconds: int = 180
 
 
 @dataclass
@@ -194,6 +221,15 @@ class AskAgentConfig:
     v0.28.0：移除 conversation_enhancement_mode——agent 开启时只有「inject 注入」一种行为，
     主动检索改由 knowledge_research skill 承担（原 query_agent 会静默吞掉 research，已删）。
     """
+
+    # 单次主 LLM 调用上限（秒），0 = 不限。AstrBot provider 挂死时，没有这道闸整条 ask
+    # 会永不返回；前端只看到「请求超时」，服务端却仍在等。
+    llm_timeout_seconds: int = 300
+    # 整条 ask() 任务（检索 + Deep Thinking/Enhanced 多轮编排 + 最终答案合成）的总上限
+    # （秒），0 = 不限。Deep Thinking 允许多次 LLM 调用，即便每次都在 llm_timeout_seconds
+    # 内完成，累计仍可能远超前端的 ASK_TIMEOUT_MS——这道闸保证后端自己也会放弃，而不是
+    # 一直跑到用户早已断开连接之后。
+    task_timeout_seconds: int = 900
 
     agent_enabled: bool = False  # ka↔astrbot 回复关联（RAG 上下文注入）总开关。
     research_enabled: bool = False  # knowledge_research skill 是否响应自然语言调用。
@@ -357,6 +393,8 @@ class Config:
             "ask": {
                 # 与前端 askAI 的 answer_language 同一参数；召回恒英文，仅决定回答语言。
                 "answer_language": ask.answer_language,
+                "llm_timeout_seconds": ask.llm_timeout_seconds,
+                "task_timeout_seconds": ask.task_timeout_seconds,
             },
             "source_store": {
                 "db_filename": source.db_filename,
@@ -412,6 +450,8 @@ class Config:
                 "model": embedding.model,
                 "base_url": embedding.base_url,
                 "max_token_size": embedding.max_token_size,
+                "load_timeout_seconds": embedding.load_timeout_seconds,
+                "device": embedding.device,
                 "actual_dimension": self.runtime_embedding_dimension,
                 "api_key": _mask(_secret("", ENV_EMBEDDING_API_KEY)),
             },
@@ -517,11 +557,16 @@ class Config:
             diagnostics.append(
                 "KR_EMBEDDING_API_KEY is required when embedding.provider=external."
             )
-        if self.get_vector_db_config().backend == "milvus" and not _module_available("pymilvus"):
-            diagnostics.append(
-                "Milvus Lite is a required dependency from requirements.txt; "
-                "AstrBot fallback remains available until it is installed."
-            )
+        if self.get_vector_db_config().backend == "milvus":
+            # 就绪 = pymilvus ∧ milvus_lite。缺哪个、怎么修由 capabilities 统一给文案，
+            # 避免此处再复述一份可能过期的说法。
+            milvus_runtime = milvus_runtime_status()
+            if not milvus_runtime["ready"]:
+                diagnostics.append(
+                    "Milvus Lite is a required dependency from requirements.txt; "
+                    "AstrBot fallback remains available until it is installed. "
+                    f"{milvus_runtime['hint']}"
+                )
         graph = self.get_graph_config()
         if graph.enabled and not _module_available("lightrag"):
             diagnostics.append(
@@ -705,6 +750,10 @@ class Config:
                     EmbeddingConfig.local_idle_timeout_seconds,
                 )
             ),
+            load_timeout_seconds=_clamp_load_timeout(
+                current.get("load_timeout_seconds", EmbeddingConfig.load_timeout_seconds)
+            ),
+            device=str(current.get("device", EmbeddingConfig.device)).strip() or "auto",
         )
 
     def get_ask_agent_config(self) -> AskAgentConfig:
@@ -713,6 +762,12 @@ class Config:
         if answer_language not in {"auto", "zh", "en"}:
             answer_language = AskAgentConfig.answer_language
         return AskAgentConfig(
+            llm_timeout_seconds=max(
+                0, int(s.get("llm_timeout_seconds", AskAgentConfig.llm_timeout_seconds))
+            ),
+            task_timeout_seconds=max(
+                0, int(s.get("task_timeout_seconds", AskAgentConfig.task_timeout_seconds))
+            ),
             agent_enabled=bool(s.get("agent_enabled", AskAgentConfig.agent_enabled)),
             research_enabled=bool(s.get("research_enabled", AskAgentConfig.research_enabled)),
             persona_enabled=bool(s.get("persona_enabled", AskAgentConfig.persona_enabled)),
@@ -863,6 +918,11 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "provider": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
+        # 只影响「等多久」，不影响向量本身，故为 RESTART 而非 REBUILD。
+        "load_timeout_seconds": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        # 只影响本地模型跑在 CPU 还是 GPU，向量数值本身不变，故为 RESTART 而非 REBUILD
+        # （provider 实例在启动时构造一次，运行期切换设备需要重启才能生效）。
+        "device": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
     },
     "ask": {
         "persona_enabled": ConfigKeyPolicy(False, True),
@@ -871,6 +931,10 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "research_enabled": ConfigKeyPolicy(False, True),
         # 召回语言（回答语言）：开放 API 写，使前端 askAI 与配置项共享同一参数。
         "answer_language": ConfigKeyPolicy(True, True),
+        # 主 LLM 单次调用上限：LLMAdapter 在组合根构造，改后需重启生效。
+        "llm_timeout_seconds": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        # 整条 ask() 任务总上限：api.ask() 每次调用时从 Config 现读，无需重启生效。
+        "task_timeout_seconds": ConfigKeyPolicy(True, True),
     },
     "web_console": {
         # /ka webui on|off 实时启停并持久化；不走 update_config（避免 RESTART 后果误判）。

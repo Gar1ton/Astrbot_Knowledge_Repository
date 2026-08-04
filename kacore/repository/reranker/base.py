@@ -49,6 +49,14 @@ class Reranker(ABC):
             "last_error": None,
         }
 
+    def close(self) -> None:
+        """卸载常驻的本地模型并释放加速器缓存；下次重排时自动重新懒加载。
+
+        契约：幂等（未加载时是空操作），不抛异常，不使重排器永久退化——`is_passthrough`
+        不受影响。退化实现（noop）无模型可卸，用默认空操作即可。
+        """
+        return None
+
     @abstractmethod
     async def rerank(
         self, query: str, candidates: list[DocumentChunk], *, top_n: int | None = None

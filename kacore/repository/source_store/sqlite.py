@@ -793,20 +793,36 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     @_locked_write
     async def set_lightrag_index_status(
-        self, doc_id: str, collection: str, status: str, last_error: str = ""
+        self,
+        doc_id: str,
+        collection: str,
+        status: str,
+        last_error: str = "",
+        *,
+        job_id: str | None = None,
     ) -> None:
         updated_at = _format_dt(datetime.now(timezone.utc))
         await self._db.execute(
             """
-            INSERT INTO lightrag_index_status (doc_id, collection, status, last_error, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO lightrag_index_status
+                (doc_id, collection, status, last_error, updated_at, job_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(doc_id) DO UPDATE SET
                 collection = excluded.collection, status = excluded.status,
-                last_error = excluded.last_error, updated_at = excluded.updated_at
+                last_error = excluded.last_error, updated_at = excluded.updated_at,
+                job_id = excluded.job_id
             """,
-            (doc_id, collection, status, last_error, updated_at),
+            (doc_id, collection, status, last_error, updated_at, job_id),
         )
         await self._db.commit()
+
+    @_locked_write
+    async def delete_lightrag_index_status_by_job(self, job_id: str) -> int:
+        cursor = await self._db.execute(
+            "DELETE FROM lightrag_index_status WHERE job_id = ?", (job_id,)
+        )
+        await self._db.commit()
+        return cursor.rowcount if cursor.rowcount is not None else 0
 
     async def get_lightrag_index_status(self, doc_id: str) -> dict[str, str] | None:
         async with self._db.execute(
@@ -1838,6 +1854,46 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
                 updated_at = excluded.updated_at
             """,
             (source, account_id, account_name, datetime.now(timezone.utc).isoformat()),
+        )
+        await self._db.commit()
+
+    async def get_zotero_account_identity(self, namespace: str) -> dict[str, str] | None:
+        async with self._db.execute(
+            "SELECT account_key, library_id, access_mode "
+            "FROM zotero_account_identities WHERE namespace = ?",
+            (namespace,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "account_key": str(row[0]),
+            "library_id": str(row[1]),
+            "access_mode": str(row[2]),
+        }
+
+    @_locked_write
+    async def link_zotero_account_identity(
+        self, namespace: str, account_key: str, library_id: str, access_mode: str
+    ) -> None:
+        await self._db.execute(
+            """
+            INSERT INTO zotero_account_identities
+                (namespace, account_key, library_id, access_mode, linked_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(namespace) DO UPDATE SET
+                account_key = excluded.account_key,
+                library_id = excluded.library_id,
+                access_mode = excluded.access_mode,
+                linked_at = excluded.linked_at
+            """,
+            (
+                namespace,
+                account_key,
+                library_id,
+                access_mode,
+                datetime.now(timezone.utc).isoformat(),
+            ),
         )
         await self._db.commit()
 

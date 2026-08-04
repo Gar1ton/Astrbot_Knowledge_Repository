@@ -247,14 +247,29 @@ class SourceDocumentStore(ABC):
 
     @abstractmethod
     async def set_lightrag_index_status(
-        self, doc_id: str, collection: str, status: str, last_error: str = ""
+        self,
+        doc_id: str,
+        collection: str,
+        status: str,
+        last_error: str = "",
+        *,
+        job_id: str | None = None,
     ) -> None:
-        """设置独立 LightRAG 索引状态；不得复用 needs_reindex。"""
+        """设置独立 LightRAG 索引状态；不得复用 needs_reindex。
+
+        job_id 记录本次写入来自哪个构建任务，供 cancel_build_job() 精确清理该任务写入的
+        状态行，不牵连其他任务/其他构建轮次对同一文档的记录。
+        """
         ...
 
     @abstractmethod
     async def get_lightrag_index_status(self, doc_id: str) -> dict[str, str] | None:
         """读取文档的独立 LightRAG 索引状态。"""
+        ...
+
+    @abstractmethod
+    async def delete_lightrag_index_status_by_job(self, job_id: str) -> int:
+        """删除某构建任务写入的全部索引状态行，返回删除行数。"""
         ...
 
     # ── 文档/集合笔记 ───────────────────────────────────────────
@@ -554,6 +569,18 @@ class SourceDocumentStore(ABC):
     @abstractmethod
     async def purge_zotero_mirror(self) -> None:
         """删除全部 Zotero-origin 镜像与统一集合；LOCAL 数据必须保留。"""
+        ...
+
+    @abstractmethod
+    async def get_zotero_account_identity(self, namespace: str) -> dict[str, str] | None:
+        """读取 `{access_mode}:{library_id}` 命名空间关联的逻辑账号身份；未链接返回 None。"""
+        ...
+
+    @abstractmethod
+    async def link_zotero_account_identity(
+        self, namespace: str, account_key: str, library_id: str, access_mode: str
+    ) -> None:
+        """把命名空间链接到某逻辑账号身份（同一 account_key 的多个命名空间视为同一账号）。"""
         ...
 
     # ── 页面级 provenance（clean.md 字符偏移）────────────────────

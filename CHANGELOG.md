@@ -2,10 +2,84 @@
 
 ## [Unreleased]
 
+## [v1.1.2] — 2026-08-04
+
+### 新增功能 (Added)
+
+- **Milvus 索引自动重建**。新文件进来之后不必再手动点「重建索引」。
+  需要先说清此前的真实状况：自动索引**本来就有**，但它整个被兼容门挡着——
+  `kacore/api.py` 的 `register_document()` 只在 `auto_index_enabled and
+  _milvus_index_is_compatible()` 同时为真时才即时写入 Milvus，`_index_document()`
+  （Zotero 同步回调）是同一道门；两者失败或被跳过时都只把文档标成 `needs_reindex`。
+  而兼容态一旦坏掉——`plugin_initializer.py` 的 collection 被重建、embedding fingerprint
+  变化、schema mismatch，或 `api.py` 的删集合失败、换 embedding——**只有跑完一次重建才会
+  翻回来**。于是兼容态坏掉之后，其后进来的每一个新文件都只是排进队列，而全项目**没有任何
+  东西会主动排空这个队列**，只有 WebUI 的 `POST /api/documents/rebuild-index` 那个按钮。
+  这才是「每次都要手动重建」的真正来源，本轮补的是那个「自己按按钮的人」。
+- 新增 `kacore/auto_reindex.py` 的 `AutoReindexScheduler`：**事件驱动 + 防抖 + 启动补跑**。
+  文档被标记待重建时打信号，静默 `auto_rebuild_delay_seconds`（默认 30s）没有新变动才真正
+  开跑——Zotero 批量同步会为每篇文档打一次信号，防抖把连击合并成一次重建而不是上百次。
+  插件启动时补打一次信号，因此重启即会把积压队列排空。索引不兼容时
+  `rebuild_index_pending` 本就内部转全量，故**增量与全量都自动**。
+- 调度器**不含任何索引逻辑**，只调用新增的 `api.run_milvus_rebuild_to_completion()`，后者复用
+  既有的全局单飞 `start_milvus_rebuild()`。因此自动重建与手动点按钮走同一个 job、同一条
+  进度条、同一套 runtime events，WebUI 侧零改动即生效；手动重建正在跑时自动重建会直接搭上
+  同一个 job，不会并发起第二次。
+- 新增配置 `vector_db.auto_rebuild_enabled`（默认 `true`）与
+  `vector_db.auto_rebuild_delay_seconds`（默认 30，下限夹到 5）。二者的 `CONFIG_KEY_POLICY`
+  **consequence 是 `none` 而非 `restart`**：调度循环每轮重读配置，改完即生效，不必重启插件。
+  `kacore/capabilities.py` 的 `vector_store.detail` 随之暴露这两个字段，WebUI 数据流页的
+  快速配置面板新增「自动重建索引」开关与「自动重建防抖（秒）」高级项（i18n zh+en 双份）。
+  把开关**从关切到开**时 `update_config_value()` 会立刻唤醒调度器——否则积压队列要一直等到
+  下一份新文档进来才被排空，开关看上去就像没生效。
+- **codex skill 可以代按「重建索引」按钮**（调用代码，非 computer use）。
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 新增两个子命令：
+  `index-status`（只读：待重建数、当前重建任务、兼容性、自动重建是否已开）与 `index-rebuild`
+  （默认只出 preview，`--apply` 才 `POST /api/documents/rebuild-index`，即 WebUI 那个按钮打的
+  同一个端点；可选 `--wait` 轮询到终态再汇报）。沿用既有的 `--apply` 变更门禁写法，与
+  `config-set` / `restart` 一致。`--wait` 超时只是**停止观察**，重建仍在跑，返回体里的
+  `note` 明说这一点——否则模型会把「不再等」误报成「已取消」。
+  服务端本就是全局单飞，重复触发只会拿到同一个 job。
+  相应放开了 `SKILL.md` 原先的不变量「Never start a normal index rebuild」：现在是「不得自作
+  主张重建」，用户要求 + preview 确认后允许；`references/settings.md` 新增第 4 节写清判读顺序
+  （`pending_reindex_count` 为 0 就直说不用建、有 `active_job` 就报进度别重复触发、
+  `auto_rebuild_enabled` 为真时优先等一个防抖窗口而不是立刻手动重建）。
+
+### 修复 (Fixed)
+
+- **失败不再无限重试**。`AutoReindexScheduler` 按指数退避（60s 起、翻倍、封顶 1 小时）重试，
+  并在连续 6 次「零进展」后 **park**——只等新信号，不再定时重试。一篇永远清洗失败的坏 PDF
+  会让待重建队列永远非空，没有 park 就是每小时一次的全量重建风暴。判定用的是「有无进展」
+  而非只看 status：`partial_failure` 里只要有文档成功入库就算在推进，值得下一轮继续清剩余。
+- **重建自身造出的信号不会解除 park**。重建会把失败文档重新标成 `needs_reindex`，那也会经
+  `_mark_document_needs_reindex()` 打信号；若它能重置失败计数，park 永远不会发生。
+
+### 变更 (Changed)
+
+- `kacore/api.py`：`_mark_document_needs_reindex()` 成为自动重建的**唯一信号收口**（上传自动
+  索引失败、Zotero 遇不兼容、集合移动、reextract、删集合失败全部经它）；`_invalidate_embedding_indexes()`
+  直接改 `doc.needs_reindex` 绕过了前者，故单独补一次信号。新增 `attach_auto_reindex_scheduler()`
+  薄注入（对齐既有 `attach_zotero_pipeline`）与 `_notify_auto_reindex()`（打信号失败只记日志，
+  不得影响主流程）。
+- `kacore/plugin_initializer.py`：在 6.3 段装配调度器并 `create_task`，`teardown()` 按既有
+  三段式释放；`config.py` 新增 `MIN_AUTO_REBUILD_DELAY_SECONDS` 与 `_int_or_default()`。
+- 同步 `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 的
+  `CONFIG_POLICIES` 快照（该文件注释明写要与 `kacore.config.CONFIG_KEY_POLICY` 保持同步）。
+
 ### 维护 (Maintenance)
 
 - 新增 `docs/GIT_WORKFLOW.md` 的人工发布 instruction，记录 developer → publish → main
   的白名单生成、认证、推送、PR 与版本 tag 流程，并保留 v1.1.1 本轮发布准备记录。
+- 新增 `tests/backend/test_auto_reindex.py`（11 例，纯内存假件驱动，注入极小退避参数避免把
+  用例拖成分钟级）：防抖合并连击、开关关闭不跑、非 milvus 后端不跑、空队列不跑、未就绪退避
+  而非空转、失败后自行重试、有进展不进退避、**连续零进展进 park**、park 后 notify 唤醒并
+  重置、重建期内信号不解除 park。`test_api.py` 补信号收口与单飞复用，`test_config.py`
+  补新键默认值/下限夹取/policy。
+- `test_knowledge_arch_skill_client.py` 补 6 例覆盖新子命令。其中
+  `test_client_exposes_only_agent_evidence_and_guarded_graph_builds` 原先断言**客户端源码里
+  不得出现 `/api/documents/rebuild-index`**——它和 `SKILL.md` 的不变量、`config_options()` 的
+  `rebuild_command_available: False` 是同一条禁令的三个落点，本轮一并改为「端点可达但受
+  `--apply` 门禁保护」（新测试断言 preview 分支位于 POST 之前，未确认时够不到写操作）。
 
 ## [v1.1.1] — 2026-08-03
 

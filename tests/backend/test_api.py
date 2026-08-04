@@ -1349,6 +1349,146 @@ async def test_start_milvus_rebuild_is_single_flight(tmp_path: Path) -> None:
     assert api._milvus_build_task is None  # 未创建新后台任务
 
 
+async def test_mark_needs_reindex_notifies_auto_reindex_scheduler() -> None:
+    """自动重建的唯一信号收口：所有标记路径都经 `_mark_document_needs_reindex`。"""
+
+    class RecordingScheduler:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def notify(self) -> None:
+            self.calls += 1
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+    )
+    scheduler = RecordingScheduler()
+    api.attach_auto_reindex_scheduler(scheduler)
+
+    await api._mark_document_needs_reindex("d1")
+    assert scheduler.calls == 1
+
+    # 文档不存在 → 什么都没排队，不该打信号。
+    await api._mark_document_needs_reindex("missing")
+    assert scheduler.calls == 1
+
+
+async def test_notify_auto_reindex_survives_scheduler_error() -> None:
+    """打信号失败不得影响主流程（标记本身必须已经落库）。"""
+
+    class ExplodingScheduler:
+        def notify(self) -> None:
+            raise RuntimeError("boom")
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1", "papers"))
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+    )
+    api.attach_auto_reindex_scheduler(ExplodingScheduler())
+
+    await api._mark_document_needs_reindex("d1")
+    pending = await store.list_pending_reindex_documents()
+    assert [d.doc_id for d in pending] == ["d1"]
+
+
+async def test_enabling_auto_rebuild_wakes_the_scheduler(tmp_path: Path) -> None:
+    """刚把开关打开就该唤醒调度器——否则积压队列要等下一份新文档才被排空。"""
+    from kacore.config import Config
+
+    class RecordingScheduler:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def notify(self) -> None:
+            self.calls += 1
+
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus", "auto_rebuild_enabled": False}}),
+        config_persist=lambda section, key, value: None,
+    )
+    scheduler = RecordingScheduler()
+    api.attach_auto_reindex_scheduler(scheduler)
+
+    await api.update_config_value("vector_db", "auto_rebuild_enabled", True)
+    assert scheduler.calls == 1
+    # 关掉开关不该打信号（没有活要干）。
+    await api.update_config_value("vector_db", "auto_rebuild_enabled", False)
+    assert scheduler.calls == 1
+
+
+async def test_run_milvus_rebuild_to_completion_reuses_running_job(tmp_path: Path) -> None:
+    """自动重建借单飞语义搭上手动重建的同一个 job，不并发起第二次。"""
+    from kacore.config import Config
+    from kacore.index_compatibility import IndexCompatibilityStore
+    from kacore.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "papers")
+    doc.needs_reindex = True
+    await store.add_document(doc)
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "evidence", "h1")])
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=InMemoryVectorStore(),
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    started = await api.start_milvus_rebuild()
+    first_task = api._milvus_build_task
+
+    snapshot = await api.run_milvus_rebuild_to_completion()
+    assert snapshot["job_id"] == started["job_id"]  # 同一个 job，未新建
+    assert api._milvus_build_task is first_task
+    assert snapshot["status"] == "success"
+    assert await store.list_pending_reindex_documents() == []
+
+
+async def test_run_milvus_rebuild_to_completion_returns_terminal_snapshot(
+    tmp_path: Path,
+) -> None:
+    """调度器靠这个终态快照判成败，因此它必须是**跑完之后**的快照。"""
+    from kacore.config import Config
+    from kacore.index_compatibility import IndexCompatibilityStore
+    from kacore.repository.vector_store.memory import InMemoryVectorStore
+    from tests.backend.test_embedding import MockEmbeddingProvider
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "papers")
+    doc.needs_reindex = True
+    await store.add_document(doc)
+    await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "evidence", "h1")])
+    compatibility = IndexCompatibilityStore(tmp_path / "compat.json")
+    compatibility.mark_milvus_compatible("fp")
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        config=Config({"vector_db": {"backend": "milvus"}}),
+        vector_store=InMemoryVectorStore(),
+        embedding_provider=MockEmbeddingProvider(dimension=4),
+        index_compatibility=compatibility,
+        embedding_fingerprint="fp",
+    )
+
+    snapshot = await api.run_milvus_rebuild_to_completion()
+    assert snapshot["status"] == "success"
+    assert snapshot["processed_docs"] == 1
+    assert snapshot["finished_at"]  # 已写终态时间戳 = 确实等到了任务结束
+
+
 async def test_capabilities_degraded_while_milvus_building(tmp_path: Path) -> None:
     from kacore.config import Config
     from kacore.index_compatibility import IndexCompatibilityStore

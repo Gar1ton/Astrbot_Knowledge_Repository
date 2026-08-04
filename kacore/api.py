@@ -743,10 +743,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         self._ingest_job: IngestJob | None = None
         # Zotero 换号采用两阶段确认；待确认明文 token 只在内存保留十分钟。
         self._pending_zotero_account_change: dict[str, Any] | None = None
+        # Milvus 自动重建调度器（组合根在 api 构造后注入；为空表示当轮不自动重建）。
+        self._auto_reindex: Any | None = None
 
     def attach_zotero_pipeline(self, pipeline: Any) -> None:
         """组合根注入 ZoteroSyncPipeline（其回调引用本 api 的索引/LRAG 助手）。"""
         self._zotero_pipeline = pipeline
+
+    def attach_auto_reindex_scheduler(self, scheduler: Any) -> None:
+        """组合根注入 AutoReindexScheduler（本 api 只负责在标记待重建时给它打信号）。"""
+        self._auto_reindex = scheduler
 
     def attach_notion_sync_pipeline(self, pipeline: Any) -> None:
         """组合根注入 NotionSyncPipeline（Notion 单向增量推送编排）。"""
@@ -2092,6 +2098,23 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         self._record_milvus_progress(job, force=True)
         self._milvus_build_task = asyncio.create_task(self._run_milvus_rebuild(job))
         return job.to_dict()
+
+    async def run_milvus_rebuild_to_completion(self) -> dict[str, Any]:
+        """启动（或复用）一次 Milvus 重建并等到它结束，返回终态快照。
+
+        供自动重建调度器使用：借 `start_milvus_rebuild` 的全局单飞语义，**手动重建正在跑时
+        直接搭上同一个 job**，不会并发起第二次；因此自动与手动共用同一条进度条与 runtime events。
+        重建任务自身已吞掉一切异常并写终态，这里只在拿不到任务时兜底。
+        """
+        await self.start_milvus_rebuild()
+        task = self._milvus_build_task
+        if task is not None:
+            # 用 `asyncio.wait` 而非 `await task`：重建任务被取消时不该把 CancelledError
+            # 灌给调度循环（终态已由 `_run_milvus_rebuild` 写回快照）；而调度器自身被取消时，
+            # `asyncio.wait` 仍会正常抛 CancelledError 向上传播。
+            await asyncio.wait({task})
+        job = self._milvus_build_job
+        return job.to_dict() if job is not None else {}
 
     def _record_milvus_progress(self, job: MilvusBuildJob, *, force: bool = False) -> None:
         snapshot = job.to_dict()
@@ -3576,6 +3599,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             )
         if changed and section == "rerank":
             self._apply_rerank_runtime_config()
+        if changed and section == "vector_db" and key == "auto_rebuild_enabled" and value:
+            # 刚把自动重建打开：立刻唤醒调度器，否则积压队列要等到下一份新文档才被排空。
+            self._notify_auto_reindex()
 
         logger.info("update_config ok: %s.%s persisted", section, key)
         return {
@@ -4994,11 +5020,26 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             self._index_compatibility.remove_lightrag_collection(collection)
 
     async def _mark_document_needs_reindex(self, doc_id: str) -> None:
+        """把文档排进待重建队列，并给自动重建调度器打一次信号。
+
+        这是**全部**标记路径的唯一收口（上传自动索引失败、Zotero 同步遇不兼容、集合移动、
+        reextract、删集合失败……），因此信号只需在这里打一次。
+        """
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             return
         doc.needs_reindex = True
         await self._source_store.update_document(doc)
+        self._notify_auto_reindex()
+
+    def _notify_auto_reindex(self) -> None:
+        """通知自动重建调度器「队列里有活了」；未装配调度器时是空操作。"""
+        if self._auto_reindex is None:
+            return
+        try:
+            self._auto_reindex.notify()
+        except Exception as exc:  # noqa: BLE001 - 打信号失败不得影响主流程
+            logger.warning("自动重建信号发送失败：%s", exc)
 
     async def _clear_document_needs_reindex(self, doc_id: str) -> None:
         doc = await self._source_store.get_document(doc_id)
@@ -5808,6 +5849,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             doc.needs_reindex = True
             await self._source_store.update_document(doc)
             await self._mark_lightrag_pending(doc.doc_id, doc.collection)
+        # 这里直接改 `doc.needs_reindex`（绕过 `_mark_document_needs_reindex`），故补一次信号。
+        self._notify_auto_reindex()
         if self._config:
             self._config.add_diagnostic(
                 "Embedding configuration changed; restart and rebuild Milvus/LightRAG indexes."

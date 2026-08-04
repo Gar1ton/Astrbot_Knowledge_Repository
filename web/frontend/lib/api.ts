@@ -726,7 +726,7 @@ const MOCK_CONFIG: EffectiveConfig = {
     llm_model: "",
     llm_api_key: "",
   },
-  vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true },
+  vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true, auto_rebuild_enabled: true, auto_rebuild_delay_seconds: 30 },
   embedding: { provider: "local", model: "intfloat/multilingual-e5-small", base_url: "https://api.openai.com/v1", max_token_size: 512, actual_dimension: 384, api_key: "" },
   zotero_sync: { enabled: false, access_mode: "local", zotero_data_dir: "", resolved_data_dir: "", api_port: 23119, storage_mode: "managed_copy", linked_root: "", zotmoov_root: "", sync_mode: "conservative", auto_sync_enabled: false, auto_sync_interval_sec: 3600, server_key_present: false, server_key_masked: "" },
 };
@@ -1037,6 +1037,8 @@ function applyMockConfigUpdate(section: string, key: string, value: unknown): vo
   if (section === "vector_db" && vectorStore) {
     if (key === "backend") vectorStore.current = String(value);
     if (key === "auto_index_enabled") vectorStore.detail.auto_index_enabled = Boolean(value);
+    if (key === "auto_rebuild_enabled") vectorStore.detail.auto_rebuild_enabled = Boolean(value);
+    if (key === "auto_rebuild_delay_seconds") vectorStore.detail.auto_rebuild_delay_seconds = Number(value);
   }
 
   if (section === "rerank" && ask) {
@@ -1890,7 +1892,7 @@ const MOCK_CAPABILITIES: CapabilitiesData = {
     { id: "zotero", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { access_mode: "local", api_port: 23119, sync_mode: "conservative", storage_mode: "managed_copy" } },
     { id: "ingest", current: "pymupdf4llm", candidates: ["pymupdf4llm"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { ocr_enabled: false, pdf_converter: "pymupdf4llm", pdf_converter_ready: true, dependency_source: "requirements.txt" } },
     { id: "embedding", current: "local", candidates: ["local", "external"], status: "ready", switchable: true, consequence: "rebuild", required_deps: ["local_embedding"], configured: true, detail: { model: "intfloat/multilingual-e5-small", actual_dimension: 384 } },
-    { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true, astrbot_locked: true, compatible: true, rebuild_required: false, pending_reindex_count: 0, document_count: 0, chunk_count: 0, reason: "" } },
+    { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true, auto_rebuild_enabled: true, auto_rebuild_delay_seconds: 30, astrbot_locked: true, compatible: true, rebuild_required: false, pending_reindex_count: 0, document_count: 0, chunk_count: 0, reason: "" } },
     { id: "retrieval", current: "rrf_fusion", candidates: ["rrf_fusion"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { engines: ["milvus", "sqlite_lexical"] } },
     { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix", llm_provider: "main", llm_model: "", llm_label: "<main - AstrBot main LLM>" } },
     { id: "ask", current: "", candidates: [], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { rerank_provider: "cross_encoder", rerank_model: "Alibaba-NLP/gte-reranker-modernbert-base", rerank_status: "idle", rerank_dependency_ready: true, rerank_runtime: { provider: "cross_encoder", status: "idle", model: "Alibaba-NLP/gte-reranker-modernbert-base", enabled: true, last_error: null } } },

@@ -84,6 +84,8 @@ class PluginInitializer:
         self._backup_task: asyncio.Task[Any] | None = None
         self._zotero_sync_task: asyncio.Task[Any] | None = None
         self._notion_sync_task: asyncio.Task[Any] | None = None
+        self._auto_reindex_task: asyncio.Task[Any] | None = None
+        self.auto_reindex_scheduler: Any | None = None
         # 超时后仍在后台跑的维度探针（模型下载不可中断，只能让它跑完再补记结果）。
         self._pending_probe_task: asyncio.Task[Any] | None = None
         self.zotero_sync_pipeline: Any | None = None
@@ -647,6 +649,23 @@ class PluginInitializer:
         if notion_cfg.enabled and notion_cfg.auto_sync_interval_sec > 0:
             self._notion_sync_task = asyncio.create_task(self._periodic_notion_sync())
 
+        # 6.3) Milvus 索引自动重建：常驻调度器（开关每轮重读，故不在这里按配置决定是否创建）。
+        # 启动即打一次信号做「补跑」——此时 4.6 段的 _mark_all_documents_needs_reindex() 已跑完，
+        # 待重建队列是终态，调度器自己查队列决定跑不跑。
+        if vdb_cfg.backend == "milvus":
+            from kacore.auto_reindex import AutoReindexScheduler
+
+            self.auto_reindex_scheduler = AutoReindexScheduler(
+                pending_count=self.api.get_pending_reindex_count,
+                run_rebuild=self.api.run_milvus_rebuild_to_completion,
+                config_provider=self._config.get_vector_db_config,
+                is_ready=lambda: self.vector_store is not None
+                and self.embedding_provider is not None,
+            )
+            self.api.attach_auto_reindex_scheduler(self.auto_reindex_scheduler)
+            self._auto_reindex_task = asyncio.create_task(self.auto_reindex_scheduler.run())
+            self.auto_reindex_scheduler.notify()
+
         # 6.5) 启动摘要——记录各关键组件激活状态，方便终端页快速诊断。
         logger.info(
             "初始化完成 | embedding=%s dim=%s | vector_store=%s | lightrag=%s",
@@ -959,6 +978,15 @@ class PluginInitializer:
             except (asyncio.CancelledError, Exception):
                 pass
             self._notion_sync_task = None
+
+        if self._auto_reindex_task is not None:
+            self._auto_reindex_task.cancel()
+            try:
+                await self._auto_reindex_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._auto_reindex_task = None
+            self.auto_reindex_scheduler = None
 
         # 后台探针：取消任务本身（不等待）。底层模型下载线程无法中断，会继续跑完写入
         # HuggingFace 缓存——这正是我们要的：下次 initialize 直接命中缓存。

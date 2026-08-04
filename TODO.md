@@ -1,5 +1,75 @@
 # TODO
 
+## v1.1.2：Milvus 索引自动重建
+
+### User constraints / 约束
+
+- **新文件进来后不得再要求手动点「重建索引」**——自动重建必须是系统自己的事。
+- 增量与全量**都自动**：索引不兼容时（换 embedding / collection 被重建 / schema 不匹配）
+  也自动转全量重建，用户明确确认接受「先 clear() 再逐篇重建」的代价。
+- 触发方式为**事件驱动 + 防抖 + 启动补跑**，失败按指数退避，不得空转刷屏。
+
+### 核实到的根因（必须先记录）
+
+自动索引**本来就存在**，问题不是「没写」而是「全被兼容门挡着」：
+
+- `kacore/api.py:1526` `register_document()` 仅当 `auto_index_enabled and
+  _milvus_index_is_compatible()` 才同步写 Milvus，否则 `:1560` 落 `needs_reindex=True`；
+  `:5182` `_index_document()`（Zotero 同步回调）是同一道门。
+- 兼容态一旦翻成 incompatible——`plugin_initializer.py:349`（collection 被重建而 SQLite 有文档）、
+  `:366`（fingerprint 变了）、`:375`（schema mismatch）、`api.py:890`（删集合失败）、
+  `api.py:5806`（换 embedding）——**只有跑完一次全量重建才会翻回来**（`api.py:1943/1957`）。
+- 因此兼容态坏掉之后，其后进来的**每一个**新文件都只会排进 `needs_reindex` 队列，而全项目
+  **没有任何东西会主动排空该队列**，只有 WebUI 的 `POST /api/documents/rebuild-index`
+  （`web/server.py:800` → `api.start_milvus_rebuild`）。这就是「每次都要手动重建」的真正来源。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 配置项**（`kacore/config.py`）：`VectorDbConfig` 新增
+  `auto_rebuild_enabled: bool = True` 与 `auto_rebuild_delay_seconds: int = 30`（解析时下限
+  夹到 5 秒）；同步改配置快照与 `CONFIG_KEY_POLICY["vector_db"]`。policy 取
+  **`CONSEQUENCE_NONE` 而非 RESTART**——调度循环每轮重读配置，改完即生效；若标 RESTART，
+  用户关掉自动重建还得重启插件，与「省心」的诉求相悖。同步
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 的 `CONFIG_POLICIES` 快照。
+- [x] **Phase 2 — 调度器**（新建 `kacore/auto_reindex.py`）：`AutoReindexScheduler`，
+  构造器注入 `pending_count` / `run_rebuild` / `config_provider` / `is_ready` 四个回调，
+  **不放进 `api.py`**（该文件已 5876 行，是 600 行红线的 9 倍，v1.1.1 已登记拆分计划）。
+  `notify()` 打信号；`run()` = 等信号 → 防抖静默 → 门禁 → 查队列 → 调重建 → 判成败。
+  **park 机制是硬要求**：连续 6 次「零进展」后停止定时重试、只等新信号——一篇永远清洗失败的
+  坏 PDF 会让队列永远非空，没有 park 就是每小时一次的无限重试风暴。
+- [x] **Phase 3 — api 接线**（`kacore/api.py`）：`attach_auto_reindex_scheduler()`（对齐
+  `:747` 的 `attach_zotero_pipeline` 薄注入）、`run_milvus_rebuild_to_completion()`（复用现成
+  的单飞 `start_milvus_rebuild`，故自动重建与手动按钮共用同一 job、同一进度条、同一 runtime
+  events，WebUI 零改动生效）；信号点落在 `_mark_document_needs_reindex()`（`:4996`，全部标记
+  路径的唯一收口）与 `_invalidate_embedding_indexes()`（`:5804`，它直接改 `doc.needs_reindex`
+  绕过了前者）。
+- [x] **Phase 4 — 组合根**（`kacore/plugin_initializer.py`）：在 6.x 周期任务区装配 +
+  `create_task(scheduler.run())` + 建完即 `notify()` 做启动补跑（此时 4.6 段的
+  `_mark_all_documents_needs_reindex()` 已跑完，队列是终态）；`teardown()` 按既有三段式释放。
+- [x] **Phase 5 — 状态暴露**：`kacore/capabilities.py` 的 `vector_store.detail` 增
+  `auto_rebuild_enabled`；`QuickConfigPanel.tsx` 在「自动索引」旁加开关；`lib/i18n.ts` zh+en
+  双份；`lib/api.ts` 的 mock 配置/能力快照补字段（**不进 `MOCK_RESTART_KEYS`**，policy 是 NONE）。
+- [x] **Phase 6 — 测试**：新建 `tests/backend/test_auto_reindex.py`（防抖只跑一次、开关关闭
+  不跑、空队列不跑、失败退避递增、**连续零进展 6 次进 park**、park 后 notify 唤醒并重置）；
+  `test_api.py` 补 notify 收口与单飞复用；`test_config.py` 补新键默认值/夹取/policy。
+- [x] **Phase 7 — 落版**：全绿后 `python bump_version.py 1.1.2`，写 CHANGELOG。
+- [x] **Phase 8 — codex skill 可代按「重建索引」按钮**（用户追加需求，明确要求走调用代码而非
+  computer use）：`knowledge_arch_client.py` 新增 `index-status`（只读）与 `index-rebuild`
+  （`--apply` 门禁 + 可选 `--wait` 轮询到终态）。此前 `SKILL.md` 的不变量是「Never start a
+  normal index rebuild」、`config_options()` 里写死 `rebuild_command_available: False`，且
+  `test_client_exposes_only_agent_evidence_and_guarded_graph_builds` 断言**客户端源码里不得
+  出现该端点**——三处都是这条禁令的落点，必须一起改，否则改一处另两处会把它拉回去。
+  测试从「端点不得出现」改为「端点可达但受 apply 门禁保护」（断言 preview 分支在 POST 之前）。
+
+### Known limitations（本轮有意不解决）
+
+- **坏文档不隔离**：永久失败的文档仍留在 `needs_reindex` 队列，靠 park 止损，但待重建数字
+  不会自己归零。真正的隔离需 per-doc 失败计数与新的持久化字段，属于另一轮。
+- **不动 LightRAG 图谱构建**：LRAG 有独立的 `lightrag_index_status` 与带暂停语义的 `BuildJob`，
+  逐 chunk 打 LLM 成本高，自动触发是另一个量级的决策。
+- **不改 `auto_index_enabled` 语义**：它管「上传瞬间同步写 Milvus」，自动重建是它失败/被跳过
+  后的兜底网，两者正交。
+
 ## v1.1.1：全文检索端到端实装 · 显存面板对齐 DS · 版本落版 (completed)
 
 ### User constraints / 约束

@@ -390,6 +390,8 @@ def detect_pipeline(config: Config) -> list[dict[str, Any]]:
         "configured": True,
         "detail": {
             "auto_index_enabled": vdb_cfg.auto_index_enabled,
+            "auto_rebuild_enabled": vdb_cfg.auto_rebuild_enabled,
+            "auto_rebuild_delay_seconds": vdb_cfg.auto_rebuild_delay_seconds,
             "astrbot_locked": True,
             "milvus_runtime_ready": has_milvus,
             "milvus_runtime_hint": milvus_runtime["hint"],

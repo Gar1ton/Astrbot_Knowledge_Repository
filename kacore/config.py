@@ -63,6 +63,18 @@ def _clamp_load_timeout(value: Any) -> int:
     return max(_LOAD_TIMEOUT_MIN_SECONDS, min(_LOAD_TIMEOUT_MAX_SECONDS, seconds))
 
 
+# 自动重建防抖窗口下限：低于此值时，Zotero 批量同步会每来一篇就重跑一次全量重建。
+MIN_AUTO_REBUILD_DELAY_SECONDS: int = 5
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    """把配置值转成 int；None/空串/非数字一律回退默认值（不抛错）。"""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 # ── 各子系统专属 typed config ────────────────────────────────────
 
 
@@ -186,11 +198,19 @@ class GraphConfig:
 
 @dataclass
 class VectorDbConfig:
-    """向量数据库与检索后端配置。"""
+    """向量数据库与检索后端配置。
+
+    `auto_index_enabled` 与 `auto_rebuild_enabled` 是**正交**的两件事：前者管「上传/同步的
+    瞬间是否同步写 Milvus」，后者管「已排进 `needs_reindex` 队列的文档是否由后台自动排空」。
+    前者失败或被兼容门跳过时，后者是兜底网。
+    """
 
     backend: str = "milvus"
     db_filename: str = "vector_store.db"
     auto_index_enabled: bool = True
+    auto_rebuild_enabled: bool = True
+    # 防抖静默期：Zotero 批量同步会连打上百次信号，静默这么久没有新信号才真正开跑。
+    auto_rebuild_delay_seconds: int = 30
 
 
 @dataclass
@@ -444,6 +464,8 @@ class Config:
                 "backend": vector_db.backend,
                 "db_filename": vector_db.db_filename,
                 "auto_index_enabled": vector_db.auto_index_enabled,
+                "auto_rebuild_enabled": vector_db.auto_rebuild_enabled,
+                "auto_rebuild_delay_seconds": vector_db.auto_rebuild_delay_seconds,
             },
             "embedding": {
                 "provider": embedding.provider,
@@ -704,6 +726,8 @@ class Config:
         s = _section(self.raw, "vector_db")
         raw_auto = s.get("auto_index_enabled", VectorDbConfig.auto_index_enabled)
         auto_index = bool(raw_auto) if not isinstance(raw_auto, bool) else raw_auto
+        raw_rebuild = s.get("auto_rebuild_enabled", VectorDbConfig.auto_rebuild_enabled)
+        auto_rebuild = bool(raw_rebuild) if not isinstance(raw_rebuild, bool) else raw_rebuild
         backend = str(s.get("backend", VectorDbConfig.backend))
         if backend == "astrbot":
             backend = "astr"
@@ -713,6 +737,15 @@ class Config:
             backend=backend,
             db_filename=s.get("db_filename", VectorDbConfig.db_filename),
             auto_index_enabled=auto_index,
+            auto_rebuild_enabled=auto_rebuild,
+            # 下限 5 秒：防抖窗口过短会让 Zotero 批量同步每来一篇就重跑一次重建。
+            auto_rebuild_delay_seconds=max(
+                MIN_AUTO_REBUILD_DELAY_SECONDS,
+                _int_or_default(
+                    s.get("auto_rebuild_delay_seconds"),
+                    VectorDbConfig.auto_rebuild_delay_seconds,
+                ),
+            ),
         )
 
     def get_embedding_config(self) -> EmbeddingConfig:
@@ -913,6 +946,10 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
     "vector_db": {
         "backend": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "auto_index_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        # 自动重建调度器每轮循环重读这两个键，改完即生效，故 consequence 为 NONE：
+        # 若标 RESTART，用户想关掉自动重建还得重启插件，与「省心」的诉求相悖。
+        "auto_rebuild_enabled": ConfigKeyPolicy(True, True),
+        "auto_rebuild_delay_seconds": ConfigKeyPolicy(True, True),
     },
     "embedding": {
         "provider": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),

@@ -1,10 +1,6 @@
 # CHANGELOG
 
-## [Unreleased]
-
 ## [v1.1.1] — 2026-08-03
-
-来源：用户提出的四项改进。核实后其中两项的前提与实际代码不符，本轮按实际情况处理。
 
 ### 新增功能 (Added)
 
@@ -68,9 +64,7 @@
 
 ### 已知限制 (Known limitations)
 
-- `kacore/utils/torch_memory.py` 的 GPU/显存读取**本就是系统实时识别**（`torch.cuda`，零硬编码），
-  本轮按用户指示未改动。遗留瑕疵：设备名取自 `get_device_name(0)` 而显存数字取自
-  `mem_get_info()` 的当前设备，单卡环境两者同源、数据正确，多卡环境会错配。
+- `mem_get_info()` 的当前设备，单卡环境两者同源、数据正确，多卡环境会错配。
 - codex skill 的确认门按**单次调用返回量**判定，分页累计读取不受约束（客户端无状态，无法可靠
   累计）。仍靠 `references/research.md` §4 的阅读纪律约束。
 

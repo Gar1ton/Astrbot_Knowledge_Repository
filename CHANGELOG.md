@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## [Unreleased]
+
+### 维护 (Maintenance)
+
+- 新增 `docs/GIT_WORKFLOW.md` 的人工发布 instruction，记录 developer → publish → main
+  的白名单生成、认证、推送、PR 与版本 tag 流程，并保留 v1.1.1 本轮发布准备记录。
+
 ## [v1.1.1] — 2026-08-03
 
 ### 新增功能 (Added)

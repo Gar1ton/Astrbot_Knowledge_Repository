@@ -1,7 +1,5 @@
 # CHANGELOG
 
-## [Unreleased]
-
 ## [v1.1.2] — 2026-08-04
 
 ### 新增功能 (Added)

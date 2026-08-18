@@ -11,12 +11,14 @@ import { Z } from "@/lib/zLayers";
 import { useConsole } from "@/lib/ConsoleContext";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n, type I18nKey } from "@/lib/i18n";
+import { buildCitationIndex, splitByCitations } from "@/lib/citationIndex";
+import { FullTextConfirmDialog } from "@/components/panels/FullTextConfirmDialog";
 import {
-  AskResult, AskSource, ApiError, GraphBuildEstimate, ThinkingTrace,
+  AskResult, AskSource, ApiError, AskTaskTimeoutError, FullTextConfirmation, GraphBuildEstimate, ThinkingTrace,
   ChatMessage, ask, buildGraph, estimateGraphBuild,
   getChatHistory, clearChatHistory, lockChatAnswer,
   createDocumentNote, createCollectionNote,
-  getAskProgress, type LiveProgressDetail,
+  getAskProgress, waitForLateAskAnswer, type LiveProgressDetail,
   getEffectiveConfig, pushNotionNote,
 } from "@/lib/api";
 
@@ -51,6 +53,12 @@ interface GraphBuildDialogState {
   building?: boolean;
 }
 
+interface FullTextConfirmDialogState {
+  question: string;
+  info: FullTextConfirmation;
+  running?: boolean;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────
 
 function retrievalModeLabel(
@@ -68,6 +76,8 @@ function retrievalModeLabel(
   if (mode === "enhanced_recall") return t("chat_retrieval_enhanced_mode");
   if (mode === "enhanced_degraded_to_default") return t("chat_retrieval_enhanced_degraded");
   if (mode === "memecho") return t("chat_retrieval_memecho_mode");
+  // 缺这条会让全文检索的答案（以及历史回放）被兜底标成「Milvus 语义检索」。
+  if (mode === "fulltext") return t("chat_retrieval_fulltext");
   return t("chat_retrieval_milvus");
 }
 
@@ -274,40 +284,44 @@ function formatDuration(seconds?: number | null): string {
 
 // ─── renderAnswer: **bold** + [n] citation sups ───────────────
 
+const CITE_STYLE: React.CSSProperties = {
+  cursor: "pointer",
+  color: "var(--accent)",
+  background: "var(--accent-soft)",
+  borderRadius: 3,
+  padding: "0 3px",
+  fontWeight: 600,
+  margin: "0 1px",
+};
+
 function renderAnswer(
   text: string,
+  sources: AskSource[] | undefined,
   onCite: (n: number) => void,
 ): React.ReactNode {
+  // v1.1.0：正文里的引用已是 Harvard 短引 `(Vaswani et al., 2017, p. 3)`；索引把它映射回
+  // 来源序号。历史消息里的裸 `[n]` 由 index 内置的兜底分支继续支持。
+  const index = buildCitationIndex(sources);
   return text.split("\n").map((line, li, lines) => {
-    const parts = line.split(/(\*\*[^*]+\*\*|\[\d+\])/g);
+    const bold = line.split(/(\*\*[^*]+\*\*)/g);
     return (
       <React.Fragment key={li}>
-        {parts.map((p, pi) => {
-          if (/^\*\*[^*]+\*\*$/.test(p))
-            return <strong key={pi} style={{ fontWeight: 700, color: "var(--heading)" }}>{p.slice(2, -2)}</strong>;
-          const m = p.match(/^\[(\d+)\]$/);
-          if (m) {
-            const n = parseInt(m[1]);
-            return (
-              <sup
-                key={pi}
-                onClick={() => onCite(n)}
-                style={{
-                  cursor: "pointer",
-                  color: "var(--accent)",
-                  background: "var(--accent-soft)",
-                  borderRadius: 3,
-                  padding: "0 3px",
-                  fontWeight: 700,
-                  fontSize: ".72em",
-                  margin: "0 1px",
-                }}
-              >
-                [{n}]
-              </sup>
-            );
-          }
-          return p;
+        {bold.map((chunk, ci) => {
+          if (/^\*\*[^*]+\*\*$/.test(chunk))
+            return <strong key={ci} style={{ fontWeight: 700, color: "var(--heading)" }}>{chunk.slice(2, -2)}</strong>;
+          return (
+            <React.Fragment key={ci}>
+              {splitByCitations(chunk, index).map((part, pi) =>
+                part.n === null ? (
+                  part.text
+                ) : (
+                  <span key={pi} onClick={() => onCite(part.n as number)} style={CITE_STYLE}>
+                    {part.text}
+                  </span>
+                ),
+              )}
+            </React.Fragment>
+          );
         })}
         {li < lines.length - 1 && <br />}
       </React.Fragment>
@@ -461,8 +475,24 @@ function MessageBubble({
             </Badge>
           )}
         </div>
+        {/* v1.1.0：校验告警前置到正文之前——读完整篇才发现「未通过证据校验」为时已晚。
+            与 AstrBot 聊天路径、存库回放（stored_answer）三处同序。 */}
+        {msg.answerNotice && (
+          <div
+            style={{
+              marginBottom: 8,
+              paddingBottom: 8,
+              borderBottom: "1px solid var(--border)",
+              fontSize: 11,
+              lineHeight: 1.6,
+              color: "var(--warn)",
+            }}
+          >
+            ⚠️ {msg.answerNotice.replace(/\*\*/g, "")}
+          </div>
+        )}
         <div style={{ fontSize: 12.5, lineHeight: 1.7, color: "var(--fg)" }}>
-          {renderAnswer(msg.content, onCite)}
+          {renderAnswer(msg.content, msg.sources, onCite)}
         </div>
         {msg.sources && msg.sources.length > 0 && (
           <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
@@ -484,20 +514,6 @@ function MessageBubble({
           </div>
         )}
         {msg.thinkingTrace && <ThinkingTraceView trace={msg.thinkingTrace} t={t} />}
-        {msg.answerNotice && (
-          <div
-            style={{
-              marginTop: 8,
-              paddingTop: 8,
-              borderTop: "1px solid var(--border)",
-              fontSize: 11,
-              lineHeight: 1.6,
-              color: "var(--warn)",
-            }}
-          >
-            ⚠️ {msg.answerNotice.replace(/\*\*/g, "")}
-          </div>
-        )}
       </div>
       <div
         style={{
@@ -669,6 +685,18 @@ function getOrCreateConvId(): string {
   return id;
 }
 
+/** ChatMessage（后端存库形态）→ Message（气泡渲染形态）；挂载加载历史与超时后补回答案共用。 */
+function chatMessagesToMessages(msgs: ChatMessage[]): Message[] {
+  return msgs.map((m) => ({
+    role: m.role as "user" | "assistant",
+    content: m.content,
+    sources: m.sources,
+    actualRetrievalMode: m.retrieval_mode || undefined,
+    id: m.id,
+    pinned: Boolean(m.locked),
+  }));
+}
+
 export function ChatPanel({ width }: { width?: number }) {
   const { selectedCollection, selectedDocId, setSelectedDocId, setHighlightedChunk } = useConsole();
   const { t } = useI18n();
@@ -697,6 +725,7 @@ export function ChatPanel({ width }: { width?: number }) {
   const [answerLanguage, setAnswerLanguage] = useState<"auto" | "zh" | "en">("auto");
   const [showSettings, setShowSettings] = useState(false);
   const [graphBuildDialog, setGraphBuildDialog] = useState<GraphBuildDialogState | null>(null);
+  const [fullTextDialog, setFullTextDialog] = useState<FullTextConfirmDialogState | null>(null);
   const [notionEnabled, setNotionEnabled] = useState(false);
   // 卸载时兜底清除轮询定时器，避免组件被销毁后仍在轮询。
   useEffect(
@@ -743,16 +772,7 @@ export function ChatPanel({ width }: { width?: number }) {
     getChatHistory(conversationId)
       .then((msgs: ChatMessage[]) => {
         if (msgs.length === 0) return;
-        setMessages(
-          msgs.map((m) => ({
-            role: m.role as "user" | "assistant",
-            content: m.content,
-            sources: m.sources,
-            actualRetrievalMode: m.retrieval_mode || undefined,
-            id: m.id,
-            pinned: Boolean(m.locked),
-          })),
-        );
+        setMessages(chatMessagesToMessages(msgs));
       })
       .catch(() => {});
   }, [conversationId]);
@@ -851,10 +871,15 @@ export function ChatPanel({ width }: { width?: number }) {
     setMessages((prev) => prev.filter((m) => m.pinned));
   }
 
-  async function submitQuestion(question: string, mode: RetrievalMode, appendUser: boolean) {
+  async function submitQuestion(
+    question: string,
+    mode: RetrievalMode,
+    appendUser: boolean,
+    confirmed = false,
+  ) {
     if (loading) return;
     if (mode === "fulltext" && !selectedDocId) {
-      toast(t("chat_graph_requires_collection"), "info");
+      toast(t("chat_fulltext_requires_doc"), "info");
       return;
     }
     if (appendUser) {
@@ -893,7 +918,9 @@ export function ChatPanel({ width }: { width?: number }) {
         retrieval_mode: mode,
         use_english_retrieval: useEnglishRetrieval,
         answer_language: answerLanguage,
+        confirmed,
       });
+      setFullTextDialog(null);
       setConversationId(result.conversation_id);
       if (typeof window !== "undefined") localStorage.setItem(CONV_KEY, result.conversation_id);
       setMessages((prev) => [
@@ -920,6 +947,34 @@ export function ChatPanel({ width }: { width?: number }) {
           try { estimate = await estimateGraphBuild(collectionName); } catch { /* ignore */ }
         }
         setGraphBuildDialog({ question, collection: collectionName, reason: err.message, estimate, canBuild });
+      } else if (
+        mode === "fulltext" &&
+        err instanceof ApiError &&
+        err.body?.status === "fulltext_confirmation_required"
+      ) {
+        // 409 = 后端在问「这篇有 N 字符，确定要整篇送进去吗」。此刻后端尚未调用 LLM、
+        // 也没写任何 chat_history，用户确认后原样重发即可，不是续跑。
+        setFullTextDialog({
+          question,
+          info: err.body as unknown as FullTextConfirmation,
+        });
+      } else if (err instanceof AskTaskTimeoutError || (err instanceof ApiError && err.timedOut)) {
+        // 后端 task_timeout_seconds 到点，或前端自己先放弃等待：请求没有失败，任务仍在
+        // 后台跑并会正常写库——转入补轮询找回迟到的答案，而不是弹错误后直接放弃。
+        const recoverCid = err instanceof AskTaskTimeoutError ? err.conversationId : cid;
+        toast(t("chat_ask_still_running"), "info");
+        setConversationId(recoverCid);
+        if (typeof window !== "undefined") localStorage.setItem(CONV_KEY, recoverCid);
+        waitForLateAskAnswer(recoverCid)
+          .then((history) => {
+            if (history) {
+              setMessages(chatMessagesToMessages(history));
+              toast(t("chat_ask_recovered"), "ok");
+            } else {
+              toast(t("chat_ask_recover_failed"), "info");
+            }
+          })
+          .catch(() => {});
       } else {
         toast(err instanceof ApiError ? err.message : t("error_generic"), "error");
       }
@@ -927,6 +982,9 @@ export function ChatPanel({ width }: { width?: number }) {
       stopPolling();
       setLiveProgress(null);
       setLoading(false);
+      // 已确认的那次重发无论成败都要收起确认框，否则失败时它会永远停在 loading 态。
+      // 刚被 409 打开的（running 未置位）不受影响。
+      setFullTextDialog((prev) => (prev?.running ? null : prev));
     }
   }
 
@@ -988,6 +1046,18 @@ export function ChatPanel({ width }: { width?: number }) {
           onBuild={handleGraphBuild}
           onFallback={handleGraphFallback}
           onCancel={() => setGraphBuildDialog(null)}
+        />
+      )}
+
+      {fullTextDialog && (
+        <FullTextConfirmDialog
+          info={fullTextDialog.info}
+          running={fullTextDialog.running}
+          onConfirm={() => {
+            setFullTextDialog((prev) => (prev ? { ...prev, running: true } : prev));
+            void submitQuestion(fullTextDialog.question, "fulltext", false, true);
+          }}
+          onCancel={() => setFullTextDialog(null)}
         />
       )}
 

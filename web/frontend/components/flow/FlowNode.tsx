@@ -115,12 +115,20 @@ function DepRow({
 }) {
   const depName = t(`flow_dep_${dep.key}` as I18nKey);
   const isInstalling = installing === dep.key;
+  // 顶层包在、运行时不可用（如缺 milvus-lite）：标题说清是「运行时不可用」，
+  // 副行给后端下发的具体修复建议，而不是重复一条装了也没用的 pip 规格。
+  const runtimeBroken = dep.installed && dep.runtime_ready === false;
+  const hint = dep.runtime_hint ?? "";
   return (
     <div className="flow-dep-row" onClick={(event) => event.stopPropagation()}>
       <span className="flow-dep-icon"><AlertIcon /></span>
       <div className="flow-dep-text">
-        <span className="flow-dep-name">{t(dep.required ? "flow_missing_required_dep" : "flow_missing_dep")}: {depName}</span>
-        <code className="flow-dep-pip">{dep.pip_spec}</code>
+        <span className="flow-dep-name">
+          {runtimeBroken
+            ? `${t("flow_dep_runtime_broken")}: ${depName}`
+            : `${t(dep.required ? "flow_missing_required_dep" : "flow_missing_dep")}: ${depName}`}
+        </span>
+        <code className="flow-dep-pip">{hint || dep.pip_spec}</code>
       </div>
       <button
         type="button"
@@ -209,7 +217,11 @@ export function FlowNode({
   const detailParts = buildDetailParts(stage, lang, t("flow_engines"));
   const missingDeps = stage.required_deps
     .map((key) => depMap.get(key))
-    .filter((dep): dep is DependencyStatus => Boolean(dep && !dep.installed));
+    // runtime_ready=false 与「没装」同等对待：pymilvus 装了但缺 milvus-lite 时，
+    // 节点必须显示未就绪并给出修复入口，而不是因为顶层包在就显示绿灯。
+    .filter((dep): dep is DependencyStatus =>
+      Boolean(dep && (!dep.installed || dep.runtime_ready === false)),
+    );
   const fieldKey = FIELD_LABEL_KEYS[id] ?? "flow_current";
   const needsMilvusRebuild =
     id === "vector_store" &&

@@ -8,6 +8,7 @@ import type { QuickConfigUpdate } from "@/components/flow/QuickConfigPanel";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
+  ApiError,
   getCapabilities,
   getEffectiveConfig,
   getZoteroConfig,
@@ -24,6 +25,11 @@ import {
 
 type Banner = { kind: "restart" | "rebuild" | "install"; msg?: string } | null;
 type RefreshOptions = { recheck?: boolean; includeZotero?: boolean; notify?: boolean };
+
+/** 后端忙（重建索引、加载模型）时刷新会超时；这是抖动不是故障，不该弹错误 toast。 */
+function isClientTimeout(reason: unknown): boolean {
+  return reason instanceof ApiError && reason.timedOut;
+}
 
 export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
   const { t, lang } = useI18n();
@@ -86,12 +92,12 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
         }
         rerankStatusRef.current = nextRerankKey;
         setCaps(freshCaps);
-      } else if (options.notify) {
+      } else if (options.notify && !isClientTimeout(capsResult.reason)) {
         toast(capsResult.reason instanceof Error ? capsResult.reason.message : String(capsResult.reason), "error");
       }
       if (configResult.status === "fulfilled") {
         setConfig(configResult.value);
-      } else if (options.notify) {
+      } else if (options.notify && !isClientTimeout(configResult.reason)) {
         toast(configResult.reason instanceof Error ? configResult.reason.message : String(configResult.reason), "error");
       }
       if (options.includeZotero) {

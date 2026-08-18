@@ -118,9 +118,15 @@ export function TerminalPanel({
     errors[errorJumpIndexRef.current].scrollIntoView({ block: "center" });
   }
 
+  function exportVisibleText() {
+    const body = buildLogText(logs.visible);
+    if (logs.droppedCount <= 0) return body;
+    return `[WARNING] ${t("terminal_dropped_logs", { n: logs.droppedCount })}\n${body}`;
+  }
+
   async function copyVisible() {
     try {
-      await navigator.clipboard.writeText(buildLogText(logs.visible));
+      await navigator.clipboard.writeText(exportVisibleText());
       setCopied(true);
       window.clearTimeout(copiedTimerRef.current);
       copiedTimerRef.current = window.setTimeout(() => setCopied(false), 1500);
@@ -133,7 +139,7 @@ export function TerminalPanel({
     const pad = (n: number) => String(n).padStart(2, "0");
     const d = new Date();
     const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-    const blob = new Blob([buildLogText(logs.visible)], { type: "text/plain;charset=utf-8" });
+    const blob = new Blob([exportVisibleText()], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -204,6 +210,20 @@ export function TerminalPanel({
       />
 
       <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {logs.droppedCount > 0 && (
+          <div
+            role="status"
+            style={{
+              padding: "7px 16px",
+              borderBottom: "1px solid color-mix(in srgb, var(--warn) 35%, var(--border))",
+              background: "color-mix(in srgb, var(--warn) 8%, var(--surface))",
+              color: "var(--warn)",
+              fontSize: 11,
+            }}
+          >
+            {t("terminal_dropped_logs", { n: logs.droppedCount })}
+          </div>
+        )}
         <div
           ref={scrollRef}
           onScroll={onScroll}
@@ -228,7 +248,7 @@ export function TerminalPanel({
             </div>
           ) : (
             logs.visible.map((line, index) => (
-              <LogRow key={`${line.ts}:${line.name}:${index}`} line={line} />
+              <LogRow key={line.seq || `${line.ts}:${line.name}:${index}`} line={line} />
             ))
           )}
         </div>

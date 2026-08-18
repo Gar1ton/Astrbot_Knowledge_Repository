@@ -398,6 +398,18 @@ export interface AskSource {
   ordinal: number;
   text: string;
   rrf_score?: number;
+  // v1.1.0 书目字段：Zotero 与本地文档一视同仁（此前只有 Zotero 文档能拿到）。
+  creators?: string[];
+  author?: string;
+  year?: string;
+  venue?: string;
+  doi?: string;
+  url?: string;
+  pages?: number[];
+  // 后端渲染好的 Harvard 串。harvard_in_text 是正文里出现的**内层**串（不含括号），
+  // 前端据它还原「点击引用 → 跳来源卡片」。
+  harvard_in_text?: string;
+  harvard_reference?: string;
 }
 
 export interface ThinkingChecklistItem {
@@ -434,6 +446,8 @@ export interface AskResult {
   answer: string;
   // 证据不足/未验证提示（结构化字段，v0.30.0 起不再拼在正文开头）。
   answer_notice?: string;
+  // Harvard 参考文献表（已去重排序）。答案正文尾部已含同一份，此字段供非 Web 调用方使用。
+  references?: string[];
   sources: AskSource[];
   requested_retrieval_mode:
     | "default"
@@ -447,6 +461,24 @@ export interface AskResult {
   retrieval_engines: string[];
   fallback_reason?: string | null;
   thinking_trace?: ThinkingTrace | null;
+}
+
+/**
+ * `/api/ask` 与文档分页读在正文超阈值时返回的 409 体（`status:
+ * "fulltext_confirmation_required"`）。
+ *
+ * 不是失败而是一次询问：把这些数字展示给用户，取得同意后带 `confirmed: true` 重发同一请求。
+ * 阈值由后端回传，前端**不复制**这个数字——阈值只有一个真相源（kacore/retrieval_modes.py）。
+ */
+export interface FullTextConfirmation {
+  status: "fulltext_confirmation_required";
+  message: string;
+  doc_id: string;
+  title: string;
+  total_chars: number;
+  requested_chars: number;
+  threshold_chars: number;
+  estimated_tokens: number;
 }
 
 export interface ReservedResult {
@@ -479,15 +511,42 @@ export class ApiError extends Error {
     public readonly status: number,
     message: string,
     public readonly body?: Record<string, unknown>,
+    /** 客户端主动放弃等待（后端很可能还在跑）：调用方据此区分「超时」与「真失败」。 */
+    public readonly timedOut: boolean = false,
   ) {
     super(message);
     this.name = "ApiError";
   }
 }
 
+/**
+ * 后端 ask.task_timeout_seconds 到点（HTTP 202 status="ask_task_timeout"）：请求没有失败，
+ * 只是后端放弃了「等它跑完再回」，任务仍在后台继续运行、完成后会正常写入 chat_history。
+ * 与 ApiError.timedOut（客户端主动放弃等待）语义相近但成因不同，调用方通常一并处理
+ * （见 ChatPanel 的补轮询逻辑）。
+ */
+export class AskTaskTimeoutError extends Error {
+  constructor(
+    public readonly conversationId: string,
+    public readonly timeoutSeconds: number,
+  ) {
+    super(`ask 任务超过后端总超时 ${timeoutSeconds}s，仍在后台运行`);
+    this.name = "AskTaskTimeoutError";
+  }
+}
+
 // ─── 核心 fetch 封装 ───────────────────────────────────────────
 
 const DEFAULT_API_TIMEOUT_MS = 30_000;
+
+// 长任务专用时限：默认 30s 会把「正常但耗时」的请求误报成超时——后端其实还在跑，
+// 用户却看到「请求超时，请稍后重试」，重试又叠一份负载。各值按最坏情况给足余量，
+// 但仍保留上限，避免请求永远悬着（timeoutMs: 0 = 不设限，留给调用方显式选择）。
+const ASK_TIMEOUT_MS = 600_000; // 深度思考 / 图谱问答可跑数分钟
+const UPLOAD_TIMEOUT_MS = 300_000; // PDF 清洗 + 切块 + 首次索引
+const DEPENDENCY_INSTALL_TIMEOUT_MS = 900_000; // pip 安装 torch 等大包
+const MODEL_PROBE_TIMEOUT_MS = 300_000; // 模型连通性探测（可能触发首次下载）
+const ZOTERO_PULL_TIMEOUT_MS = 600_000; // 全量镜像同步
 
 type ApiFetchOptions = RequestInit & {
   timeoutMs?: number;
@@ -524,7 +583,12 @@ async function apiFetch<T>(
     });
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      throw new ApiError(0, timedOut ? "请求超时，请稍后重试" : "请求已取消");
+      throw new ApiError(
+        0,
+        timedOut ? "请求超时，请稍后重试" : "请求已取消",
+        undefined,
+        timedOut,
+      );
     }
     throw err;
   } finally {
@@ -699,7 +763,7 @@ const MOCK_CONFIG: EffectiveConfig = {
     llm_model: "",
     llm_api_key: "",
   },
-  vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true },
+  vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true, auto_rebuild_enabled: true, auto_rebuild_delay_seconds: 30 },
   embedding: { provider: "local", model: "intfloat/multilingual-e5-small", base_url: "https://api.openai.com/v1", max_token_size: 512, actual_dimension: 384, api_key: "" },
   zotero_sync: { enabled: false, access_mode: "local", zotero_data_dir: "", resolved_data_dir: "", api_port: 23119, storage_mode: "managed_copy", linked_root: "", zotmoov_root: "", sync_mode: "conservative", auto_sync_enabled: false, auto_sync_interval_sec: 3600, server_key_present: false, server_key_masked: "" },
   memecho: { enabled: false, base_url: "https://api.artific.social", default_vault_id: "", query_readonly: true, write_back_enabled: false, timeout_seconds: 30, import_preset: "default", api_key_present: false, api_key_masked: "" },
@@ -855,7 +919,11 @@ export async function uploadDocument(
   form.append("file", file);
   form.append("collection", collection);
   if (tags.length) form.append("tags", tags.join(","));
-  return apiFetch<KrDocument>("/api/documents", { method: "POST", body: form });
+  return apiFetch<KrDocument>("/api/documents", {
+    method: "POST",
+    body: form,
+    timeoutMs: UPLOAD_TIMEOUT_MS,
+  });
 }
 
 export async function patchDocument(
@@ -1007,6 +1075,8 @@ function applyMockConfigUpdate(section: string, key: string, value: unknown): vo
   if (section === "vector_db" && vectorStore) {
     if (key === "backend") vectorStore.current = String(value);
     if (key === "auto_index_enabled") vectorStore.detail.auto_index_enabled = Boolean(value);
+    if (key === "auto_rebuild_enabled") vectorStore.detail.auto_rebuild_enabled = Boolean(value);
+    if (key === "auto_rebuild_delay_seconds") vectorStore.detail.auto_rebuild_delay_seconds = Number(value);
   }
 
   if (section === "rerank" && ask) {
@@ -1240,6 +1310,7 @@ export async function testEmbeddingConnection(
   if (isMock()) return { status: "ok", dimension: 1024, model: modelName };
   return apiFetch<EmbeddingTestResult>("/api/config/test-embedding", {
     method: "POST",
+    timeoutMs: MODEL_PROBE_TIMEOUT_MS,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ base_url: baseUrl, model_name: modelName }),
   });
@@ -1357,6 +1428,32 @@ export async function pauseBuildJob(jobId: string): Promise<void> {
 export async function resumeBuildJob(jobId: string): Promise<void> {
   if (isMock()) return;
   await apiFetch(`/api/graph/build/${encodeURIComponent(jobId)}/resume`, { method: "POST" });
+}
+
+export interface CancelBuildResult {
+  job_id: string;
+  status: string;
+  cleanup: {
+    workspace: boolean;
+    index_status_rows: number;
+    codex_tasks: number;
+    active_state_removed: boolean;
+  };
+}
+
+export async function cancelBuildJob(jobId: string, cleanup = true): Promise<CancelBuildResult> {
+  if (isMock()) {
+    return {
+      job_id: jobId,
+      status: "cancelled",
+      cleanup: { workspace: false, index_status_rows: 0, codex_tasks: 0, active_state_removed: true },
+    };
+  }
+  return apiFetch<CancelBuildResult>(`/api/graph/build/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cleanup }),
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1646,6 +1743,8 @@ export async function ask(opts: {
     | "memecho";
   use_english_retrieval?: boolean;
   answer_language?: "auto" | "zh" | "en";
+  /** 全文检索确认门：正文超阈值时后端返回 409，用户同意后带 true 重发同一请求。 */
+  confirmed?: boolean;
 }): Promise<AskResult> {
   if (isMock()) {
     await new Promise((r) => setTimeout(r, 800));
@@ -1654,12 +1753,13 @@ export async function ask(opts: {
       ...MOCK_ASK,
       conversation_id: `conv-${Date.now()}`,
       requested_retrieval_mode: requested,
-      actual_retrieval_mode: requested === "graph_mixed" ? "milvus_lightrag" : requested === "graph_only" ? "lightrag_only" : requested === "fulltext" ? "sqlite_lexical" : requested === "enhanced" ? "enhanced_recall" : "milvus",
-      retrieval_engines: requested === "graph_mixed" ? ["milvus", "sqlite_lexical", "lightrag"] : requested === "graph_only" ? ["lightrag"] : requested === "fulltext" ? ["sqlite_lexical"] : ["milvus", "sqlite_lexical"],
+      actual_retrieval_mode: requested === "graph_mixed" ? "milvus_lightrag" : requested === "graph_only" ? "lightrag_only" : requested === "fulltext" ? "fulltext" : requested === "enhanced" ? "enhanced_recall" : "milvus",
+      retrieval_engines: requested === "graph_mixed" ? ["milvus", "sqlite_lexical", "lightrag"] : requested === "graph_only" ? ["lightrag"] : requested === "fulltext" ? ["fulltext"] : ["milvus", "sqlite_lexical"],
     };
   }
-  return apiFetch<AskResult>("/api/ask", {
+  const result = await apiFetch<AskResult | AskTaskTimeoutBody>("/api/ask", {
     method: "POST",
+    timeoutMs: ASK_TIMEOUT_MS,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       question: opts.question,
@@ -1671,8 +1771,23 @@ export async function ask(opts: {
       retrieval_mode: opts.retrieval_mode ?? "default",
       use_english_retrieval: opts.use_english_retrieval ?? false,
       answer_language: opts.answer_language ?? "auto",
+      confirmed: opts.confirmed ?? false,
     }),
   });
+  // HTTP 202：后端 task_timeout_seconds 到点，任务仍在后台跑——不是失败，但也不是
+  // 正常结果，转成一个专门的异常，调用方（ChatPanel）据此转入补轮询而不是当作答案渲染。
+  if ((result as AskTaskTimeoutBody).status === "ask_task_timeout") {
+    const body = result as AskTaskTimeoutBody;
+    throw new AskTaskTimeoutError(body.conversation_id, body.timeout_seconds);
+  }
+  return result as AskResult;
+}
+
+interface AskTaskTimeoutBody {
+  status: "ask_task_timeout";
+  message: string;
+  conversation_id: string;
+  timeout_seconds: number;
 }
 
 // deep thinking 实时进度：检索/校验进行中轮询时携带的逐轮增量 trace（与最终 thinking_trace 同形）。
@@ -1698,6 +1813,37 @@ export async function getAskProgress(conversationId: string): Promise<AskProgres
   } catch {
     return null;
   }
+}
+
+/**
+ * 客户端超时（ApiError.timedOut）或后端 task_timeout_seconds 到点（AskTaskTimeoutError）后
+ * 的补轮询：任务并未被取消，仍在后台跑，跑完会正常写入 chat_history——这里持续轮询
+ * /api/ask/progress 直到看到 stage="done"（或进度记录已过期/不存在，说明早就跑完了），
+ * 再拉一次 chat_history 找回迟到的答案。找不到时返回 null，调用方兜底提示手动刷新。
+ */
+export async function waitForLateAskAnswer(
+  conversationId: string,
+  opts?: { maxWaitMs?: number; intervalMs?: number },
+): Promise<ChatMessage[] | null> {
+  if (isMock()) return null;
+  const maxWaitMs = opts?.maxWaitMs ?? 15 * 60_000;
+  const intervalMs = opts?.intervalMs ?? 3_000;
+  const deadline = Date.now() + maxWaitMs;
+
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const progress = await getAskProgress(conversationId);
+    if (progress !== null && progress.stage !== "done") continue; // 仍在跑，继续等
+    // stage="done" 或进度记录已不存在（TTL 过期，大概率早已跑完）：去历史里找答案。
+    try {
+      const history = await getChatHistory(conversationId);
+      if (history.some((m) => m.role === "assistant")) return history;
+    } catch {
+      /* 网络抖动，下一轮再试 */
+    }
+    if (progress === null) return null; // 没有进度可依据、历史里也没有答案：放弃轮询
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1769,12 +1915,15 @@ export async function deleteLocalModel(name: string): Promise<void> {
 // ─────────────────────────────────────────────────────────────
 
 export interface LogLine {
-  ts: number; level: string; name: string; msg: string;
+  seq: number; ts: number; level: string; name: string; msg: string;
   location?: string; exc?: string;
   source?: string; category?: string; operation?: string; status?: string;
   elapsed_ms?: number | null; metadata?: Record<string, unknown>;
 }
-export interface LogsResponse { lines: LogLine[]; server_ts: number; }
+export interface LogsResponse {
+  lines: LogLine[]; server_ts: number;
+  oldest_seq: number; latest_seq: number; dropped_count: number;
+}
 
 export async function postLogEvent(event: {
   type: "info" | "error" | "ok";
@@ -1789,9 +1938,12 @@ export async function postLogEvent(event: {
   });
 }
 
-export async function getLogs(after = 0, limit = 200): Promise<LogsResponse> {
-  if (isMock()) return { lines: [], server_ts: Date.now() / 1000 };
-  return apiFetch<LogsResponse>(`/api/logs?after=${after}&limit=${limit}`, { timeoutMs: 4_000 });
+export async function getLogs(afterSeq = 0, limit = 200): Promise<LogsResponse> {
+  if (isMock()) return {
+    lines: [], server_ts: Date.now() / 1000,
+    oldest_seq: 0, latest_seq: 0, dropped_count: 0,
+  };
+  return apiFetch<LogsResponse>(`/api/logs?after_seq=${afterSeq}&limit=${limit}`, { timeoutMs: 4_000 });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1822,6 +1974,10 @@ export interface DependencyStatus {
   stages: string[];
   required?: boolean;
   installed: boolean;
+  /** 顶层包装了 ≠ 功能能跑（如 pymilvus 装了但缺 milvus-lite）。缺省视为与 installed 相同。 */
+  runtime_ready?: boolean;
+  /** runtime_ready=false 时的中文修复建议，直接展示给用户。 */
+  runtime_hint?: string;
   version: string | null;
 }
 
@@ -1851,7 +2007,7 @@ const MOCK_CAPABILITIES: CapabilitiesData = {
     { id: "zotero", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { access_mode: "local", api_port: 23119, sync_mode: "conservative", storage_mode: "managed_copy" } },
     { id: "ingest", current: "pymupdf4llm", candidates: ["pymupdf4llm"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { ocr_enabled: false, pdf_converter: "pymupdf4llm", pdf_converter_ready: true, dependency_source: "requirements.txt" } },
     { id: "embedding", current: "local", candidates: ["local", "external"], status: "ready", switchable: true, consequence: "rebuild", required_deps: ["local_embedding"], configured: true, detail: { model: "intfloat/multilingual-e5-small", actual_dimension: 384 } },
-    { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true, astrbot_locked: true, compatible: true, rebuild_required: false, pending_reindex_count: 0, document_count: 0, chunk_count: 0, reason: "" } },
+    { id: "vector_store", current: "milvus", candidates: ["milvus", "astr"], status: "ready", switchable: true, consequence: "restart", required_deps: ["milvus"], configured: true, detail: { auto_index_enabled: true, auto_rebuild_enabled: true, auto_rebuild_delay_seconds: 30, astrbot_locked: true, compatible: true, rebuild_required: false, pending_reindex_count: 0, document_count: 0, chunk_count: 0, reason: "" } },
     { id: "retrieval", current: "rrf_fusion", candidates: ["rrf_fusion"], status: "ready", switchable: false, consequence: "none", required_deps: [], configured: true, detail: { engines: ["milvus", "sqlite_lexical"] } },
     { id: "graph", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "rebuild", required_deps: ["lightrag"], configured: false, detail: { query_mode: "mix", llm_provider: "main", llm_model: "", llm_label: "<main - AstrBot main LLM>" } },
     { id: "memecho", current: "off", candidates: ["on", "off"], status: "off", switchable: true, consequence: "restart", required_deps: [], configured: false, detail: { base_url: "https://api.artific.social", vault_id: "", api_key_present: false, query_readonly: true, write_back_enabled: false } },
@@ -1864,7 +2020,84 @@ const MOCK_CAPABILITIES: CapabilitiesData = {
 
 export async function getCapabilities(): Promise<CapabilitiesData> {
   if (isMock()) return JSON.parse(JSON.stringify(MOCK_CAPABILITIES));
-  return apiFetch<CapabilitiesData>("/api/capabilities", { timeoutMs: 1_500 });
+  // 8s 而非 1.5s：该端点会聚合 SQLite 统计与 Milvus 运行态，重建/加载模型时 1.5s 必超，
+  // 于是数据流页会毫无征兆地弹「请求超时」。
+  return apiFetch<CapabilitiesData>("/api/capabilities", { timeoutMs: 8_000 });
+}
+
+// ── 本地模型驻留 / 显存 ────────────────────────────────────────
+
+export type ModelRuntimeState = "idle" | "loading" | "ready" | "failed" | "external";
+
+export interface AcceleratorInfo {
+  device: string;
+  total_bytes: number;
+  free_bytes: number;
+  used_bytes: number;
+  allocated_bytes: number;
+  reserved_bytes: number;
+  torch_version: string;
+}
+
+export interface ModelRuntimeEntry {
+  kind: "embedding" | "rerank";
+  provider: string;
+  state: ModelRuntimeState;
+  model: string | null;
+  device?: string;
+  enabled?: boolean;
+  idle_timeout_seconds?: number;
+  last_error?: string | null;
+}
+
+export interface ModelRuntime {
+  /** 无 torch / 无 CUDA 时为 null——面板据此降级为「CPU 模式」，不是错误。 */
+  accelerator: AcceleratorInfo | null;
+  models: ModelRuntimeEntry[];
+  resident_count: number;
+  unloaded?: string[];
+  errors?: Record<string, string>;
+}
+
+const MOCK_MODEL_RUNTIME: ModelRuntime = {
+  accelerator: {
+    device: "NVIDIA GeForce RTX 4090",
+    total_bytes: 25_757_220_864,
+    free_bytes: 17_179_869_184,
+    used_bytes: 8_577_351_680,
+    allocated_bytes: 2_147_483_648,
+    reserved_bytes: 2_684_354_560,
+    torch_version: "2.4.0",
+  },
+  models: [
+    { kind: "embedding", provider: "local", state: "ready", model: "BAAI/bge-m3", device: "cuda" },
+    { kind: "rerank", provider: "cross_encoder", state: "idle", model: "BAAI/bge-reranker-v2-m3", enabled: true },
+  ],
+  resident_count: 1,
+};
+
+export async function getModelRuntime(): Promise<ModelRuntime> {
+  if (isMock()) return JSON.parse(JSON.stringify(MOCK_MODEL_RUNTIME));
+  return apiFetch<ModelRuntime>("/api/system/models", { timeoutMs: 8_000 });
+}
+
+export async function unloadModels(kinds?: string[]): Promise<ModelRuntime> {
+  if (isMock()) {
+    return {
+      ...JSON.parse(JSON.stringify(MOCK_MODEL_RUNTIME)),
+      models: MOCK_MODEL_RUNTIME.models.map((m) => ({ ...m, state: "idle" as const })),
+      resident_count: 0,
+      unloaded: kinds ?? ["embedding", "rerank"],
+      errors: {},
+    };
+  }
+  return apiFetch<ModelRuntime>("/api/system/models/unload", {
+    method: "POST",
+    // 卸载要等 CUDA 缓存回收，比普通 GET 慢；沿用能力探测那档超时。
+    timeoutMs: 8_000,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kinds: kinds ?? [] }),
+  });
 }
 
 export async function listDependencies(): Promise<DependencyStatus[]> {
@@ -1877,6 +2110,7 @@ export async function installDependency(pkg: string): Promise<InstallResult> {
   if (isMock()) return { status: "ok", package: pkg, restart_required: true, message: "mock installed" };
   return apiFetch<InstallResult>("/api/dependencies/install", {
     method: "POST",
+    timeoutMs: DEPENDENCY_INSTALL_TIMEOUT_MS,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ package: pkg }),
   });

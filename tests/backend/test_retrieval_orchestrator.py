@@ -695,3 +695,41 @@ async def test_retrieval_global_and_subtree_lexical(sqlite_store):
     )
     p = await orchestrator.retrieve_with_outcome("ROOT_SCOPE_A", "EXACTTERMA", top_k=3, scope=scope)
     assert any(c.doc_id == "doc-child" for c in p.chunks)
+
+
+def test_milvus_lite_relocates_legacy_single_file_store(temp_dir):
+    """回归 v1.0.9：milvus-lite 3.x 用目录存数据，2.x 留下的单文件必须先挪开。
+
+    直接对旧文件开库会在 `os.makedirs(data_dir)` 抛 FileExistsError，对外表现为
+    `ConnectionConfigException: Open local milvus failed`，整个向量库不可用。
+    挪走是安全的：Milvus 只是 SQLite 分块的可重建投影索引。
+    """
+    import pathlib
+
+    db_path = pathlib.Path(temp_dir) / "vector_store.db"
+    db_path.write_bytes(b"legacy milvus-lite 2.x single-file payload")
+
+    store = MilvusLiteVectorStore(db_path=str(db_path), dim=4)
+    store._relocate_legacy_store()
+
+    assert not db_path.exists()
+    moved = list(pathlib.Path(temp_dir).glob("vector_store.db.legacy-*"))
+    assert len(moved) == 1
+    assert moved[0].read_bytes() == b"legacy milvus-lite 2.x single-file payload"
+
+
+def test_milvus_lite_leaves_current_directory_store_untouched(temp_dir):
+    """3.x 的目录形态与全新安装（路径不存在）都不该被动到。"""
+    import pathlib
+
+    db_dir = pathlib.Path(temp_dir) / "vector_store.db"
+    db_dir.mkdir()
+    (db_dir / "marker").write_text("v3 data")
+
+    MilvusLiteVectorStore(db_path=str(db_dir), dim=4)._relocate_legacy_store()
+    assert (db_dir / "marker").read_text() == "v3 data"
+    assert not list(pathlib.Path(temp_dir).glob("*.legacy-*"))
+
+    missing = pathlib.Path(temp_dir) / "brand_new.db"
+    MilvusLiteVectorStore(db_path=str(missing), dim=4)._relocate_legacy_store()
+    assert not missing.exists()

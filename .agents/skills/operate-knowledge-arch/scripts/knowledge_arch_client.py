@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from http.cookiejar import CookieJar
@@ -25,11 +26,16 @@ CONNECTION_KEYRING_SERVICE = "knowledge-arch.codex.connection.v1"
 
 
 DEFAULT_TIMEOUT_SECONDS = 30
+# index-rebuild --wait 的轮询节奏与上限。重建是后台 job，服务端 POST 立即返回；
+# 上限到点只是停止观察，**不会**取消仍在跑的重建（用 index-status 继续查）。
+INDEX_REBUILD_POLL_SECONDS = 3.0
+INDEX_REBUILD_WAIT_MAX_SECONDS = 1800
+# 终态集合，与 kacore/milvus_build.py 的 MILVUS_BUILD_TERMINAL_STATUSES 对齐。
+INDEX_REBUILD_TERMINAL_STATUSES = ("success", "partial_failure", "error")
 RRF_K = 60
 MAX_QUERIES = 4
 MAX_FINAL_HITS = 20
 MAX_HIT_CHARS = 4000
-MAX_READ_CHARS = 40000
 MAX_NOTION_QA_ITEMS = 20
 MAX_NOTION_QA_QUESTION_CHARS = 2000
 MAX_NOTION_QA_ANSWER_CHARS = 100000
@@ -38,9 +44,24 @@ READ_INTENTS = ("anchored", "full-text")
 
 # Keep this compact distribution-side snapshot synchronized with kacore.config.CONFIG_KEY_POLICY.
 CONFIG_POLICIES: dict[str, dict[str, str]] = {
-    "vector_db": {"backend": "restart", "auto_index_enabled": "restart"},
-    "embedding": {"provider": "rebuild", "model": "rebuild", "base_url": "rebuild"},
-    "ask": {"answer_language": "none"},
+    "vector_db": {
+        "backend": "restart",
+        "auto_index_enabled": "restart",
+        "auto_rebuild_enabled": "none",
+        "auto_rebuild_delay_seconds": "none",
+    },
+    "embedding": {
+        "provider": "rebuild",
+        "model": "rebuild",
+        "base_url": "rebuild",
+        "load_timeout_seconds": "restart",
+        "device": "restart",
+    },
+    "ask": {
+        "answer_language": "none",
+        "llm_timeout_seconds": "restart",
+        "task_timeout_seconds": "none",
+    },
     "graph": {
         "enabled": "restart",
         "query_mode": "restart",
@@ -123,6 +144,20 @@ class ConnectionFailure(ClientError):
 class ApiError(ClientError):
     code = "api_error"
     exit_code = 5
+
+
+class StructuredApiError(ApiError):
+    """An API error whose JSON body carries a machine-readable ``status`` discriminator.
+
+    Subclasses ApiError on purpose: every existing ``except ApiError`` site and the
+    ``exit_code`` contract keep working untouched. Callers that care about a specific
+    gate (e.g. the full-text confirmation gate) can inspect ``http_status``/``payload``.
+    """
+
+    def __init__(self, message: str, http_status: int, payload: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.payload = payload
 
 
 class UsageError(ClientError):
@@ -481,9 +516,12 @@ class KnowledgeArchClient:
                 return response.read()
         except HTTPError as exc:
             payload = exc.read().decode("utf-8", errors="replace")
+            structured: dict[str, Any] | None = None
             try:
                 parsed = json.loads(payload)
                 detail = parsed.get("message") or parsed.get("error") or payload
+                if isinstance(parsed, dict):
+                    structured = parsed
             except (json.JSONDecodeError, AttributeError):
                 detail = payload or exc.reason
             message = self._protect_message(str(detail))
@@ -491,7 +529,10 @@ class KnowledgeArchClient:
                 raise AuthenticationError(
                     f"Knowledge Arch authentication failed: {message}"
                 ) from None
-            raise ApiError(f"Knowledge Arch API returned HTTP {exc.code}: {message}") from None
+            summary = f"Knowledge Arch API returned HTTP {exc.code}: {message}"
+            if structured is not None:
+                raise StructuredApiError(summary, exc.code, structured) from None
+            raise ApiError(summary) from None
         except (URLError, TimeoutError, OSError) as exc:
             reason = self._protect_message(str(getattr(exc, "reason", exc)))
             raise ConnectionFailure(
@@ -840,16 +881,53 @@ def read_document(
     max_chars: int,
     *,
     intent: str,
+    confirm_large_read: bool = False,
 ) -> dict[str, Any]:
+    """Read document Markdown. ``max_chars=0`` reads to the end of the document.
+
+    There is no client-side character cap. Reads whose returned size exceeds the
+    server's confirmation threshold come back as a preview carrying **no document
+    text**; surface ``total_chars`` to the user, obtain explicit consent, and only
+    then retry with ``confirm_large_read=True``.
+    """
     if intent not in READ_INTENTS:
         raise UsageError("read requires --intent anchored or --intent full-text")
     if start < 0:
         raise UsageError("--start must be zero or greater")
-    max_chars = _bounded(max_chars, 1, MAX_READ_CHARS)
-    payload = client.request_json(
-        f"/api/documents/{quote(doc_id, safe='')}/content/page",
-        query_params={"start": start, "max_chars": max_chars},
-    )
+    if max_chars < 0:
+        raise UsageError("--max-chars must be zero or greater (0 reads to the end)")
+    query: dict[str, Any] = {"start": start, "max_chars": max_chars}
+    if confirm_large_read:
+        query["confirmed"] = 1
+    try:
+        payload = client.request_json(
+            f"/api/documents/{quote(doc_id, safe='')}/content/page",
+            query_params=query,
+        )
+    except StructuredApiError as exc:
+        if (
+            exc.http_status == 409
+            and exc.payload.get("status") == "fulltext_confirmation_required"
+        ):
+            gate = redact_secrets(exc.payload)
+            return {
+                "status": "preview",
+                "doc_id": doc_id,
+                "start": start,
+                "total_chars": gate.get("total_chars"),
+                "requested_chars": gate.get("requested_chars"),
+                "confirm_threshold_chars": gate.get("threshold_chars"),
+                "estimated_tokens": gate.get("estimated_tokens"),
+                "title": gate.get("title"),
+                "message": gate.get("message"),
+                "requires_explicit_confirmation": True,
+                # Deliberately not `mutation_performed`: this is a read gate, not a
+                # write gate. What the caller needs to know is that no text came back.
+                "content_returned": False,
+                "full_text_used": False,
+                "read_intent": intent,
+            }
+        raise
     result = _expect_dict(payload, "document content page")
     result["read_intent"] = intent
     result["full_text_used"] = True
@@ -938,10 +1016,16 @@ def config_options() -> dict[str, Any]:
         "consequences": {
             "none": "saved without restart or rebuild",
             "restart": "saved; separately confirmed plugin restart required",
-            "rebuild": "saved; restart and user-operated index rebuild required",
+            "rebuild": (
+                "saved; a separately confirmed restart plus an index rebuild are required "
+                "(see the index-rebuild command)"
+            ),
         },
         "writable": CONFIG_POLICIES,
-        "rebuild_command_available": False,
+        # v1.1.2 起可用：`index-rebuild --apply` 等价于 WebUI 的「重建索引」按钮。
+        # 仍是变更操作，须先 preview 并取得用户明确确认。
+        "rebuild_command_available": True,
+        "rebuild_command": "index-rebuild",
     }
 
 
@@ -1147,6 +1231,150 @@ def config_set(
     return preview
 
 
+def _vector_store_stage(client: KnowledgeArchClient) -> dict[str, Any]:
+    """从能力快照里取 vector_store 阶段；拿不到时返回空 dict 而不是抛错。
+
+    索引状态本身不该因为能力端点的形状变化而整个失败——待重建数量才是主信号。
+    """
+    try:
+        capabilities = client.request_json("/api/capabilities")
+    except ApiError:
+        return {}
+    if not isinstance(capabilities, dict):
+        return {}
+    pipeline = capabilities.get("pipeline")
+    if not isinstance(pipeline, list):
+        return {}
+    for stage in pipeline:
+        if isinstance(stage, dict) and stage.get("id") == "vector_store":
+            return stage
+    return {}
+
+
+def index_status(client: KnowledgeArchClient) -> dict[str, Any]:
+    """只读：待重建文档数、当前重建任务、以及自动重建是否已经在管这件事。"""
+    count_payload = _expect_dict(
+        client.request_json("/api/documents/pending-reindex-count"),
+        "/api/documents/pending-reindex-count",
+    )
+    active_payload = _expect_dict(
+        client.request_json("/api/documents/rebuild-index/active"),
+        "/api/documents/rebuild-index/active",
+    )
+    job = active_payload.get("job")
+    stage = _vector_store_stage(client)
+    detail = stage.get("detail") if isinstance(stage.get("detail"), dict) else {}
+    return {
+        "status": "ok",
+        "pending_reindex_count": int(count_payload.get("count") or 0),
+        "active_job": job if isinstance(job, dict) else None,
+        "backend": stage.get("current", ""),
+        "vector_store_status": stage.get("status", ""),
+        "compatible": detail.get("compatible"),
+        "rebuild_required": detail.get("rebuild_required"),
+        # 自动重建已开时，队列通常会自己排空；先看这两个字段再决定是否手动催一次。
+        "auto_rebuild_enabled": detail.get("auto_rebuild_enabled"),
+        "auto_rebuild_delay_seconds": detail.get("auto_rebuild_delay_seconds"),
+        "reason": detail.get("reason", ""),
+        "mutation_performed": False,
+    }
+
+
+def _wait_for_index_rebuild(
+    client: KnowledgeArchClient,
+    *,
+    max_seconds: int,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """轮询到重建进入终态或等待上限；返回观察结果（不代表重建被取消）。
+
+    `/api/documents/rebuild-index/active` 在 success 时返回 `job: null`（前端据此隐藏进度条），
+    因此「job 消失」与「job 到达终态」都算跑完，前者按 success 汇报。
+    """
+    deadline = monotonic() + max_seconds
+    last_job: dict[str, Any] | None = None
+    while True:
+        payload = _expect_dict(
+            client.request_json("/api/documents/rebuild-index/active"),
+            "/api/documents/rebuild-index/active",
+        )
+        job = payload.get("job")
+        if not isinstance(job, dict):
+            # 任务已消失 = 成功收尾（失败/部分失败会一直留着供重试）。
+            return {"observed": "finished", "job": last_job, "final_status": "success"}
+        last_job = job
+        status = str(job.get("status") or "")
+        if status in INDEX_REBUILD_TERMINAL_STATUSES:
+            return {"observed": "finished", "job": job, "final_status": status}
+        if monotonic() >= deadline:
+            return {"observed": "timeout", "job": job, "final_status": status}
+        sleep(INDEX_REBUILD_POLL_SECONDS)
+
+
+def index_rebuild(
+    client: KnowledgeArchClient,
+    *,
+    apply: bool,
+    wait: bool = False,
+    max_wait_seconds: int = INDEX_REBUILD_WAIT_MAX_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """预览或启动一次 Milvus 索引重建（等价于 WebUI 的「重建索引」按钮）。
+
+    预览里带上 `pending_reindex_count` 与 `auto_rebuild_enabled`：多数情况下自动重建已经在
+    排空队列，用户该知道这一次手动触发是不是多余的。
+
+    服务端是全局单飞——已有重建在跑时会返回同一个 job 而非并发起第二次。
+    """
+    status = index_status(client)
+    if not apply:
+        return {
+            "status": "preview",
+            "pending_reindex_count": status["pending_reindex_count"],
+            "active_job": status["active_job"],
+            "auto_rebuild_enabled": status["auto_rebuild_enabled"],
+            "compatible": status["compatible"],
+            "effect": (
+                "Re-embeds every pending document; a full rebuild clears the vector "
+                "collection first and retrieval stays degraded until it finishes"
+            ),
+            "embedding_provider_will_be_used": True,
+            "plugin_llm_used": False,
+            "mutation_performed": False,
+            "requires_explicit_confirmation": True,
+        }
+    started = _expect_dict(
+        client.request_json("/api/documents/rebuild-index", method="POST", body={}),
+        "/api/documents/rebuild-index",
+    )
+    result: dict[str, Any] = {
+        "status": "started",
+        "mutation_performed": True,
+        "requires_explicit_confirmation": False,
+        "pending_reindex_count_before": status["pending_reindex_count"],
+        "api_result": redact_secrets(started),
+    }
+    if not wait:
+        return result
+    observation = _wait_for_index_rebuild(
+        client, max_seconds=max_wait_seconds, sleep=sleep, monotonic=monotonic
+    )
+    result["status"] = "completed" if observation["observed"] == "finished" else "timeout"
+    result["final_status"] = observation["final_status"]
+    result["final_job"] = observation["job"]
+    if observation["observed"] == "timeout":
+        # 说清楚「不再等」不等于「已停止」，否则模型会误报重建被取消。
+        result["note"] = (
+            "Stopped observing after the wait limit; the rebuild is still running. "
+            "Poll index-status instead of starting another rebuild."
+        )
+    else:
+        result["pending_reindex_count_after"] = index_status(client)["pending_reindex_count"]
+    return result
+
+
 def restart(client: KnowledgeArchClient, *, apply: bool) -> dict[str, Any]:
     if not apply:
         return {
@@ -1202,11 +1430,26 @@ def build_parser() -> argparse.ArgumentParser:
     ask_scope.add_argument("--collection")
     ask_scope.add_argument("--all", dest="all_collections", action="store_true")
 
-    read_parser = subparsers.add_parser("read", help="Read one bounded page of document Markdown")
+    read_parser = subparsers.add_parser("read", help="Read one page of document Markdown")
     read_parser.add_argument("--doc-id", required=True)
     read_parser.add_argument("--start", type=int, default=0)
-    read_parser.add_argument("--max-chars", type=int, default=12000)
+    read_size_group = read_parser.add_mutually_exclusive_group()
+    read_size_group.add_argument("--max-chars", type=int, default=12000)
+    read_size_group.add_argument(
+        "--whole",
+        action="store_true",
+        help="Read from --start to the end of the document (no character cap)",
+    )
     read_parser.add_argument("--intent", choices=READ_INTENTS, required=True)
+    read_parser.add_argument(
+        "--confirm-large-read",
+        action="store_true",
+        help=(
+            "Proceed with a read whose size exceeds the server's confirmation threshold. "
+            "Only pass this after telling the user the document's total_chars and getting "
+            "explicit consent. This is a read gate; --apply remains the mutation gate."
+        ),
+    )
 
     notion_save_parser = subparsers.add_parser(
         "notion-save-qa", help="Save conversation QA records to the configured Notion QA database"
@@ -1251,6 +1494,25 @@ def build_parser() -> argparse.ArgumentParser:
     set_parser.add_argument("key")
     set_parser.add_argument("value")
     set_parser.add_argument("--apply", action="store_true")
+
+    subparsers.add_parser(
+        "index-status", help="Show pending reindex count and any running index rebuild"
+    )
+    index_rebuild_parser = subparsers.add_parser(
+        "index-rebuild", help="Preview or start the Milvus index rebuild (the WebUI button)"
+    )
+    index_rebuild_parser.add_argument("--apply", action="store_true")
+    index_rebuild_parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Poll until the rebuild reaches a terminal status instead of returning immediately",
+    )
+    index_rebuild_parser.add_argument(
+        "--max-wait-seconds",
+        type=int,
+        default=INDEX_REBUILD_WAIT_MAX_SECONDS,
+        help="Stop observing after this many seconds; the rebuild itself keeps running",
+    )
 
     restart_parser = subparsers.add_parser("restart", help="Preview or apply a plugin restart")
     restart_parser.add_argument("--apply", action="store_true")
@@ -1297,8 +1559,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     client,
                     args.doc_id,
                     args.start,
-                    args.max_chars,
+                    0 if args.whole else args.max_chars,
                     intent=args.intent,
+                    confirm_large_read=args.confirm_large_read,
                 )
             elif args.command == "notion-save-qa":
                 result = notion_save_qa(client, args.input_file)
@@ -1327,6 +1590,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.key,
                     parse_value(args.value),
                     apply=args.apply,
+                )
+            elif args.command == "index-status":
+                result = index_status(client)
+            elif args.command == "index-rebuild":
+                result = index_rebuild(
+                    client,
+                    apply=args.apply,
+                    wait=args.wait,
+                    max_wait_seconds=args.max_wait_seconds,
                 )
             elif args.command == "restart":
                 result = restart(client, apply=args.apply)

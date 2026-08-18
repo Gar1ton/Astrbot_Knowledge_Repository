@@ -4,6 +4,7 @@ import { Modal } from "@/components/ds/Modal";
 import { Badge } from "@/components/ds/Badge";
 import { ThemeGallery } from "@/components/modals/ThemeGallery";
 import { Button } from "@/components/ds/Button";
+import { Card, Field } from "@/components/ds/Card";
 import { Icon } from "@/components/ds/Icon";
 import { Select } from "@/components/ds/Select";
 import { Toggle } from "@/components/ds/Toggle";
@@ -12,6 +13,7 @@ import { useI18n, type I18nKey } from "@/lib/i18n";
 import { useToast } from "@/components/ui/Toast";
 import { TerminalPanel } from "@/components/ui/terminal/TerminalPanel";
 import {
+  ApiError,
   getEffectiveConfig, getZoteroConfig, syncZoteroPull, backupNow, restoreBackup, logout,
   updateConfigValue, saveZoteroServerKey, deleteZoteroServerKey,
   resolveZoteroAccountChange, getR2Status, getR2Job, notionInit, syncDocuments,
@@ -35,64 +37,6 @@ function formatBytes(value: number): string {
 }
 
 // ─── Shared primitives ────────────────────────────────────────
-
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "11px 0",
-        borderBottom: "1px solid var(--border)",
-      }}
-    >
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 500, color: "var(--fg)" }}>{label}</div>
-        {hint && (
-          <div style={{ fontSize: 11, color: "var(--fg-subtle)", marginTop: 2, lineHeight: 1.45 }}>
-            {hint}
-          </div>
-        )}
-      </div>
-      <div style={{ flexShrink: 0 }}>{children}</div>
-    </div>
-  );
-}
-
-function Card({
-  title,
-  icon,
-  badge,
-  children,
-}: {
-  title: string;
-  icon?: string;
-  badge?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      style={{
-        background: "var(--surface)",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-xl)",
-        boxShadow: "var(--shadow-card)",
-        padding: "4px 16px 12px",
-        marginBottom: 14,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 0 4px" }}>
-        {icon && <Icon name={icon} size={16} style={{ color: "var(--accent)" }} />}
-        <span style={{ fontSize: 13.5, fontWeight: 650, color: "var(--heading)", flex: 1 }}>
-          {title}
-        </span>
-        {badge}
-      </div>
-      {children}
-    </div>
-  );
-}
 
 function ConfigKV({ k, v, masked }: { k: string; v: unknown; masked?: boolean }) {
   const display = masked ? "••••••••" : v == null ? "—" : String(v);
@@ -300,7 +244,10 @@ function SyncTab() {
       await syncZoteroPull(true);
       toast("Zotero 同步已启动", "ok");
     } catch (e) {
-      toast(e instanceof Error ? e.message : "同步失败", "error");
+      // 这里的请求是「触发即轮询」：5s 后放弃等待属于预期，后端仍在同步，
+      // 进度看左下角进度条。把它当失败弹红字只会让用户以为同步没跑起来。
+      if (e instanceof ApiError && e.timedOut) toast("Zotero 同步已在后台进行", "ok");
+      else toast(e instanceof Error ? e.message : "同步失败", "error");
     } finally {
       setSyncing(false);
     }

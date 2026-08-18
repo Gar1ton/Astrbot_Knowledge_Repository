@@ -96,3 +96,84 @@ def test_web_api_reader_builds_personal_snapshot(tmp_path: Path) -> None:
     # 惰性单篇下载：按需调用才真正落盘。
     fetched = reader.fetch_attachment_file("ATT1", "paper.pdf")
     assert fetched is not None and fetched.exists()
+
+
+def test_web_api_reader_includes_standalone_attachment_in_collection_items(
+    tmp_path: Path,
+) -> None:
+    """独立放入集合、无 parent item 的 PDF 附件必须保留自己的集合归属，不落入 __unfiled__。"""
+
+    class Client:
+        def list_user_collections(self, user_id: str):
+            return [{"key": "COLL1", "data": {"key": "COLL1", "name": "Papers"}}]
+
+        def list_user_items(self, user_id: str):
+            return [
+                {
+                    "key": "STANDALONE",
+                    "version": 3,
+                    "data": {
+                        "key": "STANDALONE",
+                        "itemType": "attachment",
+                        "parentItem": "",
+                        "contentType": "application/pdf",
+                        "filename": "standalone.pdf",
+                        "linkMode": "imported_file",
+                        "collections": ["COLL1"],
+                    },
+                },
+                {
+                    "key": "NOTE1",
+                    "version": 3,
+                    "data": {
+                        "key": "NOTE1",
+                        "itemType": "note",
+                        "collections": ["COLL1"],
+                    },
+                },
+                {
+                    "key": "ITEM1",
+                    "version": 3,
+                    "data": {
+                        "key": "ITEM1",
+                        "itemType": "journalArticle",
+                        "title": "Parented Paper",
+                        "collections": ["COLL1"],
+                    },
+                },
+                {
+                    "key": "ATT_OF_ITEM1",
+                    "version": 3,
+                    "data": {
+                        "key": "ATT_OF_ITEM1",
+                        "itemType": "attachment",
+                        "parentItem": "ITEM1",
+                        "contentType": "application/pdf",
+                        "filename": "child.pdf",
+                        "linkMode": "imported_file",
+                        # 有 parent 的普通附件通常没有自己的 collections。
+                    },
+                },
+            ]
+
+        def download_user_file(self, user_id: str, item_key: str, target_path: Path):
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(b"%PDF-1.4")
+            return target_path
+
+    reader = ZoteroWebApiReader(
+        Client(),  # type: ignore[arg-type]
+        user_id="123",
+        username="alice",
+        download_dir=tmp_path / "cache",
+    )
+    snapshot = reader.read_snapshot()
+
+    # 独立附件贡献了自己的归属对，未落入 __unfiled__。
+    assert ("COLL1", "STANDALONE") in snapshot.collection_items
+    # 有 parent 的普通附件自己没有 collections，不产生多余归属。
+    assert ("COLL1", "ATT_OF_ITEM1") not in snapshot.collection_items
+    # note 仍被排除在集合成员之外（回归防呆）。
+    assert ("COLL1", "NOTE1") not in snapshot.collection_items
+    # 普通条目归属不受影响。
+    assert ("COLL1", "ITEM1") in snapshot.collection_items

@@ -76,6 +76,51 @@ def test_zotero_zotmoov_root_key_policy_registered() -> None:
     assert policy.consequence == CONSEQUENCE_REBUILD
 
 
+def test_vector_db_auto_rebuild_defaults() -> None:
+    vdb = Config({}).get_vector_db_config()
+    assert vdb.auto_rebuild_enabled is True  # 默认开：新文件进来后无需手动重建
+    assert vdb.auto_rebuild_delay_seconds == 30
+    public = Config({}).to_public_dict()["vector_db"]
+    assert public["auto_rebuild_enabled"] is True
+    assert public["auto_rebuild_delay_seconds"] == 30
+
+
+def test_vector_db_auto_rebuild_delay_is_floored() -> None:
+    """防抖窗口过短会让 Zotero 批量同步每来一篇就重跑一次重建，故夹到 ≥5 秒。"""
+    from kacore.config import MIN_AUTO_REBUILD_DELAY_SECONDS
+
+    assert (
+        Config({"vector_db": {"auto_rebuild_delay_seconds": 0}})
+        .get_vector_db_config()
+        .auto_rebuild_delay_seconds
+        == MIN_AUTO_REBUILD_DELAY_SECONDS
+    )
+    # 非法输入回退默认值而不是抛错。
+    assert (
+        Config({"vector_db": {"auto_rebuild_delay_seconds": "abc"}})
+        .get_vector_db_config()
+        .auto_rebuild_delay_seconds
+        == 30
+    )
+    assert (
+        Config({"vector_db": {"auto_rebuild_delay_seconds": 120}})
+        .get_vector_db_config()
+        .auto_rebuild_delay_seconds
+        == 120
+    )
+
+
+def test_vector_db_auto_rebuild_keys_are_hot_runtime_writable() -> None:
+    """调度器每轮重读配置，故这两个键改完即生效——policy 必须是 NONE 而非 RESTART。"""
+    from kacore.config import CONFIG_KEY_POLICY, CONSEQUENCE_NONE
+
+    for key in ("auto_rebuild_enabled", "auto_rebuild_delay_seconds"):
+        policy = CONFIG_KEY_POLICY["vector_db"][key]
+        assert policy.api_writable is True
+        assert policy.runtime_persistable is True
+        assert policy.consequence == CONSEQUENCE_NONE
+
+
 def test_r2_endpoint_and_free_tier_bytes() -> None:
     assert Config({}).get_r2_sync_config().endpoint == ""  # 无 account_id
     r2 = Config({"r2_sync": {"account_id": "abc"}}).get_r2_sync_config()
@@ -281,6 +326,8 @@ def test_diagnostics_report_missing_optional_feature_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("kacore.config._module_available", lambda name: False)
+    # Milvus 就绪度收口在 capabilities（pymilvus ∧ milvus_lite），须一并置为「都没装」。
+    monkeypatch.setattr("kacore.capabilities.module_available", lambda name: False)
     diagnostics = Config(
         {
             "r2_sync": {"enabled": True},

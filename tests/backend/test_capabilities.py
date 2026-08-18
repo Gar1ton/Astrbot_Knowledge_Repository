@@ -8,6 +8,8 @@ from __future__ import annotations
 import pytest
 
 from kacore.capabilities import (
+    MILVUS_LITE_PIP_SPEC,
+    MILVUS_PIP_SPEC,
     OPTIONAL_DEPENDENCIES,
     STATUS_DEGRADED,
     STATUS_OFF,
@@ -15,6 +17,7 @@ from kacore.capabilities import (
     dependency_statuses,
     detect_pipeline,
     resolve_install_spec,
+    resolve_install_specs,
 )
 from kacore.config import Config
 
@@ -41,7 +44,7 @@ def _patch_modules(monkeypatch: pytest.MonkeyPatch, available: set[str]) -> None
 
 
 def test_resolve_install_spec_accepts_key_and_full_spec() -> None:
-    assert resolve_install_spec("milvus") == "pymilvus[milvus_lite]>=2.5,<3.0"
+    assert resolve_install_spec("milvus") == "pymilvus[milvus_lite]>=2.6,<3.0"
     spec = OPTIONAL_DEPENDENCIES[0].pip_spec
     assert resolve_install_spec(spec) == spec
 
@@ -102,7 +105,7 @@ def test_local_embedding_degraded_without_dependency(monkeypatch: pytest.MonkeyP
 
 
 def test_milvus_ready_when_installed_and_probed(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_modules(monkeypatch, {"sentence_transformers", "pymilvus"})
+    _patch_modules(monkeypatch, {"sentence_transformers", "pymilvus", "milvus_lite"})
     cfg = _cfg({"vector_db": {"backend": "milvus"}, "embedding": {"provider": "local"}}, dim=384)
     pipeline = detect_pipeline(cfg)
     assert _stage(pipeline, "embedding")["status"] == STATUS_READY
@@ -117,6 +120,49 @@ def test_milvus_degraded_falls_back_to_astrbot(monkeypatch: pytest.MonkeyPatch) 
     pipeline = detect_pipeline(cfg)
     assert _stage(pipeline, "vector_store")["status"] == STATUS_DEGRADED
     assert "astrbot_kb" in _stage(pipeline, "retrieval")["detail"]["engines"]
+
+
+def test_milvus_not_ready_when_only_pymilvus_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归 v1.0.9：装了 pymilvus 但没有 milvus-lite ≠ 可用。
+
+    `pymilvus[milvus_lite]` 的 extra 带 `sys_platform != "win32"` 标记，Windows 上 pip
+    静默跳过 milvus-lite 且退出码为 0。旧实现只探 pymilvus，于是面板显示绿灯、装配却抛
+    `ConnectionConfigException`，用户被引导去重复安装同一个包。
+    """
+    _patch_modules(monkeypatch, {"sentence_transformers", "pymilvus"})
+    cfg = _cfg({"vector_db": {"backend": "milvus"}, "embedding": {"provider": "local"}}, dim=384)
+
+    stage = _stage(detect_pipeline(cfg), "vector_store")
+    assert stage["status"] == STATUS_DEGRADED
+    assert stage["detail"]["milvus_runtime_ready"] is False
+    assert "milvus-lite" in stage["detail"]["milvus_runtime_hint"]
+
+    milvus_dep = next(d for d in dependency_statuses() if d["key"] == "milvus")
+    assert milvus_dep["installed"] is True  # 顶层包确实在
+    assert milvus_dep["runtime_ready"] is False  # 但功能跑不起来
+    assert "milvus-lite" in milvus_dep["runtime_hint"]
+
+
+def test_milvus_install_specs_carry_milvus_lite_explicitly() -> None:
+    """安装 milvus 必须显式带上 milvus-lite，否则 Windows 上 pip 会跳过它。
+
+    Milvus Lite 3.0（2026-05）起是纯 Python 包（py3-none-any），全平台可装；
+    但 pymilvus 的 milvus_lite extra 仍带着 2.x C++ wheel 时代的 `sys_platform != "win32"`
+    标记，只写 `pymilvus[milvus_lite]` 在 Windows 上等于什么都没装。
+    """
+    specs = resolve_install_specs("milvus")
+    assert specs[0] == MILVUS_PIP_SPEC
+    assert MILVUS_LITE_PIP_SPEC in specs
+    # milvus-lite 3.x 的 search 要求 pymilvus>=2.6（2.5.x 会抛 function_score）。
+    assert ">=2.6" in MILVUS_PIP_SPEC
+    assert ">=3.0" in MILVUS_LITE_PIP_SPEC
+
+
+def test_non_milvus_install_specs_stay_single() -> None:
+    """其余依赖没有 companion，安装规格保持单条。"""
+    assert resolve_install_specs("lightrag") == ("lightrag-hku>=1.5.0rc1,<2.0.0",)
 
 
 def test_graph_off_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

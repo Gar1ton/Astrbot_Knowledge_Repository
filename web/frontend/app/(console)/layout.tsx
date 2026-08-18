@@ -14,6 +14,7 @@ import { DocumentsPanel } from "@/components/panels/DocumentsPanel";
 import { ChatPanel } from "@/components/panels/ChatPanel";
 import { NotePanel } from "@/components/panels/NotePanel";
 import { WorkflowModal } from "@/components/modals/WorkflowModal";
+import { ModelsModal } from "@/components/modals/ModelsModal";
 import { SettingModal } from "@/components/modals/SettingModal";
 import { AstrBotModal } from "@/components/modals/AstrBotModal";
 
@@ -54,7 +55,7 @@ const MAX_FILE_W = 528;
 type DragTarget = "file" | "chat" | null;
 
 function ConsoleCanvas({ onLogout }: { onLogout: () => void }) {
-  const { noteDocId, selectedDocId, selectedCollection, settingOpen, setSettingOpen, astrBotOpen, setAstrBotOpen, workflowOpen, setWorkflowOpen } = useConsole();
+  const { noteDocId, selectedDocId, selectedCollection, settingOpen, setSettingOpen, astrBotOpen, setAstrBotOpen, workflowOpen, setWorkflowOpen, modelsOpen, setModelsOpen } = useConsole();
 
   const [chatWidth, setChatWidth] = useState(DEFAULT_CHAT_W);
   const [fileWidth, setFileWidth] = useState(DEFAULT_FILE_W);
@@ -206,6 +207,7 @@ function ConsoleCanvas({ onLogout }: { onLogout: () => void }) {
       {settingOpen && <SettingModal onClose={() => setSettingOpen(false)} onLogout={onLogout} />}
       {astrBotOpen && <AstrBotModal onClose={() => setAstrBotOpen(false)} />}
       {workflowOpen && <WorkflowModal onClose={() => setWorkflowOpen(false)} />}
+      {modelsOpen && <ModelsModal onClose={() => setModelsOpen(false)} />}
     </div>
   );
 }

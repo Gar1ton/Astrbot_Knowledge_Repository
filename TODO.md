@@ -49,6 +49,541 @@
 - 前端：`cd web/frontend && npm ci && npm run build` → 编译 + TypeScript 通过、13 页静态产出；`python tools/sync_frontend.py` → 同步 357 文件到 `pages/`，`--check` 一致。
 - 真实联网冒烟（需 `KR_MEMECHO_API_KEY`、会计费）尚未执行：留待用户以真实 Key 验证 create vault → import → query-readonly 端到端。
 
+## v1.1.2：Milvus 索引自动重建
+
+### User constraints / 约束
+
+- **新文件进来后不得再要求手动点「重建索引」**——自动重建必须是系统自己的事。
+- 增量与全量**都自动**：索引不兼容时（换 embedding / collection 被重建 / schema 不匹配）
+  也自动转全量重建，用户明确确认接受「先 clear() 再逐篇重建」的代价。
+- 触发方式为**事件驱动 + 防抖 + 启动补跑**，失败按指数退避，不得空转刷屏。
+
+### 核实到的根因（必须先记录）
+
+自动索引**本来就存在**，问题不是「没写」而是「全被兼容门挡着」：
+
+- `kacore/api.py:1526` `register_document()` 仅当 `auto_index_enabled and
+  _milvus_index_is_compatible()` 才同步写 Milvus，否则 `:1560` 落 `needs_reindex=True`；
+  `:5182` `_index_document()`（Zotero 同步回调）是同一道门。
+- 兼容态一旦翻成 incompatible——`plugin_initializer.py:349`（collection 被重建而 SQLite 有文档）、
+  `:366`（fingerprint 变了）、`:375`（schema mismatch）、`api.py:890`（删集合失败）、
+  `api.py:5806`（换 embedding）——**只有跑完一次全量重建才会翻回来**（`api.py:1943/1957`）。
+- 因此兼容态坏掉之后，其后进来的**每一个**新文件都只会排进 `needs_reindex` 队列，而全项目
+  **没有任何东西会主动排空该队列**，只有 WebUI 的 `POST /api/documents/rebuild-index`
+  （`web/server.py:800` → `api.start_milvus_rebuild`）。这就是「每次都要手动重建」的真正来源。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 配置项**（`kacore/config.py`）：`VectorDbConfig` 新增
+  `auto_rebuild_enabled: bool = True` 与 `auto_rebuild_delay_seconds: int = 30`（解析时下限
+  夹到 5 秒）；同步改配置快照与 `CONFIG_KEY_POLICY["vector_db"]`。policy 取
+  **`CONSEQUENCE_NONE` 而非 RESTART**——调度循环每轮重读配置，改完即生效；若标 RESTART，
+  用户关掉自动重建还得重启插件，与「省心」的诉求相悖。同步
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 的 `CONFIG_POLICIES` 快照。
+- [x] **Phase 2 — 调度器**（新建 `kacore/auto_reindex.py`）：`AutoReindexScheduler`，
+  构造器注入 `pending_count` / `run_rebuild` / `config_provider` / `is_ready` 四个回调，
+  **不放进 `api.py`**（该文件已 5876 行，是 600 行红线的 9 倍，v1.1.1 已登记拆分计划）。
+  `notify()` 打信号；`run()` = 等信号 → 防抖静默 → 门禁 → 查队列 → 调重建 → 判成败。
+  **park 机制是硬要求**：连续 6 次「零进展」后停止定时重试、只等新信号——一篇永远清洗失败的
+  坏 PDF 会让队列永远非空，没有 park 就是每小时一次的无限重试风暴。
+- [x] **Phase 3 — api 接线**（`kacore/api.py`）：`attach_auto_reindex_scheduler()`（对齐
+  `:747` 的 `attach_zotero_pipeline` 薄注入）、`run_milvus_rebuild_to_completion()`（复用现成
+  的单飞 `start_milvus_rebuild`，故自动重建与手动按钮共用同一 job、同一进度条、同一 runtime
+  events，WebUI 零改动生效）；信号点落在 `_mark_document_needs_reindex()`（`:4996`，全部标记
+  路径的唯一收口）与 `_invalidate_embedding_indexes()`（`:5804`，它直接改 `doc.needs_reindex`
+  绕过了前者）。
+- [x] **Phase 4 — 组合根**（`kacore/plugin_initializer.py`）：在 6.x 周期任务区装配 +
+  `create_task(scheduler.run())` + 建完即 `notify()` 做启动补跑（此时 4.6 段的
+  `_mark_all_documents_needs_reindex()` 已跑完，队列是终态）；`teardown()` 按既有三段式释放。
+- [x] **Phase 5 — 状态暴露**：`kacore/capabilities.py` 的 `vector_store.detail` 增
+  `auto_rebuild_enabled`；`QuickConfigPanel.tsx` 在「自动索引」旁加开关；`lib/i18n.ts` zh+en
+  双份；`lib/api.ts` 的 mock 配置/能力快照补字段（**不进 `MOCK_RESTART_KEYS`**，policy 是 NONE）。
+- [x] **Phase 6 — 测试**：新建 `tests/backend/test_auto_reindex.py`（防抖只跑一次、开关关闭
+  不跑、空队列不跑、失败退避递增、**连续零进展 6 次进 park**、park 后 notify 唤醒并重置）；
+  `test_api.py` 补 notify 收口与单飞复用；`test_config.py` 补新键默认值/夹取/policy。
+- [x] **Phase 7 — 落版**：全绿后 `python bump_version.py 1.1.2`，写 CHANGELOG。
+- [x] **Phase 8 — codex skill 可代按「重建索引」按钮**（用户追加需求，明确要求走调用代码而非
+  computer use）：`knowledge_arch_client.py` 新增 `index-status`（只读）与 `index-rebuild`
+  （`--apply` 门禁 + 可选 `--wait` 轮询到终态）。此前 `SKILL.md` 的不变量是「Never start a
+  normal index rebuild」、`config_options()` 里写死 `rebuild_command_available: False`，且
+  `test_client_exposes_only_agent_evidence_and_guarded_graph_builds` 断言**客户端源码里不得
+  出现该端点**——三处都是这条禁令的落点，必须一起改，否则改一处另两处会把它拉回去。
+  测试从「端点不得出现」改为「端点可达但受 apply 门禁保护」（断言 preview 分支在 POST 之前）。
+
+### Known limitations（本轮有意不解决）
+
+- **坏文档不隔离**：永久失败的文档仍留在 `needs_reindex` 队列，靠 park 止损，但待重建数字
+  不会自己归零。真正的隔离需 per-doc 失败计数与新的持久化字段，属于另一轮。
+- **不动 LightRAG 图谱构建**：LRAG 有独立的 `lightrag_index_status` 与带暂停语义的 `BuildJob`，
+  逐 chunk 打 LLM 成本高，自动触发是另一个量级的决策。
+- **不改 `auto_index_enabled` 语义**：它管「上传瞬间同步写 Milvus」，自动重建是它失败/被跳过
+  后的兜底网，两者正交。
+
+## v1.1.1：全文检索端到端实装 · 显存面板对齐 DS · 版本落版 (completed)
+
+### User constraints / 约束
+
+- **全文检索取消硬上限**，但单篇超过 **60000 字符**时，WebUI Ask 面板与 codex skill 两个入口
+  都必须**先明确警告并询问，硬同意之后才能执行**。低于阈值零摩擦，不得多一次点击/往返。
+- 显存面板「内外的颜色」参考 AstrBot 配置面板，做成 **block（Card）样式**。
+- GPU/显存数据必须是**识别系统**的，不能是为特定机器优化的。核实结论：`torch_memory.py` 本就是
+  `torch.cuda` 实时读取、零硬编码；用户明确指示**不涉及多卡就不改**，故本轮不动该文件。
+- 版本号从 v1.1.0 落到 **v1.1.1**。
+
+### 核实到的前提偏差（必须先记录）
+
+- Ask 面板的「全文检索」**今天是坏的**，不是「有上限」而是「根本跑不通」：
+  `kacore/retrieval_modes.py:17-25` 的 `VALID_RETRIEVAL_MODES` 不含 `fulltext`，
+  `web/server.py` 的 `handle_ask` 从不读 `body["doc_id"]`（前端 `ChatPanel.tsx:888` 一直在发），
+  选中后提问必然 400。「60 000 字符上限」只是 `lib/i18n.ts:246` 的一句文案，全链路无强制点。
+  因此第 4 项不是「调上限」而是「端到端实装 + 加确认门」。
+- codex skill 侧的硬上限是真实存在的两处静默夹取：`knowledge_arch_client.py` 的
+  `MAX_READ_CHARS = 40000` 与 `web/server.py` 的 `_query_int(..., 1, 40000)`。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 模式常量**（`kacore/retrieval_modes.py`）：新增 `MODE_FULLTEXT`、并入
+  `VALID_RETRIEVAL_MODES`；新增 `STRICT_DOCUMENT_MODES`（与 `STRICT_COLLECTION_MODES` 对称，
+  表达「本模式必须绑定一个具体文档」）；新增 `FULLTEXT_CONFIRM_THRESHOLD_CHARS = 60_000`——
+  **全项目唯一真相源**，`web/server.py`／前端／skill 一律不得复制该数字。连带修
+  `kacore/research_skill.py`：AstrBot 的 `research_execute` 没有 doc_id 概念，收到
+  `mode="fulltext"` 必须降级为 `default`，否则撞 ValueError。
+- [x] **Phase 2 — 整篇文档合成**（`kacore/pipelines/answer_synthesis.py`）：新增
+  `synthesize_from_document()`，内部 `allow_mock=False`（`adapters/llm.py` 的 `allow_mock=True`
+  会在拿不到文本时返回**离线占位文本**——用户确认了 18 万字却拿到一段假答案是最坏结果）。
+  复用 `_FLUENT_PROSE_RULE`，**不用** `_SOURCE_ISOLATION_RULE`（防跨文档串线，单文档场景无意义）。
+  `_lang_instruction` 去下划线导出：这段 if/elif 已在 `api.py` 出现两次，加第四份即踩中
+  CONVENTIONS §4「重复 3 次 → 提取」。
+- [x] **Phase 3 — 业务门面**（`kacore/api.py`）：新增 `FullTextConfirmationRequiredError`(409)／
+  `FullTextDocumentUnavailableError`(404)／`FullTextGenerationFailedError`(502)；
+  `_est_context_tokens()`（CJK ~1 token/字，**不用** `llm_json.est_tokens` 的 `len//4`——对中文
+  低估 4~6 倍，而低估恰恰发生在最危险的场景）；`_load_fulltext_document()`（顺带修掉现存隐患：
+  今天 clean.md 缺失时 `FileNotFoundError` 逃出 `ask()` 会变成裸 500）；
+  `_require_fulltext_confirmation()` 作为唯一阈值比较点；`get_document_markdown_page` 拆掉
+  40000 上限、`max_chars == 0` 语义改为「读到文末」；`_build_source_entry` 拆出
+  `_build_document_source_entry`（`citation_rendering.build_citation_refs` 只读书目键、
+  从不碰 `chunk_id`，故整条 Harvard 机器可原样复用）；`ask()` 新增 fulltext 分支。
+  **回归红线**：`source["text"]` 绝不能放整篇正文——`sources` 会随 `add_chat_message` 落库，
+  几十万字符会撑爆每行 chat_history，必须用 `clip_at_sentence(content, 300)`。
+- [x] **Phase 4 — HTTP 层**（`web/server.py`）：`handle_ask` 透传 `doc_id` / `confirmed`
+  （即「前端一直在发、后端从不读」这个 bug 的正式修复点）+ 三条带 `status` 判别字段的异常映射；
+  `handle_document_content_page` 拆掉 40000 静默夹取、新增 `_query_flag()` 解析 `confirmed`。
+- [x] **Phase 5 — 前端**：`Card`/`Field` 从 `AstrBotModal` 提到 `components/ds/Card.tsx`
+  （`SettingModal` 里还有一份逐字拷贝，一并改为 import，**视觉必须零变化**）；
+  `ModelRuntimePanel` 重样式（补 `18px 22px` 内容 padding、两张 Card、行改 Field、
+  卸载按钮移入 `Modal footer`、字号归位 DS 刻度、丢掉 `--bg-inset`+`--border-strong` 这套
+  输入槽配方）；新增 `FullTextConfirmDialog`；`ChatPanel` 接线并修两个既有 bug
+  （`:856` 错用 `chat_graph_requires_collection`、`retrievalModeLabel` 缺 fulltext 分支会把
+  全文检索标成「Milvus 语义检索」）；`api.ts` 加 `confirmed` 并修 mock 分支；i18n zh+en 双份。
+- [x] **Phase 6 — codex skill**：删 `MAX_READ_CHARS`；新增 `StructuredApiError`（`ApiError`
+  子类，既有 catch 点与 exit_code 行为不变）；`read` 支持 `--whole` 与 `--confirm-large-read`，
+  超阈值返回 **preview 且不含任何正文**。刻意**不复用 `--apply`**：`SKILL.md` 把 `--apply`
+  定义为变更类门禁，read 是纯读操作，混用会稀释变更门禁的严肃性；preview 用 `content_returned`
+  而非 `mutation_performed`。同步 `SKILL.md` 与 `references/research.md`。
+- [x] **Phase 7 — 测试**：`test_api.py` / `test_web_server.py` /
+  `test_knowledge_arch_skill_client.py` / `test_research_skill.py`。关键回归锁：超阈值时
+  **LLM 一次都没被调用且 chat_history 没落任何消息**；确认后 prompt 含文档**末尾哨兵字符串**
+  （证明无截断）；`sources[0]["text"]` 长度 < 1000；LLM 失败时**不返回离线占位文本**。
+- [x] **Phase 8 — 版本与治理**：全绿后 `python bump_version.py 1.1.1`，写 CHANGELOG。
+
+### Known limitations（本轮有意不解决，不假装已解决）
+
+- **多卡显存错配**：`kacore/utils/torch_memory.py` 的 `accelerator_snapshot()` 设备名取自
+  `get_device_name(0)`，显存数字取自 `mem_get_info()` 的**当前设备**。单卡环境两者同源、
+  数据完全正确；多卡环境会出现「0 号卡的名字配 1 号卡的显存」。按用户指示本轮不处理。
+- **codex skill 分页累计读取不受门禁约束**：门禁按「单次调用返回多少字符」判定，agent 仍可
+  连续 `read --start N --max-chars 12000` 读满整篇。客户端无状态、无法可靠累计；要真正封死
+  需服务端按会话累计，是另一个量级的改动。现阶段靠 `references/research.md` §4 的阅读纪律约束。
+- **`kacore/api.py` 拆分计划（CONVENTIONS §4 登记）**：该文件已 5572 行，是 600 行红线的 9 倍，
+  本轮再加约 120 行。后续应把 `ask()` 的各 mode 分支（graph_only / deep_thinking / enhanced /
+  fulltext）逐一迁往 `kacore/pipelines/`，`api.py` 只留门面与装配。
+
+## v1.1.0：Harvard 引用统一 · 校验告警前置 · 模型驻留面板 · README 重写 (completed)
+
+### User constraints / 约束
+
+- 引用可读性：deep thinking / enhanced 召回给用户看到的是 `[n]` 数字标记，codex skill 侧更直接暴露
+  `doc_id`（`references/research.md:69` 明文要求 cite using `doc_id`）。三条出口（ask Web、AstrBot
+  聊天、codex skill）必须统一为 Harvard 风格 **in-text + reference list**，且 **in-text 必须带页码**
+  （取自 chunk 元数据 `pages`/`page_number`）。
+- Harvard 引用由**代码确定性生成**：LLM 继续只输出 `[n]`，后端按 sources 元数据确定性改写。零幻觉
+  风险，复用既有 `[n]`↔sources 同序对齐契约，`test_cross_document_attribution.py` 等 prompt 层测试
+  不受影响。**不**改成让 LLM 直接写 `(Author, Year)`。
+- 元数据缺失走**标准 Harvard 降级**：无作者 `Anon.`，无年份 `n.d.`；同时打通本地文档 `local_meta`
+  （现 `api.py:2384` 只对 Zotero 文档富化）。采用 Cite Them Right Harvard：正文内 4+ 作者用 `et al.`。
+- 显存按键**以卸载为核心**（对齐 LM Studio 的 unload/eject），显存数值用 `torch.cuda` 尽力而为读取，
+  **不引入** `psutil` / `pynvml` 新依赖。按键脉冲颜色按驻留状态：绿=全部已卸载、紫=有模型驻留、
+  红=配置为 cuda 但不可用/加载失败。位置在 AstrBot 与 数据流 之间，沿用 `wf-pulse-*` 呼吸光效。
+- 未来可能扩成完整性能面板，但本轮只做「显存可视 + 手动卸载」，不预埋抽象。
+
+### Technical implementation path
+
+- [x] **Phase 1 — Harvard 引用核心（纯函数）**：新增 `kacore/domain/citation.py`（零依赖：`CitationRef`
+  frozen dataclass + `normalize_creators`/`format_pages`/`harvard_in_text`/`harvard_in_text_group`/
+  `harvard_reference`/`reference_sort_key`；`ANON`/`NO_DATE`/`ET_AL_THRESHOLD=4`/
+  `REFERENCE_MAX_AUTHORS=20` 提为常量）。边界铁律：domain 模块不得认识 `source` dict 键名、
+  `DocumentChunk`、`zotero_meta`/`local_meta`。`harvard_in_text` 返回**不含括号的内层串**，是 Phase 3
+  前端最长匹配还原点击态的前提。作者归一化针对 `sqlite_reader.py:249`/`web_api.py:357` 在机构名
+  /`fieldMode==1` 时产出**无逗号裸姓名**、以及 `local_meta["creators"]` 可能是换行拼接**字符串**
+  （`DocumentMeta.tsx:101`）、`year` 可能是 `int` 的现实：无逗号整串作 surname（绝不按空格启发式
+  切分，否则毁掉 `van der Berg`/`OpenAI`/`张三`）。新增 `kacore/pipelines/citation_rendering.py`
+  （`build_citation_refs`/`strip_llm_reference_section`/`rewrite_citations`/`build_reference_list`/
+  `render_answer_with_references`），标记正则 `(?<!\\)\[(\d{1,3}(?:\s*[,，]\s*\d{1,3})*)\]`，处理
+  围栏代码块/行内代码/Markdown 链接/引用式链接定义的遮罩、相邻 `[1][2]` 合并（必须先算全部 span
+  再合并再替换，`re.sub` 回调看不到邻居）、越界编号整段原样保留（绝不产出 `(Anon., n.d.)`，那是
+  凭空捏造引用）、LLM 自写参考文献尾块去重。
+- [x] **Phase 2 — 书目元数据打通**：`kacore/api.py:2384` 删掉 `origin is ZOTERO` 门控，抽 `
+  _document_biblio_meta(doc)`（ZOTERO→`get_zotero_item_meta`，LOCAL→`doc.local_meta`；
+  `web/server.py:1531-1541` 已证明二者同构），保留**全部** `creators` 与 `venue`/`doi`/`url`/
+  `item_type`（现 2389-2396 只留首作者姓氏+年份后全丢）；`source["author"]/["year"]/["citation"]`
+  语义**保持不变**（`api.py:2423` 用 `citation` 拼 deep-fallback 的 `source_labels`，改了等于悄悄
+  改 LLM prompt）；`abstract` 不进 sources（撑大每行 `chat_history`）。加 `doc_cache`/`meta_cache`
+  消除逐 chunk 的 N+1。`retrieve_agent_evidence`（`api.py:1573-1590`，codex skill 出口）套用同一
+  辅助并补 `harvard_in_text`/`harvard_reference` 成品串。`update_document_meta`（:1430）白名单阶段
+  把 `creators` 强制 `list[str]`、`year` 强制 `str`。
+- [x] **Phase 3 — 应用改写 + 三出口收口**：`kacore/api.py` 分支链收口后、`_compute_answer_notice`
+  之前唯一应用点 `render_answer_with_references`，`citable` 仅对 deep_answer 与通用 LLM 合成分支为
+  真——**无-LLM 摘录分支（:2478）必须为假**，其 `**[1] {title}**` 列表头会被改成
+  `**(Anon., n.d.) Title**`。响应新增 `references`。`research_skill.py:413` 改
+  `result.get("references") or _build_citations(sources)`（保留旧函数作降级）；`main.py:592-604`
+  去掉 `引用：` 段避免与正文内参考文献块**发两份书目**。前端新增 `web/frontend/lib/citationIndex.ts`
+  （按串长**降序**拼 alternation，否则 `Smith, 2020` 遮蔽 `Smith, 2020, p. 3`；末尾保留
+  `|\[\d+\]` 分支兼容已落库的历史裸 `[n]`），`ChatPanel.tsx` `renderAnswer` 改签名接 sources。
+  改写 `.agents/skills/operate-knowledge-arch/references/research.md:69` 与 `SKILL.md` 输出契约为
+  Harvard（不改则 agent 继续自造格式，Phase 1-3 在该路径完全失效）。顺带修
+  `enhanced_recall_orchestrator.py:204-226`：重合成抛异常时保留的首轮答案其 `[n]` 按**纠正前**池
+  编号，而返回的是**新**池——今天症状是 `<sup>` 链错 chunk，本轮后会升级为正文明文错误归因。
+- [x] **Phase 4 — 证据校验告警前置**：文案生成器 `_deep_warning_prefix`/`_compute_answer_notice`
+  （`api.py:231-360`）不动，只调顺序：`api.py:2552` `stored_answer` 改为 notice 在前（并更新
+  :344-352 描述 v0.30.0 尾注行为的 docstring）；`main.py:592-604` notice 移到表头之后、正文之前；
+  `ChatPanel.tsx:485-497` 的 notice 块移到 `renderAnswer`（:463）之上，`borderTop`→`borderBottom`；
+  核对 `chatMessagesToMessages()`（:670-679）不映射 `answerNotice` 的历史回放路径不会双重显示。
+- [x] **Phase 5 — 模型驻留面板后端**：按 `ARCHITECTURE.md` §8 清单落位，**无新增配置键**（`idle_timeout`
+  已存在，故不涉及 `CONFIG_KEY_POLICY` 与 skill 侧 `CONFIG_POLICIES` 快照同步）。新增
+  `kacore/utils/torch_memory.py`（`release_accelerator_cache`/`accelerator_snapshot`），收敛散在
+  `bge_local.py:97-108`（全仓唯一 CUDA 释放代码）与 `local.py:189-198`（仅日志用）的重复。接口先行：
+  `embedding/base.py` 加 `unload()` + `runtime_status`（契约 docstring 注明**不得触发模型加载**）、
+  `reranker/base.py` 加 `close()` 默认 no-op。实现：`embedding/local.py` 公开 `unload()`（现 `_unload`
+  只置空引用、**不释放显存**，正是用户抱怨点）、`cached.py` 装饰器必须**透传**（组合根拿到的是
+  cached 实例，否则卸载静默失效）、`external.py` no-op、`bge_local.py` 改调共享工具。组合根把
+  `plugin_initializer.py:496` 的**单一** reranker 实例注入 `KnowledgeRepositoryApi`（现
+  `api_capabilities.py:85` 只靠 `getattr(orchestrator, "reranker_status")` 间接取状态，无法调
+  `close()`）。新增 mixin `kacore/api_runtime_models.py`（`get_model_runtime`/`unload_models`；
+  `api.py` 已 5499 行，禁止再增业务代码），`web/server.py` 加
+  `GET /api/system/models` + `POST /api/system/models/unload` 薄壳路由。
+- [x] **Phase 6 — 模型驻留面板前端**：`lib/api.ts` 加 `ModelRuntimeStatus`/`getModelRuntime`/
+  `unloadModels` + MOCK 夹具（照 `getCapabilities`:1878 形制）；新增 `lib/modelHealth.ts`
+  （镜像 `lib/flowHealth.ts:8-26`）；**复用** `globals.css:280-296` 既有 `wf-pulse-*` keyframes；
+  `Icon.tsx` 加 `chip` 路径；`ConsoleContext.tsx` 加 `modelsOpen`；`layout.tsx:205-207` 挂
+  `ModelsModal`；`TopBar.tsx` 在 AstrBot(:85-92) 与 数据流(:93-102) 之间插按钮 + 8s 轮询；新建
+  `components/modals/ModelsModal.tsx`（照 `WorkflowModal.tsx` 32 行薄包装）+
+  `components/panels/ModelRuntimePanel.tsx`（每模型一卡片带独立卸载键，顶部显卡名与已用/总量，
+  `accelerator === null` 时整块降级为「CPU 模式」，底部「全部卸载并清空缓存」）；`lib/i18n.ts` 在
+  `zh`/`en` **两个**字典成对加键（`en` 类型是 `Record<keyof typeof zh, string>`，漏加即编译失败）；
+  `npm run build` + `python tools/sync_frontend.py`（`pages/` 是产物，禁止手改）。
+- [x] **Phase 7 — 文档与版本**：`python bump_version.py` 升 `metadata.yaml` + `main.py::_PLUGIN_VERSION`
+  至 `v1.1.0`。README 重写：徽章 v1.0.11→v1.1.0（已落后两版）、新增 **Codex Skill** 主章节
+  （定位/`requirements-codex-skill.txt`/`connection-setup` 交互式注册/凭据按 OS 分路径且密码仅入
+  keyring/子命令速查/Windows 沙箱 ACL）——这是最大缺口，skill 已随 `release/published-files.txt:16`
+  发布给终端用户却零文档；新增 v1.0→v1.1 功能概览；WebUI 面板导览补模型面板；补
+  `ask.task_timeout_seconds`/`embedding.device`/LightRAG 取消构建/Zotero 跨源去重；补 AGPL-3.0
+  License 章节。`metadata.yaml` 的 `short_desc`/`desc` 补 Zotero/五档检索/WebUI/Codex skill
+  （`name` 是冻结机器名，不得改）。`dist/published/README.md` 是构建产物，不手改。
+- [x] **Phase 8 — 验证与治理**：全量 `pytest`/`ruff`/`mypy`；前端 `tsc`/`npm run build`/
+  `sync_frontend.py`；`CHANGELOG.md` 追加 v1.1.0 条目。
+
+### Verification
+
+- `python -m pytest -q`（scratchpad 缓存 venv `/tmp/astrbot-ka-v1.0.10-venv`）→ **858 passed, 2 skipped**；
+  2 个失败为环境缺 `torch`（`test_embedding.py` 两条本地 GPU 设备用例）的既有基线失败，与本轮无关
+  （v1.0.12 基线为 757 passed，本轮净增 101 条用例）。
+- `ruff check .` → All checks passed；`mypy`（`files = ["kacore/domain/"]`）→ Success，5 source files
+  （新增 `kacore/domain/citation.py`）。
+- 前端：`node node_modules/typescript/bin/tsc --noEmit --incremental false` → 无输出（通过）；
+  `npm run build` → 11 条路由静态产出成功；`python tools/sync_frontend.py` → 同步 357 个文件到 `pages/`；
+  `python tools/sync_frontend.py --check-structure` → 结构一致。
+- 新增测试文件：`tests/backend/test_harvard_citation.py`（43）、
+  `tests/backend/test_citation_rendering.py`（28）、`tests/backend/test_model_runtime.py`（13）、
+  `tests/frontend/test_citation_index.py`（7）。
+- 契约未破（重点核对）：`test_cross_document_attribution.py` 6 条全绿——改写严格位于 prompt 层之上，
+  `[n]`↔sources 同序对齐契约与 `（来源：X）` 标注均未改动。
+- 治理联动确认：本轮**未新增配置键**（`idle_timeout` 复用既有），故无需同步
+  `kacore.config.CONFIG_KEY_POLICY` 与 skill 侧 `CONFIG_POLICIES` 快照；
+  `test_published_tree.py` / `test_knowledge_arch_skill_client.py` 均绿。
+- 验收逐条核对（对照用户四点诉求）：
+  - deep thinking / enhanced 与 codex skill 的引用统一为 Harvard（in-text + reference list）
+    → Phase 1-3；in-text 含页码，取自 chunk 元数据 `pages` / `page_number`。
+  - ask 的证据校验告警移到最前 → Phase 4（WebUI 气泡 / AstrBot 聊天 / 存库回放三处同序）。
+  - 主界面数据流左侧、AstrBot 右侧新增显存按键，同款配色显示，可点击卸载并清缓存 → Phase 5-6；
+    未做成完整性能面板（按约束本轮只做显存可视 + 手动卸载，不预埋抽象）。
+  - README 补 Codex Skill 配置信息并含 v1.0→v1.1 功能介绍 → Phase 7。
+
+## v1.0.12：Ask 长任务丢答案 · reasoning-only 误判重复调用 · LLM 结果结构化 (completed)
+
+### User constraints / 约束
+
+- 用户报告场景：线上 DeepSeek reasoning 模型 + Deep Thinking 模式，前端 600s 超时后答案在页面“消失”，
+  但 `chat_history` 里实际已写入完整答案；reasoning-only 响应被误判为空触发重复调用；`LLMResponse` 被压
+  成裸字符串丢失诊断信息。三问题互为因果（详见 issue 原文）。
+- 用最低限度方案修「答案消失」：后端加任务级总超时 + 前端超时/断线后自动补拉 `chat_history`，不做
+  `job_id`/`/api/ask/result/{id}` 的完整异步任务重构（现有 `ProgressStore` + `chat_history` 已够用）。
+- `LLMAdapter.generate()` 对外签名/返回值不变（仍返回 `str`），新增 `generate_result()` 供需要按状态分流
+  的调用方（`answer_synthesis`/`llm_json`）使用；零散调用点（翻译、`lightrag_core` 等）不做无收益迁移。
+
+### Technical implementation path
+
+- [x] **Phase 1 — LLMAdapter 识别 reasoning-only，杜绝无意义重复调用**：`_call_astrbot_llm_generate` 空
+  text 但 `reasoning_content` 非空时，不再无条件调 `text_chat()` 盲重试，改为对 `llm_generate` 路径带
+  「直接输出最终答案」追加指令重试一次；仍空才继续走原有 `text_chat`/`_call_legacy_context_llm` 兜底链；
+  日志区分「空响应」与「reasoning-only 空响应」并带 `finish_reason`（`kacore/adapters/llm.py`）。
+- [x] **Phase 2 — 结构化生成结果 `GenerationResult`**：新增 `kacore/domain/llm_generation.py`
+  （`text`/`status`/`finish_reason`/`prompt_tokens`/`completion_tokens`/`reasoning_present`/
+  `provider_id`/`model`，status 含 `ok`/`empty`/`reasoning_only`/`timeout`/`error`/`length`/
+  `content_filter`）；`LLMAdapter.generate_result()` 产出，`generate()` 薄委派取 `.text`（对外签名
+  不变）；`answer_synthesis.synthesize_answer` 改为直接返回 `GenerationResult`，`llm_json.llm_json_call`
+  改用 `generate_result()`（finish_reason=length 时解析失败日志专门标注疑似截断）；`api.ask` 把
+  `reasoning_only`/`length`/`content_filter` 状态接到既有 `answer_notice` 字段（`_compute_answer_notice`
+  新增 `generation_status` 参数），allow_mock=True 的调用点只在 length/content_filter 时透传状态（避免
+  reasoning-only 场景下把提示挂在完全虚构的离线占位答案上）（`kacore/domain/llm_generation.py`、
+  `kacore/adapters/llm.py`、`kacore/pipelines/answer_synthesis.py`、`kacore/pipelines/llm_json.py`、
+  `kacore/pipelines/deep_thinking_orchestrator.py`、`kacore/pipelines/enhanced_recall_orchestrator.py`、
+  `kacore/domain/deep_thinking.py`、`kacore/api.py`）。
+- [x] **Phase 3 — Ask 任务总超时 + 前端超时后自动补回答案**：`AskAgentConfig.task_timeout_seconds`
+  （默认 900s，0=不限，每次现读 Config 无需重启）。`api.ask()` 把检索+编排+合成主体包成内部闭包
+  `_retrieve_and_generate()`，用 `asyncio.create_task` + `asyncio.wait(timeout=...)`（而非
+  `asyncio.wait_for`）等待——到点**不取消**该任务，镜像 v1.0.9 embedding 探针的「非破坏式等待」
+  （`plugin_initializer._probe_embedding_dimension`）：后台任务继续跑完、照常写入 `chat_history`；
+  外层抛 `AskTaskTimeoutError`，`web/server.py::handle_ask` 映射为 HTTP 202
+  `status="ask_task_timeout"`（非失败）。前端新增 `AskTaskTimeoutError` 类 + `waitForLateAskAnswer()`
+  轮询 `/api/ask/progress` 直到 `stage=done`/记录过期，再拉 `/api/chat/history` 补回消息；
+  `ChatPanel.submitQuestion` 的 catch 分支对 `AskTaskTimeoutError` 与客户端 `ApiError.timedOut`
+  统一走该补轮询路径（不新增 `/api/ask/result/{id}` 端点，复用既有两个接口）
+  （`kacore/config.py`、`kacore/api.py`、`web/server.py`、`web/frontend/lib/api.ts`、
+  `web/frontend/components/panels/ChatPanel.tsx`、`web/frontend/lib/i18n.ts`）。
+- [x] **Phase 4 — 验证与治理**：全量 `pytest`/`ruff`/`mypy`；前端 `tsc`/`npm run build`/
+  `sync_frontend.py`；核对 issue 验收标准逐条；`CHANGELOG.md` 追加条目；`metadata.yaml`/
+  `main.py::_PLUGIN_VERSION` 升至 `v1.0.12`。
+
+### Verification
+
+- `python -m pytest -q`（scratchpad 缓存 venv `/tmp/astrbot-ka-v1.0.10-venv`）→ 757 passed, 2 skipped，
+  2 个失败为环境缺 `torch`（`test_embedding.py` 两条本地 GPU 设备用例）的既有基线失败，与本轮改动无关。
+  新增 17 条用例覆盖：reasoning-only 单次受控重试/持久失败落 text_chat/真空响应行为不变
+  （`test_llm_adapter.py`）、`generate_result()` 对 ok/empty/reasoning_only/timeout/length/
+  content_filter 六类响应的 status（同文件）、Ask 任务超时不取消后台任务且完成后仍落库
+  （`test_api.py::test_ask_task_timeout_lets_background_task_finish_and_persist`）。
+- `ruff check .` → All checks passed；`mypy`（`files = ["kacore/domain/"]`）→ Success，4 source files。
+- 前端：`node node_modules/typescript/bin/tsc --noEmit --incremental false` → 无输出（通过）；
+  `npm run build` → 全部 11 条路由静态产出成功；`python tools/sync_frontend.py` → 同步 357 个文件到
+  `pages/`。
+- 治理联动修复：新增配置键 `ask.task_timeout_seconds` 后同步更新
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 的独立 `CONFIG_POLICIES`
+  快照（`test_knowledge_arch_skill_client.py::test_distribution_policy_snapshot_matches_config_truth_source`
+  兜底发现该遗漏）。
+- 验收标准逐条核对（对照 issue 原文）：
+  - 运行超过 10 分钟的 Ask 不会从页面永久消失 → Phase 3 前端 `waitForLateAskAnswer` 补轮询。
+  - 刷新或重连后可恢复正在执行的 Ask → `/api/ask/progress` 本就支持，未变。
+  - 后端完成后前端可自动补回最终答案 → Phase 3（202 → 补轮询 → `getChatHistory` 重渲染消息）。
+  - reasoning-only 响应不再被记录成普通空响应 → Phase 1 日志区分 + Phase 2 `status=reasoning_only`。
+  - 同一 reasoning-only 响应不再无条件重复调用 provider → Phase 1（一次受控重试代替多路径盲试）。
+  - 日志/thinking trace 可见 provider、model、finish reason、token usage → Phase 2 `GenerationResult`
+    字段（当前接入 answer 合成与 JSON 调用路径；零散调用点未逐一迁移，见约束）。
+  - length/content_filter/reasoning_only/timeout 有不同处理路径 → Phase 2 状态分流 + `answer_notice`
+    文案区分 + Phase 3 `AskTaskTimeoutError`/HTTP 202 专属处理路径。
+
+## v1.0.11：Embedding 设备/超时、Zotero 跨源去重、LightRAG 健壮性与取消构建 (completed)
+
+### User constraints / 约束
+
+- 来源：`KA_PLUGIN_DEVELOPER_ISSUE.md` 汇总的一次真实 Windows + Zotero Web API + 本地 GPU
+  Embedding + LightRAG 生产运行暴露的问题，部分已在运行实例手工验证，需系统化落回源码。
+- 全部 6 类问题一并纳入 v1.0.11，不拆分到后续版本。
+- Zotero 跨源重复文档合并采用「确认后删除重复项，交给正常同步/重建索引补全」，不做原地
+  `library_id`/`doc_id` 重写与 chunks/向量迁移。
+- LightRAG 取消构建只清理本次任务残留（索引状态/任务记录/内存态句柄），绝不触碰 Zotero 文档、
+  原文件、chunks、Embedding 缓存或 Milvus 向量。
+
+### Technical implementation path
+
+- [x] **Phase 1 — LightRAG adapter deepcopy 安全**：`LightRAGLLMAdapter`/`LightRAGEmbeddingAdapter`
+  增加身份保持的 `__deepcopy__`，修复 LightRAG 1.5.5rc1 构造期 `cannot pickle '_thread.lock'
+  object`。回归含一条不 mock `lightrag-hku`、直接构造真实 `LightRAG` 实例的烟雾测试。
+- [x] **Phase 2 — Zotero Web API 独立附件集合归属修复**：`_collection_items()` 不再无条件排除
+  `itemType == "attachment"`，只排除 note/annotation，修复独立 PDF 附件误落 `__unfiled__`。
+- [x] **Phase 3 — 本地 Embedding 超时误判 + 设备选择**：`_run_guarded()` 改为轮询式拆分加载超时闸
+  与 encode 阶段，encode 不再被误判为加载超时；新增 `embedding.device`（auto/cpu/cuda/cuda:N，已
+  登记 `_conf_schema.json`），显式选 cuda 不可用时报错而非静默降级；补诊断日志（torch 版本/cuda 可
+  用性/解析设备/GPU 名称）。
+- [x] **Phase 4 — LightRAG 构建前置就绪度探针 + 熔断**：`build_graph()`/`build_graph_with_codex()`
+  启动前用真实短探测调用检查 LLM/Embedding 就绪度（探测的是 registry 实际持有的图谱构建 LLM，
+  与主答疑 LLM 在 `lightrag_llm_provider=local/api` 时可以是不同 endpoint），未就绪同步拒绝、不
+  创建任务；逐文档循环加连续失败熔断（阈值 3），命中后提前终止并标记 `error`/`partial_failure`。
+- [x] **Phase 5 — Zotero 跨源账号绑定 + 手动确认合并（后端）**：新增 `zotero_account_identities`
+  表；新增 `detect_zotero_duplicate_documents()`/`preview_zotero_account_merge()`/
+  `confirm_zotero_account_merge()`，按 `(item_key, attachment_key)` 跨 `library_id` 识别重复，
+  确认后删除非 canonical 副本（复用单文档删除路径）并记录账号身份链接；`update_config_value()` 对
+  `zotero_sync.access_mode` 真正切换（新值≠当前值）且已知存在未解决重复时抛 `ValueError` 拦截
+  并指路合并工具——**上线前审计发现并修正**：最初实现返回一个「看起来正常」的 dict，被前端两条
+  既有 `update_config_value` 调用路径（`SettingModal.tsx`/`FlowPageContent.tsx`）都只检查
+  `rebuild_required`/`restart_required`、不识别新 `status` 字段，会把「已拦截」误报成「已保存」
+  且配置实际未落盘；改为复用已有的 `ValueError` → HTTP 400 → toast 报错路径后两边都能正确显示
+  错误。同时只在值真正变化时才检查，避免对已存在历史遗留重复的老实例，重新提交同一个值（如
+  `SettingModal.tsx` 标签点击没有「已是当前值」前置判断）也被误拦。
+  **范围收窄（已在实现前与用户确认权衡）**：
+  - 三个新方法未接 HTTP 路由（`web/server.py` 无对应 endpoint），也无前端 UI——本轮只有
+    `kacore/api.py` 里可直接调用的后端方法，Web 控制台目前完全不可达；低频管理员操作，非本次
+    头号诉求，留给后续版本补 HTTP 层 + 确认弹窗。
+  - `_apply_removals()` 未按账号链接扩大跨命名空间自动清理范围——分析后判断这类自动删除的风险
+    超过收益（切换回旧 access_mode 时可能误删刚合并保留的 canonical 副本），选择只提供可重复
+    调用、只读预览、显式确认的合并工具作为安全兜底，而不是在同步管线里插入自动决策。
+- [x] **Phase 6 — 取消 LightRAG 构建（无 per-job staging workspace）**：新增
+  `cancel_build_job(job_id, cleanup=True)` 与 `POST /api/graph/build/{job_id}/cancel`，取消只清
+  理本 job 写入的 `lightrag_index_status`（新增 `job_id` 列）/`codex_graph_tasks` 行与内存态句柄，
+  幂等；前端进度条在活跃状态（`queued`/`running`/`pause_requested`/`paused`/`waiting_agent`）下把
+  「查看图谱」按钮改为「取消构建」+ 二次确认 + toast。
+  **范围收窄（已在实现前评估风险后决定）**：未实现 `LightRAGCoreRegistry` 的
+  `active/`/`staging/<job_id>/` workspace 拆分与原子提升——`build_graph()` 对已建图集合默认走
+  增量插入，真正的 staging 需要「先整份拷贝现有 workspace 再原子替换」，属于独立的高风险子系统
+  改造（涉及大目录拷贝、崩溃时的回滚路径）；本轮取消保证「不再处理后续文档」，与现有 pause/
+  进程崩溃场景的语义一致（同样不做部分写入回滚），更强的原子性保证留作后续版本单独评估。
+
+### Verification
+
+- 定向：`test_lightrag_core.py`（deepcopy + 真实 LightRAG 构造）、`test_zotero_server.py`（独立
+  附件归属）、`test_embedding.py`（加载/编码超时解耦 + 设备选择）、`test_build_hardening.py`（探针
+  拒绝、熔断、取消幂等与任务隔离）、`test_zotero_account_identity.py`（跨源重复识别与合并）、
+  `test_web_server.py`（取消构建 HTTP 端点）、`test_codex_graph_build.py`（Codex 路径就绪度探针
+  调整后的回归）。
+- 全量后端：`python -m pytest -q` → `751 passed`。
+- `ruff check .` → All checks passed；`mypy`（domain 层严格检查）→ Success。
+- 前端：`node node_modules/typescript/bin/tsc --noEmit --incremental false` → 无输出（通过）；
+  `npm run build` → 全部 11 条路由静态产出成功；`python tools/sync_frontend.py` → 同步 357 个
+  文件到 `pages/`。
+- 新增迁移：`migrations/023_zotero_account_identities.sql`、
+  `migrations/024_lightrag_index_status_job_id.sql`（均为追加式，无破坏性 schema 变更）。
+- 版本号同步：`metadata.yaml`/`main.py::_PLUGIN_VERSION`/`README.md` 徽章 → v1.0.11。
+
+## v1.0.10：Web 终端日志完整性与可观测性增强 (completed)
+
+### User constraints / 约束
+
+- 仅增强 Web 控制台终端日志；保留现有日志，不降低级别、不删除字段，不额外扩大宿主终端输出。
+- 长任务采用「阶段变化立即记录 + 同阶段每 10% 或 30s 节流进度」，逐文档成功不刷屏、失败必留。
+- `DataDirLockedError` 只做根因诊断与安全建议，不自动破锁、终止进程或删除 Milvus 数据目录。
+- 版本锁定 v1.0.10；不做磁盘日志持久化，不执行 commit、push、PR 或发布。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 日志传输可靠性与诊断**：为日志增加单调 `seq`、2000 条统一缓冲、
+  `after_seq` 增量契约与显式丢行计数；保留时间戳兼容；异常补根因类型、诊断码与安全建议。
+- [x] **Phase 2 — Web 请求时间线**：组合根注入唯一日志处理器；直接记录变更请求的开始/结束、
+  非 2xx 或慢 GET、请求 ID、规范化路由、状态和耗时，不记录请求正文或秘密。
+- [x] **Phase 3 — 长任务结构化事件**：注入框架无关 RuntimeEventSink，覆盖摄入、Milvus、
+  LightRAG、Zotero/Notion、R2、Ask、依赖安装与重启的开始、阶段、节流进度和终态。
+- [x] **Phase 4 — 前端完整性提示**：按 `seq` 去重合并并稳定渲染；显示缓冲轮转遗漏数量，
+  保持暂停、清屏、筛选、复制和下载行为。
+- [x] **Phase 5 — 验证与治理**：补后端/HTTP/任务回归，执行 pytest、ruff、mypy 与前端
+  lint/tsc/build；仅经同步脚本更新 `pages/`，通过后统一版本并追加 CHANGELOG。
+
+### Verification
+
+- 定向日志/Web/运行事件测试：`88 passed`；相关 API、生命周期、同步与 R2 回归：`179 passed`。
+- 全量后端：`719 passed, 1 skipped`；`ruff check .` → All checks passed；`mypy` → Success。
+- 前端：TypeScript 无错误；ESLint 通过（仅保留 1 条既有 unused 常量 warning）；生产构建成功，
+  13 条路由静态产出；`tools/sync_frontend.py` 同步 357 个文件，`--check` 逐字节一致。
+
+## v1.0.9：重启挂死 · Milvus 就绪度 · 可观测性 · ask 超时 (completed)
+
+### User constraints / 约束
+
+- 版本号锁定 v1.0.9，不新开版本；`metadata.yaml`/`main.py::_PLUGIN_VERSION` 保持不变。
+- 超时兜底不得中止已在后台跑的模型下载：`asyncio.to_thread` 不可取消，超时只放弃等待、
+  让 `initialize()` 走完把 Web 控制台拉起来，下载继续写入 HuggingFace 缓存。
+- 依赖状态必须反映「运行时真的能用」，不能只反映「import 名存在」。
+
+### Technical implementation path
+
+- [x] **Phase 1 — Embedding 探针与本地模型加载超时**：新增 `embedding.load_timeout_seconds`
+  （默认 180s，钳制 30–3600，0=不限）并登记 `_conf_schema.json` 与 `CONFIG_KEY_POLICY`；
+  `LocalEmbeddingProvider` 仅在「模型未加载」时给该次调用加闸（已加载后的 encode 不设超时，
+  沿用 `bge_local.py` 既定理由），加载期 30s 心跳日志；组合根探针改非破坏式等待
+  （不取消后台任务 + 完成回调补日志/诊断 + 纳入 teardown），超时走中文诊断。
+  技术理由：裸 await 卡在 HuggingFace 下载时，旧 Web 控制台已关、新端口永不启动。
+- [x] **Phase 2 — Milvus 真实就绪度与精确诊断**：`capabilities.py` 把 `milvus_lite` 纳入探测与
+  依赖卡；组合根 gate 收严并区分「pymilvus 缺失 / milvus-lite 缺失 / embedding 未就绪」；
+  `api.py` 两处固定文案改为按运行态派生的真实原因；`_run_pip_install` 支持多规格且装完校验
+  import 名可用。技术理由：`pymilvus[milvus_lite]` 的 extra 带 `sys_platform != 'win32'` 标记，
+  Windows 上 pip 静默跳过 milvus-lite 且退出码为 0，依赖面板却显示已安装，用户陷入「装了也没用、
+  提示还叫你再装」的死循环。
+- [x] **Phase 2.1 — 修正「Windows 装不上 milvus-lite」的错误结论**：初版按平台前置拒绝安装是错的。
+  Milvus Lite 3.0（2026-05-13）起整包用纯 Python 重写、wheel 为 `py3-none-any`，**Windows 完全
+  装得上**；失效的是 pymilvus 那条为 2.x C++ wheel 写的 extra 标记。改为删除平台判定、把
+  `milvus-lite>=3.0,<4.0` 作为 companion spec 显式安装（`OptionalDependency.companion_specs`
+  + `resolve_install_specs()`），并在 `requirements.txt` 显式列出，使「重新安装插件」在 Windows
+  上也能真正补齐运行时。同时把 pymilvus 下限从 `>=2.5` 提到 `>=2.6`——实测 2.5.x 搭 milvus-lite
+  3.x 能建集合能写入，但 search 抛 `MilvusException: function_score`。
+- [x] **Phase 2.2 — 旧向量库迁移**：milvus-lite 3.x 用目录存数据、2.x 是单文件，直接开旧文件会抛
+  `FileExistsError` → `ConnectionConfigException: Open local milvus failed`。`MilvusLiteVectorStore`
+  开库前把单文件旧库重命名为 `<name>.legacy-<时间戳>`，由 3.x 重建空索引并触发既有的全量待重建标记。
+  技术理由：抬高依赖版本会打到现有 Linux/macOS 安装，必须自带迁移路径；Milvus 只是 SQLite 分块的
+  可重建投影索引，挪走旧文件不丢数据。
+- [x] **Phase 3 — 日志与进度可观测性**：`initialize/teardown/reload` 逐步骤 INFO + 耗时 + 跳过原因；
+  本地模型加载心跳；`LLMAdapter` 失败带 traceback、空响应显式 WARNING（不再静默返回离线占位）、
+  每次调用记耗时；`ask` 各阶段耗时；`log_capture` 放行 `sentence_transformers`/`huggingface_hub`
+  的 WARNING+。技术理由：当前长耗时链路全程静默，用户只能看到「卡住」而看不到卡在哪。
+- [x] **Phase 4 — ask 与长任务超时**：前端 `apiFetch` 支持 `timeoutMs: 0` 并为长任务显式设时限
+  （ask 600s、上传 300s、依赖安装 900s、test-embedding 300s、zotero pull 600s）；后端
+  `LLMAdapter` 主 LLM 调用加 `asyncio.wait_for`（新增 `ask.llm_timeout_seconds`，默认 300s）。
+  技术理由：前端 30s 默认时限会把正常的长问答误报为超时，而后端主 LLM 调用完全没有上限。
+- [x] **Phase 5 — 验证与治理**：全量 pytest、ruff、mypy、前端 tsc/build + `tools/sync_frontend.py`；
+  测试通过后勾 `[x]` 并在 CHANGELOG 的 v1.0.9 段内追加条目。
+
+### Verification
+
+- 基线（改动前）：scratchpad venv `python -m pytest -q` → 686 passed, 2 skipped。
+- 改动后：`python -m pytest -q` → 707 passed, 1 skipped（新增 21 条；装齐
+  `pymilvus[milvus_lite]` 后原本 skip 的 Milvus Lite 生命周期用例已实际执行）。
+- `ruff check .` → All checks passed；`mypy` → Success（3 source files）。
+- 前端：`node node_modules/typescript/bin/tsc --noEmit --incremental false` → 无输出（通过）；
+  `npm run build` → 全部 11 条路由静态产出成功；`python tools/sync_frontend.py` → 同步 357 个文件到 `pages/`。
+- 实测确认 Milvus 根因：干净 venv 只装 `pymilvus>=2.5,<3.0` →
+  `milvus_lite installed: False`、extra 标记 `(sys_platform != 'win32')`、
+  `MilvusClient('<local>.db')` 抛 `ConnectionConfigException: milvus-lite is required for
+  local database connections`。
+- PyPI 一手数据（推翻「Windows 装不上」的初版结论）：milvus-lite ≤2.5.1 只有
+  macOS/manylinux wheel；**3.0（2026-05-13）起为 `py3-none-any` 纯 Python 包**，3.1.1
+  发布于 2026-07-27；其依赖 faiss-cpu / pyarrow / grpcio / numpy 均有 Windows wheel。
+- 版本兼容边界实测（决定 `>=2.6` 下限）：pymilvus 2.5.18 + milvus-lite 3.1.1 →
+  create/upsert/load 正常但 `search` 抛 `MilvusException: function_score`；
+  pymilvus 2.6.0 与 2.6.5 + milvus-lite 3.1.1 → search/query 全部通过。
+- 旧库迁移实测：用 pymilvus 2.5.18 + milvus-lite 2.5.1 真实写出单文件旧库，再用
+  pymilvus 2.6.17 + milvus-lite 3.1.1 经本项目适配器打开 → 旧文件自动备份为 `.legacy-<ts>`、
+  3.x 以目录重建、`created_collection=True`（触发全量待重建标记）。
+- 新增回归用例：探针超时后 `initialize()` 仍走完并保留后台探针任务（`test_lifecycle_and_cli.py`）、
+  本地模型加载超时/已加载不加闸/加载中快速失败（`test_embedding.py`）、
+  只装 pymilvus 时 Milvus 判未就绪与 Windows 提示（`test_capabilities.py`）、
+  重建入口四类精确原因与安装后校验（`test_api.py`）、主 LLM 超时与离线占位告警
+  （`test_llm_adapter.py`）、模型下载栈 WARNING+ 不再被丢弃（`test_log_capture.py`）。
+
+## v1.0.9：修复 main.py 命令注解在 AstrBot v4.26.8+ 核心下的 NameError (completed)
+
+### Technical implementation path
+
+- [x] **Phase 1 — 核心修复**：`main.py` 将 `AstrMessageEvent`、`ProviderRequest` 从 `TYPE_CHECKING` 块提升为顶层真实导入；修复 AstrBot core（v4.26.8+）在 `@ka.command(...)` 装饰期对 `from __future__ import annotations` 字符串注解调用 `inspect.signature(handler, eval_str=True)` 时抛出的 `NameError: name 'AstrMessageEvent' is not defined`，导致插件安装即失败（Windows 安装日志复现，非环境问题）。
+- [x] **Phase 2 — 回归测试**：新增不依赖真实 AstrBot SDK 的轻量测试，模拟框架 `eval_str=True` 签名内省，覆盖 `main.py`（真壳）里全部 `@ka.command`/`@filter.*` 装饰方法的注解；堵住 `tests/backend/test_lifecycle_and_cli.py` 只测 `kacore/main.py`（假壳，装饰器均已注释）导致的测试盲区。
+- [x] **Phase 3 — 版本与文档**：`_PLUGIN_VERSION`/`metadata.yaml`/`README.md` 徽章同步至 v1.0.9；测试通过后更新 CHANGELOG.md 并标记完成。
+
+### Verification
+
+- 本地 venv（`/tmp/.../scratchpad/venv`，`pip install -r requirements.txt -r requirements-dev.txt`）：
+  `pytest tests/backend/test_main_shell_command_annotations.py -v` → 1 passed。
+- 红/绿验证：`git stash push -- main.py` 临时回退修复后重跑该测试 → 1 failed（20 处
+  `NameError: name 'AstrMessageEvent' is not defined`，逐一列出真壳全部命令方法），确认测试
+  能复现 v1.0.8 的安装期报错；`git stash pop` 恢复修复后重跑 → 1 passed。
+- `pytest -q` → 687 passed, 1 skipped（较此前记录的 686 passed 多出本次新增的 1 条测试）。
+- `ruff check main.py tests/backend/test_main_shell_command_annotations.py` → All checks passed。
+- `mypy` → Success: no issues found in 3 source files。
+
 ## 未发布：Codex 对话问答保存至指定 Notion QA 库 (🚧)
 
 ### Technical implementation path

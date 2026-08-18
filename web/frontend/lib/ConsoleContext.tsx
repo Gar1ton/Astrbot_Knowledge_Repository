@@ -28,6 +28,9 @@ interface ConsoleContextValue {
 
   workflowOpen: boolean;
   setWorkflowOpen: (v: boolean) => void;
+
+  modelsOpen: boolean;
+  setModelsOpen: (v: boolean) => void;
 }
 
 const ConsoleContext = createContext<ConsoleContextValue>({
@@ -45,6 +48,8 @@ const ConsoleContext = createContext<ConsoleContextValue>({
   setAstrBotOpen: () => {},
   workflowOpen: false,
   setWorkflowOpen: () => {},
+  modelsOpen: false,
+  setModelsOpen: () => {},
 });
 
 export function ConsoleProvider({ children }: { children: React.ReactNode }) {
@@ -55,6 +60,7 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
   const [settingOpen, setSettingOpen] = useState(false);
   const [astrBotOpen, setAstrBotOpen] = useState(false);
   const [workflowOpen, setWorkflowOpen] = useState(false);
+  const [modelsOpen, setModelsOpen] = useState(false);
   const hydratedRef = useRef(false);
 
   useEffect(() => {
@@ -157,6 +163,7 @@ export function ConsoleProvider({ children }: { children: React.ReactNode }) {
         settingOpen, setSettingOpen,
         astrBotOpen, setAstrBotOpen,
         workflowOpen, setWorkflowOpen,
+        modelsOpen, setModelsOpen,
       }}
     >
       {children}

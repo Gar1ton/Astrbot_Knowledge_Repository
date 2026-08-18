@@ -270,10 +270,14 @@ class ZoteroWebApiReader:
             return None
 
     def _collection_items(self, payload: list[dict[str, Any]]) -> list[tuple[str, str]]:
+        # 注意：这里不能复用 _NON_REGULAR_TYPES（它把 attachment 也算作「非常规条目」）。
+        # 独立放入集合、无 parent item 的 PDF attachment 是靠自己的 data.collections
+        # 字段承载归属信息的——排除它会导致该附件的集合归属信息永久丢失，落入合成的
+        # __unfiled__ 桶。只有 note/annotation 在 Zotero 模型里确实不能作为集合成员。
         pairs: list[tuple[str, str]] = []
         for entry in payload:
             data = _data(entry)
-            if str(data.get("itemType") or "") in _NON_REGULAR_TYPES:
+            if str(data.get("itemType") or "") in ("note", "annotation"):
                 continue
             item_key = str(data.get("key") or entry.get("key") or "")
             for coll_key in data.get("collections") or []:

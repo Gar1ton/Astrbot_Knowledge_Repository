@@ -15,7 +15,7 @@ import logging as _logging
 import secrets
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import web
 
@@ -42,6 +42,104 @@ _LOG_HANDLER_KEY = web.AppKey("log_handler", object)
 # ── 中间件 ──────────────────────────────────────────────────────
 
 _mw_logger = _logging.getLogger("KRWebServer")
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_SLOW_REQUEST_SECONDS = 2.0
+_LOG_ENDPOINTS = frozenset({"/api/logs", "/api/logs/events"})
+
+
+def _canonical_route(request: web.Request) -> str:
+    """返回不含用户实参的路由模板，避免日志泄露标题、路径或查询参数。"""
+    try:
+        resource = request.match_info.route.resource
+        canonical = getattr(resource, "canonical", "")
+        if canonical:
+            return str(canonical)
+    except (AttributeError, RuntimeError):
+        pass
+    return request.path
+
+
+def _request_category(route: str) -> str:
+    if any(part in route for part in ("rebuild-index", "search")):
+        return "retrieval"
+    if "/graph" in route:
+        return "graph"
+    if any(part in route for part in ("zotero", "notion", "backup", "restore", "sync")):
+        return "sync"
+    if any(part in route for part in ("documents", "collections")):
+        return "ingest"
+    if any(part in route for part in ("ask", "research")):
+        return "llm"
+    return "web"
+
+
+@web.middleware
+async def _request_observability_middleware(
+    request: web.Request, handler: web.Handler
+) -> web.StreamResponse:
+    """直接记录 Web 请求时间线，不依赖宿主 logging 的 logger 配置。"""
+    started = time.monotonic()
+    request_id = secrets.token_hex(4)
+    route = _canonical_route(request)
+    category = _request_category(route)
+    log_handler = cast("MemoryLogHandler | None", request.app.get(_LOG_HANDLER_KEY))
+    is_api = request.path.startswith(_API_PREFIX)
+    is_mutating = request.method in _MUTATING_METHODS and request.path not in _LOG_ENDPOINTS
+    base_metadata = {"request_id": request_id, "method": request.method, "route": route}
+    if log_handler is not None and is_mutating:
+        log_handler.add_event(
+            source="web",
+            category=category,
+            operation="http_request",
+            status="started",
+            msg=f"Web 请求开始：{request.method} {route}",
+            metadata=base_metadata,
+        )
+    try:
+        response = await handler(request)
+    except web.HTTPException as exc:
+        elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+        if log_handler is not None and is_api and request.path not in _LOG_ENDPOINTS:
+            level = "ERROR" if exc.status >= 500 else "WARNING"
+            log_handler.add_event(
+                source="web",
+                category=category,
+                operation="http_request",
+                status="error" if exc.status >= 500 else "warning",
+                level=level,
+                msg=f"Web 请求结束：{request.method} {route} → HTTP {exc.status}",
+                metadata={**base_metadata, "http_status": exc.status, "elapsed_ms": elapsed_ms},
+            )
+        exc.headers["X-KA-Request-ID"] = request_id
+        raise
+    elapsed_ms = round((time.monotonic() - started) * 1000, 1)
+    response.headers["X-KA-Request-ID"] = request_id
+    should_log = (
+        is_api
+        and request.path not in _LOG_ENDPOINTS
+        and (is_mutating or response.status >= 400 or elapsed_ms >= _SLOW_REQUEST_SECONDS * 1000)
+    )
+    if log_handler is not None and should_log:
+        level = (
+            "ERROR" if response.status >= 500
+            else "WARNING" if response.status >= 400
+            else "INFO"
+        )
+        status = (
+            "error" if response.status >= 500
+            else "warning" if response.status >= 400
+            else "ok"
+        )
+        log_handler.add_event(
+            source="web",
+            category=category,
+            operation="http_request",
+            status=status,
+            level=level,
+            msg=f"Web 请求结束：{request.method} {route} → HTTP {response.status}",
+            metadata={**base_metadata, "http_status": response.status, "elapsed_ms": elapsed_ms},
+        )
+    return response
 
 
 @web.middleware
@@ -99,6 +197,36 @@ def _parse_int(raw: object, name: str, default: int, lo: int, hi: int) -> int:
 
 def _query_int(request: web.Request, name: str, default: int, lo: int, hi: int) -> int:
     return _parse_int(request.query.get(name), name, default, lo, hi)
+
+
+def _query_flag(request: web.Request, name: str) -> bool:
+    """解析布尔查询参数（`1` / `true` / `yes`，大小写不敏感）；缺省为 False。
+
+    显式确认类的 flag 必须「默认关」：拼错值只会退回未确认，绝不会意外放行门禁。
+    """
+    return str(request.query.get(name) or "").strip().lower() in {"1", "true", "yes"}
+
+
+# 字符偏移/长度类查询参数的解析上界，纯粹用来挡住荒谬输入，不表达任何业务上限。
+_CHAR_OFFSET_CEILING = 2_000_000_000
+
+
+def _fulltext_confirmation_payload(exc: Any) -> dict[str, Any]:
+    """把全文确认门异常拍平成 409 响应体（`/api/ask` 与文档分页读共用同一形状）。
+
+    刻意把展示所需的数字全带上：调用方据此直接渲染确认界面，不必再打一次 estimate 请求。
+    阈值也一并回传——前端与 skill 因此不需要各自复制 60000 这个字面量。
+    """
+    return {
+        "status": "fulltext_confirmation_required",
+        "message": str(exc),
+        "doc_id": exc.doc_id,
+        "title": exc.title,
+        "total_chars": exc.total_chars,
+        "requested_chars": exc.requested_chars,
+        "threshold_chars": exc.threshold_chars,
+        "estimated_tokens": exc.estimated_tokens,
+    }
 
 
 async def handle_auth(request: web.Request) -> web.Response:
@@ -371,16 +499,28 @@ async def handle_document_content(request: web.Request) -> web.Response:
 
 
 async def handle_document_content_page(request: web.Request) -> web.Response:
-    """GET 文档 Markdown 的单个字符页；供具备明确阅读意图的 agent 使用。"""
+    """GET 文档 Markdown 的单个字符页；供具备明确阅读意图的 agent 使用。
+
+    v1.1.1：`max_chars` 不再有 40000 硬上限（旧实现是**静默夹取**，请求 6 万字会被悄悄砍到
+    4 万，调用方毫不知情）。`max_chars=0` 表示读到文末；单次返回量超阈值且无 `confirmed`
+    时返回 409，形状与 `/api/ask` 的全文确认门完全一致。
+    """
+    from kacore.api import FullTextConfirmationRequiredError, FullTextDocumentUnavailableError
+
     doc_id = request.match_info["doc_id"]
-    start = _query_int(request, "start", 0, 0, 2_000_000_000)
-    max_chars = _query_int(request, "max_chars", 12000, 1, 40000)
+    start = _query_int(request, "start", 0, 0, _CHAR_OFFSET_CEILING)
+    max_chars = _query_int(request, "max_chars", 12000, 0, _CHAR_OFFSET_CEILING)
     try:
         result = await _api(request).get_document_markdown_page(
-            doc_id, start=start, max_chars=max_chars
+            doc_id,
+            start=start,
+            max_chars=max_chars,
+            confirmed=_query_flag(request, "confirmed"),
         )
-    except FileNotFoundError as exc:
-        return web.json_response({"error": str(exc)}, status=404)
+    except FullTextConfirmationRequiredError as exc:
+        return web.json_response(_fulltext_confirmation_payload(exc), status=409)
+    except FullTextDocumentUnavailableError as exc:
+        return web.json_response({"error": str(exc), "reason": exc.reason}, status=404)
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     if result is None:
@@ -1001,6 +1141,19 @@ async def handle_graph_build_resume(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "message": str(exc)}, status=404)
 
 
+async def handle_graph_build_cancel(request: web.Request) -> web.Response:
+    job_id = request.match_info["job_id"]
+    body = await request.json() if request.can_read_body else {}
+    cleanup = bool(body.get("cleanup", True)) if isinstance(body, dict) else True
+    try:
+        result = await _api(request).cancel_build_job(job_id, cleanup=cleanup)
+        return web.json_response(result)
+    except KeyError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=404)
+    except ValueError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+
 async def handle_graph_probe(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     if not isinstance(body, dict) or body.get("confirmed") is not True:
@@ -1168,6 +1321,31 @@ async def handle_system_info(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=500)
 
 
+async def handle_model_runtime(request: web.Request) -> web.Response:
+    """GET /api/system/models — 本地模型驻留状态 + 尽力而为的显存读数（模型面板轮询）。"""
+    try:
+        return web.json_response(await _api(request).get_model_runtime())
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def handle_model_unload(request: web.Request) -> web.Response:
+    """POST /api/system/models/unload — 立即卸载本地模型并清空显存缓存。
+
+    body: `{"kinds": ["embedding", "rerank"]}`，缺省或空表示全部。
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw_kinds = body.get("kinds") if isinstance(body, dict) else None
+    kinds = [str(k) for k in raw_kinds] if isinstance(raw_kinds, list) else None
+    try:
+        return web.json_response(await _api(request).unload_models(kinds))
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 async def handle_files_list(request: web.Request) -> web.Response:
     """GET /api/files/list?dir=<subdir> — 列出 data_dir 内文件（路径穿越防护）。"""
     subdir = request.query.get("dir", "")
@@ -1305,14 +1483,26 @@ async def handle_logs(request: web.Request) -> web.Response:
     """GET /api/logs?after=<float>&limit=<int> — 返回内存日志缓冲区中的最新日志行。"""
     handler = cast("MemoryLogHandler | None", request.app.get(_LOG_HANDLER_KEY))
     if handler is None:
-        return web.json_response({"lines": [], "server_ts": time.time()})
+        return web.json_response(
+            {
+                "lines": [],
+                "server_ts": time.time(),
+                "oldest_seq": 0,
+                "latest_seq": 0,
+                "dropped_count": 0,
+            }
+        )
     try:
         after_ts = float(request.query.get("after", "0"))
-        limit = min(int(request.query.get("limit", "200")), 1000)
+        after_seq_raw = request.query.get("after_seq")
+        after_seq = int(after_seq_raw) if after_seq_raw is not None else None
+        limit = min(int(request.query.get("limit", "200")), 2000)
+        if after_seq is not None and after_seq < 0:
+            raise ValueError
     except ValueError:
         return web.json_response({"error": "invalid params"}, status=400)
-    lines = handler.get_lines(after_ts=after_ts, limit=limit)
-    return web.json_response({"lines": lines, "server_ts": time.time()})
+    batch = handler.get_batch(after_seq=after_seq, after_ts=after_ts, limit=limit)
+    return web.json_response({**batch, "server_ts": time.time()})
 
 
 async def handle_ask(request: web.Request) -> web.Response:
@@ -1331,7 +1521,18 @@ async def handle_ask(request: web.Request) -> web.Response:
     retrieval_mode = body.get("retrieval_mode") or "default"
     use_english_retrieval = bool(body.get("use_english_retrieval") or False)
     answer_language = str(body.get("answer_language") or "auto")
-    from kacore.api import GraphMixedQueryError, LightRAGNotReadyError
+    # doc_id / confirmed 服务于 retrieval_mode="fulltext"。前端从 v1.0.x 起就一直在发
+    # doc_id，但这里从未读取过——全文检索因此始终跑不通（模式名也不在白名单里）。
+    doc_id = str(body.get("doc_id") or "") or None
+    confirmed = bool(body.get("confirmed") or False)
+    from kacore.api import (
+        AskTaskTimeoutError,
+        FullTextConfirmationRequiredError,
+        FullTextDocumentUnavailableError,
+        FullTextGenerationFailedError,
+        GraphMixedQueryError,
+        LightRAGNotReadyError,
+    )
 
     try:
         result = await _api(request).ask(
@@ -1343,9 +1544,35 @@ async def handle_ask(request: web.Request) -> web.Response:
             retrieval_mode=retrieval_mode,
             use_english_retrieval=use_english_retrieval,
             answer_language=answer_language,
+            doc_id=doc_id,
+            confirmed=confirmed,
             scope_type=str(body.get("scope_type") or ""),
             scope_key=str(body.get("scope_key") or ""),
             scope_library_id=str(body.get("scope_library_id") or ""),
+        )
+    except FullTextConfirmationRequiredError as exc:
+        # 409 不是失败，是一次询问：正文超过确认阈值，前端据此弹窗，用户同意后带
+        # confirmed=true 重发同一请求。此时后端尚未调用 LLM、尚未写任何 chat_history。
+        return web.json_response(_fulltext_confirmation_payload(exc), status=409)
+    except FullTextDocumentUnavailableError as exc:
+        return web.json_response(
+            {
+                "status": "fulltext_document_unavailable",
+                "message": str(exc),
+                "doc_id": exc.doc_id,
+                "reason": exc.reason,
+            },
+            status=404,
+        )
+    except FullTextGenerationFailedError as exc:
+        return web.json_response(
+            {
+                "status": "fulltext_generation_failed",
+                "message": exc.reason,
+                "doc_id": exc.doc_id,
+                "total_chars": exc.total_chars,
+            },
+            status=502,
         )
     except LightRAGNotReadyError as exc:
         return web.json_response(
@@ -1365,6 +1592,18 @@ async def handle_ask(request: web.Request) -> web.Response:
                 "collection": exc.collection,
             },
             status=502,
+        )
+    except AskTaskTimeoutError as exc:
+        # 202：请求仍在后台运行（未取消），不是失败——前端据此改为轮询
+        # /api/ask/progress + /api/chat/history 找回迟到的答案，而不是弹错误后放弃。
+        return web.json_response(
+            {
+                "status": "ask_task_timeout",
+                "message": str(exc),
+                "conversation_id": exc.conversation_id,
+                "timeout_seconds": exc.timeout_seconds,
+            },
+            status=202,
         )
     except ValueError as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
@@ -1544,6 +1783,7 @@ def build_app(
     auth_required: bool = True,
     username: str = "admin",
     password: str = "",
+    log_handler: MemoryLogHandler | None = None,
 ) -> web.Application:
     """构造 aiohttp 应用：注入 api、配置认证与静态目录。
 
@@ -1554,13 +1794,19 @@ def build_app(
             "web console password is empty; set a password or pass auth_required=False"
         )
 
-    app = web.Application(middlewares=[_error_middleware, _auth_middleware])
+    app = web.Application(
+        middlewares=[_request_observability_middleware, _error_middleware, _auth_middleware]
+    )
     app[_API_KEY] = api
     app[_UPLOAD_DIR_KEY] = upload_dir
     app[_AUTH_REQUIRED_KEY] = auth_required
     app[_USERNAME_KEY] = username
     app[_PASSWORD_KEY] = password
     app[_SESSIONS_KEY] = set()
+
+    from kacore.log_capture import install as _install_log_handler
+
+    app[_LOG_HANDLER_KEY] = log_handler or _install_log_handler()
 
     app.router.add_get("/api/auth", handle_auth)
     app.router.add_post("/api/login", handle_login)
@@ -1641,6 +1887,7 @@ def build_app(
     app.router.add_get("/api/graph/build/{job_id}", handle_graph_build_job)
     app.router.add_post("/api/graph/build/{job_id}/pause", handle_graph_build_pause)
     app.router.add_post("/api/graph/build/{job_id}/resume", handle_graph_build_resume)
+    app.router.add_post("/api/graph/build/{job_id}/cancel", handle_graph_build_cancel)
     app.router.add_post("/api/graph/probe", handle_graph_probe)
     app.router.add_get("/api/graph/query", handle_graph_query)
     app.router.add_get("/api/graph/stats", handle_graph_stats)
@@ -1648,6 +1895,8 @@ def build_app(
     app.router.add_get("/api/metrics", handle_metrics)
     app.router.add_get("/api/ask/progress/{cid}", handle_ask_progress)
     app.router.add_get("/api/system/info", handle_system_info)
+    app.router.add_get("/api/system/models", handle_model_runtime)
+    app.router.add_post("/api/system/models/unload", handle_model_unload)
     app.router.add_get("/api/files/list", handle_files_list)
     app.router.add_get("/api/fs/browse", handle_fs_browse)
     app.router.add_get("/api/models/local", handle_list_local_models)
@@ -1669,10 +1918,7 @@ def build_app(
         "/api/chat/history/{conv_id}/messages/{msg_idx}/lock", handle_chat_message_lock
     )
 
-    # 安装内存日志 handler（幂等，重复调用安全）
-    from kacore.log_capture import install as _install_log_handler
-
-    app[_LOG_HANDLER_KEY] = _install_log_handler(maxlen=500)
+    # 日志 handler 已在路由装配前注入；生产由组合根传入，独立测试/开发则幂等安装默认实例。
 
     # 静态文件服务：兼容 Next.js export 产物（pages/ 下存在子目录 index.html）
     # 和旧的单文件 HTML 产物。

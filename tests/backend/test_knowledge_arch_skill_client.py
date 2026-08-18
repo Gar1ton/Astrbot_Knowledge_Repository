@@ -77,6 +77,15 @@ class _State:
         self.notion_push_bodies: list[dict[str, Any]] = []
         self.graph_build_bodies: list[dict[str, Any]] = []
         self.graph_submissions: list[dict[str, Any]] = []
+        # 索引重建：用例可编排待重建数与 active job 的返回序列（模拟进度推进）。
+        self.rebuild_starts = 0
+        self.pending_reindex_count = 0
+        self.auto_rebuild_enabled = True
+        self.active_jobs: list[dict[str, Any] | None] = [None]
+        self.active_polls = 0
+        # 全文读门禁：单个用例可调大文档长度/调小阈值来触发 409 预览。
+        self.doc_chars = 100
+        self.confirm_threshold = 60000
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -204,10 +213,28 @@ class _Handler(BaseHTTPRequestHandler):
             )
         elif parsed.path == "/api/documents/d1/content/page":
             params = parse_qs(parsed.query)
-            content = "0123456789" * 10
+            # doc_chars 让单个用例决定文档长度；默认 100 保持既有用例的期望值不变。
+            content = "0123456789" * (self.state.doc_chars // 10)
+            threshold = self.state.confirm_threshold
             start = int(params.get("start", ["0"])[0])
             max_chars = int(params.get("max_chars", ["12000"])[0])
-            end = min(len(content), start + max_chars)
+            confirmed = params.get("confirmed", ["0"])[0] in {"1", "true", "yes"}
+            end = len(content) if max_chars == 0 else min(len(content), start + max_chars)
+            if not confirmed and end - start > threshold:
+                self._json(
+                    409,
+                    {
+                        "status": "fulltext_confirmation_required",
+                        "message": "confirmation required",
+                        "doc_id": "d1",
+                        "title": "Long Paper",
+                        "total_chars": len(content),
+                        "requested_chars": end - start,
+                        "threshold_chars": threshold,
+                        "estimated_tokens": (end - start) // 4,
+                    },
+                )
+                return
             self._json(
                 200,
                 {
@@ -231,6 +258,32 @@ class _Handler(BaseHTTPRequestHandler):
             )
         elif parsed.path == "/api/graph/build/job-1":
             self._json(200, {"job_id": "job-1", "status": "success"})
+        elif parsed.path == "/api/documents/pending-reindex-count":
+            self._json(200, {"count": self.state.pending_reindex_count})
+        elif parsed.path == "/api/documents/rebuild-index/active":
+            index = min(self.state.active_polls, len(self.state.active_jobs) - 1)
+            self.state.active_polls += 1
+            self._json(200, {"job": self.state.active_jobs[index]})
+        elif parsed.path == "/api/capabilities":
+            self._json(
+                200,
+                {
+                    "pipeline": [
+                        {
+                            "id": "vector_store",
+                            "current": "milvus",
+                            "status": "ready",
+                            "detail": {
+                                "compatible": True,
+                                "rebuild_required": False,
+                                "auto_rebuild_enabled": self.state.auto_rebuild_enabled,
+                                "auto_rebuild_delay_seconds": 30,
+                                "reason": "",
+                            },
+                        }
+                    ]
+                },
+            )
         else:
             self._json(404, {"error": "not found"})
 
@@ -338,6 +391,13 @@ class _Handler(BaseHTTPRequestHandler):
             self._body()
             self.state.restart_count += 1
             self._json(200, {"status": "restarting"})
+        elif parsed.path == "/api/documents/rebuild-index":
+            self._body()
+            self.state.rebuild_starts += 1
+            self._json(
+                200,
+                {"status": "started", "job": {"job_id": "milvus-1", "status": "running"}},
+            )
         else:
             self._json(404, {"error": "not found"})
 
@@ -784,6 +844,91 @@ def test_restart_has_a_separate_apply_gate() -> None:
     assert state.restart_count == 1
 
 
+def test_index_status_is_read_only_and_reports_auto_rebuild() -> None:
+    """先看状态再决定要不要重建：多数时候自动重建已经在排空队列。"""
+    with _mock_api() as (state, url):
+        state.pending_reindex_count = 4
+        client = CLIENT.KnowledgeArchClient(url)
+        result = CLIENT.index_status(client)
+    assert result["pending_reindex_count"] == 4
+    assert result["auto_rebuild_enabled"] is True
+    assert result["auto_rebuild_delay_seconds"] == 30
+    assert result["compatible"] is True
+    assert result["mutation_performed"] is False
+    assert state.rebuild_starts == 0  # 只读命令绝不触发重建
+
+
+def test_index_rebuild_has_a_separate_apply_gate() -> None:
+    with _mock_api() as (state, url):
+        state.pending_reindex_count = 2
+        client = CLIENT.KnowledgeArchClient(url)
+        preview = CLIENT.index_rebuild(client, apply=False)
+        assert preview["status"] == "preview"
+        assert preview["requires_explicit_confirmation"] is True
+        assert preview["pending_reindex_count"] == 2
+        assert preview["embedding_provider_will_be_used"] is True
+        assert state.rebuild_starts == 0  # 预览不得触发
+
+        applied = CLIENT.index_rebuild(client, apply=True)
+    assert applied["status"] == "started"
+    assert applied["mutation_performed"] is True
+    assert state.rebuild_starts == 1
+
+
+def test_index_rebuild_wait_reports_terminal_status() -> None:
+    with _mock_api() as (state, url):
+        state.pending_reindex_count = 1
+        state.active_jobs = [
+            {"job_id": "milvus-1", "status": "running", "progress_percent": 40},
+            {"job_id": "milvus-1", "status": "partial_failure", "failed_docs": 1},
+        ]
+        client = CLIENT.KnowledgeArchClient(url)
+        result = CLIENT.index_rebuild(
+            client, apply=True, wait=True, sleep=lambda _seconds: None
+        )
+    assert result["status"] == "completed"
+    assert result["final_status"] == "partial_failure"
+    assert result["final_job"]["failed_docs"] == 1
+    assert state.rebuild_starts == 1
+
+
+def test_index_rebuild_wait_treats_vanished_job_as_success() -> None:
+    """成功后 /active 返回 job: null（前端据此隐藏进度条）——不能被当成失败。"""
+    with _mock_api() as (_state, url):
+        client = CLIENT.KnowledgeArchClient(url)
+        result = CLIENT.index_rebuild(
+            client, apply=True, wait=True, sleep=lambda _seconds: None
+        )
+    assert result["status"] == "completed"
+    assert result["final_status"] == "success"
+
+
+def test_index_rebuild_wait_timeout_does_not_claim_cancellation() -> None:
+    """回归锁：等待上限只是停止观察，重建仍在跑；措辞不得让模型误报为已取消。"""
+    ticks = iter([0.0, 0.0, 100.0, 200.0])
+    with _mock_api() as (state, url):
+        state.active_jobs = [{"job_id": "milvus-1", "status": "running"}]
+        client = CLIENT.KnowledgeArchClient(url)
+        result = CLIENT.index_rebuild(
+            client,
+            apply=True,
+            wait=True,
+            max_wait_seconds=1,
+            sleep=lambda _seconds: None,
+            monotonic=lambda: next(ticks),
+        )
+    assert result["status"] == "timeout"
+    assert result["final_status"] == "running"
+    assert "still running" in result["note"]
+    assert state.rebuild_starts == 1  # 超时不得重复触发
+
+
+def test_config_options_advertises_the_rebuild_command() -> None:
+    options = CLIENT.config_options()
+    assert options["rebuild_command_available"] is True
+    assert options["rebuild_command"] == "index-rebuild"
+
+
 def test_codex_graph_build_is_previewed_and_uses_task_protocol() -> None:
     with _mock_api() as (state, url):
         client = CLIENT.KnowledgeArchClient(url)
@@ -825,8 +970,25 @@ def test_client_exposes_only_agent_evidence_and_guarded_graph_builds() -> None:
     assert '"/api/ask"' not in source
     assert '"/api/graph/codex-build"' in source
     assert '"/api/graph/build"' not in source
-    assert '"/api/documents/rebuild-index"' not in source
     assert '/content/page"' in source
+
+
+def test_index_rebuild_endpoint_is_reachable_but_gated() -> None:
+    """v1.1.2 起索引重建对 skill 开放（此前这里断言的是「端点不得出现」）。
+
+    开放的是**受 `--apply` 门禁保护**的调用，不是随手就能跑：POST 只能出现在
+    `index_rebuild()` 的 apply 分支里，且该函数必须在无 apply 时先返回 preview。
+    """
+    import inspect
+
+    source = CLIENT_PATH.read_text(encoding="utf-8")
+    assert '"/api/documents/rebuild-index"' in source
+
+    body = inspect.getsource(CLIENT.index_rebuild)
+    preview_index = body.index('"status": "preview"')
+    post_index = body.index('"/api/documents/rebuild-index"')
+    assert preview_index < post_index  # 未确认时先 return preview，够不到 POST
+    assert "if not apply:" in body
 
 
 def test_fresh_process_cli_notion_save_qa(tmp_path: Path) -> None:
@@ -910,3 +1072,66 @@ def test_fresh_process_cli_research_and_config_preview() -> None:
     assert preview.returncode == 0, preview.stderr
     assert json.loads(preview.stdout)["status"] == "preview"
     assert state.config_updates == []
+
+
+def test_read_document_small_document_needs_no_confirmation() -> None:
+    """低于阈值零摩擦：整篇读（--whole → max_chars=0）也直接返回正文。"""
+    with _mock_api() as (_state, url):
+        result = CLIENT.read_document(
+            CLIENT.KnowledgeArchClient(url), "d1", 0, 0, intent="full-text"
+        )
+    assert result["full_text_used"] is True
+    assert len(result["content"]) == 100
+    assert "requires_explicit_confirmation" not in result
+
+
+def test_read_document_large_document_previews_before_returning_text() -> None:
+    """超阈值单次读取只回预览，**绝不夹带正文**。"""
+    with _mock_api() as (state, url):
+        state.doc_chars = 200_000
+        result = CLIENT.read_document(
+            CLIENT.KnowledgeArchClient(url), "d1", 0, 0, intent="full-text"
+        )
+    assert result["status"] == "preview"
+    assert result["requires_explicit_confirmation"] is True
+    assert result["content_returned"] is False
+    assert result["full_text_used"] is False
+    assert result["total_chars"] == 200_000
+    assert result["confirm_threshold_chars"] == 60000
+    assert "content" not in result
+
+
+def test_read_document_confirmed_returns_whole_document() -> None:
+    """确认后拿到全文；长度 > 40000 证明旧的客户端硬上限已拆除。"""
+    with _mock_api() as (state, url):
+        state.doc_chars = 200_000
+        result = CLIENT.read_document(
+            CLIENT.KnowledgeArchClient(url),
+            "d1",
+            0,
+            0,
+            intent="full-text",
+            confirm_large_read=True,
+        )
+    assert result["full_text_used"] is True
+    assert len(result["content"]) == 200_000
+    assert result["has_more"] is False
+
+
+def test_read_document_paging_below_threshold_never_trips_the_gate() -> None:
+    """门禁按单次返回量判定：长文档的小分页读不应被拦。"""
+    with _mock_api() as (state, url):
+        state.doc_chars = 200_000
+        result = CLIENT.read_document(
+            CLIENT.KnowledgeArchClient(url), "d1", 0, 12000, intent="anchored"
+        )
+    assert result["full_text_used"] is True
+    assert len(result["content"]) == 12000
+
+
+def test_read_document_rejects_negative_max_chars() -> None:
+    with _mock_api() as (_state, url):
+        with pytest.raises(CLIENT.UsageError, match="zero or greater"):
+            CLIENT.read_document(
+                CLIENT.KnowledgeArchClient(url), "d1", 0, -1, intent="anchored"
+            )

@@ -80,3 +80,131 @@ main 上发现的缺陷也先修 developer，再重新生成发布树；不得�
 
 紧急修复仍从 developer 开始。修复测试通过后冻结新的 developer SHA，生成
 `publish/vX.Y.Z` 并走正常 main PR。这样 developer 永远包含全部正式修复，main 永远可重建。
+
+## 7. 人工发布指令（developer → main）
+
+以下流程可直接作为人工发布 instruction。将 `<VERSION>` 替换为
+`metadata.yaml`、`CHANGELOG.md` 与 `TODO.md` 对齐的版本，例如 `v1.1.1`。
+
+### 7.1 认证与发布前确认
+
+先在本机配置 GitHub 认证。推荐使用 SSH；也可以使用已配置好的 HTTPS
+credential manager。不要把 PAT、密码或私钥写进 remote URL、脚本或提交记录：
+
+```bash
+# SSH 方式
+git remote set-url origin git@github.com:Gar1ton/Astrbot_Knowledge_Repository.git
+ssh -T git@github.com
+
+# 或 HTTPS credential manager 方式；按系统提示完成一次登录
+git remote set-url origin https://github.com/Gar1ton/Astrbot_Knowledge_Repository.git
+git config --global credential.helper manager-core
+```
+
+确认认证有效后，回到 developer 并冻结源提交。工作区必须干净；不要用
+`git add -A` 把缓存、运行数据或未确认的改动带入发布：
+
+```bash
+git fetch origin developer main
+git switch developer
+git pull --ff-only origin developer
+git status --short --branch
+SOURCE_SHA="$(git rev-parse HEAD)"
+VERSION="v1.1.1"  # 替换为本次发布版本，并确认与 metadata.yaml 一致
+```
+
+### 7.2 生成并验证正式树
+
+必须从已提交的 `SOURCE_SHA` 生成，不能使用 `WORKTREE` 作为正式发布输入：
+
+```bash
+python3 -m pytest
+ruff check .
+git diff --check
+
+python3 tools/build_published_tree.py \
+  --source "$SOURCE_SHA" \
+  --output dist/published \
+  --zip "dist/astrbot_plugin_knowledge_repository-${VERSION}.zip"
+```
+
+如果项目包含前端且本机具备 Node.js，再运行：
+
+```bash
+cd web/frontend
+npm run build
+cd ../..
+python3 tools/sync_frontend.py --check
+```
+
+测试工具或 Node.js 缺失时不得假装验证通过；记录为阻塞项，并在远端发布前
+补齐依赖后重跑。发布生成器会校验白名单、必需文件、禁止文件和 ZIP 大小。
+
+### 7.3 创建发布分支与本地提交
+
+发布分支必须从正式 `origin/main` 创建；禁止把 `developer` merge 到 `main`，
+也禁止直接在 `main` 手改文件。下面的 `git rm` 只允许在新建的本地
+`publish/<VERSION>` 分支执行：
+
+```bash
+git switch -c "publish/$VERSION" origin/main
+git rm -r -- .
+cp -a dist/published/. .
+
+# 只暂存生成树；git add -A 可能把 developer 的缓存或源码带进来
+git add -u
+git add -- $(find dist/published -type f -printf %P\n)
+git diff --cached --check
+
+git commit \
+  -m "Release: $VERSION" \
+  -m "Source-Developer-Commit: $SOURCE_SHA"
+git show --stat --oneline HEAD
+```
+
+提交前应确认索引只包含生成器输出。若同一工作区残留了 developer 的
+`tests/`、`tools/`、`web/frontend/` 或 `__pycache__/`，不要删除用户文件，
+只用生成树路径显式暂存，或改用独立 worktree 重做发布分支。
+
+### 7.4 推送发布分支并合并到 main
+
+远端操作前再次报告并确认以下四项：remote、源分支、目标分支和提交范围。
+本项目的目标不是直接向 `main` 推送，而是先推送发布分支并创建 PR：
+
+```bash
+git remote -v
+git branch --show-current
+git log --oneline origin/main..HEAD
+git status --short
+
+git push -u origin "publish/$VERSION"
+```
+
+然后在 GitHub 网页创建 Pull Request：
+
+1. `base` 选择 `main`，`compare` 选择 `publish/<VERSION>`。
+2. 标题使用 `Release: <VERSION>`。
+3. 描述写明 `Source-Developer-Commit: <SOURCE_SHA>`、生成器命令和验证结果。
+4. 等待 CI 与人工审查通过后合并 PR；不使用 force push，不直接把
+   `developer` 推到 `main`。
+
+合并后再同步本地并创建版本 tag：
+
+```bash
+git fetch origin main
+git switch main  # 若本地没有 main，先执行 git switch -c main --track origin/main
+git pull --ff-only origin main
+git tag -a "$VERSION" -m "Release $VERSION" origin/main
+git push origin "$VERSION"
+```
+
+### 7.5 本轮 v1.1.1 操作记录
+
+2026-08-04 已按上述流程完成本地准备：developer 源提交为
+`818731747ec800167d99ada080fc3af480b13848`，生成器输出 501 个文件和约
+4.00 MiB 的 ZIP，本地发布提交为 `743bcbd`（`Release: v1.1.1`）。
+`git diff --check` 通过；由于本机缺少 `pytest`、`ruff` 与 `node`，完整测试、
+静态检查和前端构建未能执行。随后执行
+`git push -u origin publish/v1.1.1` 时因 HTTPS 没有可用认证失败，未产生远端
+分支、PR 或 main 变更。认证完成后，从该发布提交继续执行 7.4，不要重新改写
+或 force push 提交。

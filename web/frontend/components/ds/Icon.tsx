@@ -4,6 +4,8 @@ import React from "react";
 const PATHS: Record<string, string> = {
   sparkle: "M12 2l1.8 5.5L19 9l-5.2 2-1.8 5.5L10.2 11 5 9l5.2-2.5z",
   spark2: "M9 3l1.5 4.5L15 9l-4.5 1.5L9 15l-1.5-4.5L3 9l4.5-1.5zM19 2l.9 2.7 2.7.9-2.7.9L19 9l-.9-2.7-2.7-.9 2.7-.9z",
+  // 显存/模型驻留面板：芯片轮廓 + 引脚。
+  chip: "M9 3v2M15 3v2M9 19v2M15 19v2M3 9h2M3 15h2M19 9h2M19 15h2M7 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM10 10h4v4h-4z",
   doc: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8",
   filePdf: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M9 13h1a2 2 0 0 1 0 4H9v-4zM14 13v4h2M17 13h1",
   file: "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z",

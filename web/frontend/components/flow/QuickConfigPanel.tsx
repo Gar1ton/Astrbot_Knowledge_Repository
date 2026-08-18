@@ -181,6 +181,8 @@ function buildQuickConfig(stage: PipelineStage, config: FlowConfigSnapshot): Qui
     const backend = readString(config, "vector_db", "backend", stage.current);
     if (backend === "milvus") {
       required.push(booleanField("vector_db", "auto_index_enabled", "flow_quick_auto_index_enabled", readBoolean(config, "vector_db", "auto_index_enabled", true)));
+      required.push(booleanField("vector_db", "auto_rebuild_enabled", "flow_quick_auto_rebuild_enabled", readBoolean(config, "vector_db", "auto_rebuild_enabled", true)));
+      advanced.push(numberField("vector_db", "auto_rebuild_delay_seconds", "flow_quick_auto_rebuild_delay_seconds", readNumberString(config, "vector_db", "auto_rebuild_delay_seconds", 30), "flow_quick_auto_rebuild_delay_hint", 5));
     }
     return { required, advanced, hints };
   }

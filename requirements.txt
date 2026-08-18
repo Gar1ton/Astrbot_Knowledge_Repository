@@ -7,7 +7,12 @@ aiosqlite                  # SQLite 事实源与分块仓储
 PyMuPDF>=1.24,<2.0         # PDF 原件处理；pymupdf4llm 的运行时依赖
 pymupdf4llm>=0.0.17,<0.1.0 # PDF → 干净 Markdown 清洗内核（pinned）
 aiohttp                    # 独立 Web 控制台、外部 Embedding HTTP 客户端
-pymilvus[milvus_lite]>=2.5,<3.0  # Milvus Lite 向量库，默认且必装
+pymilvus[milvus_lite]>=2.6,<3.0  # Milvus Lite 向量库，默认且必装
+# 必须显式列出 milvus-lite：pymilvus 的 milvus_lite extra 至今带着 2.x C++ wheel 时代的
+# `sys_platform != "win32"` 标记，Windows 上 pip 会静默跳过它（退出码仍为 0），装完即缺运行时。
+# Milvus Lite 3.0 起是纯 Python 包（py3-none-any），全平台可装；它要求 pymilvus>=2.6
+# ——2.5.x 搭 3.x 能建集合能写入，但 search 会抛 MilvusException: function_score。
+milvus-lite>=3.0,<4.0
 # cryptography is managed by AstrBot core; do not constrain it here.
 
 # 默认配置优先使用 Milvus；后端仍保留 AstrBot/SQLite 检索兜底。

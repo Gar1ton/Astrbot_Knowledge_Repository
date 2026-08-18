@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -23,6 +24,7 @@ from kacore.domain.models import (
     SyncTargetKind,
 )
 from kacore.index_compatibility import IndexCompatibilityStore
+from kacore.log_capture import MemoryLogHandler
 from kacore.plugin_initializer import PluginInitializer
 from kacore.repository.kb_reader.memory import InMemoryKnowledgeBaseReader
 from kacore.repository.source_store.memory import InMemorySourceDocumentStore
@@ -417,6 +419,21 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
                 "debug": {"query_mode": "mix"},
             }
 
+        async def probe_llm_ready(self) -> None:
+            # build_graph() 启动前的就绪度探针（v1.0.11）；本测试的图谱构建 LLM 本身
+            # 不是被测对象，直接放行即可。
+            return None
+
+    class StubEmbeddingProvider:
+        async def embed_query(self, text: str) -> list[float]:
+            return [0.1]
+
+        async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [[0.1] for _ in texts]
+
+        def get_dimension(self) -> int:
+            return 1
+
     store = InMemorySourceDocumentStore()
     await store.upsert_collection(Collection(name="papers", description="d"))
     await store.add_document(
@@ -432,6 +449,7 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         lightrag_registry=StubLightRAGRegistry(),  # type: ignore[arg-type]
         index_compatibility=compatibility,
         embedding_fingerprint="fp",
+        embedding_provider=StubEmbeddingProvider(),  # type: ignore[arg-type]
     )
 
     app = build_app(
@@ -475,6 +493,36 @@ async def test_graph_endpoints_return_200(tmp_path: Path) -> None:
         assert body2["context"] == "LightRAG context"
         assert body2["engine"] == "lightrag_core"
         assert body2["debug"]["query_mode"] == "mix"
+    finally:
+        await client.close()
+
+
+async def test_graph_build_cancel_endpoint_returns_200(tmp_path: Path) -> None:
+    """POST /api/graph/build/{job_id}/cancel 取消一个活跃任务并返回清理摘要。"""
+    from kacore.lightrag_core import BuildJob
+
+    api = await _make_api()
+    job = BuildJob(job_id="job-1", collection="papers", status="running")
+    api._graph_build_jobs["job-1"] = job
+
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/graph/build/job-1/cancel", json={"cleanup": True})
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["status"] == "cancelled"
+        assert body["job_id"] == "job-1"
+        assert "cleanup" in body
+
+        missing = await client.post("/api/graph/build/does-not-exist/cancel", json={})
+        assert missing.status == 404
     finally:
         await client.close()
 
@@ -719,7 +767,54 @@ async def test_document_page_route_returns_only_requested_page(tmp_path: Path) -
         resp = await client.get("/api/documents/d1/content/page?start=10&max_chars=10")
         assert resp.status == 200
         assert (await resp.json())["content"] == "0123456789"
-        page.assert_awaited_once_with("d1", start=10, max_chars=10)
+        page.assert_awaited_once_with("d1", start=10, max_chars=10, confirmed=False)
+
+        # v1.1.1：max_chars 不再被静默夹取到 40000，0 表示读到文末，confirmed 可透传。
+        page.reset_mock()
+        await client.get("/api/documents/d1/content/page?max_chars=60001")
+        page.assert_awaited_once_with("d1", start=0, max_chars=60001, confirmed=False)
+
+        page.reset_mock()
+        await client.get("/api/documents/d1/content/page?max_chars=0&confirmed=1")
+        page.assert_awaited_once_with("d1", start=0, max_chars=0, confirmed=True)
+    finally:
+        await client.close()
+
+
+async def test_document_page_route_returns_409_when_confirmation_required(
+    tmp_path: Path,
+) -> None:
+    """超阈值单次读取返回 409 询问体，且**不含任何正文**。"""
+    from kacore.api import FullTextConfirmationRequiredError
+
+    api = await _make_api()
+    api.get_document_markdown_page = AsyncMock(  # type: ignore[method-assign]
+        side_effect=FullTextConfirmationRequiredError(
+            "d1",
+            title="Long Paper",
+            total_chars=183421,
+            requested_chars=183421,
+            threshold_chars=60000,
+            estimated_tokens=172530,
+        )
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/documents/d1/content/page?max_chars=0")
+        assert resp.status == 409
+        body = await resp.json()
+        assert body["status"] == "fulltext_confirmation_required"
+        assert body["total_chars"] == 183421
+        assert body["threshold_chars"] == 60000
+        assert body["estimated_tokens"] == 172530
+        assert "content" not in body
     finally:
         await client.close()
 
@@ -816,6 +911,100 @@ async def test_ask_route_returns_answer_and_sources(tmp_path: Path) -> None:
         assert "metadata" in src and src["metadata"]
         assert "locator" in src["metadata"] and src["metadata"]["locator"] == "page_1_p1"
         assert "conversation_id" in body and body["conversation_id"]
+    finally:
+        await client.close()
+
+
+async def test_ask_route_forwards_doc_id_and_confirmed(tmp_path: Path) -> None:
+    """doc_id / confirmed 必须透传给 api.ask()。
+
+    回归锁：前端从 v1.0.x 起就一直在 body 里发 doc_id，但 handle_ask 从未读取过——
+    全文检索因此始终跑不通。这条断言防止它再次被静默丢弃。
+    """
+    api = await _make_api()
+    ask = AsyncMock(return_value={"conversation_id": "c1", "answer": "ok", "sources": []})
+    api.ask = ask  # type: ignore[method-assign]
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post(
+            "/api/ask",
+            json={
+                "question": "q",
+                "retrieval_mode": "fulltext",
+                "doc_id": "d1",
+                "confirmed": True,
+            },
+        )
+        assert resp.status == 200
+        assert ask.await_args.kwargs["doc_id"] == "d1"
+        assert ask.await_args.kwargs["confirmed"] is True
+
+        # 缺省时 doc_id 为 None、confirmed 为 False（确认类 flag 必须默认关）。
+        ask.reset_mock()
+        await client.post("/api/ask", json={"question": "q"})
+        assert ask.await_args.kwargs["doc_id"] is None
+        assert ask.await_args.kwargs["confirmed"] is False
+    finally:
+        await client.close()
+
+
+async def test_ask_route_maps_fulltext_errors_to_status_codes(tmp_path: Path) -> None:
+    """全文检索三类领域异常各自映射到 409 / 404 / 502，且都带 status 判别串。"""
+    from kacore.api import (
+        FullTextConfirmationRequiredError,
+        FullTextDocumentUnavailableError,
+        FullTextGenerationFailedError,
+    )
+
+    api = await _make_api()
+    ask = AsyncMock()
+    api.ask = ask  # type: ignore[method-assign]
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    payload = {"question": "q", "retrieval_mode": "fulltext", "doc_id": "d1"}
+    try:
+        ask.side_effect = FullTextConfirmationRequiredError(
+            "d1",
+            title="Long Paper",
+            total_chars=183421,
+            requested_chars=183421,
+            threshold_chars=60000,
+            estimated_tokens=172530,
+        )
+        resp = await client.post("/api/ask", json=payload)
+        assert resp.status == 409
+        body = await resp.json()
+        assert body["status"] == "fulltext_confirmation_required"
+        assert body["title"] == "Long Paper"
+        assert body["total_chars"] == 183421
+        assert body["threshold_chars"] == 60000
+
+        ask.side_effect = FullTextDocumentUnavailableError("d1", "artifact_missing")
+        resp = await client.post("/api/ask", json=payload)
+        assert resp.status == 404
+        body = await resp.json()
+        assert body["status"] == "fulltext_document_unavailable"
+        assert body["reason"] == "artifact_missing"
+
+        ask.side_effect = FullTextGenerationFailedError("d1", 183421, "context overflow")
+        resp = await client.post("/api/ask", json=payload)
+        assert resp.status == 502
+        body = await resp.json()
+        assert body["status"] == "fulltext_generation_failed"
+        assert body["total_chars"] == 183421
     finally:
         await client.close()
 
@@ -1519,7 +1708,7 @@ async def test_dependencies_route_lists_optional_packages(tmp_path: Path) -> Non
         assert resp.status == 200
         deps = (await resp.json())["dependencies"]
         milvus = next(d for d in deps if d["key"] == "milvus")
-        assert milvus["pip_spec"] == "pymilvus[milvus_lite]>=2.5,<3.0"
+        assert milvus["pip_spec"] == "pymilvus[milvus_lite]>=2.6,<3.0"
         assert "installed" in milvus
     finally:
         await client.close()
@@ -2000,5 +2189,176 @@ async def test_notion_active_route_returns_null_when_idle(tmp_path: Path) -> Non
         resp = await client.get("/api/sync/notion/active")
         assert resp.status == 200
         assert await resp.json() == {"job": None}
+    finally:
+        await client.close()
+
+
+# ── v1.0.10：Web 请求时间线与 seq 日志端点 ──────────────────────
+
+
+async def test_mutating_request_is_recorded_even_when_web_logger_disabled(tmp_path: Path) -> None:
+    api = await _make_api()
+    log_handler = MemoryLogHandler()
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+        log_handler=log_handler,
+    )
+    client = TestClient(TestServer(app))
+    web_logger = logging.getLogger("KRWebServer")
+    previous_disabled = web_logger.disabled
+    web_logger.disabled = True
+    await client.start_server()
+    try:
+        resp = await client.post("/api/documents/rebuild-index")
+        assert resp.status == 503
+        request_id = resp.headers["X-KA-Request-ID"]
+        events = [
+            line for line in log_handler.get_lines()
+            if line["operation"] == "http_request"
+            and line["metadata"].get("route") == "/api/documents/rebuild-index"
+        ]
+        assert [line["status"] for line in events] == ["started", "error"]
+        assert {line["metadata"]["request_id"] for line in events} == {request_id}
+        assert events[-1]["metadata"]["http_status"] == 503
+        assert isinstance(events[-1]["elapsed_ms"], float)
+    finally:
+        web_logger.disabled = previous_disabled
+        await client.close()
+
+
+async def test_successful_poll_get_is_quiet_but_failed_mutation_is_not(tmp_path: Path) -> None:
+    api = await _make_api()
+    log_handler = MemoryLogHandler()
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+        log_handler=log_handler,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        assert (await client.get("/api/documents/rebuild-index/active")).status == 200
+        assert log_handler.get_lines() == []
+        assert (await client.post("/api/documents/rebuild-index")).status == 503
+        assert len(log_handler.get_lines()) == 2
+    finally:
+        await client.close()
+
+
+async def test_request_observability_never_logs_login_body_or_password(tmp_path: Path) -> None:
+    api = await _make_api()
+    log_handler = MemoryLogHandler()
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=True,
+        username="admin",
+        password="correct-password",
+        log_handler=log_handler,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        secret = "must-not-appear-in-terminal"
+        resp = await client.post("/api/login", json={"username": "admin", "password": secret})
+        assert resp.status == 401
+        serialized = str(log_handler.get_lines())
+        assert secret not in serialized
+        assert "correct-password" not in serialized
+    finally:
+        await client.close()
+
+
+async def test_logs_endpoint_exposes_sequence_cursor_and_gap_fields(tmp_path: Path) -> None:
+    api = await _make_api()
+    log_handler = MemoryLogHandler(maxlen=3)
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+        log_handler=log_handler,
+    )
+    for i in range(5):
+        log_handler.add_event(
+            source="test", category="system", operation="seed",
+            status="ok", msg=f"line-{i}",
+        )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        body = await (await client.get("/api/logs?after_seq=0&limit=2")).json()
+        assert [line["seq"] for line in body["lines"]] == [4, 5]
+        assert body["oldest_seq"] == 3
+        assert body["latest_seq"] == 5
+        assert body["dropped_count"] == 3
+    finally:
+        await client.close()
+
+async def test_http_exception_response_carries_request_id(tmp_path: Path) -> None:
+    api = await _make_api()
+    log_handler = MemoryLogHandler()
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+        log_handler=log_handler,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/api/route-that-does-not-exist")
+        assert resp.status == 404
+        request_id = resp.headers["X-KA-Request-ID"]
+        event = log_handler.get_lines()[-1]
+        assert event["metadata"]["request_id"] == request_id
+        assert event["metadata"]["http_status"] == 404
+    finally:
+        await client.close()
+
+
+# ── /api/system/models ────────────────────────────────────────────
+
+
+async def test_model_runtime_route_returns_accelerator_and_models(tmp_path: Path) -> None:
+    """GET /api/system/models 应委派 api.get_model_runtime() 并返回稳定形状。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.get("/api/system/models")
+        assert resp.status == 200
+        body = await resp.json()
+        assert "accelerator" in body  # 无 CUDA 时为 null，不是错误
+        assert isinstance(body["models"], list)
+        assert isinstance(body["resident_count"], int)
+    finally:
+        await client.close()
+
+
+async def test_model_unload_route_accepts_empty_body(tmp_path: Path) -> None:
+    """POST /api/system/models/unload 无 body 表示「全部卸载」，不得 400/500。"""
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post("/api/system/models/unload")
+        assert resp.status == 200
+        body = await resp.json()
+        assert isinstance(body["unloaded"], list)
+        assert isinstance(body["errors"], dict)
+    finally:
+        await client.close()
+
+
+async def test_model_unload_route_passes_kinds_through(tmp_path: Path) -> None:
+    client = await _client(tmp_path)
+    try:
+        resp = await client.post("/api/system/models/unload", json={"kinds": ["rerank"]})
+        assert resp.status == 200
+        assert "models" in await resp.json()
     finally:
         await client.close()

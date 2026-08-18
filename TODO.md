@@ -41,13 +41,38 @@
 - [x] **Phase 4 — 能力探针与薄壳**：`capabilities.py` 加 `memecho` stage（off/ready/degraded）；`main.py`/`research_skill.py` 补 memecho 模式文案与可选项。
 - [x] **Phase 5 — 前端 flow/文案**：`flow/model.ts`+`Icons.tsx`+`MemEchoQuickConfig.tsx`+`QuickConfigPanel.tsx`+`lib/api.ts`+`lib/flowHealth.ts`+`lib/i18n.ts`+`ChatPanel.tsx` 全链路接入 memecho（flow 快配为规范配置面，未在 SettingModal 重复）。
 - [x] **Phase 6 — 测试与验证**：新增 `test_memecho_client/recall/api`；`test_capabilities`/`test_web_server` 顺序断言纳入 memecho；策略快照同步。全量 pytest / ruff / mypy / 前端 build 全绿。
+- [x] **Phase 7 — 按 MemoryEcho 2026-07 文档更新适配层**：`import_file` 端点路径从
+  `/api/v1/memory/memories/import_file` 改为 `/api/v1/memory/vaults/{vault_id}/import_file`
+  （破坏性，已修）；`MemEchoClient` 补齐文档新增端点的纯翻译方法：`update_vault`/`delete_vault`/
+  `list_vault_trash`/`restore_vault`/`purge_vault`/`list_messages`/`get_file_content`（均未接入
+  编排层/产品面）；`adapters/memecho/README.md` 端点表同步；`POST /api/v1/memory/chat`（MemEcho
+  代理 LLM Hub 对话，真流式）明确不做，见 README 说明。
+- [x] **Phase 8 — 同步 `developer` 分支**：`git merge --no-ff origin/developer`（12 个提交：
+  Milvus 索引自动重建、全文检索模式、Harvard 引用统一、模型驻留面板等）。真实冲突仅
+  `kacore/api.py`（`ask()` 的 `MODE_MEMECHO` 早退分支迁入 developer 新增的
+  `_retrieve_and_generate()` 闭包内部，与 `MODE_FULLTEXT` 同一位置）、`kacore/retrieval_modes.py`、
+  `web/frontend/components/panels/ChatPanel.tsx`、`TODO.md`（均为「两边都保留」）；`pages/`
+  生成产物冲突不手工合并，整体丢弃后用 `npm run build && python tools/sync_frontend.py` 重建。
+- [x] **Phase 9 — MemEcho 门面拆 mixin**：仿照既有 `api_capabilities.py::CapabilitiesApiMixin`
+  模式，把 `api.py` 里的 MemEcho 公开门面（`_memecho_api_key`/`_build_memecho_client`/
+  `_build_memecho_recall`/`get_memecho_config`/`save|delete_memecho_api_key`/`probe_memecho`/
+  `list|create_memecho_vault`/`import_collection_to_memecho`/`_ask_memecho`，约 210 行）整体迁到
+  新文件 `kacore/api_memecho.py::MemEchoApiMixin`；`api.py` 只保留 `ask()` 内的
+  `MODE_MEMECHO` 中央派发（结构性，不可搬）。目的：把 memecho 逻辑本体尽量收拢，方便未来再次
+  同步 `developer` 时冲突面更小；散落在 `config.py`/`capabilities.py`/`plugin_initializer.py`/
+  `main.py`/`research_skill.py`/`web/server.py`/前端多处的一行级 touch 点经本轮 merge 验证均可
+  零冲突自动合并，故不强行搬迁（详见 CHANGELOG「变更」条目的理由说明）。
 
 ### Verification
 
-- 容器内：`python -m pytest tests/backend -q` → 721 passed；1 个既有 reranker 空闲卸载计时抖动失败，单独复跑 `tests/backend/test_reranker.py::test_cross_encoder_reloads_after_idle_unload` → 1 passed。
-- 容器内：`ruff check .` → All checks passed；`mypy` → Success（3 source files）。
-- 前端：`cd web/frontend && npm ci && npm run build` → 编译 + TypeScript 通过、13 页静态产出；`python tools/sync_frontend.py` → 同步 357 文件到 `pages/`，`--check` 一致。
-- 真实联网冒烟（需 `KR_MEMECHO_API_KEY`、会计费）尚未执行：留待用户以真实 Key 验证 create vault → import → query-readonly 端到端。
+- 容器内：`python -m pytest tests/backend -q` → 947 passed, 2 skipped；另 2 个失败为环境未装
+  `torch`（`test_embedding.py` 两条本地 GPU 设备用例），与本轮改动无关，developer 分支自身也是
+  同一基线。
+- 容器内：`ruff check .` → All checks passed；`mypy` → Success（5 source files）。
+- 前端：`cd web/frontend && npm ci && npm run build` → 编译 + TypeScript 通过、13 页静态产出；
+  `python tools/sync_frontend.py` → 同步 357 文件到 `pages/`，`--check` 一致。
+- 真实联网冒烟（需 `KR_MEMECHO_API_KEY`、会计费）尚未执行：留待用户以真实 Key 验证 create vault
+  → import（新 vault 路径端点）→ query-readonly 端到端。
 
 ## v1.1.2：Milvus 索引自动重建
 

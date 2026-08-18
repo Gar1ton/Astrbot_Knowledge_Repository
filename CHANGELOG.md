@@ -42,6 +42,10 @@
   主张重建」，用户要求 + preview 确认后允许；`references/settings.md` 新增第 4 节写清判读顺序
   （`pending_reindex_count` 为 0 就直说不用建、有 `active_job` 就报进度别重复触发、
   `auto_rebuild_enabled` 为真时优先等一个防抖窗口而不是立刻手动重建）。
+- **MemEcho 适配层随 MemoryEcho API 2026-07 文档更新补齐**（分支
+  `Experiment-with-MemEcho-API`）：`kacore/adapters/memecho/client.py` 新增
+  `update_vault`/`delete_vault`/`list_vault_trash`/`restore_vault`/`purge_vault`/
+  `list_messages`/`get_file_content`，均为纯 REST 翻译方法，未接入任何编排层或产品面。
 
 ### 修复 (Fixed)
 
@@ -51,6 +55,10 @@
   而非只看 status：`partial_failure` 里只要有文档成功入库就算在推进，值得下一轮继续清剩余。
 - **重建自身造出的信号不会解除 park**。重建会把失败文档重新标成 `needs_reindex`，那也会经
   `_mark_document_needs_reindex()` 打信号；若它能重置失败计数，park 永远不会发生。
+- **MemEcho `import_file` 端点路径**（分支 `Experiment-with-MemEcho-API`）：MemoryEcho API
+  文档 2026-07 更新把该端点从 `POST /api/v1/memory/memories/import_file` 改成了
+  vault 路径下的子资源 `POST /api/v1/memory/vaults/{vault_id}/import_file`；本仓库
+  `MemEchoClient.import_file()` 按新文档同步，此前实现按旧路径调用会 404。
 
 ### 变更 (Changed)
 
@@ -63,6 +71,18 @@
   三段式释放；`config.py` 新增 `MIN_AUTO_REBUILD_DELAY_SECONDS` 与 `_int_or_default()`。
 - 同步 `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 的
   `CONFIG_POLICIES` 快照（该文件注释明写要与 `kacore.config.CONFIG_KEY_POLICY` 保持同步）。
+- **`Experiment-with-MemEcho-API` 同步 `developer` 分支 12 个提交**：Milvus 索引自动重建、
+  全文检索模式、Harvard 引用统一、模型驻留面板、多处安装期修复均已并入本分支。冲突集中在
+  `kacore/api.py::ask()`——`developer` 把检索+生成+落库重构进了 `_retrieve_and_generate()`
+  闭包并加了任务级总超时；本分支的 `MODE_MEMECHO` 早退分支相应迁到该闭包内部第一行（与
+  `MODE_FULLTEXT` 自己的派发同一位置），使 MemEcho 的网络往返获得与其它模式一致的
+  `task_timeout_seconds`/迟到补记行为。其余散落的 memecho touch 点
+  （`kacore/config.py`/`capabilities.py`/`plugin_initializer.py`/`main.py`/
+  `research_skill.py`/`web/server.py`/前端多处）全部零冲突自动合并。
+- **`kacore/api.py` 的 MemEcho 门面拆分为 `kacore/api_memecho.py::MemEchoApiMixin`**，与既有
+  `api_capabilities.py::CapabilitiesApiMixin`/`api_runtime_models.py::RuntimeModelsApiMixin`
+  同一拆分模式；`api.py` 只保留 `ask()` 内的 `MODE_MEMECHO` 中央派发（不可搬走）。目的是把
+  MemEcho 逻辑本体尽量集中到独立文件，方便未来该分支再次与 `developer` 同步时冲突面更小。
 
 ### 维护 (Maintenance)
 

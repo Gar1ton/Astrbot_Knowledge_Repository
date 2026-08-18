@@ -12,7 +12,10 @@
 ## 边界（防腐层）
 
 - **纯翻译**：只做 HTTP ↔ dict 映射，不夹带召回融合 / 写回 / 导入编排决策——那些属于
-  `kacore/pipelines/memecho_recall.py`。
+  `kacore/pipelines/memecho_recall.py`。面向 `KnowledgeRepositoryApi` 调用方的公开门面
+  （key 管理 / 探针 / vault / 导入 / `ask()` 的 `memecho` 分支实现）在 `kacore/api_memecho.py`
+  的 `MemEchoApiMixin`——与 `client.py`/`pipelines/memecho_recall.py` 一样是独立文件，方便
+  这条分支未来与 `developer` 再次同步时冲突面小；`api.py` 里只留 `ask()` 的中央派发一行。
 - **可测试缝**：`MemEchoClient` 接受可注入的 `transport`（默认 aiohttp），单测无需真实网络。
 - **机密**：`api_key` 可为字符串或 `Callable[[], str]`（延迟从 secret_store/env 取值），本层不持久化密钥。
 
@@ -37,8 +40,9 @@
 > `library_id` 中）；本仓库已按新文档同步。
 >
 > `update_vault`/`delete_vault`/回收站三件套/`list_messages`/`get_file_content` 是本次文档同步
-> 新增的纯翻译方法，**未接入**任何编排层（`pipelines/memecho_recall.py`）或产品面（`api.py` 门面 /
-> web 路由 / 前端）——是否要在 UI 上暴露记忆库删除、回收站恢复等操作，属于后续独立的功能决策。
+> 新增的纯翻译方法，**未接入**任何编排层（`pipelines/memecho_recall.py`）或产品面
+> （`kacore/api_memecho.py` 门面 / web 路由 / 前端）——是否要在 UI 上暴露记忆库删除、回收站恢复
+> 等操作，属于后续独立的功能决策。
 >
 > 文档新增的 `POST /api/v1/memory/chat`（MemEcho 代理 LLM Hub 对话，真正的增量 SSE 流式）尚未实现：
 > 项目现有 `_ask_memecho`（见 `kacore/api_memecho.py`）已自带独立 LLM 合成逻辑，且该端点的流式契约

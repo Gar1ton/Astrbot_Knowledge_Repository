@@ -106,9 +106,12 @@ async def test_error_code_mapping(status: int, exc: type[MemEchoError]) -> None:
 
 async def test_import_file_parses_sse_events() -> None:
     sse = 'data: {"stage":"parse"}\n\ndata: [DONE]\n\ndata: {"stage":"done"}\n'
-    client = MemEchoClient("x", "k", transport=_transport({"*": (200, sse)}))
+    calls: list = []
+    client = MemEchoClient("x", "k", transport=_transport({"*": (200, sse)}, calls))
     events = await client.import_file("v", "n.md", to_data_url("# hi"))
     assert events == [{"stage": "parse"}, {"stage": "done"}]
+    assert calls[0]["url"] == "x/api/v1/memory/vaults/v/import_file"
+    assert calls[0]["json"]["library_id"] == "v"
 
 
 async def test_probe_ok_with_usage() -> None:
@@ -144,6 +147,77 @@ async def test_probe_reports_failure_without_raising() -> None:
 async def test_204_no_content_returns_empty() -> None:
     client = MemEchoClient("x", "k", transport=_transport({"*": (204, "")}))
     assert await client.get_vault("v") == {}
+
+
+async def test_update_vault_sends_only_provided_fields() -> None:
+    calls: list = []
+    client = MemEchoClient(
+        "x", "k", transport=_transport({"*": (200, json.dumps({"id": "v"}))}, calls)
+    )
+    await client.update_vault("v", name="new-name")
+    assert calls[0]["method"] == "PATCH"
+    assert calls[0]["url"].endswith("/api/v1/memory/vaults/v")
+    assert calls[0]["json"] == {"name": "new-name"}
+
+
+async def test_delete_vault_returns_none_on_204() -> None:
+    calls: list = []
+    client = MemEchoClient("x", "k", transport=_transport({"*": (204, "")}, calls))
+    assert await client.delete_vault("v") is None
+    assert calls[0]["method"] == "DELETE"
+    assert calls[0]["url"].endswith("/api/v1/memory/vaults/v")
+
+
+async def test_list_vault_trash() -> None:
+    client = MemEchoClient(
+        "x", "k", transport=_transport({"*": (200, json.dumps([{"id": "t1"}]))})
+    )
+    assert await client.list_vault_trash() == [{"id": "t1"}]
+
+
+async def test_restore_vault() -> None:
+    calls: list = []
+    client = MemEchoClient(
+        "x", "k", transport=_transport({"*": (200, json.dumps({"id": "v"}))}, calls)
+    )
+    await client.restore_vault("t1")
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["url"].endswith("/api/v1/memory/vaults/trash/t1/restore")
+
+
+async def test_purge_vault_returns_none_on_204() -> None:
+    calls: list = []
+    client = MemEchoClient("x", "k", transport=_transport({"*": (204, "")}, calls))
+    assert await client.purge_vault("t1") is None
+    assert calls[0]["method"] == "DELETE"
+    assert calls[0]["url"].endswith("/api/v1/memory/vaults/trash/t1")
+
+
+async def test_list_messages_passes_limit_and_offset() -> None:
+    calls: list = []
+    client = MemEchoClient(
+        "x", "k", transport=_transport({"*": (200, json.dumps([{"id": "m1"}]))}, calls)
+    )
+    assert await client.list_messages("v", limit=10, offset=5) == [{"id": "m1"}]
+    assert calls[0]["url"].endswith("/api/v1/memory/vaults/v/messages")
+    assert calls[0]["params"] == {"limit": 10, "offset": 5}
+
+
+async def test_get_file_content_returns_raw_text() -> None:
+    calls: list = []
+    client = MemEchoClient("x", "k", transport=_transport({"*": (200, "raw content")}, calls))
+    text = await client.get_file_content("v", "a1")
+    assert text == "raw content"
+    assert calls[0]["url"] == "x/api/v1/memory/files/content"
+    assert calls[0]["params"] == {"library_id": "v", "attachment_id": "a1"}
+
+
+async def test_get_file_content_raises_on_error_status() -> None:
+    client = MemEchoClient(
+        "x", "k", transport=_transport({"*": (404, json.dumps({"error": "not found"}))})
+    )
+    with pytest.raises(MemEchoNotFoundError):
+        await client.get_file_content("v", "a1")
 
 
 def test_to_data_url_base64() -> None:

@@ -125,8 +125,51 @@ class MemEchoClient:
             body["vault_type"] = vault_type
         return await self._request("POST", f"{_API_PREFIX}/vaults", json_body=body) or {}
 
+    async def update_vault(
+        self, vault_id: str, name: str | None = None, description: str | None = None
+    ) -> dict[str, Any]:
+        """更新记忆库名称/描述；两字段均可选，只更新提供的字段。"""
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if description is not None:
+            body["description"] = description
+        return await self._request(
+            "PATCH", f"{_API_PREFIX}/vaults/{vault_id}", json_body=body
+        ) or {}
+
+    async def delete_vault(self, vault_id: str) -> None:
+        """软删除记忆库（移入回收站）；成功返回 204。"""
+        await self._request("DELETE", f"{_API_PREFIX}/vaults/{vault_id}")
+
+    async def list_vault_trash(self) -> list[dict[str, Any]]:
+        """列出回收站中的记忆库（按删除时间倒序）。"""
+        data = await self._request("GET", f"{_API_PREFIX}/vaults/trash")
+        return data if isinstance(data, list) else []
+
+    async def restore_vault(self, trash_id: str) -> dict[str, Any]:
+        """从回收站恢复记忆库；``trash_id`` 为回收站条目 ID（非原记忆库 ID）。"""
+        return await self._request(
+            "POST", f"{_API_PREFIX}/vaults/trash/{trash_id}/restore"
+        ) or {}
+
+    async def purge_vault(self, trash_id: str) -> None:
+        """彻底删除回收站中的记忆库（不可恢复）；成功返回 204。"""
+        await self._request("DELETE", f"{_API_PREFIX}/vaults/trash/{trash_id}")
+
     async def get_usage(self) -> dict[str, Any]:
         return await self._request("GET", _USAGE_PATH) or {}
+
+    # ── 记忆消息 ──────────────────────────────────────────────────
+    async def list_messages(
+        self, vault_id: str, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        data = await self._request(
+            "GET",
+            f"{_API_PREFIX}/vaults/{vault_id}/messages",
+            params={"limit": limit, "offset": offset},
+        )
+        return data if isinstance(data, list) else []
 
     # ── 召回 ──────────────────────────────────────────────────────
     async def query_readonly(self, vault_id: str, message: str) -> dict[str, Any]:
@@ -165,7 +208,7 @@ class MemEchoClient:
             "data_url": data_url,
             "preset": preset,
         }
-        url = f"{self._base_url}{_API_PREFIX}/memories/import_file"
+        url = f"{self._base_url}{_API_PREFIX}/vaults/{vault_id}/import_file"
         status, text = await self._transport(
             "POST",
             url,
@@ -183,6 +226,21 @@ class MemEchoClient:
             "GET", f"{_API_PREFIX}/files", params={"library_id": vault_id}
         )
         return data if isinstance(data, list) else []
+
+    async def get_file_content(self, vault_id: str, attachment_id: str) -> str:
+        """获取已导入文件的原始内容。Content-Type 与原文件一致，故按文本原样返回。"""
+        url = f"{self._base_url}{_API_PREFIX}/files/content"
+        status, text = await self._transport(
+            "GET",
+            url,
+            headers=self._headers(),
+            json_body=None,
+            params={"library_id": vault_id, "attachment_id": attachment_id},
+            timeout_seconds=self._timeout_seconds,
+        )
+        if status >= 400:
+            raise _error_for(status, _loads_json(text), text)
+        return text
 
     # ── 连通探针 ──────────────────────────────────────────────────
     async def probe(self) -> dict[str, Any]:

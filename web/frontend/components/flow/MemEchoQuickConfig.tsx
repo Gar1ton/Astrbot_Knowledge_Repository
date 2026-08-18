@@ -32,6 +32,7 @@ const ADVANCED_KEYS = new Set([
   "query_readonly",
   "write_back_enabled",
   "timeout_seconds",
+  "import_timeout_seconds",
   "import_preset",
 ]);
 
@@ -69,6 +70,13 @@ function editableFields(config: QuickConfigPanelProps["config"]): QuickConfigFie
       "timeout_seconds",
       "flow_quick_memecho_timeout",
       readNumberString(config, "memecho", "timeout_seconds", 30),
+    ),
+    // 导入是 SSE 长任务，与上面的普通请求超时分档（后端 memecho.import_timeout_seconds）。
+    numberField(
+      "memecho",
+      "import_timeout_seconds",
+      "flow_quick_memecho_import_timeout",
+      readNumberString(config, "memecho", "import_timeout_seconds", 300),
     ),
     textField(
       "memecho",

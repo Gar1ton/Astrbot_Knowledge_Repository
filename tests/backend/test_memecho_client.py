@@ -11,12 +11,15 @@ import json
 import pytest
 
 from kacore.adapters.memecho.client import (
+    DEFAULT_IMPORT_TIMEOUT_SECONDS,
     MemEchoAuthError,
     MemEchoClient,
     MemEchoError,
     MemEchoNotFoundError,
     MemEchoPayloadTooLargeError,
     MemEchoQuotaError,
+    MemEchoTimeoutError,
+    MemEchoTransportError,
     to_data_url,
 )
 
@@ -223,3 +226,80 @@ async def test_get_file_content_raises_on_error_status() -> None:
 def test_to_data_url_base64() -> None:
     url = to_data_url("# hi", "text/markdown")
     assert url.startswith("data:text/markdown;base64,")
+
+
+# ── 传输层异常翻译与导入超时分档（真机 30s 导入超时逃逸后补）────────────
+
+
+def _raising_transport(exc: BaseException):
+    async def transport(method, url, *, headers, json_body, params, timeout_seconds):
+        raise exc
+
+    return transport
+
+
+def _timeout_recording_transport(seen: list, body: tuple[int, str] = (200, "[]")):
+    async def transport(method, url, *, headers, json_body, params, timeout_seconds):
+        seen.append({"url": url, "timeout": timeout_seconds})
+        return body
+
+    return transport
+
+
+async def test_request_timeout_becomes_memecho_error() -> None:
+    client = MemEchoClient("x", "k", transport=_raising_transport(TimeoutError()))
+    with pytest.raises(MemEchoTimeoutError) as excinfo:
+        await client.list_vaults()
+    assert isinstance(excinfo.value, MemEchoError)
+    assert excinfo.value.status is None
+    # str(TimeoutError()) 为空串；翻译后必须有可读文案，否则前端只剩 "Internal Server Error"。
+    assert str(excinfo.value)
+
+
+async def test_transport_failure_becomes_memecho_error() -> None:
+    client = MemEchoClient("x", "k", transport=_raising_transport(ValueError("boom")))
+    with pytest.raises(MemEchoTransportError) as excinfo:
+        await client.list_vaults()
+    assert isinstance(excinfo.value, MemEchoError)
+    assert "boom" in str(excinfo.value)
+
+
+async def test_memecho_error_from_transport_passes_through() -> None:
+    original = MemEchoAuthError("revoked", status=401)
+    client = MemEchoClient("x", "k", transport=_raising_transport(original))
+    with pytest.raises(MemEchoAuthError) as excinfo:
+        await client.list_vaults()
+    assert excinfo.value is original
+
+
+async def test_import_file_timeout_is_wrapped_too() -> None:
+    client = MemEchoClient("x", "k", transport=_raising_transport(TimeoutError()))
+    with pytest.raises(MemEchoTimeoutError):
+        await client.import_file("v", "n.md", to_data_url("# hi"))
+
+
+async def test_import_file_uses_separate_longer_timeout() -> None:
+    seen: list = []
+    client = MemEchoClient("x", "k", transport=_timeout_recording_transport(seen))
+    await client.list_vaults()
+    await client.import_file("v", "n.md", to_data_url("# hi"))
+    assert seen[0]["timeout"] == 30
+    assert seen[1]["timeout"] == DEFAULT_IMPORT_TIMEOUT_SECONDS
+
+
+async def test_explicit_import_timeout_wins() -> None:
+    seen: list = []
+    client = MemEchoClient(
+        "x", "k", import_timeout_seconds=45, transport=_timeout_recording_transport(seen)
+    )
+    await client.import_file("v", "n.md", to_data_url("# hi"))
+    assert seen[0]["timeout"] == 45
+
+
+async def test_import_timeout_never_below_request_timeout() -> None:
+    seen: list = []
+    client = MemEchoClient(
+        "x", "k", timeout_seconds=600, transport=_timeout_recording_transport(seen)
+    )
+    await client.import_file("v", "n.md", to_data_url("# hi"))
+    assert seen[0]["timeout"] == 600

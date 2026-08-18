@@ -48,7 +48,25 @@
 > 项目现有 `_ask_memecho`（见 `kacore/api_memecho.py`）已自带独立 LLM 合成逻辑，且该端点的流式契约
 > 与 `import_file` 的「收全文本再解析」不同，需要新的 transport 契约，留待有实际需求时再做。
 
+## 超时分档
+
+| 档位 | 配置键 | 默认 | 适用 |
+|---|---|---|---|
+| 普通 REST | `memecho.timeout_seconds` | 30s | vaults / query / append / usage … |
+| 文件导入（SSE） | `memecho.import_timeout_seconds` | 300s | 仅 `import_file` |
+
+导入档未显式配置时取「两者较大值」，因此把 `timeout_seconds` 调大不会被导入档卡回去。
+两档分开的理由：`import_file` 服务端要解析文件 + 切片 + 入库，实测远超 30s；此前共用一个
+超时会在导入首篇即超时，且超时会打断整批（见下）。
+
 ## 异常层级
 
 `MemEchoError`（基类，带 `status`）→ `MemEchoAuthError`(401/403) · `MemEchoQuotaError`(402) ·
-`MemEchoNotFoundError`(404) · `MemEchoPayloadTooLargeError`(413)。
+`MemEchoNotFoundError`(404) · `MemEchoPayloadTooLargeError`(413) ·
+`MemEchoTimeoutError` / `MemEchoTransportError`（无 HTTP 状态码，`status` 恒为 None）。
+
+> **本层对上只抛 `MemEchoError`。** 所有出网调用收口在 `MemEchoClient._call_transport()`，
+> 把 `asyncio.TimeoutError` / `aiohttp.ClientError` / 注入 transport 自身抛出的异常统一翻译。
+> 这不是洁癖：调用方 `pipelines/memecho_recall.py::import_documents()` 的单篇容错是按
+> `MemEchoError` 写的，异常一旦逃逸就会打断整批导入，并以空文案冒成 HTTP 500
+> （`str(TimeoutError())` 是空串，前端只剩 "Internal Server Error"）。

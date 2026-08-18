@@ -59,6 +59,36 @@
   文档 2026-07 更新把该端点从 `POST /api/v1/memory/memories/import_file` 改成了
   vault 路径下的子资源 `POST /api/v1/memory/vaults/{vault_id}/import_file`；本仓库
   `MemEchoClient.import_file()` 按新文档同步，此前实现按旧路径调用会 404。
+- **MemEcho 集合导入不再 32 秒后整批 500**（分支 `Experiment-with-MemEcho-API`）。真机
+  （WebUI 26618）点「导入集合」必然失败，前端只弹一句 "Internal Server Error"。根因不在
+  MemoryEcho 服务端，而是本仓库三处叠加：
+  ① `kacore/adapters/memecho/client.py` 的 `_aiohttp_transport` 直接把
+  `asyncio.TimeoutError` / `aiohttp.ClientError` 抛给调用方，没有翻译成 `MemEchoError`；
+  ② `kacore/pipelines/memecho_recall.py::import_documents()` 的单篇容错只
+  `except MemEchoError`，于是首篇一超时就逃逸、打断整批，冒到 `web/server.py` 的兜底
+  handler 变成 HTTP 500——而 `str(TimeoutError())` 是空串，所以前端连错因都拿不到；
+  ③ SSE 长任务 `import_file`（服务端要解析文件+切片+入库）与 `list_vaults` 这类快请求
+  共用同一个 `memecho.timeout_seconds`（默认 30s），首篇必然超时。
+- 对应修：`MemEchoClient` 所有出网调用收口到新增的 `_call_transport()`，把超时/连接失败/
+  注入 transport 自身抛出的异常统一翻译为新增的 `MemEchoTimeoutError` /
+  `MemEchoTransportError`（均继承 `MemEchoError`，`status` 为 None，文案非空）；
+  `import_documents()` 的单篇兜底放宽到 `except Exception` 并记 `warning`，
+  失败只进 `failed` 列表不再打断整批。至此「本层对上只抛 `MemEchoError`」成为客户端契约，
+  写进 `kacore/adapters/memecho/README.md`。
+- 新增配置 `memecho.import_timeout_seconds`（默认 300s，`ConfigKeyPolicy` consequence 为
+  `none`，改完即生效）：仅 `import_file` 使用，与普通 REST 的 `timeout_seconds` 分档；未显式
+  配置时取两者较大值，因此调大 `timeout_seconds` 不会被导入档卡回去。链路同步：
+  `kacore/config.py`（`MemEchoConfig` + `get_memecho_config` + effective 段 + `CONFIG_KEY_POLICY`）、
+  `kacore/api_memecho.py`（`_build_memecho_client` 传参、`get_memecho_config` 端点回吐）、
+  `kacore/plugin_initializer.py`（装配期构造）、
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 策略快照、
+  `tests/mocks/realtime_config.py` 与 `tests/mock_data/Config/config.example.py`
+  （`MEMECHO_IMPORT_TIMEOUT_SECONDS`）。
+- 前端同步（`web/frontend/lib/api.ts`、`lib/i18n.ts`、`components/flow/MemEchoQuickConfig.tsx`）：
+  `MemEchoConfig` 类型加字段、flow 快配高级区加「导入超时（秒）」数字项（zh+en），并把
+  `importCollectionToMemEcho` 的前端超时从 120s 提到 30 分钟——导入端点是同步的，前端比后端
+  单篇上限（300s）还先放弃，会造成「浏览器已断、服务端还在导」的假失败。`pages/` 已用
+  `npm run build && python tools/sync_frontend.py` 重建。
 
 ### 变更 (Changed)
 

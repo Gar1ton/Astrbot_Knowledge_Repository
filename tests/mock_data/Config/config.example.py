@@ -82,5 +82,6 @@ MEMECHO_BASE_URL = "https://api.artific.social"
 MEMECHO_DEFAULT_VAULT_ID = ""  # 创建/选择 vault 后填入 library_id
 MEMECHO_QUERY_READONLY = True  # True：Ask 召回不写查询历史
 MEMECHO_WRITE_BACK_ENABLED = False  # True：把问答追加回 vault（会产生远端写入）
-MEMECHO_TIMEOUT_SECONDS = 30
+MEMECHO_TIMEOUT_SECONDS = 30  # 普通 REST 请求超时
+MEMECHO_IMPORT_TIMEOUT_SECONDS = 300  # 文件导入（SSE 长任务）专用超时，与上面分档
 MEMECHO_IMPORT_PRESET = "default"

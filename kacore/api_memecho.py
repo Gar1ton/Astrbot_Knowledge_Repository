@@ -64,7 +64,13 @@ class MemEchoApiMixin:
         cfg = self._config.get_memecho_config() if self._config else None
         base_url = cfg.base_url if cfg else DEFAULT_BASE_URL
         timeout = cfg.timeout_seconds if cfg else 30
-        return MemEchoClient(base_url, key, timeout_seconds=timeout)
+        import_timeout = cfg.import_timeout_seconds if cfg else None
+        return MemEchoClient(
+            base_url,
+            key,
+            timeout_seconds=timeout,
+            import_timeout_seconds=import_timeout,
+        )
 
     def _build_memecho_recall(self) -> Any | None:
         """优先用组合根注入的召回门面；否则按需构造瞬时门面（供探针/建库/导入复用）。"""
@@ -92,6 +98,7 @@ class MemEchoApiMixin:
             "query_readonly": cfg.query_readonly,
             "write_back_enabled": cfg.write_back_enabled,
             "timeout_seconds": cfg.timeout_seconds,
+            "import_timeout_seconds": cfg.import_timeout_seconds,
             "import_preset": cfg.import_preset,
             "api_key_present": bool(key),
             "api_key_masked": _mask_secret(key),

@@ -641,6 +641,7 @@ class PluginInitializer:
                 memecho_cfg.base_url,
                 self.api._memecho_api_key,
                 timeout_seconds=memecho_cfg.timeout_seconds,
+                import_timeout_seconds=memecho_cfg.import_timeout_seconds,
             )
             self.api._memecho_recall = MemEchoRecall(memecho_client)
             logger.info(

@@ -63,11 +63,28 @@
   `main.py`/`research_skill.py`/`web/server.py`/前端多处的一行级 touch 点经本轮 merge 验证均可
   零冲突自动合并，故不强行搬迁（详见 CHANGELOG「变更」条目的理由说明）。
 
+- [x] **Phase 10 — 导入超时逃逸修复（真机 26618 实测暴露）**：真实环境点「导入集合」→
+  `POST /api/memecho/import` 32 秒后 HTTP 500、前端只显示 "Internal Server Error"。根因不是
+  MemEcho 服务端，而是本仓库三处叠加：①`_aiohttp_transport` 不把 `asyncio.TimeoutError` /
+  `aiohttp.ClientError` 包成 `MemEchoError`；②`import_documents` 的单篇容错只
+  `except MemEchoError`，于是超时逃逸打断整批；③SSE 长任务 `import_file` 与 `list_vaults`
+  这类快请求共用同一个 `timeout_seconds`（默认 30s）。对应修：客户端新增
+  `_call_transport()` 统一翻译传输层异常（新异常 `MemEchoTimeoutError`/`MemEchoTransportError`）、
+  新增独立 `memecho.import_timeout_seconds`（默认 300s，仅 `import_file` 使用）、
+  `import_documents` 兜底 `except Exception`。
+
 ### Verification
 
 - 容器内：`python -m pytest tests/backend -q` → 947 passed, 2 skipped；另 2 个失败为环境未装
   `torch`（`test_embedding.py` 两条本地 GPU 设备用例），与本轮改动无关，developer 分支自身也是
   同一基线。
+- Phase 10：容器内 `python -m pytest tests/backend -q` → 956 passed, 2 skipped（仍是同两条
+  `torch` 用例失败，与本轮无关）；`ruff check .` → All checks passed；`mypy` → Success；
+  `cd web/frontend && npm run build`（含 tsc 类型检查）通过后 `python tools/sync_frontend.py`
+  重建 `pages/`。`npm run lint` 余 1 error + 1 warning 均在未触碰文件（`ModelRuntimePanel.tsx`
+  的 `react-hooks/set-state-in-effect`、`api.ts` 未使用的 `ZOTERO_PULL_TIMEOUT_MS`），为既有基线。
+- Phase 10 未做真机复跑：修完需重启插件才会重新装配 MemEcho（真机当前进程是「启动时无 key →
+  召回未装配」状态），重启与真实导入交由用户在 26618 控制台自行触发。
 - 容器内：`ruff check .` → All checks passed；`mypy` → Success（5 source files）。
 - 前端：`cd web/frontend && npm ci && npm run build` → 编译 + TypeScript 通过、13 页静态产出；
   `python tools/sync_frontend.py` → 同步 357 文件到 `pages/`，`--check` 一致。

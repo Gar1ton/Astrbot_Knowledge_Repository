@@ -96,6 +96,9 @@ def _memecho_raw_config(cfg: Any) -> dict[str, object]:
         "query_readonly": bool(getattr(cfg, "MEMECHO_QUERY_READONLY", True)),
         "write_back_enabled": bool(getattr(cfg, "MEMECHO_WRITE_BACK_ENABLED", False)),
         "timeout_seconds": int(getattr(cfg, "MEMECHO_TIMEOUT_SECONDS", 30)),
+        "import_timeout_seconds": int(
+            getattr(cfg, "MEMECHO_IMPORT_TIMEOUT_SECONDS", 300)
+        ),
         "import_preset": _str_cfg(cfg, "MEMECHO_IMPORT_PRESET", "default"),
     }
 
@@ -113,6 +116,7 @@ def _attach_memecho(api: Any, config: Any) -> str:
             memecho_cfg.base_url,
             api._memecho_api_key,
             timeout_seconds=memecho_cfg.timeout_seconds,
+            import_timeout_seconds=memecho_cfg.import_timeout_seconds,
         )
         api._memecho_recall = MemEchoRecall(client)
         return (

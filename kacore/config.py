@@ -347,8 +347,11 @@ class MemEchoConfig:
     query_readonly: bool = True
     # 问答写回：True 时把本轮 user/assistant 消息 append 回 vault 形成长期记忆（默认关，保非破坏）。
     write_back_enabled: bool = False
-    # 单次 HTTP 请求超时（秒）。
+    # 单次 HTTP 请求超时（秒）。仅普通 REST 调用使用。
     timeout_seconds: int = 30
+    # 文件导入（SSE 长任务）专用超时（秒）。服务端要解析文件+切片+入库，与上面分档，
+    # 共用 30s 会在导入首篇就超时，且超时会打断整批（见 v1.1.2 后的导入超时修复）。
+    import_timeout_seconds: int = 300
     # 文件导入调优预设，透传给 /memories/import_file 的 preset。
     import_preset: str = "default"
 
@@ -555,6 +558,7 @@ class Config:
                 "query_readonly": memecho.query_readonly,
                 "write_back_enabled": memecho.write_back_enabled,
                 "timeout_seconds": memecho.timeout_seconds,
+                "import_timeout_seconds": memecho.import_timeout_seconds,
                 "import_preset": memecho.import_preset,
                 # api_key_present/masked 由 api.get_memecho_config 端点补充（Config 无
                 # secret_store 访问权）；此运行时探针位供前端快速判定密钥是否就绪。
@@ -977,6 +981,14 @@ class Config:
             timeout_seconds=max(
                 1, int(s.get("timeout_seconds", MemEchoConfig.timeout_seconds))
             ),
+            import_timeout_seconds=max(
+                1,
+                int(
+                    s.get(
+                        "import_timeout_seconds", MemEchoConfig.import_timeout_seconds
+                    )
+                ),
+            ),
             import_preset=str(s.get("import_preset", MemEchoConfig.import_preset)).strip()
             or MemEchoConfig.import_preset,
         )
@@ -1121,6 +1133,7 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "query_readonly": ConfigKeyPolicy(True, True),
         "write_back_enabled": ConfigKeyPolicy(True, True),
         "timeout_seconds": ConfigKeyPolicy(True, True),
+        "import_timeout_seconds": ConfigKeyPolicy(True, True),
         "import_preset": ConfigKeyPolicy(True, True),
     },
 }

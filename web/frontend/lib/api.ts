@@ -107,6 +107,7 @@ export interface MemEchoConfig {
   query_readonly: boolean;
   write_back_enabled: boolean;
   timeout_seconds: number;
+  import_timeout_seconds: number;
   import_preset: string;
   api_key_present?: boolean;
   api_key_masked?: string;
@@ -766,7 +767,7 @@ const MOCK_CONFIG: EffectiveConfig = {
   vector_db: { backend: "milvus", db_filename: "vector_store.db", auto_index_enabled: true, auto_rebuild_enabled: true, auto_rebuild_delay_seconds: 30 },
   embedding: { provider: "local", model: "intfloat/multilingual-e5-small", base_url: "https://api.openai.com/v1", max_token_size: 512, actual_dimension: 384, api_key: "" },
   zotero_sync: { enabled: false, access_mode: "local", zotero_data_dir: "", resolved_data_dir: "", api_port: 23119, storage_mode: "managed_copy", linked_root: "", zotmoov_root: "", sync_mode: "conservative", auto_sync_enabled: false, auto_sync_interval_sec: 3600, server_key_present: false, server_key_masked: "" },
-  memecho: { enabled: false, base_url: "https://api.artific.social", default_vault_id: "", query_readonly: true, write_back_enabled: false, timeout_seconds: 30, import_preset: "default", api_key_present: false, api_key_masked: "" },
+  memecho: { enabled: false, base_url: "https://api.artific.social", default_vault_id: "", query_readonly: true, write_back_enabled: false, timeout_seconds: 30, import_timeout_seconds: 300, import_preset: "default", api_key_present: false, api_key_masked: "" },
 };
 
 const MOCK_ASK: AskResult = {
@@ -1594,6 +1595,7 @@ export async function getMemEchoConfig(timeoutMs = 8_000): Promise<MemEchoConfig
       query_readonly: m.query_readonly !== false,
       write_back_enabled: Boolean(m.write_back_enabled),
       timeout_seconds: Number(m.timeout_seconds ?? 30),
+      import_timeout_seconds: Number(m.import_timeout_seconds ?? 300),
       import_preset: String(m.import_preset ?? "default"),
       api_key_present: Boolean(m.api_key_present),
       api_key_masked: String(m.api_key_masked ?? ""),
@@ -1654,7 +1656,9 @@ export async function importCollectionToMemEcho(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ collection, vault_id: vaultId }),
-    timeoutMs: 120_000,
+    // 同步端点：整批文档逐篇 import_file，单篇后端上限 memecho.import_timeout_seconds（默认 300s）。
+    // 前端原本 120s 就放弃，比后端单篇超时还短——批量导入必然在浏览器侧先断，且服务端仍在跑。
+    timeoutMs: 1_800_000,
   });
 }
 

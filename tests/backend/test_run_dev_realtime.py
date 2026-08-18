@@ -44,6 +44,7 @@ def test_memecho_raw_config_defaults_are_safe() -> None:
         "query_readonly": True,
         "write_back_enabled": False,
         "timeout_seconds": 30,
+        "import_timeout_seconds": 300,
         "import_preset": "default",
     }
     assert "api_key" not in raw
@@ -58,6 +59,7 @@ def test_memecho_raw_config_maps_explicit_values() -> None:
         MEMECHO_QUERY_READONLY=False,
         MEMECHO_WRITE_BACK_ENABLED=True,
         MEMECHO_TIMEOUT_SECONDS=45,
+        MEMECHO_IMPORT_TIMEOUT_SECONDS=600,
         MEMECHO_IMPORT_PRESET="research",
     )
 
@@ -69,6 +71,7 @@ def test_memecho_raw_config_maps_explicit_values() -> None:
     assert raw["query_readonly"] is False
     assert raw["write_back_enabled"] is True
     assert raw["timeout_seconds"] == 45
+    assert raw["import_timeout_seconds"] == 600
     assert raw["import_preset"] == "research"
 
 

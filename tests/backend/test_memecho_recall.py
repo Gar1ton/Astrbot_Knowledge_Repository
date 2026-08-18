@@ -110,3 +110,42 @@ async def test_import_documents_records_failures() -> None:
     assert summary["total"] == 1
     assert len(summary["failed"]) == 1
     assert summary["failed"][0]["status"] == 413
+
+
+async def test_import_documents_survives_timeout_on_one_doc() -> None:
+    """首篇超时不得打断整批——真机 30s 超时正是在这里冒成 HTTP 500 的。"""
+    seen: list = []
+
+    async def transport(method, url, *, headers, json_body, params, timeout_seconds):
+        seen.append(json_body.get("file_name") if json_body else None)
+        if len(seen) == 1:
+            raise TimeoutError()
+        return 200, 'data: {"pct":100}\n'
+
+    client = MemEchoClient("x", "k", transport=transport)
+    events: list = []
+    summary = await MemEchoRecall(client).import_documents(
+        "v1",
+        [{"doc_id": "d1", "content": "aaa"}, {"doc_id": "d2", "content": "bbb"}],
+        progress_cb=events.append,
+    )
+    assert summary["imported"] == 1
+    assert summary["total"] == 2
+    assert len(summary["failed"]) == 1
+    assert summary["failed"][0]["doc_id"] == "d1"
+    assert summary["failed"][0]["status"] is None
+    assert summary["failed"][0]["error"]  # 超时文案不得为空串
+    assert [e["status"] for e in events] == ["error", "ok"]
+
+
+async def test_import_documents_survives_unexpected_exception() -> None:
+    async def transport(method, url, *, headers, json_body, params, timeout_seconds):
+        raise RuntimeError("unexpected")
+
+    client = MemEchoClient("x", "k", transport=transport)
+    summary = await MemEchoRecall(client).import_documents(
+        "v1", [{"doc_id": "d1", "content": "x"}, {"doc_id": "d2", "content": "y"}]
+    )
+    assert summary["imported"] == 0
+    assert summary["total"] == 2
+    assert len(summary["failed"]) == 2

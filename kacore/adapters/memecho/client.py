@@ -7,6 +7,11 @@
 - 可注入 ``transport``（默认 aiohttp）→ 单测无需真实网络。transport 契约：
   ``async (method, url, *, headers, json_body, params, timeout_seconds) -> (status, text)``。
 - ``api_key`` 允许是字符串或 ``Callable[[], str]``，后者供延迟从 secret_store/env 取值。
+- **本客户端对上层只抛 ``MemEchoError``**：超时/连接失败等传输层异常在 ``_call_transport()``
+  统一翻译，不让 ``asyncio.TimeoutError`` / ``aiohttp.ClientError`` 逃逸——否则调用方按
+  ``MemEchoError`` 写的单篇容错（``import_documents``）会被整批打断。
+- 超时分两档：普通 REST 用 ``timeout_seconds``；SSE 长任务 ``import_file`` 用
+  ``import_timeout_seconds``（服务端要读文件+切片+入库，秒级超时不够）。
 """
 from __future__ import annotations
 
@@ -19,6 +24,8 @@ from typing import Any
 logger = logging.getLogger("MemEchoClient")
 
 DEFAULT_BASE_URL = "https://api.artific.social"
+# 文件导入（SSE）的默认超时：服务端逐块解析+向量化，远慢于普通 REST，故与 timeout_seconds 分档。
+DEFAULT_IMPORT_TIMEOUT_SECONDS = 300
 _API_PREFIX = "/api/v1/memory"
 _USAGE_PATH = "/api/v1/dashboard/services/memory/usage"
 
@@ -53,6 +60,14 @@ class MemEchoPayloadTooLargeError(MemEchoError):
     """413：请求体超限（文件导入上限 16 MiB）。"""
 
 
+class MemEchoTimeoutError(MemEchoError):
+    """请求超时：无 HTTP 状态码，``status`` 恒为 None。"""
+
+
+class MemEchoTransportError(MemEchoError):
+    """传输层失败（DNS/连接/TLS/注入 transport 自身抛错）：无 HTTP 状态码。"""
+
+
 # ── 客户端 ────────────────────────────────────────────────────────
 
 
@@ -65,11 +80,19 @@ class MemEchoClient:
         api_key: str | Callable[[], str],
         *,
         timeout_seconds: int = 30,
+        import_timeout_seconds: int | None = None,
         transport: Transport | None = None,
     ) -> None:
         self._base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._api_key = api_key
         self._timeout_seconds = max(1, int(timeout_seconds))
+        # 未显式配置时取「普通超时」与默认导入超时的较大者：调大 timeout_seconds 的人
+        # 显然是想让慢网络也能过，不该被导入档反过来卡回去。
+        self._import_timeout_seconds = (
+            max(1, int(import_timeout_seconds))
+            if import_timeout_seconds
+            else max(self._timeout_seconds, DEFAULT_IMPORT_TIMEOUT_SECONDS)
+        )
         self._transport: Transport = transport or _aiohttp_transport
 
     def _resolve_key(self) -> str:
@@ -83,6 +106,43 @@ class MemEchoClient:
             headers["Authorization"] = f"Bearer {key}"
         return headers
 
+    async def _call_transport(
+        self,
+        method: str,
+        url: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> tuple[int, str]:
+        """调用 transport，并把一切非 HTTP 失败翻译成 MemEchoError。唯一的出网口。
+
+        超时/连接失败原本会以 ``asyncio.TimeoutError`` / ``aiohttp.ClientError`` 原样抛出，
+        逃过调用方的 ``except MemEchoError``——真机上一次 30s 导入超时就是这样打断整批并冒成
+        HTTP 500（且 ``str(TimeoutError())`` 为空串，前端只剩 "Internal Server Error"）。
+        """
+        effective_timeout = timeout_seconds or self._timeout_seconds
+        try:
+            return await self._transport(
+                method,
+                url,
+                headers=self._headers(),
+                json_body=json_body,
+                params=params,
+                timeout_seconds=effective_timeout,
+            )
+        except MemEchoError:
+            raise
+        except TimeoutError as exc:
+            # Python 3.11 起 asyncio.TimeoutError 即内置 TimeoutError；aiohttp 亦抛此类。
+            raise MemEchoTimeoutError(
+                f"请求超时（{effective_timeout}s）：{method} {url}"
+            ) from exc
+        except Exception as exc:
+            raise MemEchoTransportError(
+                f"请求失败（{type(exc).__name__}）：{exc or f'{method} {url}'}"
+            ) from exc
+
     async def _request(
         self,
         method: str,
@@ -92,13 +152,8 @@ class MemEchoClient:
         params: dict[str, Any] | None = None,
     ) -> Any:
         url = f"{self._base_url}{path}"
-        status, text = await self._transport(
-            method,
-            url,
-            headers=self._headers(),
-            json_body=json_body,
-            params=params,
-            timeout_seconds=self._timeout_seconds,
+        status, text = await self._call_transport(
+            method, url, json_body=json_body, params=params
         )
         if status == 204:
             return None
@@ -209,13 +264,8 @@ class MemEchoClient:
             "preset": preset,
         }
         url = f"{self._base_url}{_API_PREFIX}/vaults/{vault_id}/import_file"
-        status, text = await self._transport(
-            "POST",
-            url,
-            headers=self._headers(),
-            json_body=body,
-            params=None,
-            timeout_seconds=self._timeout_seconds,
+        status, text = await self._call_transport(
+            "POST", url, json_body=body, timeout_seconds=self._import_timeout_seconds
         )
         if status >= 400:
             raise _error_for(status, _loads_json(text), text)
@@ -230,13 +280,8 @@ class MemEchoClient:
     async def get_file_content(self, vault_id: str, attachment_id: str) -> str:
         """获取已导入文件的原始内容。Content-Type 与原文件一致，故按文本原样返回。"""
         url = f"{self._base_url}{_API_PREFIX}/files/content"
-        status, text = await self._transport(
-            "GET",
-            url,
-            headers=self._headers(),
-            json_body=None,
-            params={"library_id": vault_id, "attachment_id": attachment_id},
-            timeout_seconds=self._timeout_seconds,
+        status, text = await self._call_transport(
+            "GET", url, params={"library_id": vault_id, "attachment_id": attachment_id}
         )
         if status >= 400:
             raise _error_for(status, _loads_json(text), text)

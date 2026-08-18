@@ -92,7 +92,7 @@ class MemEchoRecall:
         """把一组文档逐个 import_file 到 vault；返回 {imported, failed, total}。
 
         docs 每项形如 {"doc_id", "title"?, "file_name"?, "content"|"text"}。
-        单个失败记入 failed 不中断整体；progress_cb 每篇回报一次进度事件。
+        单个失败（含超时/连接失败）记入 failed 不中断整体；progress_cb 每篇回报一次进度事件。
         """
         doc_list = list(docs)
         total = len(doc_list)
@@ -118,8 +118,18 @@ class MemEchoRecall:
                         "events": len(events),
                     },
                 )
-            except MemEchoError as exc:
-                failed.append({"doc_id": doc_id, "error": str(exc), "status": exc.status})
+            except Exception as exc:
+                # 兜底到 Exception 而非 MemEchoError：单篇失败绝不能打断整批。client 已把
+                # 超时/连接错翻译成 MemEchoError，此处再兜一层防的是「将来某个新异常又逃逸」。
+                message = str(exc) or type(exc).__name__
+                failed.append(
+                    {
+                        "doc_id": doc_id,
+                        "error": message,
+                        "status": getattr(exc, "status", None),
+                    }
+                )
+                logger.warning("memecho import failed for %s: %s", doc_id, message)
                 _emit(
                     progress_cb,
                     {
@@ -128,7 +138,7 @@ class MemEchoRecall:
                         "status": "error",
                         "index": idx,
                         "total": total,
-                        "error": str(exc),
+                        "error": message,
                     },
                 )
         return {"imported": imported, "failed": failed, "total": total}

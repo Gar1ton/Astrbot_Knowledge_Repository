@@ -117,6 +117,7 @@ CONFIG_POLICIES: dict[str, dict[str, str]] = {
         "query_readonly": "none",
         "write_back_enabled": "none",
         "timeout_seconds": "none",
+        "import_timeout_seconds": "none",
         "import_preset": "none",
     },
 }

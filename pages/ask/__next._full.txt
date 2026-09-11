@@ -1,9 +1,9 @@
 1:"$Sreact.fragment"
-2:I[3729,["674","static/chunks/674-45a064d2237589cf.js","177","static/chunks/app/layout-79d979acb397f4f0.js"],"RootProvider"]
+2:I[3729,["674","static/chunks/674-45a064d2237589cf.js","177","static/chunks/app/layout-cb44698cbb276fdc.js"],"RootProvider"]
 3:I[7121,[],""]
 4:I[4581,[],""]
 5:I[8616,[],"ClientSegmentRoot"]
-6:I[6201,["674","static/chunks/674-45a064d2237589cf.js","870","static/chunks/app/(console)/layout-1883ba2032b5427b.js"],"default"]
+6:I[6201,["674","static/chunks/674-45a064d2237589cf.js","870","static/chunks/app/(console)/layout-56786e484fd0639a.js"],"default"]
 9:I[484,[],"OutletBoundary"]
 a:"$Sreact.suspense"
 d:I[484,[],"ViewportBoundary"]

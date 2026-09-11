@@ -259,7 +259,7 @@ export function Rail({ onLogout, collapsed = false, onToggle }: RailProps) {
         /* 折叠态：整个 header 就是展开按钮 */
         <button
           onClick={onToggle}
-          title="展开侧边栏"
+          title={t("rail_expand")}
           style={{
             height: "var(--topbar-h)", boxSizing: "border-box",
             margin: "0 -6px 6px", width: "calc(100% + 12px)",
@@ -292,12 +292,12 @@ export function Rail({ onLogout, collapsed = false, onToggle }: RailProps) {
             </span>
             <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
               <span style={{ fontSize: 13, fontWeight: 700, color: "var(--heading)", letterSpacing: "-0.02em", lineHeight: 1.2 }}>Knowledge Repo</span>
-              <span style={{ fontSize: 10, color: "var(--fg-subtle)", lineHeight: 1.25 }}>知识库控制台</span>
+              <span style={{ fontSize: 10, color: "var(--fg-subtle)", lineHeight: 1.25 }}>{t("rail_subtitle")}</span>
             </span>
           </div>
           <button
             onClick={onToggle}
-            title="收起侧边栏"
+            title={t("rail_collapse")}
             style={{
               width: 24, height: 24, borderRadius: 6, border: "none",
               background: "transparent", color: "var(--fg-subtle)",
@@ -376,7 +376,7 @@ export function Rail({ onLogout, collapsed = false, onToggle }: RailProps) {
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 10px" }}>
             <span style={{ display: "flex", flexDirection: "column", fontSize: 12, color: "var(--fg)", fontWeight: 600, lineHeight: 1.25 }}>
               admin
-              <span style={{ color: "var(--ok)", fontSize: 10, fontWeight: 500 }}>● 在线演示</span>
+              <span style={{ color: "var(--ok)", fontSize: 10, fontWeight: 500 }}>{t("rail_demo")}</span>
             </span>
             <button onClick={onLogout} title={t("nav_logout")} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--fg-subtle)", padding: 4, borderRadius: 6, display: "flex", alignItems: "center", transition: "color 0.15s" }}
               onMouseEnter={(e) => { e.currentTarget.style.color = "var(--danger)"; }}

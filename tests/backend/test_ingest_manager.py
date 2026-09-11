@@ -444,6 +444,54 @@ async def test_artifact_bundle_and_offset_invariant(temp_pdf: Path, tmp_path: Pa
     assert len(items) == 1 and items[0].origin.value == "local"
 
 
+async def test_ingest_extracts_biblio_hint_from_well_formed_filename(
+    temp_pdf: Path, tmp_path: Path
+) -> None:
+    """上传标题长得像「作者 (年份) - 标题」时，应确定性提取干净标题与作者/年份写进 local_meta。"""
+    store = InMemorySourceDocumentStore()
+    manager = _manager(store, tmp_path)
+
+    document_id = await manager.ingest(
+        title="Vaswani and Shazeer (2017) - Attention Is All You Need.pdf",
+        file_path=str(temp_pdf),
+        content_type="application/pdf",
+        size_bytes=temp_pdf.stat().st_size,
+        collection="papers",
+    )
+
+    doc = await store.get_document(document_id)
+    assert doc is not None
+    assert doc.title == "Attention Is All You Need"
+    assert doc.local_meta["creators"] == ["Vaswani", "Shazeer"]
+    assert doc.local_meta["year"] == "2017"
+    # chunk_schema 仍然存在——biblio_hint 是叠加，不是替换。
+    assert doc.local_meta["chunk_schema"]
+    items = await store.list_zotero_items(LOCAL_LIBRARY_ID)
+    assert items[0].title == "Attention Is All You Need"
+
+
+async def test_ingest_keeps_raw_title_when_filename_not_recognized(
+    temp_pdf: Path, tmp_path: Path
+) -> None:
+    """文件名不符合书目格式时，标题与 local_meta 都应保持原样（不猜、不报错）。"""
+    store = InMemorySourceDocumentStore()
+    manager = _manager(store, tmp_path)
+
+    document_id = await manager.ingest(
+        title="scan_final_v2.pdf",
+        file_path=str(temp_pdf),
+        content_type="application/pdf",
+        size_bytes=temp_pdf.stat().st_size,
+        collection="papers",
+    )
+
+    doc = await store.get_document(document_id)
+    assert doc is not None
+    assert doc.title == "scan_final_v2.pdf"
+    assert "creators" not in doc.local_meta
+    assert "year" not in doc.local_meta
+
+
 async def test_ingest_raises_if_file_missing(tmp_path: Path) -> None:
     store = InMemorySourceDocumentStore()
     manager = IngestManager(source_store=store, config=SourceStoreConfig(), data_dir=tmp_path)

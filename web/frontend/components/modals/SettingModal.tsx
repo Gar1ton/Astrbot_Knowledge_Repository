@@ -138,17 +138,20 @@ function AppearanceTab({ onLogout }: { onLogout: () => void }) {
 // ─── Tab: Sync/Backup ─────────────────────────────────────────
 
 const ZOTERO_SYNC_MODES = ["strict_mirror", "conservative", "archive"];
-const ZOTERO_SYNC_MODE_LABELS: Record<string, string> = {
-  strict_mirror: "严格镜像",
-  conservative: "保守同步",
-  archive: "归档堆栈",
+const ZOTERO_SYNC_MODE_LABEL_KEYS: Record<string, I18nKey> = {
+  strict_mirror: "sync_mode_strict_mirror",
+  conservative: "sync_mode_conservative",
+  archive: "sync_mode_archive",
 };
 
 function ZoteroSyncModeLabel({ value }: { value: string }) {
-  return <>{ZOTERO_SYNC_MODE_LABELS[value] ?? value}</>;
+  const { t } = useI18n();
+  const key = ZOTERO_SYNC_MODE_LABEL_KEYS[value];
+  return <>{key ? t(key) : value}</>;
 }
 
 function SyncTab() {
+  const { t } = useI18n();
   const { toast } = useToast();
   const [zotero, setZotero] = useState<ZoteroConfig | null>(null);
   const [effectiveConfig, setEffectiveConfig] = useState<EffectiveConfig | null>(null);
@@ -227,7 +230,7 @@ function SyncTab() {
     try {
       await updateConfigValue(section, key, value);
     } catch (e) {
-      toast(e instanceof Error ? e.message : "保存失败", "error");
+      toast(e instanceof Error ? e.message : t("toast_save_failed"), "error");
     } finally {
       setSaving(null);
     }
@@ -242,12 +245,12 @@ function SyncTab() {
     setSyncing(true);
     try {
       await syncZoteroPull(true);
-      toast("Zotero 同步已启动", "ok");
+      toast(t("toast_zotero_sync_started"), "ok");
     } catch (e) {
       // 这里的请求是「触发即轮询」：5s 后放弃等待属于预期，后端仍在同步，
       // 进度看左下角进度条。把它当失败弹红字只会让用户以为同步没跑起来。
-      if (e instanceof ApiError && e.timedOut) toast("Zotero 同步已在后台进行", "ok");
-      else toast(e instanceof Error ? e.message : "同步失败", "error");
+      if (e instanceof ApiError && e.timedOut) toast(t("toast_zotero_sync_background"), "ok");
+      else toast(e instanceof Error ? e.message : t("toast_sync_failed"), "error");
     } finally {
       setSyncing(false);
     }
@@ -257,10 +260,10 @@ function SyncTab() {
     setBacking(true);
     try {
       await backupNow(force);
-      toast(force ? "强制完整备份已启动" : "增量完整备份已启动", "ok");
+      toast(force ? t("toast_backup_forced_started") : t("toast_backup_incremental_started"), "ok");
       setR2Job(await getR2Job().catch(() => null));
     } catch (e) {
-      toast(e instanceof Error ? e.message : "备份失败", "error");
+      toast(e instanceof Error ? e.message : t("toast_backup_failed"), "error");
     } finally {
       setBacking(false);
     }
@@ -271,10 +274,10 @@ function SyncTab() {
     setRestoring(true);
     try {
       await restoreBackup(true);
-      toast("完整恢复已启动；校验完成后插件会自动重启", "ok");
+      toast(t("toast_restore_started"), "ok");
       setR2Job(await getR2Job().catch(() => null));
     } catch (e) {
-      toast(e instanceof Error ? e.message : "恢复失败", "error");
+      toast(e instanceof Error ? e.message : t("toast_restore_failed"), "error");
     } finally {
       setRestoring(false);
     }
@@ -286,12 +289,12 @@ function SyncTab() {
       const res = await notionInit("", "");
       if (res.status === "success") {
         setNotionReady(Boolean(res.database_id) && Boolean(res.qa_database_id));
-        toast("Notion 两库初始化完成", "ok");
+        toast(t("toast_notion_init_done"), "ok");
       } else {
-        toast("Notion 初始化失败：请先在插件配置填写父页面 ID", "error");
+        toast(t("toast_notion_init_need_parent"), "error");
       }
     } catch (e) {
-      toast(e instanceof Error ? e.message : "初始化失败", "error");
+      toast(e instanceof Error ? e.message : t("toast_init_failed"), "error");
     } finally {
       setNotionInitializing(false);
     }
@@ -303,14 +306,14 @@ function SyncTab() {
       // 推送已改为后台单任务：立即返回任务快照，进度与完成提示由左下角进度条呈现。
       const res = await syncDocuments("notion");
       if ("reserved" in res) {
-        toast("Notion 同步端口预留中", "error");
+        toast(t("toast_notion_port_reserved"), "error");
       } else if (res.status === "error") {
-        toast("Notion 推送启动失败", "error");
+        toast(t("toast_notion_push_start_failed"), "error");
       } else {
-        toast("已开始 Notion 推送，进度见左下角", "ok");
+        toast(t("toast_notion_push_started"), "ok");
       }
     } catch (e) {
-      toast(e instanceof Error ? e.message : "推送失败", "error");
+      toast(e instanceof Error ? e.message : t("toast_push_failed"), "error");
     } finally {
       setNotionPushing(false);
     }
@@ -328,7 +331,7 @@ function SyncTab() {
       } else {
         setZotero(updated as ZoteroConfig);
         setServerKeyDraft("");
-        toast("API Key 已保存", "ok");
+        toast(t("toast_api_key_saved"), "ok");
       }
     } catch (err: unknown) {
       setServerKeyError(err instanceof Error ? err.message : String(err));
@@ -344,9 +347,9 @@ function SyncTab() {
       await resolveZoteroAccountChange(accountChange.change_id, action);
       if (action === "replace_local") {
         setServerKeyDraft("");
-        toast("本地 Zotero 镜像已重置，新账号同步已启动", "ok");
+        toast(t("toast_zotero_mirror_reset"), "ok");
       } else {
-        toast("已取消账号更换，旧数据保持不变", "ok");
+        toast(t("toast_account_change_cancelled"), "ok");
       }
       setAccountChange(null);
       setZotero(await getZoteroConfig());
@@ -363,7 +366,7 @@ function SyncTab() {
     try {
       const updated = await deleteZoteroServerKey();
       setZotero(updated);
-      toast("API Key 已清除", "ok");
+      toast(t("toast_api_key_cleared"), "ok");
     } catch (err: unknown) {
       setServerKeyError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -409,11 +412,11 @@ function SyncTab() {
   return (
     <>
       <Card
-        title="Zotero 同步"
+        title={t("sync_zotero_title")}
         icon="book"
         badge={
           <Badge tone={zoteroConnected ? "ok" : "warn"}>
-            {zoteroConnected ? "已连接" : "未连接"}
+            {zoteroConnected ? t("sync_connected") : t("sync_disconnected")}
           </Badge>
         }
       >
@@ -429,17 +432,17 @@ function SyncTab() {
           }}
         >
           <button type="button" style={tabStyle(accessMode === "local")} onClick={() => handleModeSwitch("local")}>
-            本地离线
+            {t("sync_tab_local")}
           </button>
           <button type="button" style={tabStyle(accessMode === "server")} onClick={() => handleModeSwitch("server")}>
-            在线服务
+            {t("sync_tab_server")}
           </button>
         </div>
 
         {/* Local panel */}
         {accessMode === "local" && (
           <div style={{ paddingTop: 4 }}>
-            <Field label="本地通讯端口">
+            <Field label={t("sync_field_local_port")}>
               <input
                 style={inputStyle}
                 type="number"
@@ -453,25 +456,25 @@ function SyncTab() {
               />
             </Field>
             {resolvedDataDir && (
-              <Field label="自动解析目录" hint="只读，由插件自动探测">
+              <Field label={t("sync_field_auto_dir")} hint={t("sync_field_auto_dir_hint")}>
                 <span style={{ fontSize: 11, color: "var(--fg-muted)", fontFamily: "var(--font-mono)", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {resolvedDataDir}
                 </span>
               </Field>
             )}
-            <Field label="目录覆盖" hint="留空使用自动解析路径">
+            <Field label={t("sync_field_dir_override")} hint={t("sync_field_dir_override_hint")}>
               <input
                 style={{ ...inputStyle, width: 200 }}
                 type="text"
                 value={dataDirOverride}
-                placeholder="留空自动探测"
+                placeholder={t("sync_placeholder_auto_detect")}
                 onChange={(e) => setDataDirOverride(e.target.value)}
                 onBlur={() => save("zotero_sync", "zotero_data_dir", dataDirOverride)}
                 disabled={saving === "zotero_sync.zotero_data_dir"}
               />
             </Field>
             <div style={{ fontSize: 11, color: "var(--fg-subtle)", padding: "6px 0 4px", lineHeight: 1.5 }}>
-              ℹ Zotero 需在同一设备运行，插件将自动探测 {apiPort || "23119"} 端口
+              {t("sync_local_notice", { port: apiPort || "23119" })}
             </div>
           </div>
         )}
@@ -481,7 +484,7 @@ function SyncTab() {
           <div style={{ paddingTop: 4 }}>
             <Field
               label="Zotero API Key"
-              hint={serverKeyPresent ? `当前：${serverKeyMasked || "****"}` : "未设置"}
+              hint={serverKeyPresent ? t("sync_key_current", { masked: serverKeyMasked || "****" }) : t("sync_key_unset")}
             >
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <input
@@ -489,7 +492,7 @@ function SyncTab() {
                   type="password"
                   autoComplete="off"
                   value={serverKeyDraft}
-                  placeholder="输入 Web API key"
+                  placeholder={t("sync_placeholder_web_api_key")}
                   disabled={serverKeySaving}
                   onChange={(e) => setServerKeyDraft(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter" && serverKeyDraft.trim()) handleServerKeySave(); }}
@@ -500,11 +503,11 @@ function SyncTab() {
                   onClick={handleServerKeySave}
                   style={{ opacity: serverKeyDraft.trim() ? 1 : 0.4, pointerEvents: serverKeyDraft.trim() ? undefined : "none" }}
                 >
-                  保存
+                  {t("sync_btn_save")}
                 </Button>
                 {serverKeyPresent && (
                   <Button variant="ghost" size="sm" onClick={handleServerKeyDelete} loading={serverKeySaving && serverKeyDraft === ""}>
-                    清除
+                    {t("sync_btn_clear")}
                   </Button>
                 )}
               </div>
@@ -513,12 +516,12 @@ function SyncTab() {
               <div style={{ fontSize: 11, color: "var(--danger)", padding: "2px 0 6px" }}>{serverKeyError}</div>
             )}
             {serverUsername && (
-              <Field label="用户名" hint="只读，从 API Key 解析">
+              <Field label={t("sync_field_username")} hint={t("sync_field_username_hint")}>
                 <span style={{ fontSize: 12, color: "var(--fg-muted)", fontFamily: "var(--font-mono)" }}>{serverUsername}</span>
               </Field>
             )}
             <div style={{ fontSize: 11, color: "var(--fg-subtle)", padding: "6px 0 4px", lineHeight: 1.5 }}>
-              ℹ 在 zotero.org → 设置 → API Keys 中生成私有 API Key
+              {t("sync_server_notice")}
             </div>
           </div>
         )}
@@ -533,7 +536,7 @@ function SyncTab() {
         {/* Common fields */}
         <div style={{ height: 1, background: "var(--border)", margin: "8px 0" }} />
 
-        <Field label="同步模式">
+        <Field label={t("sync_field_mode")}>
           <select
             value={syncMode}
             onChange={(e) => { setSyncMode(e.target.value); save("zotero_sync", "sync_mode", e.target.value); }}
@@ -546,7 +549,7 @@ function SyncTab() {
           </select>
         </Field>
 
-        <Field label="自动同步">
+        <Field label={t("sync_field_auto")}>
           <Toggle
             checked={autoSync}
             onChange={(v) => { setAutoSync(v); save("zotero_sync", "auto_sync_enabled", v); }}
@@ -554,7 +557,7 @@ function SyncTab() {
         </Field>
 
         {autoSync && (
-          <Field label="同步间隔（秒）">
+          <Field label={t("sync_field_interval")}>
             <input
               style={inputStyle}
               type="number"
@@ -570,31 +573,31 @@ function SyncTab() {
           </Field>
         )}
 
-        <Field label="单向 Pull 镜像" hint="只读镜像 Zotero 条目 / 集合 / PDF，清洗为 Markdown">
+        <Field label={t("sync_field_pull_mirror")} hint={t("sync_field_pull_mirror_hint")}>
           <Button variant="outline" size="sm" loading={syncing} onClick={handleZoteroSync}>
-            <Icon name="sync" size={13} /> 立即同步
+            <Icon name="sync" size={13} /> {t("sync_btn_sync_now")}
           </Button>
         </Field>
       </Card>
 
       <Card
-        title="Cloudflare R2 备份"
+        title={t("r2_title")}
         icon="cloud"
-        badge={<Badge tone={r2Status?.status === "ok" ? "ok" : "neutral"}>{r2Job?.status === "running" ? `${r2Job.stage} ${r2Job.progress}%` : "完整快照"}</Badge>}
+        badge={<Badge tone={r2Status?.status === "ok" ? "ok" : "neutral"}>{r2Job?.status === "running" ? `${r2Job.stage} ${r2Job.progress}%` : t("r2_badge_full_snapshot")}</Badge>}
       >
-        <Field label="Bucket / 插件占用" hint="Bucket 总量包含同一 Bucket 中的非插件对象">
+        <Field label={t("r2_field_bucket")} hint={t("r2_field_bucket_hint")}>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--fg-muted)" }}>
             {formatBytes(r2Status?.bucket_used_bytes ?? 0)} / {formatBytes(r2Status?.plugin_used_bytes ?? 0)} · {r2Status?.plugin_object_count ?? 0} objects
           </span>
         </Field>
-        <Field label="当前快照" hint="仅保留最新完整快照；未变化文件按内容哈希去重">
+        <Field label={t("r2_field_snapshot")} hint={t("r2_field_snapshot_hint")}>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--fg-subtle)" }}>
             {r2Status?.snapshot
               ? `${r2Status.snapshot.snapshot_id} · ${r2Status.snapshot.file_count} files · ${r2Status.snapshot.updated_at}`
-              : "尚无快照"}
+              : t("r2_no_snapshot")}
           </span>
         </Field>
-        <Field label="逻辑大小 / 去重节省" hint="逻辑大小是完整恢复所需文件总量；去重节省按当前 blob 物理量计算">
+        <Field label={t("r2_field_size")} hint={t("r2_field_size_hint")}>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--fg-muted)" }}>
             {formatBytes(r2Status?.snapshot?.logical_bytes ?? 0)} / {formatBytes(r2Status?.snapshot?.deduplicated_bytes ?? 0)}
           </span>
@@ -608,19 +611,19 @@ function SyncTab() {
         )}
         {r2Job?.status === "error" && (
           <div style={{ padding: "7px 10px", borderRadius: "var(--radius-md)", background: "var(--danger-soft)", color: "var(--danger)", fontSize: 12 }}>
-            {r2Job.error || "R2 任务失败"}
+            {r2Job.error || t("r2_job_failed")}
           </div>
         )}
-        <Field label="完整备份与恢复" hint="恢复会整体覆盖本地持久化数据并自动重启；密钥和依赖不在快照内">
+        <Field label={t("r2_field_backup_restore")} hint={t("r2_field_backup_restore_hint")}>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <Button variant="outline" size="sm" loading={backing} disabled={r2Job?.status === "running"} onClick={() => handleBackup(false)}>
-            立即备份
+            {t("r2_btn_backup_now")}
           </Button>
           <Button variant="outline" size="sm" disabled={backing || r2Job?.status === "running"} onClick={() => handleBackup(true)}>
-            强制备份
+            {t("r2_btn_backup_force")}
           </Button>
           <Button variant="danger" size="sm" loading={restoring} disabled={r2Job?.status === "running"} onClick={() => setRestoreConfirm(true)}>
-            一键恢复
+            {t("r2_btn_restore")}
           </Button>
           </div>
         </Field>
@@ -628,57 +631,57 @@ function SyncTab() {
 
       {accountChange && (
         <Modal
-          title="检测到 Zotero 账号变化"
+          title={t("zotero_account_change_title")}
           icon="book"
           width={500}
           height="auto"
           onClose={() => handleAccountChange("cancel")}
-          footer={<><Button variant="outline" onClick={() => handleAccountChange("cancel")}>取消更改</Button><Button variant="danger" onClick={() => handleAccountChange("replace_local")}>覆盖并重置本地 Zotero 库</Button></>}
+          footer={<><Button variant="outline" onClick={() => handleAccountChange("cancel")}>{t("zotero_account_change_cancel")}</Button><Button variant="danger" onClick={() => handleAccountChange("replace_local")}>{t("zotero_account_change_replace")}</Button></>}
         >
           <div style={{ padding: 22, color: "var(--fg)", fontSize: 13, lineHeight: 1.7 }}>
-            <p>当前账号：{accountChange.current_account.account_name || accountChange.current_account.account_id}</p>
-            <p>新账号：{accountChange.new_account.account_name || accountChange.new_account.account_id}</p>
-            <p style={{ color: "var(--danger)" }}>继续会删除全部本地 Zotero 镜像及其 Milvus / LightRAG 索引；本地上传的 collection 与文件不会被删除。确认后将自动拉取新账号。</p>
+            <p>{t("zotero_account_current", { account: accountChange.current_account.account_name || accountChange.current_account.account_id })}</p>
+            <p>{t("zotero_account_new", { account: accountChange.new_account.account_name || accountChange.new_account.account_id })}</p>
+            <p style={{ color: "var(--danger)" }}>{t("settings_account_change_warning")}</p>
           </div>
         </Modal>
       )}
 
       {restoreConfirm && (
         <Modal
-          title="恢复 R2 完整快照"
+          title={t("r2_restore_title")}
           icon="cloud"
           width={500}
           height="auto"
           onClose={() => setRestoreConfirm(false)}
-          footer={<><Button variant="outline" onClick={() => setRestoreConfirm(false)}>取消</Button><Button variant="danger" onClick={handleRestore}>覆盖本地并恢复</Button></>}
+          footer={<><Button variant="outline" onClick={() => setRestoreConfirm(false)}>{t("btn_cancel")}</Button><Button variant="danger" onClick={handleRestore}>{t("r2_restore_confirm")}</Button></>}
         >
           <div style={{ padding: 22, color: "var(--fg)", fontSize: 13, lineHeight: 1.7 }}>
-            最新快照会先完整下载并校验，再覆盖本地数据库、原件、Milvus 与 LightRAG 数据。密钥、依赖和设备路径保持当前环境设置。
+            {t("r2_restore_warning")}
           </div>
         </Modal>
       )}
 
       <Card
-        title="Notion 同步"
+        title={t("notion_title")}
         icon="layers"
         badge={
           <Badge tone={notionEnabled ? (notionReady ? "ok" : "warn") : "neutral"}>
-            {notionEnabled ? (notionReady ? "已就绪" : "未初始化") : "未启用"}
+            {notionEnabled ? (notionReady ? t("notion_ready") : t("notion_uninitialised")) : t("notion_disabled")}
           </Badge>
         }
       >
         <Field
-          label="Notion 单向增量推送"
-          hint="文章（含 tag / 文件树）推到 Articles 库，研究结论推到 QA 库；启用开关在 AstrBot 插件配置面板"
+          label={t("notion_field_push")}
+          hint={t("notion_field_push_hint")}
         >
           <span style={{ fontSize: 12, color: "var(--fg-subtle)" }}>
-            {notionEnabled ? "已在插件配置中启用" : "未启用（在 AstrBot 面板开启 notion_sync.enabled）"}
+            {notionEnabled ? t("notion_enabled_in_config") : t("notion_disabled_hint")}
           </span>
         </Field>
 
         <Field
-          label="Notion 清理模式"
-          hint="preserve（默认）保持现有行为；strict 会在同步时把 detached 文章页移入 Notion 回收站，并阻止普通同步、强制同步和 QA 引用将其恢复。切回 preserve 后，仍为 detached 的页面可能重新创建。"
+          label={t("notion_field_cleanup")}
+          hint={t("notion_field_cleanup_hint")}
         >
           <select
             value={notionSyncMode}
@@ -689,14 +692,14 @@ function SyncTab() {
             style={{ ...inputStyle, width: 180 }}
             disabled={!notionEnabled || saving === "notion_sync.sync_mode"}
           >
-            <option value="preserve">保留 detached（默认）</option>
-            <option value="strict">Strict 清理（移入回收站）</option>
+            <option value="preserve">{t("notion_opt_preserve")}</option>
+            <option value="strict">{t("notion_opt_strict")}</option>
           </select>
         </Field>
 
         <Field
-          label="周期自动推送（秒）"
-          hint="0 表示关闭定时推送；>0 时每隔该秒数自动增量推送一次（改动后重启插件生效）"
+          label={t("notion_field_interval")}
+          hint={t("notion_field_interval_hint")}
         >
           <input
             style={inputStyle}
@@ -712,7 +715,7 @@ function SyncTab() {
           />
         </Field>
 
-        <Field label="初始化与推送" hint="首次使用先初始化两库（需在插件配置填父页面 ID），之后可手动增量推送">
+        <Field label={t("notion_field_init")} hint={t("notion_field_init_hint")}>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <Button
               variant="outline"
@@ -721,7 +724,7 @@ function SyncTab() {
               disabled={!notionEnabled}
               onClick={handleNotionInit}
             >
-              初始化数据库
+              {t("notion_btn_init")}
             </Button>
             <Button
               variant="outline"
@@ -730,7 +733,7 @@ function SyncTab() {
               disabled={!notionEnabled || !notionReady}
               onClick={handleNotionPush}
             >
-              <Icon name="sync" size={13} /> 立即同步
+              <Icon name="sync" size={13} /> {t("sync_btn_sync_now")}
             </Button>
           </div>
         </Field>
@@ -742,6 +745,7 @@ function SyncTab() {
 // ─── Tab: Backend Config ──────────────────────────────────────
 
 function ConfigTab() {
+  const { t } = useI18n();
   const { toast } = useToast();
   const [config, setConfig] = useState<EffectiveConfig | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
@@ -801,13 +805,13 @@ function ConfigTab() {
     setSaving(id);
     try {
       const result = await updateConfigValue(sectionName, key, value);
-      if (result.rebuild_required) toast("配置已保存，重启插件并重建索引后完全生效", "info");
-      else if (result.restart_required) toast("配置已保存，重启插件后生效", "info");
-      else toast("配置已保存", "ok");
+      if (result.rebuild_required) toast(t("cfg_saved_rebuild"), "info");
+      else if (result.restart_required) toast(t("cfg_saved_restart"), "info");
+      else toast(t("cfg_saved"), "ok");
       const fresh = await getEffectiveConfig();
       setConfig(fresh);
     } catch (error) {
-      toast(error instanceof Error ? error.message : "保存失败", "error");
+      toast(error instanceof Error ? error.message : t("toast_save_failed"), "error");
       getEffectiveConfig().then(setConfig).catch(() => {});
     } finally {
       setSaving(null);
@@ -858,7 +862,7 @@ function ConfigTab() {
             const raw = valueOf(sectionName, key);
             const parsed = parser === "float" ? Number(raw) : parseInt(raw, 10);
             if (!Number.isFinite(parsed)) {
-              toast("请输入有效数字", "error");
+              toast(t("cfg_invalid_number"), "error");
               getEffectiveConfig().then(setConfig).catch(() => {});
               return;
             }
@@ -934,7 +938,7 @@ function ConfigTab() {
   if (!config) {
     return (
       <div style={{ padding: 40, textAlign: "center", fontSize: 13, color: "var(--fg-subtle)" }}>
-        加载中…
+        {t("cfg_loading")}
       </div>
     );
   }
@@ -949,24 +953,24 @@ function ConfigTab() {
           lineHeight: 1.55,
         }}
       >
-        临时迁移入口用于承接已从 AstrBot 配置面板移出的高级项；下方仍保留后端有效配置核对（
+        {t("cfg_migration_notice_head")}
         <code style={{ fontFamily: "var(--font-mono)", color: "var(--accent)" }}>
           GET /api/config/effective
         </code>
-        ），敏感字段已打码。
+        {t("cfg_migration_notice_tail")}
       </div>
 
-      <Card title="源文档库（迁移）" icon="db" badge={<Badge tone="neutral">WebUI</Badge>}>
+      <Card title={t("cfg_card_source_store")} icon="db" badge={<Badge tone="neutral">WebUI</Badge>}>
         {textConfigField(
           "source_store",
           "default_collection",
-          "默认集合",
-          "文档上传时未指定集合时归入的默认分组名",
+          t("cfg_default_collection"),
+          t("cfg_default_collection_hint"),
         )}
       </Card>
 
-      <Card title="图谱专用 LLM（迁移）" icon="graph" badge={<Badge tone="warn">重启生效</Badge>}>
-        <Field label="图谱构建使用的 LLM" hint="main 复用 AstrBot 主 LLM；local/api 使用单独 OpenAI 兼容端点">
+      <Card title={t("cfg_card_graph_llm")} icon="graph" badge={<Badge tone="warn">{t("cfg_badge_restart")}</Badge>}>
+        <Field label={t("cfg_graph_llm_provider")} hint={t("cfg_graph_llm_provider_hint")}>
           <Select
             value={valueOf("graph", "lightrag_llm_provider", "main")}
             onChange={(value) => {
@@ -980,46 +984,46 @@ function ConfigTab() {
             ]}
           />
         </Field>
-        {textConfigField("graph", "lightrag_llm_base_url", "图谱专用 LLM 端点", "仅 provider=local 或 api 时生效", 260)}
-        {textConfigField("graph", "lightrag_llm_model", "图谱专用 LLM 模型名", "填写端点上对应的模型标识符", 220)}
+        {textConfigField("graph", "lightrag_llm_base_url", t("cfg_graph_llm_base_url"), t("cfg_graph_llm_base_url_hint"), 260)}
+        {textConfigField("graph", "lightrag_llm_model", t("cfg_graph_llm_model"), t("cfg_graph_llm_model_hint"), 220)}
         {readonlyConfigField(
-          "图谱数据目录",
+          t("cfg_graph_workspace"),
           valueOf("graph", "working_dir", "lightrag_workspaces"),
-          "结构性参数，只读展示；修改目录需手动迁移索引并重启",
+          t("cfg_graph_workspace_hint"),
         )}
       </Card>
 
-      <Card title="Deep Thinking（迁移）" icon="sparkle" badge={<Badge tone="accent">即时 / 重启</Badge>}>
-        {numberConfigField("deep_thinking", "max_rounds", "最大迭代轮数", "轮数越多越全也越慢越贵")}
-        {numberConfigField("deep_thinking", "max_sub_queries", "每轮最大子查询数")}
-        {numberConfigField("deep_thinking", "wide_top_k", "每个子查询的检索宽度")}
-        {numberConfigField("deep_thinking", "rerank_weight", "重排器权重（0~1）", undefined, "float")}
+      <Card title={t("cfg_card_deep_thinking")} icon="sparkle" badge={<Badge tone="accent">{t("cfg_badge_instant_or_restart")}</Badge>}>
+        {numberConfigField("deep_thinking", "max_rounds", t("cfg_dt_max_rounds"), t("cfg_dt_max_rounds_hint"))}
+        {numberConfigField("deep_thinking", "max_sub_queries", t("cfg_dt_max_sub_queries"))}
+        {numberConfigField("deep_thinking", "wide_top_k", t("cfg_dt_wide_top_k"))}
+        {numberConfigField("deep_thinking", "rerank_weight", t("cfg_rerank_weight"), undefined, "float")}
         {toggleConfigField(
           "deep_thinking",
           "verify_enabled",
-          "启用答案级校验闭环",
-          "合成答案后校验是否被证据完全支撑、是否完整",
+          t("cfg_dt_verify"),
+          t("cfg_dt_verify_hint"),
         )}
-        {numberConfigField("deep_thinking", "max_verify_rounds", "校验不合格后的最大补检轮数")}
-        {textConfigField("deep_thinking", "llm_base_url", "深度思考专用 LLM 端点", "填写后使用该 OpenAI-compatible endpoint", 260)}
-        {textConfigField("deep_thinking", "llm_model", "深度思考专用 LLM 模型", "填写对应端点上的模型名称", 220)}
+        {numberConfigField("deep_thinking", "max_verify_rounds", t("cfg_dt_max_verify_rounds"))}
+        {textConfigField("deep_thinking", "llm_base_url", t("cfg_dt_llm_base_url"), t("cfg_dt_llm_base_url_hint"), 260)}
+        {textConfigField("deep_thinking", "llm_model", t("cfg_dt_llm_model"), t("cfg_dt_llm_model_hint"), 220)}
         {readonlyConfigField(
-          "深度思考专用 LLM API Key",
+          t("cfg_dt_llm_api_key"),
           valueOf("deep_thinking", "llm_api_key"),
-          "机密字段。通过环境变量 KR_DEEP_THINKING_LLM_API_KEY 注入",
+          t("cfg_dt_llm_api_key_hint"),
         )}
       </Card>
 
-      <Card title="增强召回（Enhanced）" icon="sparkle" badge={<Badge tone="accent">即时</Badge>}>
-        {numberConfigField("enhanced_recall", "max_sub_queries", "拆解子查询上限", "PLAN-lite 一次规划拆出的互补检索探针数")}
-        {numberConfigField("enhanced_recall", "wide_top_k", "每个查询的检索宽度")}
-        {numberConfigField("enhanced_recall", "max_final_evidence", "合成上下文证据上限")}
-        {numberConfigField("enhanced_recall", "rerank_weight", "重排器权重（0~1）", undefined, "float")}
+      <Card title={t("cfg_card_enhanced")} icon="sparkle" badge={<Badge tone="accent">{t("cfg_badge_instant")}</Badge>}>
+        {numberConfigField("enhanced_recall", "max_sub_queries", t("cfg_er_max_sub_queries"), t("cfg_er_max_sub_queries_hint"))}
+        {numberConfigField("enhanced_recall", "wide_top_k", t("cfg_er_wide_top_k"))}
+        {numberConfigField("enhanced_recall", "max_final_evidence", t("cfg_er_max_final_evidence"))}
+        {numberConfigField("enhanced_recall", "rerank_weight", t("cfg_rerank_weight"), undefined, "float")}
         {toggleConfigField(
           "enhanced_recall",
           "corrective_enabled",
-          "启用纠正检索",
-          "合成自检不充分时补一轮检索并重合成（多 1 次 LLM 调用）",
+          t("cfg_er_corrective"),
+          t("cfg_er_corrective_hint"),
         )}
       </Card>
 

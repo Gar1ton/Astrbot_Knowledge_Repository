@@ -1,5 +1,71 @@
 # CHANGELOG
 
+## [Unreleased]
+
+## [v1.1.3] — 2026-09-04
+
+### 修复 (Fixed)
+
+- **Harvard 引用大量降级为 `Anon., n.d.`**：只读核对用户本机 Zotero 库确认根因——Zotero
+  独立附件（无 parent item，实测样本库中占 77%）同步时，`zotero_sync_pipeline.py` 的
+  `item_key = att.parent_item_key or att.attachment_key` 用附件自己的 key 顶替
+  `zotero_item_key`；但 `zotero_items` 镜像表（`sqlite_reader.py:_read_items` /
+  `web_api.py:_items`）显式排除 `itemType == 'attachment'`，这个回退 key 永远查不到镜像行，
+  `get_zotero_item_meta()` 恒返回 `None` → creators 恒空 → Harvard 渲染层降级为
+  `Anon., n.d.`。Zotero 对独立附件本身在 schema 上就没有 creators 字段，但用户这批附件的
+  文件名本身是书目信息（如 `Peng, Hou, Zhou and Shang (2026) - Title.pdf`），可确定性提取
+  而非编造：107/118 样本能干净匹配。
+  新增 `kacore/domain/filename_biblio.py`（zero-dependency 纯函数，风格对齐
+  `domain/citation.py`）：`parse_filename_biblio()` 识别 `Author(s) (Year) - Title` /
+  `Author(s) - Year - Title` 两种格式，处理字面 `n.d.`、年份区间取首年、`et al.` 截断、
+  Zotero 去重数字前缀；不确信就返回 `None`，绝不猜。
+  `kacore/managers/ingest_manager.py` 新增 `resolve_filename_biblio_hint()`（本地上传与
+  Zotero 同步共用）；`process_attachment()` 新增 `biblio_hint` 参数叠加进 `local_meta`；
+  `ingest()`（本地上传）与 `zotero_sync_pipeline.py:_sync_documents()`（Zotero 同步）两个
+  调用方分别用各自的文件名跑解析器、传入 hint，解析成功时用干净标题替换原始文件名标题——
+  这条修复因此**不是 Zotero 专属补丁**，本地上传文件名符合此格式时同样受益。
+  `kacore/api.py:_document_biblio_meta()` 的 Zotero 分支在 `creators`/`year` 为空时回退读
+  `doc.local_meta`（即上述 hint）；**Zotero 权威数据永远优先，hint 只补空**，两者都缺失才
+  真正降级。
+  新增 `tests/backend/test_filename_biblio.py`（16 例）；`test_ingest_manager.py` /
+  `test_zotero_sync.py` / `test_api.py` 补齐端到端回归，覆盖独立附件解析回归与「有权威数据
+  时绝不被文件名覆盖」两条防护用例。
+- **i18n 泄漏收口：英文用户不再看到中文界面**。项目一直维护着 `lib/i18n.ts` 的 zh/en 双份
+  文案，但有 11 个文件绕过它直接硬编码中文字符串，其中 `SettingModal.tsx` 是**整个模块**
+  没有任何 `lang` 分支——同步/备份页与配置迁移页的卡片标题、字段名、提示文案、下拉选项与
+  全部 toast 共 111 处，切到英文后原样显示中文。本轮迁移 **116 处**，新增 201 个 key
+  （zh/en 各 201），`i18n.ts` 键数 650 → 851。涉及 `components/modals/SettingModal.tsx`、
+  `components/modals/AstrBotModal.tsx`、`components/ui/PerfPanel.tsx`、
+  `components/panels/PdfViewer.tsx`、`components/flow/ZoteroQuickConfig.tsx`、
+  `components/panels/DocumentsPanel.tsx`、`components/panels/FilePanel.tsx`、
+  `components/progress/ProgressDock.tsx`、`components/rail/Rail.tsx`、
+  `app/(console)/layout.tsx`。
+  另有 44 处经核查**不属于泄漏**因而未迁：`components/flow/model.ts` 的 21 处已有
+  `BACKEND_LABEL_ZH`/`BACKEND_LABEL_EN` 双字典按 `lang` 选择，是合法的「值 → 标签」映射；
+  `lib/api.ts` 的 18 处是 `?mock` 模式下的演示假数据（假论文标题、假 chunk 正文），
+  翻译无意义。剩下 4 处是**技术限制**而非疏漏：`app/layout.tsx` 的两条是 Next.js 服务端
+  静态 `metadata` 导出、`lib/api.ts` 的两条在 `Error` 子类构造器内，两者都拿不到 i18n hook。
+- **`t` 的 props 类型比真实签名窄**。`components/flow/` 下内联重复了 9 次
+  `t: (k: I18nKey) => string`，而 `makeT()` 的真实签名是带插值参数的
+  `(key, vars?) => string`——这份手写副本导致带插值的调用在这些组件里无法通过类型检查。
+  按 `CONVENTIONS.md` §1「重复 3 次即提取」，提为 `lib/i18n.ts` 导出的 `TFunc` 并放宽到
+  真实签名（`DirPickerDialog.tsx`、`QuickConfigPanel.tsx`、`FlowNode.tsx`、`FlowDiagram.tsx`）。
+
+### 技术债登记 (Debt)
+
+- 按 `CONVENTIONS.md` §4 在 `TODO.md` 登记前端超 600 行红线且此前未登记的文件：
+  `ChatPanel.tsx` 1404、`FilePanel.tsx` 1375、`SettingModal.tsx` 1105、
+  `QuickConfigPanel.tsx` 719、`DocumentsPanel.tsx` 641，并各自写明拆分方向。
+  **本轮只登记不执行**。（`lib/api.ts` / `lib/i18n.ts` / `styles/tokens.css` 已于 v1.0.x
+  登记为暂缓，不重复计入。）
+- 前端另三项优化（`ds/Modal.tsx` 无障碍基线、`PdfViewer.tsx` 页面窗口化、前端 README 重写）
+  经核实确有必要并已在 `TODO.md` 写明方案，但**按用户决定本轮不执行**，留待后续迭代。
+- **MinerU2.5 结构化抽取计划挂起**，调研结论存入 `TODO.md` 备查：接缝在
+  `chunking.py::parse_markdown_blocks()`（MinerU 的 `content_list.json` 显式声明结构，
+  与现有 `TextBlock.kind` 词汇表几乎一一对应，故是「换结构来源、不换分块算法」）；
+  收益为表格转结构化 Markdown、公式转 LaTeX、双栏阅读顺序、矢量图 bbox、扫描件原生 OCR；
+  代价是比 PyMuPDF4LLM 慢约 600 倍（实测 1.2s/623 页 vs 估算 700–1000s/623 页），必须默认关。
+
 ## [v1.1.2] — 2026-08-04
 
 ### 新增功能 (Added)

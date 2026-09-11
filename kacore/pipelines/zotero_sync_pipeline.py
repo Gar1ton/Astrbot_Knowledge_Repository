@@ -47,7 +47,7 @@ from kacore.domain.models import (
     DocumentLifecycle,
     DocumentOrigin,
 )
-from kacore.managers.ingest_manager import make_document_id
+from kacore.managers.ingest_manager import make_document_id, resolve_filename_biblio_hint
 from kacore.zotero_sync_job import (
     ZOTERO_STAGE_APPLYING_REMOVALS,
     ZOTERO_STAGE_FINALIZING,
@@ -467,7 +467,13 @@ class ZoteroSyncPipeline:
             collection = primary_coll.get(item_key) or DEFAULT_ZOTERO_COLLECTION
             await self._ensure_unfiled_home(lib, collection, coll_keys)
             tags = [t.tag for t in snapshot.item_tags.get(item_key, [])]
-            title = (item.title if item and item.title else att.filename) or document_id
+            # 独立附件（无 parent item）或有 parent item 但 Zotero 侧就是没填书目字段时，
+            # `att.filename` 若长得像「作者 (年份) - 标题」，可确定性提取一份猜测；Zotero 自带
+            # 的 item.title/creators 始终优先，这里只是给之后没有权威数据时留一个兜底 hint。
+            guessed_title, biblio_hint = resolve_filename_biblio_hint(att.filename)
+            title = (
+                item.title if item and item.title else (guessed_title or att.filename)
+            ) or document_id
 
             try:
                 await self._ingest.process_attachment(
@@ -486,6 +492,7 @@ class ZoteroSyncPipeline:
                     last_synced_at=datetime.now(timezone.utc),
                     # web 下载件落在缓存目录，link 会成悬空引用隐患，强制复制进制品包。
                     link_original=link_only and not via_web,
+                    biblio_hint=biblio_hint,
                 )
             except Exception as exc:  # 单文档失败不阻断整库。
                 result.errors.append(f"{document_id}: {exc}")

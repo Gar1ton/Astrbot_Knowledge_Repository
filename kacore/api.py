@@ -1368,14 +1368,25 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
 
         Zotero 走 `zotero_items` 镜像表，本地文档走 `local_meta`——`update_document_meta` 的写入
         白名单与 `get_zotero_item_meta` 的返回字段同名，二者可直接互换（`web/server.py` 的
-        `_document_dict` 早已按此假设把两者都塞进同一个 `zotero_meta` 键）。缺失返回空 dict，
-        由 Harvard 渲染层降级为 `Anon.` / `n.d.`，而不是在这里编造。
+        `_document_dict` 早已按此假设把两者都塞进同一个 `zotero_meta` 键）。
+
+        Zotero 文档的 `creators`/`year` 为空时，回退读 `doc.local_meta`——那是同步管线用
+        `kacore.managers.ingest_manager.resolve_filename_biblio_hint()` 从文件名（如
+        `Author (Year) - Title.pdf`）确定性提取的猜测（典型来源：无 parent item 的独立附件，
+        Zotero 本身在 schema 上就没有 creators 字段）。Zotero 权威数据永远优先，hint 只补空；
+        两者都缺失才真正返回空 dict，由 Harvard 渲染层降级为 `Anon.` / `n.d.`——不是在这里编造。
         """
         if doc is None:
             return {}
         if doc.origin is DocumentOrigin.ZOTERO:
             meta = await self.get_zotero_item_meta(doc.library_id, doc.zotero_item_key)
-            return dict(meta) if meta else {}
+            merged = dict(meta) if meta else {}
+            hint = doc.local_meta or {}
+            if not merged.get("creators") and hint.get("creators"):
+                merged["creators"] = hint["creators"]
+            if not merged.get("year") and hint.get("year"):
+                merged["year"] = hint["year"]
+            return merged
         return dict(doc.local_meta or {})
 
     async def _build_document_source_entry(

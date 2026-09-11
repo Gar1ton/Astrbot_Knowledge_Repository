@@ -319,9 +319,9 @@ function ReadingView({
     setReextracting(true);
     try {
       const result = await reextractDocument(doc.doc_id);
-      toast(`重新提取完成：${result.chunk_count} 个 chunk`, "ok");
+      toast(t("documents_reextract_done", { n: result.chunk_count }), "ok");
     } catch (err) {
-      toast(err instanceof Error ? err.message : "重新提取失败", "error");
+      toast(err instanceof Error ? err.message : t("documents_reextract_failed"), "error");
     } finally {
       setReextracting(false);
     }

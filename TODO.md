@@ -1,5 +1,143 @@
 # TODO
 
+## v1.1.3：Harvard 引用降级修复 (completed)
+
+### User constraints / 约束
+
+- 用户反馈 KA skill 与普通召回问答里 Harvard 引用大部分时候显示 `Anon., n.d.`。
+- 修复方案须是**通用**文件名书目解析（不叫 `zotero_*`，domain 层对 Zotero/local 保持无知），
+  同时接入 Zotero 独立附件同步与本地文档上传两条路径。
+
+### 核实到的根因（必须先记录）
+
+用只读方式核对用户本机 Zotero 库（`/mnt/c/Users/Drgar/Zotero/zotero.sqlite`）确认：129 个 PDF
+附件里 99 个（77%）是「独立附件」（无 parent item）；`kacore/pipelines/zotero_sync_pipeline.py:427`
+的 `item_key = att.parent_item_key or att.attachment_key` 让这类文档的 `zotero_item_key` 指向附件
+自己的 key，而 `zotero_items` 镜像表（`sqlite_reader.py:_read_items` / `web_api.py:_items`）显式
+排除 `itemType == 'attachment'`，查表恒 miss → `get_zotero_item_meta()` 恒返回 `None` →
+creators 恒空 → Harvard 降级为 `Anon., n.d.`。用户这批独立附件的文件名本身是书目信息（如
+`Peng, Hou, Zhou and Shang (2026) - Title.pdf`），118 个样本里 107 个（91%）能干净匹配
+`Author(s) (Year) - Title` 模式，可确定性提取而非编造。
+
+### Technical implementation path
+
+- [x] **Phase 1 — 文件名书目解析器**：新增 `kacore/domain/filename_biblio.py`
+  （zero-dependency，风格对齐 `citation.py`）：`FilenameBiblio` frozen dataclass +
+  `parse_filename_biblio()`，识别 `Author(s) (Year) - Title` / `Author(s) - Year - Title`
+  两种格式，处理字面 `n.d.`、年份区间、`et al.` 截断、Zotero 去重数字前缀；解析不确信返回
+  `None`，不臆造。`test_filename_biblio.py`（16 例）全绿，ruff/mypy strict 通过。
+- [x] **Phase 2 — 接入 ingest 管线**：`kacore/managers/ingest_manager.py` 新增
+  `resolve_filename_biblio_hint()` 辅助函数（本地上传与 Zotero 同步共用）；`process_attachment()`
+  新增 `biblio_hint` 参数叠加进 `local_meta`；`ingest()`（本地上传）与
+  `kacore/pipelines/zotero_sync_pipeline.py:_sync_documents()`（Zotero 同步）两个调用方分别用
+  各自的文件名跑解析器、传入 hint，解析成功时用干净标题替换原始文件名标题（权威 `item.title`
+  始终优先）。`test_ingest_manager.py`/`test_zotero_sync.py` 补齐端到端回归（含独立附件解析
+  与「有权威数据时绝不被文件名覆盖」两条用例），全绿。
+- [x] **Phase 3 — 优先级仲裁**：`kacore/api.py:_document_biblio_meta()` 的 Zotero 分支在
+  `creators`/`year` 为空时回退读 `doc.local_meta`（即 Phase 2 写入的 hint）；Zotero 权威数据
+  始终优先，hint 只补空。`test_api.py` 新增两条端到端回归（独立附件走 hint 补出 Harvard 引用；
+  有真实 Zotero 数据时诱导性 hint 绝不覆盖），全绿。
+- [x] **Phase 4 — 测试**：见 Phase 1-3 各自落地的测试（`test_filename_biblio.py` 16 例、
+  `test_ingest_manager.py`/`test_zotero_sync.py`/`test_api.py` 新增用例），已随每个 Phase 跑绿，
+  不再单列。
+- [x] **Phase 5 — 收尾**：`ruff check .` 与 `mypy` 全绿；全量 `pytest` **927 passed / 2 skipped**，
+  2 个 pre-existing failed 均为本 venv 未装 `torch`（`test_embedding.py` 的本地 Embedding 用例，
+  与本轮改动无关，与 v1.1.3 收尾记录的已知缺口一致）。`CHANGELOG.md` 顶部已追加
+  `## [Unreleased]` 条目（原文件无此惯例，`bump_version.py` 的 `_release_changelog()` 按设计
+  期待它存在，此前从未被用过——本轮按工具脚本的实际预期补上，供下次版本发布时自动消费）。
+
+详细方案见本轮规划记录（技术理由、正则细节、已知限制均已在实现前与用户对齐）。
+
+## v1.1.3：前端 i18n 泄漏收口 (completed)
+
+### User constraints / 约束
+
+- 本轮**只做前端**，MinerU2.5 结构化抽取计划挂起（调研结论见本节末「已挂起」）。
+- 原计划四项（i18n → Modal a11y → PdfViewer 窗口化 → README）**经用户决定收窄为只做 i18n**，
+  其余三项已核实确有必要、方案已写明，但本轮**不执行**（见下方 Phase 2–4 的 `[ ]`）。
+- **视觉必须零变化**：文案迁移不得改动任何既有布局、间距、颜色与交互手感。
+- 巨型组件拆分（ChatPanel/FilePanel/SettingModal 等）**本轮只登记不执行**。
+
+### 核实到的现状（必须先记录）
+
+- **i18n 泄漏**：项目维护 `lib/i18n.ts` 的 zh+en 双份共 1292 键，但 7 个组件绕过它直接硬编码
+  中文。`AstrBotModal.tsx` 几乎整个面板（title/label/hint/option/toast 约 35 处）、
+  `PerfPanel.tsx`（指标名表 + 面板标题共 7 处）、`PdfViewer.tsx:207-233`（5 个工具栏 label）、
+  `ZoteroQuickConfig.tsx`（账号变更弹窗 6 处）、`DocumentsPanel.tsx:322-324`、
+  `FilePanel.tsx:1210`、`ProgressDock.tsx:271`。**英文用户会看到中文**——这是功能缺陷不是风格问题。
+- **Modal 无障碍缺失**：`components/ds/Modal.tsx` 只实现了 Escape 关闭，无 `role="dialog"`、
+  无 `aria-modal`、无 `aria-labelledby`、无 focus trap、无关闭后焦点归还。该文件是**全站唯一**
+  弹窗基座（SettingModal / ModelsModal / WorkflowModal / AstrBotModal / ThemeGallery /
+  DirPickerDialog / FullTextConfirmDialog 全部经它渲染），改一处全站受益。
+- **PdfViewer 全页挂载**：`PdfViewer.tsx:266` `Array.from({ length: pageCount })` 无条件为
+  **每一页**建 DOM 容器。实测样本库论文平均 28 页、最长 54 页，即单次打开挂 54 个页容器。
+- **前端 README 是 create-next-app 原始样板**：通篇讲 Vercel 部署，与本项目实际的
+  `npm run build` → `tools/sync_frontend.py` → `pages/` 流程无关（违反 CONVENTIONS §2）。
+
+### Technical implementation path
+
+- [x] **Phase 1 — i18n 泄漏收口**（`lib/i18n.ts` + 11 个文件）：把全部用户可见中文迁进
+  `i18n.ts` 的 zh/en 双份。**只迁用户可见字符串**——中文注释按 CONVENTIONS §6 语言约定保留。
+  `en` 是 `Record<keyof typeof zh, string>`，漏一个键 tsc 直接红，故无需额外校验机制。
+  📌 **实测口径修正**：登记时按初次扫描估 ~58 处，严格全量审计后实为 **116 处**——
+  初次扫描漏掉了 `SettingModal.tsx` 整个文件（111 处，全模块无任何 `lang` 分支）。
+  最终迁移 116 处、新增 **201 个 key**（zh/en 各 201），i18n.ts 键数 650 → 851。
+  另有 44 处经核查**不属于泄漏**，不迁：`components/flow/model.ts` 21 处已有
+  `BACKEND_LABEL_ZH`/`BACKEND_LABEL_EN` 双字典按 `lang` 选择（合法的值→标签映射）；
+  `lib/api.ts` 18 处是 `?mock` 演示假数据（假论文标题/假 chunk 正文）；
+  `app/layout.tsx` 2 处是 Next.js 服务端静态 `metadata`、`lib/api.ts` 2 处在 Error
+  子类构造器内，**两者都拿不到 i18n hook，属技术限制**。
+  顺带：`t` 的 props 类型此前内联重复 9 次且比真实签名窄（`(k: I18nKey) => string`，
+  丢了插值参数），按 CONVENTIONS §1「重复 3 次即提取」提为 `lib/i18n.ts` 导出的 `TFunc`。
+- [ ] **Phase 2 — Modal 无障碍基线**（⏸ 用户决定本轮不做，方案保留）（`components/ds/Modal.tsx`）：`role="dialog"` +
+  `aria-modal="true"` + `aria-labelledby` 指向标题 + focus trap（Tab/Shift+Tab 循环）+
+  打开时聚焦首个可聚焦元素 + 关闭后焦点归还触发元素。**样式与 DOM 结构零改动**，只加属性与
+  键盘事件。技术理由：改一个基座文件，7 个弹窗一次性受益，回归面最小。
+- [ ] **Phase 3 — PdfViewer 页面窗口化**（⏸ 用户决定本轮不做，方案保留）（`components/panels/PdfViewer.tsx`）：只为
+  `currentPage ± PAGE_WINDOW` 挂载真实页容器，窗口外渲染**等高占位 div** 保持滚动条几何不变。
+  技术理由：占位高度必须精确，否则 `scrollToPage` 与 annotation 跳转会错位——那是引用溯源的
+  落点，契约不能破。
+- [ ] **Phase 4 — 前端 README 重写**（⏸ 用户决定本轮不做，方案保留）（`web/frontend/README.md`）：说明分层（`app/` 路由壳 /
+  `components/panels` 业务面板 / `components/ds` 设计系统 / `lib` 客户端与状态）、构建同步
+  流程、以及 `AGENTS.md` 那条「这不是你认识的 Next.js」警告的落地含义。
+- [x] **Phase 5 — 验证与收尾**（仅覆盖 Phase 1）：`npx tsc --noEmit` 0 error；
+  `npx eslint .` 仅剩 2 个**既有**问题（`ModelRuntimePanel.tsx:43` set-state-in-effect、
+  `lib/api.ts:512` 未使用常量，两个文件本轮均未改动）；`npm run build` 13 路由全静态导出成功；
+  `tools/sync_frontend.py` 同步并 `--check` 一致；`pytest` 全绿（2 个 pre-existing failed 为
+  本 venv 未装 `torch`，见 `test_embedding.py` 的本地 Embedding 用例，与纯前端改动无关）。
+
+### 📌 技术债登记（CONVENTIONS §4，本轮只登记不执行）
+
+前端超 600 行红线且此前未登记的文件（`lib/api.ts` 2207 / `lib/i18n.ts` 1425 已于 v1.0.x
+登记为暂缓，不重复计入）：
+
+| 文件 | 行数 | 拆分方向 |
+| --- | --- | --- |
+| `components/panels/ChatPanel.tsx` | 1404 | → `components/panels/chat/`：`ChatPanel` 壳 / `ThinkingTraceView` / `AnswerRenderer` / `AskControls` / `useAskTask`（参照 v1.0.x 已成功的 `ui/terminal/` 拆分先例） |
+| `components/panels/FilePanel.tsx` | 1375 | 上传区 / 文档列表 / R2 备份区 |
+| `components/modals/SettingModal.tsx` | 1105 | 按 Tab 拆卡片组件 |
+| `components/flow/QuickConfigPanel.tsx` | 719 | 按配置域拆分组 |
+| `components/panels/DocumentsPanel.tsx` | 641 | 阅读视图 / 列表视图 |
+
+400–600 警告区（暂不处理）：`NotePanel` 588、`ProgressDock` 459、`ZoteroQuickConfig` 439、
+`PdfViewer` 428、`FlowDiagram` 419。
+
+### 🔒 已挂起：MinerU2.5 结构化抽取（调研完成，暂不执行）
+
+调研结论保留备查，触发条件满足后再开：
+
+- **技术支点**：`chunking.py` 现在靠 13 条正则从 Markdown 猜结构，而 MinerU 的
+  `content_list.json` 显式声明结构，两边词汇表几乎一一对应（`text`+`text_level` →
+  `section_heading`、`image`+`image_caption` → `figure_caption`、`table` → `table_caption`、
+  `equation` → `equation`）。故接缝在 `parse_markdown_blocks()`——**换结构来源，不换分块算法**。
+- **收益**：表格转结构化 Markdown、公式转 LaTeX（当前静默缺口）、双栏阅读顺序、矢量图 bbox、
+  扫描件原生 OCR。
+- **代价**：比 PyMuPDF4LLM 慢约 600 倍（实测 1.2s/623 页 vs 估算 700–1000s/623 页 @5060Ti）。
+  必须默认关。
+- **前置验证**：先做「caption 锚定启发式 vs MinerU bbox」的 IoU 三方对照，用数据决定是否引入。
+- **待确认**：`mineru` 包在 `vlm-http-client`（client-only）模式下是否仍拖 torch 进依赖树。
+
+
 ## v1.1.2：Milvus 索引自动重建
 
 ### User constraints / 约束

@@ -2,11 +2,11 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 import { browseDir, type FsBrowseResult } from "@/lib/api";
-import type { I18nKey } from "@/lib/i18n";
+import type { TFunc } from "@/lib/i18n";
 
 interface DirPickerDialogProps {
   initialPath?: string;
-  t: (k: I18nKey) => string;
+  t: TFunc;
   onSelect: (path: string) => void;
   onClose: () => void;
 }

@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { ToastProvider } from "@/components/ui/Toast";
-import { I18nContext, Lang, makeT } from "@/lib/i18n";
+import { I18nContext, Lang, makeT, useI18n } from "@/lib/i18n";
 import { initColorTheme } from "@/lib/theme";
 import { getAuth } from "@/lib/api";
 import { ConsoleProvider, useConsole } from "@/lib/ConsoleContext";
@@ -215,6 +215,7 @@ function ConsoleCanvas({ onLogout }: { onLogout: () => void }) {
 // ─── Console Shell (auth gate) ────────────────────────────────
 
 function ConsoleShell() {
+  const { t } = useI18n();
   const [authChecked, setAuthChecked] = useState(false);
   const [loggedIn, setLoggedIn] = useState(false);
 
@@ -248,7 +249,7 @@ function ConsoleShell() {
           fontSize: 13,
         }}
       >
-        加载中...
+        {t("panel_loading")}
       </div>
     );
   }

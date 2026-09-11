@@ -2700,6 +2700,78 @@ async def test_ask_enriches_zotero_document_with_full_bibliography() -> None:
     ]
 
 
+async def test_ask_falls_back_to_filename_hint_when_zotero_item_missing() -> None:
+    """独立附件（无 parent item）在 `zotero_items` 镜像表里查不到——这正是 Anon./n.d. 的根因。
+
+    同步管线会把文件名解析出的书目猜测写进 `local_meta`；`_document_biblio_meta()` 应在 Zotero
+    镜像查不到数据时回退读它，而不是直接空手返回。
+    """
+    store = InMemorySourceDocumentStore()
+    doc = _doc("z1", "kb1")
+    doc.title = "A Standalone Paper"
+    doc.origin = DocumentOrigin.ZOTERO
+    doc.library_id = "1"
+    doc.zotero_item_key = "MISSINGKEY"  # 独立附件回退用的是附件自己的 key，查不到镜像行
+    doc.local_meta = {
+        "chunk_schema": "clean_md_structural_v3",
+        "creators": ["Smith"],
+        "year": "2020",
+    }
+    await store.add_document(doc)
+    kb = InMemoryKnowledgeBaseReader(
+        {"kb1": [DocumentChunk("c0", "z1", 0, "relevant text", "h0", metadata={"pages": [1]})]}
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=store, kb_reader=kb, llm_adapter=_HarvardLLM()  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(question="relevant", collection="kb1")
+
+    assert "(Smith, 2020, p. 1)" in result["answer"]
+    assert "Anon." not in result["answer"]
+    assert result["references"] == ["Smith (2020) A Standalone Paper."]
+
+
+async def test_ask_prefers_real_zotero_creators_over_filename_hint() -> None:
+    """有真实 Zotero 书目数据时，文件名解析出的 hint 绝不能覆盖它——权威数据永远优先。"""
+    from kacore.domain.models import ZoteroItem
+
+    store = InMemorySourceDocumentStore()
+    doc = _doc("z1", "kb1")
+    doc.title = "Attention is all you need"
+    doc.origin = DocumentOrigin.ZOTERO
+    doc.library_id = "1"
+    doc.zotero_item_key = "K1"
+    # 诱导性 hint：如果合并逻辑写反了（hint 优先），这里会暴露成 "Decoy, 1999"。
+    doc.local_meta = {
+        "chunk_schema": "clean_md_structural_v3",
+        "creators": ["Decoy"],
+        "year": "1999",
+    }
+    await store.add_document(doc)
+    await store.upsert_zotero_item(
+        ZoteroItem(
+            item_key="K1",
+            library_id="1",
+            item_type="journalArticle",
+            title="Attention is all you need",
+            creators=["Vaswani, Ashish"],
+            year="2017",
+        )
+    )
+    kb = InMemoryKnowledgeBaseReader(
+        {"kb1": [DocumentChunk("c0", "z1", 0, "relevant text", "h0", metadata={"pages": [1]})]}
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=store, kb_reader=kb, llm_adapter=_HarvardLLM()  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(question="relevant", collection="kb1")
+
+    assert "(Vaswani, 2017, p. 1)" in result["answer"]
+    assert "Decoy" not in result["answer"]
+
+
 async def test_ask_references_are_embedded_in_stored_history() -> None:
     store = InMemorySourceDocumentStore()
     await store.add_document(_local_doc_with_meta("d1", "kb1", {"title": "T", "year": "2020"}))

@@ -149,7 +149,7 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
       await resolveZoteroAccountChange(accountChange.change_id, action);
       if (action === "replace_local") {
         setServerKeyDraft("");
-        toast("Zotero 本地镜像已重置，新账号同步已启动", "ok");
+        toast(t("zotero_mirror_reset_ok"), "ok");
       }
       setAccountChange(null);
       await onRefresh?.();
@@ -158,7 +158,7 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
     } finally {
       setServerKeyBusy(false);
     }
-  }, [accountChange, onRefresh, toast]);
+  }, [accountChange, onRefresh, t, toast]);
 
   const handleServerKeyDelete = useCallback(async () => {
     setServerKeyBusy(true);
@@ -420,17 +420,17 @@ export const ZoteroQuickConfig = forwardRef<QuickConfigHandle, QuickConfigPanelP
       )}
       {accountChange && (
         <Modal
-          title="检测到 Zotero 账号变化"
+          title={t("zotero_account_change_title")}
           icon="book"
           width={500}
           height="auto"
           onClose={() => handleAccountChange("cancel")}
-          footer={<><Button variant="outline" onClick={() => handleAccountChange("cancel")}>取消更改</Button><Button variant="danger" onClick={() => handleAccountChange("replace_local")}>覆盖并重置本地 Zotero 库</Button></>}
+          footer={<><Button variant="outline" onClick={() => handleAccountChange("cancel")}>{t("zotero_account_change_cancel")}</Button><Button variant="danger" onClick={() => handleAccountChange("replace_local")}>{t("zotero_account_change_replace")}</Button></>}
         >
           <div style={{ padding: 22, color: "var(--fg)", fontSize: 13, lineHeight: 1.7 }}>
-            <p>当前账号：{accountChange.current_account.account_name || accountChange.current_account.account_id}</p>
-            <p>新账号：{accountChange.new_account.account_name || accountChange.new_account.account_id}</p>
-            <p style={{ color: "var(--danger)" }}>继续会删除全部本地 Zotero 镜像及其 Milvus / LightRAG 索引；LOCAL 数据不受影响。确认后将自动拉取新账号。</p>
+            <p>{t("zotero_account_current", { account: accountChange.current_account.account_name || accountChange.current_account.account_id })}</p>
+            <p>{t("zotero_account_new", { account: accountChange.new_account.account_name || accountChange.new_account.account_id })}</p>
+            <p style={{ color: "var(--danger)" }}>{t("zotero_account_change_warning")}</p>
           </div>
         </Modal>
       )}

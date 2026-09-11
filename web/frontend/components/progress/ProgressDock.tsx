@@ -268,7 +268,7 @@ export function ProgressDock() {
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button
           onClick={() => setCollapsed((v) => !v)}
-          aria-label={collapsed ? "展开" : "收起"}
+          aria-label={collapsed ? t("progress_dock_expand") : t("progress_dock_collapse")}
           style={{
             background: "none", border: "none", cursor: "pointer",
             color: "var(--fg-muted)", fontSize: 11, lineHeight: 1, padding: 0,

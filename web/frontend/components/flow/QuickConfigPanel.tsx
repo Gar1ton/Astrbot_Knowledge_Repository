@@ -1,7 +1,7 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { EffectiveConfig, PipelineStage } from "@/lib/api";
-import type { I18nKey, Lang } from "@/lib/i18n";
+import type { I18nKey, Lang, TFunc } from "@/lib/i18n";
 import { backendLabel, type FlowStageId } from "./model";
 import { DirPickerDialog } from "./DirPickerDialog";
 import { ZoteroQuickConfig } from "./ZoteroQuickConfig";
@@ -275,7 +275,7 @@ export function fieldInitialValue(field: QuickConfigField): string | boolean {
   return field.kind === "boolean" ? field.value : field.value;
 }
 
-function graphModeLabel(value: string, t: (k: I18nKey) => string): string {
+function graphModeLabel(value: string, t: TFunc): string {
   const key = `graph_mode_${value}` as I18nKey;
   return t(key);
 }
@@ -370,7 +370,7 @@ export function FieldControl({
   field: QuickConfigField;
   value: string | boolean;
   lang: Lang;
-  t: (k: I18nKey) => string;
+  t: TFunc;
   saving: boolean;
   onChange: (value: string | boolean) => void;
   onBrowseDir?: () => void;
@@ -555,7 +555,7 @@ export function QuickConfigFieldGrid({
   draft: QuickConfigValues;
   setDraft: React.Dispatch<React.SetStateAction<QuickConfigValues>>;
   lang: Lang;
-  t: (k: I18nKey) => string;
+  t: TFunc;
   saving: boolean;
   onBrowseDir?: (fieldId: string) => void;
 }) {
@@ -609,7 +609,7 @@ export type QuickConfigPanelProps = {
   stage: PipelineStage;
   config: FlowConfigSnapshot;
   lang: Lang;
-  t: (k: I18nKey) => string;
+  t: TFunc;
   saving: boolean;
   onSave: (stageId: FlowStageId, updates: QuickConfigUpdate[]) => void;
   onRefresh?: () => Promise<void>;

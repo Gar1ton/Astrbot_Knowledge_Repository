@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { DependencyStatus, PipelineStage } from "@/lib/api";
 import type { FlowConfigSnapshot, QuickConfigDirty, QuickConfigHandle, QuickConfigUpdate } from "./QuickConfigPanel";
-import type { I18nKey, Lang } from "@/lib/i18n";
+import type { I18nKey, Lang, TFunc } from "@/lib/i18n";
 import {
   backendLabel,
   buildDetailParts,
@@ -30,7 +30,7 @@ const STATUS_KEY: Record<FlowStageStatus, I18nKey> = {
   info: "flow_status_info",
 };
 
-function StatusChip({ status, t }: { status: FlowStageStatus; t: (k: I18nKey) => string }) {
+function StatusChip({ status, t }: { status: FlowStageStatus; t: TFunc }) {
   return (
     <span className={`flow-status-chip ${STATUS_CLASS[status]}`}>
       <span className="flow-status-dot" />
@@ -110,7 +110,7 @@ function DepRow({
 }: {
   dep: DependencyStatus;
   installing: string | null;
-  t: (k: I18nKey) => string;
+  t: TFunc;
   onInstall: (dep: DependencyStatus) => void;
 }) {
   const depName = t(`flow_dep_${dep.key}` as I18nKey);
@@ -169,7 +169,7 @@ export function FlowNode({
   stage: PipelineStage;
   depMap: Map<string, DependencyStatus>;
   lang: Lang;
-  t: (k: I18nKey) => string;
+  t: TFunc;
   saving: boolean;
   installing: string | null;
   justActivatedValue: string | null;

@@ -8,6 +8,7 @@ import { Icon } from "@/components/ds/Icon";
 import { Select } from "@/components/ds/Select";
 import { Toggle } from "@/components/ds/Toggle";
 import { useToast } from "@/components/ui/Toast";
+import { useI18n } from "@/lib/i18n";
 import { getEffectiveConfig, updateConfigValue, EffectiveConfig } from "@/lib/api";
 
 interface AstrBotModalProps {
@@ -32,6 +33,7 @@ const INPUT_STYLE: React.CSSProperties = {
 // ─── AstrBotModal ─────────────────────────────────────────────
 
 export function AstrBotModal({ onClose }: AstrBotModalProps) {
+  const { t } = useI18n();
   const { toast } = useToast();
   const [config, setConfig] = useState<EffectiveConfig | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
@@ -79,11 +81,11 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
     setSaving(id);
     try {
       const r = await updateConfigValue(section, key, value);
-      if (r.rebuild_required) toast("配置已保存，Milvus 索引需重建", "info");
-      else if (r.restart_required) toast("配置已保存，需重启插件生效", "info");
-      else toast("已保存", "ok");
+      if (r.rebuild_required) toast(t("astrbot_saved_rebuild"), "info");
+      else if (r.restart_required) toast(t("astrbot_saved_restart"), "info");
+      else toast(t("astrbot_saved"), "ok");
     } catch (e) {
-      toast(e instanceof Error ? e.message : "保存失败", "error");
+      toast(e instanceof Error ? e.message : t("astrbot_save_failed"), "error");
     } finally {
       setSaving(null);
     }
@@ -98,21 +100,21 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
 
   return (
     <Modal
-      title="AstrBot 配置"
+      title={t("astrbot_modal_title")}
       icon="spark2"
       onClose={onClose}
       width={760}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
-            取消
+            {t("btn_cancel")}
           </Button>
           <Button
             variant="primary"
             loading={saving !== null}
             onClick={onClose}
           >
-            完成
+            {t("astrbot_btn_done")}
           </Button>
         </>
       }
@@ -133,31 +135,31 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
         >
           <Icon name="spark2" size={16} style={{ color: "var(--warn)", marginTop: 1 }} />
           <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.55 }}>
-            修改 Embedding 提供商 / 模型 / 接口后，Milvus 与各集合的 LightRAG 索引均需手动重建。部分项需重启插件生效。
+            {t("astrbot_warning")}
           </div>
         </div>
 
         {/* Embedding */}
         <Card
-          title="Embedding 运行时"
+          title={t("astrbot_card_embedding")}
           icon="layers"
           badge={
             <Badge tone={embProvider === "local" ? "ok" : "accent"}>
-              {embProvider === "local" ? "本地" : "API"}
+              {embProvider === "local" ? t("astrbot_badge_local") : t("astrbot_badge_api")}
             </Badge>
           }
         >
-          <Field label="提供商" hint="本地离线 (sentence-transformers) 或云端 API">
+          <Field label={t("astrbot_field_provider")} hint={t("astrbot_field_provider_hint")}>
             <Select
               value={embProvider}
               onChange={(v) => { setEmbProvider(v); save("embedding", "provider", v); }}
               options={[
-                { value: "local", label: "本地 Embedding" },
-                { value: "api", label: "API Embedding" },
+                { value: "local", label: t("astrbot_opt_local_embedding") },
+                { value: "api", label: t("astrbot_opt_api_embedding") },
               ]}
             />
           </Field>
-          <Field label="模型名称">
+          <Field label={t("astrbot_field_model")}>
             <input
               style={INPUT_STYLE}
               value={embModel}
@@ -165,10 +167,10 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
               onBlur={() => save("embedding", "model", embModel)}
             />
           </Field>
-          <Field label="向量维度" hint="由模型决定，只读">
+          <Field label={t("astrbot_field_dim")} hint={t("astrbot_field_dim_hint")}>
             <Badge tone="neutral">{String(embDim)}</Badge>
           </Field>
-          <Field label="API Key" hint="仅从环境变量 KR_EMBEDDING_API_KEY 读取">
+          <Field label={t("astrbot_field_api_key")} hint={t("astrbot_field_api_key_hint")}>
             <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--fg-subtle)" }}>
               env-only
             </span>
@@ -176,8 +178,8 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
         </Card>
 
         {/* Vector DB */}
-        <Card title="向量数据库与检索后端" icon="db">
-          <Field label="向量后端" hint="Milvus Lite 为默认必装向量库；AstrBot KB 仅保留为后端兜底，前端暂不可选择。">
+        <Card title={t("astrbot_card_vector")} icon="db">
+          <Field label={t("astrbot_field_backend")} hint={t("astrbot_field_backend_hint")}>
             <Select
               value={vecBackend === "astr" || vecBackend === "astrbot" ? "milvus" : vecBackend}
               onChange={(v) => { setVecBackend(v); save("vector_db", "backend", v); }}
@@ -186,7 +188,7 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
               ]}
             />
           </Field>
-          <Field label="自动索引" hint="上传后自动建立 Milvus 索引">
+          <Field label={t("astrbot_field_auto_index")} hint={t("astrbot_field_auto_index_hint")}>
             <Toggle
               checked={autoIdx}
               onChange={(v) => { setAutoIdx(v); save("vector_db", "auto_index", v); }}
@@ -200,29 +202,29 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
           icon="graph"
           badge={
             <Badge tone={graphOn ? "violet" : "neutral"}>
-              {graphOn ? "已启用" : "关闭"}
+              {graphOn ? t("astrbot_badge_graph_on") : t("astrbot_badge_graph_off")}
             </Badge>
           }
         >
-          <Field label="启用图谱索引" hint="手动触发构建，不随上传自动构建（成本隔离）">
+          <Field label={t("astrbot_field_graph_enabled")} hint={t("astrbot_field_graph_enabled_hint")}>
             <Toggle
               checked={graphOn}
               onChange={(v) => { setGraphOn(v); save("graph", "enabled", v); }}
             />
           </Field>
-          <Field label="检索模式" hint="mix 向量+图谱（推荐）">
+          <Field label={t("astrbot_field_lr_mode")} hint={t("astrbot_field_lr_mode_hint")}>
             <Select
               value={lrMode}
               onChange={(v) => { setLrMode(v); save("graph", "lightrag_mode", v); }}
               options={[
-                { value: "mix", label: "mix — 混合（推荐）" },
-                { value: "local", label: "local — 本地图谱" },
-                { value: "global", label: "global — 全局" },
-                { value: "naive", label: "naive — 纯向量" },
+                { value: "mix", label: t("astrbot_opt_lr_mix") },
+                { value: "local", label: t("astrbot_opt_lr_local") },
+                { value: "global", label: t("astrbot_opt_lr_global") },
+                { value: "naive", label: t("astrbot_opt_lr_naive") },
               ]}
             />
           </Field>
-          <Field label="LLM 并发上限" hint="默认 4，调高更快但易限流">
+          <Field label={t("astrbot_field_llm_parallel")} hint={t("astrbot_field_llm_parallel_hint")}>
             <input
               style={{ ...INPUT_STYLE, width: 80, textAlign: "center" }}
               value={lrParallel}
@@ -230,7 +232,7 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
               onBlur={() => save("graph", "llm_parallel", lrParallel)}
             />
           </Field>
-          <Field label="工作目录" hint="只读，需改配置文件并重启">
+          <Field label={t("astrbot_field_workspace")} hint={t("astrbot_field_workspace_hint")}>
             <span style={{ fontSize: 12, fontFamily: "var(--font-mono)", color: "var(--fg-subtle)" }}>
               {(graphCfg.workspace as string) ?? "lightrag_workspaces"}
             </span>
@@ -239,17 +241,17 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
 
         {/* Research Agent */}
         <Card title="Research Agent (Ask)" icon="sparkle">
-          <Field label="对话增强模式">
+          <Field label={t("astrbot_field_ask_mode")}>
             <Select
               value={agentMode}
               onChange={(v) => { setAgentMode(v); save("ask", "ask_mode", v); }}
               options={[
-                { value: "inject", label: "注入增强" },
-                { value: "agent", label: "代理增强" },
+                { value: "inject", label: t("astrbot_opt_ask_inject") },
+                { value: "agent", label: t("astrbot_opt_ask_agent") },
               ]}
             />
           </Field>
-          <Field label="默认 Top-K">
+          <Field label={t("astrbot_field_topk")}>
             <input
               style={{ ...INPUT_STYLE, width: 80, textAlign: "center" }}
               value={topK}
@@ -257,7 +259,7 @@ export function AstrBotModal({ onClose }: AstrBotModalProps) {
               onBlur={() => save("ask", "top_k", topK)}
             />
           </Field>
-          <Field label="展示引用来源" hint="cite_sources">
+          <Field label={t("astrbot_field_cite")} hint="cite_sources">
             <Toggle
               checked={citeSources}
               onChange={(v) => { setCiteSources(v); save("ask", "cite_sources", v); }}

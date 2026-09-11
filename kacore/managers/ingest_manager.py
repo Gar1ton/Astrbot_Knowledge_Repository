@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kacore.domain.filename_biblio import parse_filename_biblio
 from kacore.domain.models import (
     DocumentChunk,
     DocumentOrigin,
@@ -70,6 +71,22 @@ def make_document_id(library_id: str, item_key: str, attachment_key: str) -> str
     return f"{library_id}_{item_key}_{attachment_key}"
 
 
+def resolve_filename_biblio_hint(filename: str) -> tuple[str | None, dict[str, Any] | None]:
+    """尝试从文件名解析书目猜测，返回 `(干净标题, biblio_hint)`；解析失败时两者均为 `None`。
+
+    供本地上传与 Zotero 同步共用（两者都可能拿不到权威书目元数据，参见
+    `kacore.domain.filename_biblio` 的 docstring）。`biblio_hint` 与
+    `KnowledgeRepositoryApi.update_document_meta` 白名单同名（`creators`/`year`），
+    落进 `SourceDocument.local_meta` 后由 `_document_biblio_meta()` 按「权威数据优先，
+    此 hint 只补空」的规则合并，绝不覆盖真实书目数据。
+    """
+    parsed = parse_filename_biblio(filename)
+    if parsed is None:
+        return None, None
+    hint: dict[str, Any] = {"creators": list(parsed.authors), "year": parsed.year}
+    return parsed.title, hint
+
+
 class IngestManager(BaseIngestManager):
     """具体的文档摄入与切块管理器（制品包 + clean.md offset 分块）。"""
 
@@ -115,6 +132,11 @@ class IngestManager(BaseIngestManager):
         attachment_key = gen_zotero_key()
         document_id = make_document_id(LOCAL_LIBRARY_ID, item_key, attachment_key)
 
+        # 上传时无书目元数据可言：原始文件名（title）如果长得像「作者 (年份) - 标题」，
+        # 就顺带把干净标题与作者/年份猜测取出来，好过整篇挂着带扩展名的原始文件名。
+        guessed_title, biblio_hint = resolve_filename_biblio_hint(title)
+        resolved_title = guessed_title or title
+
         # 本地上传同样写入 Zotero 镜像（origin=local），使作用域检索/同步一视同仁。
         await self._source_store.upsert_zotero_library(
             ZoteroLibrary(library_id=LOCAL_LIBRARY_ID, library_type="LOCAL", name="本地上传")
@@ -124,7 +146,7 @@ class IngestManager(BaseIngestManager):
                 item_key=item_key,
                 library_id=LOCAL_LIBRARY_ID,
                 item_type="attachment",
-                title=title,
+                title=resolved_title,
                 origin=DocumentOrigin.LOCAL,
             )
         )
@@ -145,11 +167,12 @@ class IngestManager(BaseIngestManager):
             attachment_key=attachment_key,
             origin=DocumentOrigin.LOCAL,
             read_only=False,
-            title=title,
+            title=resolved_title,
             content_type=content_type,
             src_path=source_path,
             collection=collection,
             tags=list(tags or []),
+            biblio_hint=biblio_hint,
         )
         return document_id
 
@@ -171,6 +194,7 @@ class IngestManager(BaseIngestManager):
         tags: list[str],
         zotero_version: int = 0,
         meta_extra: dict[str, Any] | None = None,
+        biblio_hint: dict[str, Any] | None = None,
         last_synced_at: datetime | None = None,
         link_original: bool = False,
     ) -> SourceDocument:
@@ -180,6 +204,11 @@ class IngestManager(BaseIngestManager):
 
         link_original=True（Zotero linked 存储模式）：不拷贝原件，file_path 指向 Zotero 外部路径，
         但 clean.md/pages.json/meta.json 仍写入插件制品包目录；回滚不删除外部原件。
+
+        biblio_hint：调用方（`ingest()` / Zotero 同步管线）算好的书目猜测（形如
+        `{"creators": [...], "year": "..."}`，见 `resolve_filename_biblio_hint()`），本方法
+        只负责原样存进 `local_meta`，不关心它是怎么算出来的——是否采信、如何与权威数据合并，
+        由 `KnowledgeRepositoryApi._document_biblio_meta()` 决定。
         """
         bundle_dir = self._library_dir / document_id
         bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -271,7 +300,7 @@ class IngestManager(BaseIngestManager):
                 converter=artifact.converter,
                 converter_version=artifact.converter_version,
                 last_synced_at=last_synced_at,
-                local_meta={"chunk_schema": _CHUNK_SCHEMA},
+                local_meta={"chunk_schema": _CHUNK_SCHEMA, **(biblio_hint or {})},
             )
             # 幂等：本地首次为 add；Zotero 重同步为 update（覆盖已存在制品包）。
             existing = await self._source_store.get_document(document_id)

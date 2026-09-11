@@ -62,7 +62,7 @@ from kacore.utils import text_chunks
 # inspect.signature(handler, eval_str=True)，会在模块全局命名空间里对注解求值；
 # 放进 TYPE_CHECKING 会导致运行时 NameError，插件直接加载失败。
 
-_PLUGIN_VERSION = "v1.1.2"
+_PLUGIN_VERSION = "v1.1.3"
 logger = logging.getLogger(__name__)
 _RESEARCH_MESSAGE_CHUNK_LIMIT = 1600
 _RESEARCH_PARAGRAPH_LIMIT = 700

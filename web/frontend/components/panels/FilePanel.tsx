@@ -1207,7 +1207,7 @@ export function FilePanel() {
           <IconButton name="cloud" label={t("file_action_r2_backup")} onClick={async () => {
             try {
               await backupNow(false);
-              toast("R2 完整备份已启动", "ok");
+              toast(t("r2_full_backup_started"), "ok");
             } catch (err: unknown) {
               toast(err instanceof Error ? err.message : String(err), "error");
             }

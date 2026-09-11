@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DependencyStatus, PipelineStage } from "@/lib/api";
 import type { FlowConfigSnapshot, QuickConfigUpdate } from "./QuickConfigPanel";
-import type { I18nKey, Lang } from "@/lib/i18n";
+import type { Lang, TFunc } from "@/lib/i18n";
 import { FitIcon, MinusIcon, PlusIcon } from "./Icons";
 import { EDGES, GRID, isFlowStageId, STAGE_META, type FlowStageId, type FlowStageStatus } from "./model";
 import { FlowNode } from "./FlowNode";
@@ -80,7 +80,7 @@ export function FlowDiagram({
   stages: PipelineStage[];
   dependencies: DependencyStatus[];
   lang: Lang;
-  t: (k: I18nKey) => string;
+  t: TFunc;
   savingId: string | null;
   installingKey: string | null;
   justActivatedId: string | null;

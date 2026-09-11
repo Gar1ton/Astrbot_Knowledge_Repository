@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Icon } from "@/components/ds/Icon";
 import { IconButton } from "@/components/ds/IconButton";
 import { ZoteroAnnotation } from "@/lib/api";
+import { useI18n } from "@/lib/i18n";
 
 interface PdfViewerProps {
   docId: string;
@@ -57,6 +58,7 @@ const MAX_SCALE = 2.4;
 const SCALE_STEP = 0.15;
 
 export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
+  const { t } = useI18n();
   const [scale, setScale] = useState(1);
   const pagesRef = useRef<Record<number, HTMLDivElement | null>>({});
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -204,7 +206,7 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
         </span>
         <IconButton
           name="chevL"
-          label="上一页"
+          label={t("pdf_prev_page")}
           onClick={() => scrollToPage(currentPage - 1)}
           style={{ opacity: currentPage <= 1 ? 0.45 : 1 }}
         />
@@ -213,13 +215,13 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
         </span>
         <IconButton
           name="chevR"
-          label="下一页"
+          label={t("pdf_next_page")}
           onClick={() => scrollToPage(currentPage + 1)}
           style={{ opacity: pageCount && currentPage >= pageCount ? 0.45 : 1 }}
         />
         <IconButton
           name="zoomOut"
-          label="缩小"
+          label={t("pdf_zoom_out")}
           onClick={() => setScale((value) => Math.max(MIN_SCALE, Number((value - SCALE_STEP).toFixed(2))))}
         />
         <span style={{ minWidth: 38, textAlign: "center", fontSize: 11, color: "var(--fg-muted)" }}>
@@ -227,10 +229,10 @@ export function PdfViewer({ docId, title, annotations }: PdfViewerProps) {
         </span>
         <IconButton
           name="zoomIn"
-          label="放大"
+          label={t("pdf_zoom_in")}
           onClick={() => setScale((value) => Math.min(MAX_SCALE, Number((value + SCALE_STEP).toFixed(2))))}
         />
-        <IconButton name="maximize" label="适合宽度" onClick={fitWidth} />
+        <IconButton name="maximize" label={t("pdf_fit_width")} onClick={fitWidth} />
       </div>
 
       <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>

@@ -4,6 +4,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Z } from "@/lib/zLayers";
+import { useI18n, type I18nKey } from "@/lib/i18n";
 
 // ─── 类型 ──────────────────────────────────────────────────────
 
@@ -31,11 +32,11 @@ function fmtMs(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
 }
 
-const OP_LABELS: [string, string][] = [
-  ["embed_query",   "Embedding"],
-  ["vector_search", "向量检索"],
-  ["llm_generate",  "LLM 生成"],
-  ["ask_total",     "Ask 全流程"],
+const OP_LABELS: [string, I18nKey][] = [
+  ["embed_query",   "perf_metric_embedding"],
+  ["vector_search", "perf_metric_vector_search"],
+  ["llm_generate",  "perf_metric_llm_generate"],
+  ["ask_total",     "perf_metric_ask_total"],
 ];
 
 function MiniBar({ ms, max }: { ms: number; max: number }) {
@@ -57,6 +58,7 @@ interface PerfPanelProps {
 // ─── 主组件（内嵌于侧边栏，向右弹出面板） ─────────────────────
 
 export function PerfPanel({ collapsed = false }: PerfPanelProps) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [data, setData] = useState<MetricsSummary | null>(null);
   const [available, setAvailable] = useState(true);
@@ -108,7 +110,7 @@ export function PerfPanel({ collapsed = false }: PerfPanelProps) {
       {/* 触发按钮：样式跟 Rail 底部其他按钮一致 */}
       <button
         onClick={() => setOpen((v) => !v)}
-        title="性能监控"
+        title={t("perf_title")}
         style={{
           display: "flex",
           alignItems: "center",
@@ -134,7 +136,7 @@ export function PerfPanel({ collapsed = false }: PerfPanelProps) {
         }}
       >
         <span style={{ opacity: open ? 1 : 0.7, fontSize: 14 }}>⚡</span>
-        {!collapsed && <span>性能监控</span>}
+        {!collapsed && <span>{t("perf_title")}</span>}
       </button>
 
       {/* 向右弹出的面板 — Portal 渲染到 body，绕开 Rail 的 overflow:hidden 裁切 */}
@@ -159,7 +161,7 @@ export function PerfPanel({ collapsed = false }: PerfPanelProps) {
           {/* 标题栏 */}
           <div style={{ display: "flex", alignItems: "center", padding: "10px 14px 8px", borderBottom: "1px solid var(--border)", gap: 6 }}>
             <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", color: "var(--fg-subtle)", textTransform: "uppercase", flex: 1 }}>
-              ⚡ 性能监控
+              ⚡ {t("perf_title")}
             </span>
             <button
               onClick={() => setOpen(false)}
@@ -175,13 +177,13 @@ export function PerfPanel({ collapsed = false }: PerfPanelProps) {
           <div style={{ padding: "10px 14px" }}>
             {data && data.total_records > 0 ? (
               <>
-                {OP_LABELS.map(([op, label]) => {
+                {OP_LABELS.map(([op, labelKey]) => {
                   const stat = data.ops[op];
                   if (!stat) return null;
                   return (
                     <div key={op} style={{ marginBottom: 8 }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                        <span style={{ fontSize: 11, color: "var(--fg-muted)", fontWeight: 500 }}>{label}</span>
+                        <span style={{ fontSize: 11, color: "var(--fg-muted)", fontWeight: 500 }}>{t(labelKey)}</span>
                         <span style={{ fontSize: 11, fontWeight: 700, color: latencyColor(stat.last_ms), fontVariantNumeric: "tabular-nums" }}>
                           {fmtMs(stat.last_ms)}
                         </span>
@@ -195,15 +197,15 @@ export function PerfPanel({ collapsed = false }: PerfPanelProps) {
                 })}
                 {lastRefresh && (
                   <div style={{ fontSize: 9, color: "var(--fg-subtle)", textAlign: "right", borderTop: "1px solid var(--border)", paddingTop: 6 }}>
-                    刷新于 {lastRefresh.toLocaleTimeString()}
+                    {t("perf_refreshed_at", { time: lastRefresh.toLocaleTimeString() })}
                   </div>
                 )}
               </>
             ) : (
               <div style={{ color: "var(--fg-subtle)", fontSize: 12, textAlign: "center", padding: "12px 0" }}>
-                暂无监控数据
+                {t("perf_empty")}
                 <br />
-                <span style={{ fontSize: 10 }}>发起一次 Ask 查询后即可看到指标</span>
+                <span style={{ fontSize: 10 }}>{t("perf_empty_hint")}</span>
               </div>
             )}
           </div>

@@ -1,5 +1,13 @@
 # TODO
 
+## 2026-09-12 旧 chunk 升级未自动触发修复（completed）
+
+- 根因：上次分块重写未升 `CHUNK_SCHEMA`（用户决定不 bump），`chunk_needs_rebuild` 只看 schema/ID 前缀/offset，旧数据全部判为最新；且启动只在 embedding/collection 变化时才入队，升级插件不会把旧文档推进 `needs_reindex` 队列。
+- [x] Phase 1：`chunk_needs_rebuild` 增加 `local_meta.processing_version != PROCESSING_VERSION` 判据（只读 local_meta，不读 chunk）；`rebuild_document_chunks_from_artifact` 写回 `processing_version`，避免重复判旧。
+- [x] Phase 2：`plugin_initializer` 在自动重建调度器起跑前做一次轻量扫描：单次 `list_documents()`，仅比对 local_meta，把处理版本过期的文档标记 `needs_reindex`；重建完成后版本落盘，之后启动扫描为空（一次性）。
+- [x] Phase 3：补回归用例，跑 pytest / ruff / mypy，追加 CHANGELOG。
+- 验证：新增 3 项用例（`test_ingest_manager.py` ×2、`test_lifecycle_and_cli.py` ×1）；全量 1056 passed / 2 skipped，2 failed 为既有缺 torch 用例（`test_embedding.py`）。`ruff` 本次改动文件全绿（`tools/chunk_preview.py` 3 处 E402 为既有问题，未动）；`mypy` 通过。
+
 ## 2026-09-12 默认模式 top_k 5→6（completed）
 
 - [x] 用户要求默认/普通检索模式（`retrieval_mode="default"`）留存的证据 chunk 数从 5 提到 6，

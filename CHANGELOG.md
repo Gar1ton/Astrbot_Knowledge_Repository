@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### 修复 (Fixed)
+
+- **升级后旧 chunk 不会自动重切/重建索引**：v1.2.0-preview 重写了分块逻辑但未升 `CHUNK_SCHEMA`
+  （保持 `clean_md_structural_v3`），`IngestManager.chunk_needs_rebuild` 只比对 schema/ID 前缀/offset，
+  旧库全部被判为最新；且启动只在 embedding 指纹或 Milvus collection 变化时才把文档推进 `needs_reindex`
+  队列，升级插件后自动重建调度器查到空队列直接收工。修复：`chunk_needs_rebuild` 增加
+  `local_meta.processing_version != PROCESSING_VERSION` 判据（只读 local_meta，不读 chunk）；
+  `rebuild_document_chunks_from_artifact` 重切后写回 `processing_version`；`plugin_initializer`
+  在自动重建调度器起跑前新增 `_mark_stale_processing_documents_needs_reindex()`：单次
+  `list_documents()`、仅比对 local_meta，把处理版本过期的文档标记待重建。重建完成后版本落盘，
+  之后启动扫描为空，因此是一次性迁移。涉及 `kacore/managers/ingest_manager.py`、
+  `kacore/plugin_initializer.py`；新增回归 3 项。
+
 ## [v1.2.0-preview] — 2026-09-12
 
 ### 新增 (Added)

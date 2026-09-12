@@ -387,7 +387,8 @@ class IngestManager(BaseIngestManager):
             artifact=artifact,
         )
         doc.needs_reindex = True
-        doc.local_meta = {**doc.local_meta, "chunk_schema": _CHUNK_SCHEMA}
+        doc.local_meta = {**doc.local_meta, "chunk_schema": _CHUNK_SCHEMA,
+                          "processing_version": PROCESSING_VERSION}
         await self._source_store.commit_document_processing(doc, chunks, [
             PageChunk(doc.doc_id, span.page, span.start, span.end) for span in artifact.page_spans
         ])
@@ -540,8 +541,14 @@ class IngestManager(BaseIngestManager):
         chunks: list[DocumentChunk],
         local_meta: dict[str, Any] | None = None,
     ) -> bool:
-        """判断旧式 chunks 是否需要按当前 clean.md offset schema 重建。"""
+        """判断旧式 chunks 是否需要按当前 clean.md offset schema 重建。
+
+        `processing_version` 判据只读 local_meta，不需要读 chunk：分块/清洗逻辑升级而
+        `CHUNK_SCHEMA` 未升版本时，靠它识别旧数据（重切后会写回当前版本，判据自动失效）。
+        """
         if local_meta and local_meta.get("processing_pending"):
+            return True
+        if local_meta is not None and local_meta.get("processing_version") != PROCESSING_VERSION:
             return True
         if not chunks:
             return True

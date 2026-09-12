@@ -528,3 +528,52 @@ async def test_ingest_rolls_back_bundle_when_chunk_write_fails(
     assert await store.list_documents() == []
     library_dir = tmp_path / "library"
     assert not any(library_dir.iterdir())
+
+
+def test_chunk_needs_rebuild_flags_stale_processing_version_without_reading_chunks() -> None:
+    """分块逻辑升级但 CHUNK_SCHEMA 未升版本时，靠 local_meta.processing_version 识别旧数据。"""
+    from kacore.managers.artifact_provenance import PROCESSING_VERSION
+
+    current_chunk = DocumentChunk(
+        "doc1_c0000_rabc", "doc1", 0, "text", "papers",
+        metadata={"chunk_schema": "clean_md_structural_v3", "start_char": 0, "end_char": 4},
+    )
+    # 旧库：schema/ID/offset 全部满足，但没有 processing_version → 仍判旧。
+    assert IngestManager.chunk_needs_rebuild("doc1", [current_chunk], {}) is True
+    assert IngestManager.chunk_needs_rebuild(
+        "doc1", [current_chunk], {"processing_version": "cleaning-v1"}
+    ) is True
+    # 当前版本 → 不重切。
+    assert IngestManager.chunk_needs_rebuild(
+        "doc1", [current_chunk], {"processing_version": PROCESSING_VERSION}
+    ) is False
+    # 未传 local_meta 时保持旧行为（只看 chunk 本身）。
+    assert IngestManager.chunk_needs_rebuild("doc1", [current_chunk]) is False
+
+
+async def test_rebuild_from_artifact_writes_back_processing_version(tmp_path: Path) -> None:
+    """重切后必须写回 processing_version，否则每次启动都会再次判旧（破坏一次性语义）。"""
+    from kacore.managers.artifact_provenance import PROCESSING_VERSION
+
+    store = InMemorySourceDocumentStore()
+    manager = _manager(store, tmp_path)
+    bundle = tmp_path / "library" / "doc1"
+    bundle.mkdir(parents=True)
+    (bundle / "clean.md").write_text("Some legacy body text.", encoding="utf-8")
+    (bundle / "pages.json").write_text(
+        json.dumps([{"page": 1, "markdown_start_char": 0, "markdown_end_char": 22}]),
+        encoding="utf-8",
+    )
+    await store.add_document(SourceDocument(
+        "doc1", "Legacy", str(bundle / "original.pdf"), "application/pdf", 10, "hash",
+        "papers", markdown_rel_path="clean.md", pages_rel_path="pages.json",
+    ))
+    await store.replace_chunks("doc1", [DocumentChunk("doc1-0001", "doc1", 0, "old", "old")])
+
+    await manager.rebuild_document_chunks_from_artifact("doc1")
+
+    doc = await store.get_document("doc1")
+    assert doc is not None
+    assert doc.local_meta["processing_version"] == PROCESSING_VERSION
+    chunks = await store.list_chunks("doc1")
+    assert IngestManager.chunk_needs_rebuild("doc1", chunks, doc.local_meta) is False

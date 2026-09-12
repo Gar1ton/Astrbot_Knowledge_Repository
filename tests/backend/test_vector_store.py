@@ -226,3 +226,73 @@ def test_milvus_validates_every_vector_dimension(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="expected 7, got 3"):
         store._validate_vector([0.1, 0.2, 0.3])
+
+
+@pytest.mark.asyncio
+async def test_search_excludes_chunk_ids_before_top_k(vector_store: InMemoryVectorStore) -> None:
+    """R04/已选 B：发现性补查排除已命中 chunk，排除必须在候选截断之前下推。"""
+    chunks = [
+        DocumentChunk("c1", "doc1", 0, "text one", "h1"),
+        DocumentChunk("c2", "doc1", 1, "text two", "h2"),
+        DocumentChunk("c3", "doc2", 0, "text three", "h3"),
+    ]
+    embeddings = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.9, 0.1, 0.0, 0.0],
+        [0.8, 0.2, 0.0, 0.0],
+    ]
+    await vector_store.upsert_chunks(chunks, embeddings)
+
+    results = await vector_store.search(
+        "col1", [1.0, 0.0, 0.0, 0.0], top_k=1, exclude_chunk_ids=frozenset({"c1"})
+    )
+
+    # top_k=1 且排除 c1（最相似）后，下一个候选 c2 必须补进结果，而不是返回空/只排除后过滤。
+    assert len(results) == 1
+    assert results[0][0] == "c2"
+
+
+@pytest.mark.asyncio
+async def test_search_without_exclusion_is_unaffected(vector_store: InMemoryVectorStore) -> None:
+    """不传 exclude_chunk_ids（或空集合）时行为与旧签名完全一致。"""
+    chunks = [DocumentChunk("c1", "doc1", 0, "text one", "h1")]
+    embeddings = [[1.0, 0.0, 0.0, 0.0]]
+    await vector_store.upsert_chunks(chunks, embeddings)
+
+    results_default = await vector_store.search("col1", [1.0, 0.0, 0.0, 0.0], top_k=5)
+    results_empty_set = await vector_store.search(
+        "col1", [1.0, 0.0, 0.0, 0.0], top_k=5, exclude_chunk_ids=frozenset()
+    )
+
+    assert results_default == results_empty_set == [("c1", 1.0)]
+
+
+@pytest.mark.asyncio
+async def test_milvus_lite_search_excludes_before_top_k(tmp_path) -> None:
+    """对真实 Milvus Lite（非 mock）验证 exclude_chunk_ids 下推——W0 隔离探针已确认
+    pymilvus 2.6.x + milvus-lite 3.x 原生支持 `not in`，此处校验生产代码路径本身正确。
+    """
+    store = MilvusLiteVectorStore(str(tmp_path / "milvus_exclude.db"), dim=4)
+    store.set_doc_collection_mapping("doc1", "col1")
+    chunks = [
+        DocumentChunk("c1", "doc1", 0, "text one", "h1"),
+        DocumentChunk("c2", "doc1", 1, "text two", "h2"),
+        DocumentChunk("c3", "doc1", 2, "text three", "h3"),
+    ]
+    embeddings = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.9, 0.1, 0.0, 0.0],
+        [0.8, 0.2, 0.0, 0.0],
+    ]
+    await store.upsert_chunks(chunks, embeddings)
+
+    results = await store.search(
+        "col1", [1.0, 0.0, 0.0, 0.0], top_k=1, exclude_chunk_ids=frozenset({"c1"})
+    )
+
+    assert len(results) == 1
+    assert results[0][0] == "c2"
+    await store.retain_document_chunks("doc1", frozenset({"c3"}))
+    retained = await store.search("col1", [1.0, 0.0, 0.0, 0.0], top_k=3)
+    assert [cid for cid, _ in retained] == ["c3"]
+    await store.close()

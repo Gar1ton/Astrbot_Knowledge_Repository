@@ -58,6 +58,7 @@ def serialize_outcome(outcome: DeepThinkingOutcome) -> dict[str, Any]:
         "verify_missing": outcome.verify_missing,
         "verify_notes": getattr(outcome, "verify_notes", []),
         "est_total_tokens": outcome.est_total_tokens,
+        "evidence": outcome.evidence_trace,
         "checklist": serialize_checklist(outcome.checklist),
         "rounds": serialize_rounds(outcome.trace),
     }

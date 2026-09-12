@@ -1,5 +1,451 @@
 # TODO
 
+## 2026-09-12 默认模式 top_k 5→6（completed）
+
+- [x] 用户要求默认/普通检索模式（`retrieval_mode="default"`）留存的证据 chunk 数从 5 提到 6，
+  增强/深度思考两个模式的参数不变。改动点：`web/server.py` 的 `/api/ask` 请求体默认值、
+  `kacore/api.py::ask()` 的函数签名默认值、前端 `ChatPanel.tsx` 请求里此前硬编码的
+  `top_k: 5`（不改这一处的话后端默认值改了也不会生效）、以及 `lib/api.ts` 里 `ask()`
+  客户端函数自身的兜底默认值，四处一起改保持一致。技术理由：`retrieval_orchestrator.py`
+  内部三处 `top_k: int = 5` 是共享检索引擎的函数参数默认值，`ask()` 内部两条调用路径
+  （`search_kb`/主问答分支）都会显式传参覆盖，故未改动，避免影响增强/深度模式复用的同一套
+  底层检索函数。`AstrBotModal.tsx` 里另一处 `topK` 初始值是 AstrBot 聊天集成侧的独立配置
+  项（加载时会被后端已保存值覆盖），和这次讨论的"默认检索模式"不是同一个开关，未改动。
+- 验证：`test_api.py` + `test_web_server.py` 194 passed；全量 1053 passed / 2 skipped
+  （两个既有缺 torch 用例，与本次无关）。前端改动是源码级修改，未跑 `npm run build`/
+  `sync_frontend.py`，也未同步到 `pages/`。
+
+## 2026-09-12 切片质量修复（in_progress）
+
+- 用户批准仅修改切片及其直接清洗前置逻辑；不改召回、模型适配、接口或真实库。
+- [ ] Phase A：页边出版噪声与重复短页眉清理，恢复跨页/伪空行续句，准确识别单行结构边界。
+- [ ] Phase B：token 目标改为软目标，只在硬预算超限时拆段；统一句界、平衡短尾并记录真实段落边界。
+- [ ] Phase C：补行为回归，生成 Hui 独立新版预览并核对偏移/正文保留，运行相关测试与静态检查。
+- 既有超 600 行 chunking 文件只接线与修正元数据；新边界算法放入独立模块，旧文件拆分沿用既有计划。
+- [x] Phase D：跨版式兼容——用 Massumi (2018) 99 Theses 书籍样本验证发现 `### **T30**` 这类"标题符号+粗体锚点同行"格式会被 `_split_spans_at_inline_anchors` 切断，导致标题符号悬空、正文块丢失 `section_heading` 标签，个别情况下产生纯噪声空 chunk。技术理由：`_INLINE_ANCHOR_RE` 只按粗体锚点本身定位切分点，没考虑同一行前面可能还挂着装饰性 `#` 标题符号。
+  修复：`_split_spans_at_inline_anchors` 回溯检查锚点所在行、若行首到锚点之间只有 `#{1,6}\s*` 就把切分点前移；`_THESIS_RE`/`_SUBSECTION_RE` 放宽为允许可选的同一前缀，保证重新接回的标题仍被 `_classify_block`/`_chunk_anchor` 识别为 `section_heading`。三处正则常量仅 `chunking.py` 内部使用，改动范围封闭。
+  验证：新增 `test_heading_marker_stays_attached_to_inline_bold_anchor_on_same_line` 复现真实拼接结构，含行内引用（非行首）不受影响的断言；Massumi 独立预览重跑，216→214 chunk，2 处纯 `### ` 空 chunk、97 处标题悬空全部消失，`T29/T30/T77/T92/T99` 等标题-正文均正确接回且 `section_heading` 标签保留；Hui 独立预览重跑与本轮之前的版本逐字节比对完全一致（零回归）；全量 1053 passed / 2 skipped（两个既有缺 torch 用例，与本次无关）、`ruff`/`mypy` 全绿。
+
+
+## v1.2.0-preview 升级一致性修复（completed；真实库升级待用户执行）
+
+- [x] Phase A：重抽取开始前持久标记 processing_pending/needs_reindex；新增仓储原子提交接口，将 chunks、page chunks 与处理元数据一次提交，两实现同步。接口变更理由：防止页映射失败留下已提交的新正文和旧索引状态。
+- [x] Phase B：手动重处理、重抽取、读时恢复和向量重建共用进程内任务可重入锁；未完成抽取不得索引或清除待处理标记；维护结果明确区分待索引。
+- [x] Phase C：隔离 SQLite 故障注入与异步互斥回归，运行相关测试及静态检查；版本同步为 v1.2.0-preview，更新升级指南与 CHANGELOG。
+- 用户已批准本轮修复与本地版本更新；不执行真实库维护或 Git 远端操作。不恢复持久迁移队列/租约/代次服务。
+- 既有大文件仅接线；原子仓储操作与锁逻辑独立成模块，后续仍按既有拆分计划处理旧文件。
+
+- 验证：全量 1037 passed / 2 skipped / 2 deselected，62.06s（两项既有测试缺 torch）；最后取消文件线程保护后，摄入/API/恢复回归 151 passed，4.93s。新增恢复/事务/并发测试共 10 项。
+- `ruff check .`、`python -m mypy`（7 个 domain 文件）、`git diff --check` 通过；manifest、运行时与 CHANGELOG 版本一致。未操作真实库，未 commit/push/tag。
+
+## 2026-09-12 清洗与证据升级执行（completed；真实语料验收 pending）
+
+- [x] Phase A：持久保存逐页原文/脚注，稳定修订身份，接通标题识别和 token 边界；保留已确认的读取时单次重切。
+- [x] Phase B：修复方面覆盖、请求缓存、同修订展开及正文/脚注视图；不新增来源判断 LLM 或固定来源配额。
+- [x] Phase C：请求用量台账、补检预算/失败回滚，提供简单维护入口和对照导出说明。
+- [x] Phase D：行为回归、全量 pytest/ruff/mypy，统一计划和交接文档。
+- 沿用下方后续用户决定：新清洗直接生效、一次性手动重抽取，不恢复已经删除的持久迁移系统。
+- [x] 独立 endpoint 接线：LMStudioLLMAdapter 补 generate_result 与逐次 HTTP usage，避免 enhanced/deep 配置独立 endpoint 后静默降级。
+- [x] Milvus 生命周期：关闭客户端前 flush，避免未落盘状态在解释器 atexit 阶段触发 PyArrow 段错误；不改依赖版本。
+- [x] 修订向量清理：新向量成功写入后清理同文档旧 ID，防止陈旧候选占据 top-k；同步 VectorStore 契约、两实现和调用方测试。
+- 核心接口变更理由：LLM 边界记录实际尝试（含 fallback）；chunk 身份加入修订避免旧引用串文；不新增数据库表或组合根服务。
+- 既有超过 600 行的 api/chunking/ingest/编排文件只做接线；新增逻辑拆到独立职责模块，后续按功能拆分旧文件。
+
+- 最终验证：全量（仅排除两个缺 torch 用例）**1027 passed / 2 skipped / 2 deselected**，63.00s，退出码 0；
+  最后增加公式/代码页边数字保护后，摄入/脚注/结构回归 **36 passed**，4.20s。
+  `ruff check .`、`python -m mypy`（7 个 domain 文件）及 `git diff --check` 通过。
+- 环境未满足的两项既有用例：`test_local_provider_passes_device_to_sentence_transformer`、
+  `test_local_provider_device_cpu_skips_cuda_check`，均为 `ModuleNotFoundError: torch`；未删除或改成 skip。
+- Milvus 退出 139 已通过 faulthandler 定位并修复关闭前 flush；修复后真实 Milvus 及全量均正常退出。
+- 当前实现与维护/对照操作见 `docs/ingest-evidence-upgrade-plan.md` 顶部执行版。
+- 新 HTTP：`POST /api/documents/reprocess-cleaning` 默认 dry_run=true，沿用 session 鉴权；
+  非布尔值 400，实际维护逐篇返回成功/跳过/失败，不提供全库事务。
+  `GET /api/documents/{doc_id}/footnotes` 纯读，未知文档 404，不触发重切。
+- 设计边界：会话/视图/来源边为轻量实现；不重新引入被用户取消的持久迁移系统。
+  不启用尚未选定的分组搜索；不声称真实 PDF 脚注准确率、导入提速或 120% 目标已达标。
+- 已验证：摄入/切片、独立 endpoint、本地模型替身、来源约束、维护鉴权、Milvus 真实过滤及关闭；
+  维护脚本仅检查 --help，对照导出通过合成 JSON 验证，无真实语料/模型调用。
+
+以下未发布段落保留为**先前执行历史**，其中“未接线/待确认/多周未完成”等状态已由本轮记录覆盖，
+仅后续用户决定继续有效，不按过期内容再次恢复代次网关。更早 completed 发布记录保持原样。
+
+## 历史记录：清洗、证据展开与可恢复重建升级（superseded by 2026-09-12 execution）
+
+### User constraints / 约束
+
+完整方案见 `docs/ingest-evidence-upgrade-plan.md`（已确认范围、Phase 0–6、工作包 W0–W7、
+数据/接口草案、可执行验收矩阵）。本条目只登记执行进度与本轮核实到的代码现实，不复述全文。
+
+- 保留 PyMuPDF4LLM → 清洗 → 切片 → 索引主流程；不引入 MinerU/Docling；入库质量优先于导入提速。
+- 脚注保留原文与定位，默认不独立竞争普通召回名额；检索策略升级限定 enhanced/deep，
+  普通模式与外部 agent 入口行为不变，共享新清洗产物。
+- enhanced 总 token 以旧版 120% 为软目标，待用户用真实语料验证，不以离线 mock 宣称达标。
+- 原始 PDF 不改；重建/排队写入均持久化，支持断连/重启恢复；旧库在新代次就绪前持续可读。
+- 建议执行顺序：W0 契约核查 → W1 身份/存储基础 → W2 清洗切片 → W3 用量/证据会话 →
+  W4 检索/上下文 → W5 两模式编排 → W6 恢复/发布 → W7 集成回归（详见计划文档「执行顺序」表）。
+- **⚠️ 后续会话对上面这条约束提出异议并被用户采纳，如实记录（详见下方 W1/W6 条目）**：
+  用户核实 W1/W6 交付的持久任务账本/租约续期/写队列/staging→active 物化等机制后，指出
+  实际需求只是「识别旧版本文档、删掉重跑」，不需要这套复杂度——当前库里的文档 100% 是
+  旧版本（清洗规则是代码层面一次性改变的），不存在「部分文档已是新版本」需要区分对待的
+  场景，因此不需要断点续建/排队写入来解决这个具体问题。W1/W6 交付的全部持久迁移基础设施
+  已整体删除，改用一次性维护脚本 `KnowledgeRepositoryApi.reprocess_documents_with_stale_
+  cleaning()`。
+
+### 核实到的现状（W0，必须先记录）
+
+1. **语料写入口与锁**：sync/upload/delete/move/reextract/auto-index/mirror-removal/
+   rebuild-vector-store 全部路径已追踪完毕；所有单飞守卫均为进程内 plain attribute 或
+   `asyncio.Lock`（仅 R2 backup/restore 用了真锁），无一持久化、无一跨进程——印证 Phase 5
+   需要持久任务账本 + 租约的判断。**新发现一处与本次规划无关、当前生产代码里已存在的真实竞争
+   缺口**：`rebuild_vector_store()` 可被 `start_milvus_rebuild()`（`kacore/api.py:2092`，有守卫）
+   和 Zotero strict 模式 `_run_zotero_pull()`（`kacore/api.py:5763`，无守卫、绕过前者的单飞检查）
+   同时触发，二者可并发执行 `vector_store.clear()`。是否本轮一并修复待用户确认。
+2. **读路径触发隐式重建**：`_ensure_document_chunks_current`（`kacore/api.py:5151`）是
+   `/api/documents/{doc_id}/chunks`、`/api/kb/chunk-context` 两个 GET 路由和 Milvus 索引路径
+   共用的收口，命中 stale 判断时会同步调用 `rebuild_document_chunks_from_artifact` →
+   `replace_chunks` 写库——证实计划中「读取路径会调用旧 chunk 自动重建」的判断
+   （Phase 5 要求改为「读取只读固定代次」）。
+3. **新发现的两处次要缺口**（原计划未列，建议登记为契约差异一并处理）：
+   - `rebuild_document_chunks_from_artifact`/`reextract_document`（`ingest_manager.py:364,427`）
+     只调用 `replace_chunks`，不刷新 `page_chunks`（页码-偏移映射表），旧页码映射在这两条路径
+     后失效但无感知。
+   - `reextract_document`（`ingest_manager.py:427`）设置 `needs_reindex=True` 后不经过
+     `api._mark_document_needs_reindex()` 收口，不会 `notify()` 自动重建调度器，只能靠其他
+     事件间接触发。
+4. **Schema 现实**（迁移号止于 `024_lightrag_index_status_job_id.sql`，新迁移从 `025` 起）：
+   `010_documents_artifacts.sql` 实际是给 `documents` 表加列（Zotero/制品包字段），**不存在**
+   独立 `artifacts` 表——计划稿的 `ArtifactManifest` domain 类型若要落地需要新建表，不是扩展
+   现有表。kacore 自身 schema **无 FTS**；AstrBot 内置的 FTS5 KB 是完全独立的另一个数据库，
+   不受本插件迁移管理，不应被误当作可扩展对象。`chunks`/`page_chunks` 表结构与计划假设一致。
+5. **enhanced/deep 当前有效默认配置**与规划基线完全一致：enhanced `max_sub_queries=3`/
+   `wide_top_k=16`/`candidate_k=32`/`max_final_evidence=12`；deep `max_rounds=4`/
+   `wide_top_k=24`/`max_final_evidence=18`（`kacore/config.py` 的 `EnhancedRecallConfig`/
+   `DeepThinkingConfig`），两者均不经 `_conf_schema.json` 暴露给用户。
+6. **Token 计账现状**：`llm_json.py:27` 的 `est_tokens()` 是纯字符数 `len // 4` 估算；
+   `kacore/api.py:239-247` 另有一个专门针对中文校准的独立字符估算器——**两套互不一致的估算器
+   同时存在**，是原计划未点名的具体差异，Phase 2 需要统一或明确区分用途。已确认「重试丢失量」
+   的具体真实 bug（非猜测）：`deep_thinking_orchestrator.py`（PLAN 131-139、SEA 178-195）与
+   `enhanced_recall_orchestrator.py`（PLAN-lite 118-131、SYNTH+CHECK 151-167）四处
+   `except JsonContractError` 分支在重试耗尽后把 `tokens`/`round_tokens` 硬编码或跳过累加为 0，
+   真实消耗的 token 不进入 `est_tokens`/`total_tokens`，影响预算安全阀与前端展示的 usage。
+   **同时修正原计划一处过度担忧**：`GenerationResult`（`domain/llm_generation.py`）是按次返回的
+   值对象，`LLMAdapter` 无实例级累加状态，代码里不存在真正的「全局可变计数器混发」风险；但
+   `llm_json_call` 拿到 `GenerationResult.prompt_tokens/completion_tokens`（provider 真实用量，
+   `adapters/llm.py:491-520` 已解析）后完全没用，仍重新按字符估算——这是比「并发混账」更具体、
+   更容易验证也更容易修的问题。
+7. **Tokenizer 现实**：当前依赖（`requirements*.txt`、已装 `.venv`）均未安装
+   `tiktoken`/`transformers`/`sentencepiece`；embedding/reranker 仓储（`local.py`/`bge_local.py`）
+   都没有独立暴露 tokenizer，要拿到 tokenizer 就得先把完整 SentenceTransformer/CrossEncoder
+   模型加载完，这正是计划要求避免的代价——本轮未安装新依赖，留给 W1/W2 决定引入哪个轻量
+   tokenizer 库或继续用估算 + 安全阀。
+8. **Milvus Lite 过滤/排除能力**（隔离探针验证，非文档假设）：用临时目录起
+   `pymilvus==2.6.17` + `milvus-lite>=3.0`（当前锁定版本）验证——等值过滤、`in [...]` 白名单、
+   `not in [...]` 排除三种表达式均可在候选截断前原生下推，且对**动态字段**（生产 collection
+   用 `enable_dynamic_field=True`，`collection_tag` 现在就是动态字段而非静态 schema 列）同样
+   生效；关闭连接后重新打开同一 db_path，数据与可查询性均保持。结论：Phase 3「排除应在候选
+   截断之前下推」和 Phase 5「generation_id 按代次过滤」都可以靠扩展现有 `upsert_chunks` 写入
+   的动态字段 + 扩展 `VectorStore.search()` 接口参数实现，**不需要对现有 collection 做 schema
+   迁移**。探针脚本跑在系统临时目录，跑完已清理，未改动任何生产文件/数据。
+9. **既有测试基线**（本轮改动前）：`pytest -q` **927 passed / 2 failed / 2 skipped**（2 个失败
+   均为 venv 未装 `torch` 的 `test_embedding.py` 本地 Embedding 用例，与本计划无关，是已知既有
+   失败，与 v1.1.3 收尾记录一致）；`ruff check .` 全绿；`mypy` 全绿（当前配置只对 domain 层
+   6 个文件做严格类型检查）。计划中列出的全部既有测试文件均确认存在
+   （`test_ingest_manager.py`、`test_source_store.py`、`test_sqlite_source_store.py`、
+   `test_retrieval_orchestrator.py`、`test_retrieval_scope.py`、`test_agent_evidence.py`、
+   `test_enhanced_recall_orchestrator.py`、`test_deep_thinking_orchestrator.py`、
+   `test_llm_adapter.py`、`test_citation_rendering.py`、`test_cross_document_attribution.py`、
+   `test_api.py`、`test_auto_reindex.py`、`test_build_hardening.py`、`test_zotero_sync.py`、
+   `test_vector_store.py`），无需先创建再核对基线。
+
+### 本轮继续执行（用户已批准至完成）
+
+- [ ] 🚧 核验并修复基础模块：覆盖映射、缓存取消、租约与发布事务、原文复用条件。
+- [ ] 🚧 接通清洗/切片、证据会话、生产迁移及恢复路径；未接线工作包保持未完成。
+- [ ] 全部自动化验证与交接；真实语料和 20% 目标由用户实测。
+- 本轮隔离验证：缓存原语 10 passed；迁移基础 64 passed（沙箱内 aiosqlite 卡住，获准后在沙箱外运行临时库测试）。
+
+### Technical implementation path
+
+- [x] **W0 契约核查**：语料写入口全链路追踪（sync/upload/delete/move/reextract/auto-index/
+  mirror-removal/rebuild-vector-store + 锁语义）；`replace_chunks`/`replace_page_chunks`/
+  `.clear()`/`needs_reindex`/`_ensure_document_chunks_current`/PDF-Markdown-citation 路由
+  全部调用点清单；schema 现实核对（无独立 artifacts 表、无 kacore 内建 FTS、迁移号止于 024）；
+  enhanced/deep 有效配置核对（与规划基线一致）；tokenizer/usage 现状核查（两套不一致的字符
+  估算器、真实重试丢 token bug、无本地 tokenizer 依赖）；Milvus Lite 过滤/排除/动态字段/重开
+  持久化隔离探针验证；既有全量 pytest/ruff/mypy 基线。不改变任何生产行为，未装新依赖。
+- [x] **W1 身份与存储基础（🗑️ 已废弃并整体删除，见下方 W1/W6 替代方案条目）**：曾交付
+  `kacore/domain/corpus.py`（`CorpusGeneration`/`CorpusActivePointer`/`ArtifactRevision`/
+  `CorpusReadHandle`/`CorpusBuildJob` 等）+ `migrations/025_corpus_generations.sql`
+  （七张持久任务账本表）+ `kacore/repository/corpus_build/{base,sqlite,memory}.py`
+  （`CorpusBuildRepository`：legacy 代次幂等注册、lease-fencing、CAS 发布、持久写队列）。
+  这套基础设施从未接入任何生产写入口；用户核实后判断整个方向对实际需求过度设计，
+  已随 W6 一并整体删除（`domain/corpus.py`、`migrations/025`、`repository/corpus_build/`
+  全部移除），不再是当前代码的一部分。
+- [ ] **W2 清洗与切片（🚧 部分完成，纯转换函数已交付，未接入生产管线）**：新增四个独立、
+  已测试、**均未接入 `markdown_extractor.py`/`chunking.py`/`ingest_manager.py` 现有生产调用
+  路径**的纯转换模块（改动现有 `_repair_wrapped_text`/`_classify_block` 会立即改变新摄入
+  文档的 processing fingerprint 语义，需等 W6 的代次网关接线才能安全生效，故本轮刻意不碰
+  现有函数，只新增独立可测试的能力）：
+  - `kacore/domain/footnotes.py`：`FootnoteBlock`/`FootnoteLinkStatus`（LINKED/UNLINKED/
+    AMBIGUOUS）零依赖类型。
+  - `kacore/managers/footnote_linking.py`：`extract_footnote_candidates`/`link_footnotes`/
+    `separate_footnotes`——从单页原始文本尾部分离脚注候选（贴靠模式匹配数字/符号/字母标号，
+    要求前有空行段落边界或整页仅剩脚注），仅在同页正文内关联引用点，天然避免跨页/跨章节
+    复用同一标号串线；未关联/多义关联保留原文只标状态，不删除不臆造。
+  - `kacore/managers/structural_protection.py`：`repair_wrapped_text_preserving_blocks`——
+    先识别列表项/表格行/代码块/公式块并保持内部换行，范围外正文才做断词/单换行合并，
+    修正现状「先合并全部单换行、结构信息在合并阶段已丢失」的顺序缺陷。
+  - `kacore/managers/token_budget.py`：`TokenBudgetConfig`（target_chunk_tokens/
+    embedding_input_limit/rerank_pair_limit/context_budget 四个独立单位 + digest() 供
+    processing fingerprint 组装）+ `ConservativeCharTokenizer`（CJK 按字符、其余按
+    4 字符/token 向上取整估算，measurement 恒标 'estimated'，宁可高估不可低估）。
+  - `kacore/managers/generic_headings.py`：`detect_generic_heading` 组合 Chapter/Part
+    （阿拉伯/罗马数字）→ §编号 → 无编号标题启发式，补齐现有 `chunking.py` 只认编号
+    小节/thesis 标签、不认书籍章节的缺口。
+  - 测试：`test_footnote_linking.py`（11 例，含 C03 同标号跨页不串线、C05 只有脚注的
+    页面）、`test_structural_protection.py`（8 例，对应 C04 表格/列表保护）、
+    `test_token_budget.py`（10 例）、`test_generic_headings.py`（13 例，共 42 例）全绿；
+    全量 `pytest` 959→1001 passed，`ruff`/`mypy` 全绿。
+  - **⚠️ 后续会话已把脚注分离/结构保护/token 预算接入生产抽取路径，绕开了本节原定的
+    「等 W6 代次网关」前提——核实后如实记录，未撤销这个改动（见下）**：新增
+    `kacore/managers/artifact_cleaning.py`（`clean_page_structure(raw, *, page)`：只在
+    「候选全部 LINKED，或候选文本含书目特征（Ibid/Press/University/年份等）」时才信任脚注
+    分离，任一候选不可信整页回退不分离；再调 `repair_wrapped_text_preserving_blocks`）+
+    `kacore/managers/chunk_token_limits.py`（`limit_chunk_spans()`：用 `token_budget.py`
+    的 `TokenBudgetConfig`/tokenizer 对结构分块做二分搜索式超预算再切分，优先句/行边界）。
+    `kacore/managers/markdown_extractor.py` 的 `extract_pdf_markdown()` 改为逐页调
+    `clean_page_structure()`（替换原 `post_clean_markdown_pages` 的分页清洗步骤），
+    `MarkdownArtifact` 新增 `raw_pages`/`footnotes` 字段；`kacore/managers/ingest_manager.py`
+    的 `chunk_artifact()` 在结构分块后追加调用 `limit_chunk_spans()`，并把
+    `chunk_kind`/`footnotes`（按页归属）写入 chunk metadata；`processing_fingerprint()`
+    payload 相应增加 `"cleaning"` 版本标记与 `TokenBudgetConfig().digest()`
+    （正确地履行了该函数自己文档的「新增维度必须计入 payload」义务）。顺带修了 W0 登记的
+    一处已知缺口：`rebuild_document_chunks_from_artifact`/`reextract_document` 现在都会在
+    `replace_chunks` 之后调用 `replace_page_chunks`（此前只刷新 chunks，不刷新页码映射）。
+    `generic_headings.py` 仍未接入任何调用链（`_remove_marginal_noise` 新增了一段行为类似
+    但独立实现的启发式，未复用它）。
+    **两个尚未解决的真实问题，需要用户决定如何处理，而不是本轮自行定夺**：
+    1. 这条改动**没有经过任何代次网关**——`processing_fingerprint()` 在生产 ingest 路径里
+       只被定义、不被查询/比较，`extract_artifact()` 无条件跑新清洗逻辑，直接改变了新上传/
+       同步文档的正文产出，与本节最初记录的理由（「改动会立即改变新摄入文档的 processing
+       fingerprint 语义，需等 W6 的代次网关接入才能安全生效」）正面冲突。是否要在网关就绪前
+       先接受这个既成事实（清洗质量提升值得直接生效），还是应该先回退到旧清洗直到网关
+       接好，需要用户表态。
+    2. 接入前**没有任何集成测试**覆盖 `extract_pdf_markdown()` 本身（只测试过底层纯函数）——
+       本轮（见下方「本次会话」条目）已补上 `test_markdown_extractor.py`（2 例，验证真实
+       PyMuPDF4LLM 输出下脚注确实被分离、普通编号列表不被误判），但真实语料脚注准确率仍
+       待用户用自己的 PDF 验证，不构成「已验证生产可用」的结论。
+- [ ] **W3 用量与证据会话（🚧 用量计账修复已接入生产；证据会话仅交付缓存原语，未接线）**：
+  - **用量计账修复（已接入生产代码，非独立新增模块）**：`kacore/domain/llm_generation.py`
+    的 `GenerationResult.prompt_tokens/completion_tokens` 由 `int=0` 改为 `int|None=None`，
+    区分「provider 未报告（未知）」与「provider 报告为 0（已知为零）」；
+    `kacore/adapters/llm.py` 的 `_extract_tokens`/`_as_int` 同步改为返回 `None` 而非 0，
+    且不再用 fallback 覆盖已确认的 0。`kacore/pipelines/deep_thinking_prompts.py` 的
+    `JsonContractError` 新增 `calls`/`tokens`/`measurement` 属性（默认 0/0/'estimated'，
+    向后兼容原有纯消息构造）。`kacore/pipelines/llm_json.py` 的 `llm_json_call`：
+    新增 `_call_tokens()` 优先使用 provider 真实用量（两字段均非 None 时判定
+    measurement='actual'），缺失时退化字符估算；重试耗尽最终抛出的异常携带累计的
+    `calls`/`tokens`/`measurement`，不再让调用方在 `except JsonContractError` 分支里
+    把失败重试当作零消费。修复 5 处受影响调用点（W0 核实到 4 处 + 复查追加发现
+    `deep_thinking_orchestrator.py` 的 VERIFY 步骤同一 bug 模式）：
+    `deep_thinking_orchestrator.py` 的 PLAN（137 行）/SEA（194 行）/VERIFY（580 行），
+    `enhanced_recall_orchestrator.py` 的 PLAN-lite（126 行）/SYNTH+CHECK（165 行），
+    均改为读取 `exc.calls`/`exc.tokens` 而非硬编码 0/固定重试次数。
+    测试：`test_llm_json.py`（5 例，真实用量优先、字符估算退化、重试耗尽保留真实消费、
+    独立构造异常保持默认值）+ `test_llm_adapter.py` 新增 2 例（未报告用量为 None、
+    报告为 0 时如实保留）；既有 `test_llm_adapter.py`/`test_deep_thinking_orchestrator.py`/
+    `test_enhanced_recall_orchestrator.py`（79 例）全部原样通过，未破坏既有契约。
+  - **证据会话缓存原语**：`kacore/pipelines/evidence_cache.py`
+    的 `SingleFlightCache`（按键合并并发相同计算，失败不缓存可重试）+
+    `RetrievalCacheKey`（含 query/scope/generation_id/排除集合/候选预算/模型配置摘要）+
+    `RerankCacheKey`（仅 query/content_hash/model，不含候选池排名）+ `EmbeddingCacheKey`
+    + `EvidenceSessionCache` 容器（每请求一份，检索/重排/embedding 三个缓存互不干扰）。
+    测试：`test_evidence_cache.py`（10 例，覆盖并发合并、失败重试、排除集合变化触发
+    新检索）全绿。**已接入生产调用链，见下方 W5 之后「共享证据会话」条目**——原计划
+    「接入是 W4/W5 的编排整合工作」，后续会话已完成。
+  - **明确未完成**：Phase 2 字面要求的 EvidenceNode/EvidenceBranch/支持-反驳-因果关系
+    类型化 DAG 领域模型仍未交付；后续会话改用更轻量的 `EvidenceSession`（见 W5 之后条目）
+    实现了同一实际目标（共享候选池、aspect 覆盖、有界扩展、请求级缓存），但节点/边只用
+    字符串 `kind` 标记（`"retrieved"`/`"adjacent_after"` 等），没有类型化的支持/反驳/因果
+    关系——如果确实需要那种严格类型化的证据关系模型，这仍是未完成项，不能因为
+    `EvidenceSession` 已交付就当作同一件事已经做完。
+  - 全量 `pytest` 1001→1018 passed（新增 17 例：用量修复 7 例 + 缓存原语 10 例），
+    `ruff`/`mypy` 全绿。
+- [ ] **W4 检索与上下文（🚧 部分完成：排除下推已接入生产接口，覆盖选择器新增未接线，
+  相邻上下文/脚注扩展与结构锚点处理未做）**：
+  - **向量库排除下推（已接入生产接口，向后兼容）**：`kacore/repository/vector_store/base.py`
+    的 `VectorStore.search()` 新增仅关键字参数 `exclude_chunk_ids: frozenset[str]|None`，
+    契约明确要求在候选截断（top_k）之前排除。`memory.py`/`milvus_lite.py` 两个实现同步
+    支持；`milvus_lite.py` 用原生 `id not in [...]` 表达式下推（W0 探针已验证的能力，
+    未做 schema 迁移）。不传该参数时行为与旧签名完全一致——生产唯一调用点
+    `retrieval_orchestrator.py:216` 未改动调用方式，普通检索排序策略不受影响。
+    测试：`test_vector_store.py` 新增 3 例，其中一例对**真实 Milvus Lite**（非 mock）
+    验证排除下推，另两例覆盖内存实现与「不传参数行为不变」。
+  - **确定性证据覆盖选择器**：`kacore/pipelines/
+    evidence_selection.py` 的 `select_evidence()`——按 aspect 建立候选/相关度映射，
+    优先覆盖尚未覆盖的方面（每个 aspect 首轮只取一条，避免单方面吃满预算），剩余预算
+    按相关度与非重复内容（`text_signature` 相同即判重复，由调用方决定去重算法）填充；
+    重复内容降优先级但预算充裕时仍可入选，不强删；明确锚点（`is_pinned`）始终保留且
+    不占用淘汰竞争；tie-break 用 `(doc_id, revision_id, ordinal)` 确定性排序，不依赖
+    dict/set 遍历顺序；`budget_exhausted` 只在「达到上限且确有候选被舍弃」时为真，
+    与「aspect 本身零候选」区分开。测试：`test_evidence_selection.py`（11 例，覆盖
+    R01 多方面保留、R02 重复降优先级/反驳不因词汇相似被删、R03 多 aspect 共用同一证据、
+    tie-break 确定性、预算耗尽信号）全绿。**已接入两个编排器的实际候选/aspect 数据源，
+    见 W5 之后「共享证据会话」条目**。
+  - **明确未完成**：结构锚点的来源/作用域约束、选定后按需读取相邻正文与关联脚注的
+    扩展逻辑（含 token 预算控制）、`candidate_exhausted` 等不足原因在不支持原生下推的
+    后端（AstrBot `kb_reader` fallback、SQLite 词法/锚点路径）上的暴露——这两条路径
+    目前仍不支持排除下推，本轮未处理，留给 W5 编排整合时一并解决或明确记录降级行为。
+  - 全量 `pytest` 1021→1032 passed（新增 11 例），`ruff`/`mypy` 全绿。
+- [ ] **W5 两模式编排（🚧 部分完成：`verified` 语义修正已接入生产；多层动作/后端
+  trace/证据会话接线未做）**：
+  - **修正 `enhanced_recall_orchestrator.py` 的 `verified` 语义**（已接入生产代码，
+    与本计划文档「代码核查」表中明确指出的契约差异一一对应）：原逻辑「首轮自检不充分
+    → 跑一轮纠偏检索+重合成 → 无论重合成是否给出新判定，一律硬编码 `verified=True`」，
+    错误地把「完成纠偏动作」当作「证据已充分」。修正为：纠偏轮的重合成**复用首轮同一套
+    SYNTH+CHECK 契约**（`build_synth_check_prompt`/`build_synth_check_system`/
+    `parse_synth_check`，而不是纯文本 `synthesize_answer`），产出纠偏轮自己的真实
+    `sufficient`/`insufficiency_reasons`；`verified` 直接取「最后一次实际执行的自检」
+    结果——纠偏轮成功给出新 verdict 则用新结果，纠偏轮 LLM 不可用/JSON 契约失败则沿用
+    首轮已知的 `sufficient`（通常是 False），不再虚报为 True。未新增独立 VERIFY 调用，
+    调用次数不变（仍是 2 次基线/最坏 3–4 次含重试）；`JsonContractError` 失败分支同步
+    使用本轮 W3 已修复的 `exc.tokens` 保留真实消费。
+  - 测试：`test_enhanced_recall_orchestrator.py` 两个断言旧行为（纠偏完成即
+    `verified=True`）的既有测试按新契约更新断言并保留“为什么改”的注释说明
+    （`test_insufficient_triggers_corrective_round_and_resynthesis`、
+    `test_resynthesis_failure_keeps_first_answer`），未删除测试；新增
+    `test_corrective_round_still_insufficient_does_not_force_verified_true`
+    直接覆盖修正的核心场景（纠偏轮自己判不充分时必须如实 `verified=False`）。
+    该文件 20 例全绿；全量 `pytest` 1032→1033 passed，`ruff`/`mypy` 全绿。
+  - **明确未完成（截至本条目写下时）**：Phase 4 要求的「多层动作沿结构继续展开」
+    「后端 trace 增加代次/分支/来源关系/缓存命中/排除数/上下文 token/未解决缺口」
+    「共享证据会话接入两个编排器的实际检索/重排调用（复用 W3 的 `evidence_cache.py`、
+    W4 的 `evidence_selection.py`）」「deep 侧 PLAN/SEA/discovered 与共享证据池/分支
+    关联」均未做——这些是编排器控制流的深层重构，比本轮已修的单点语义 bug 大得多，
+    留给后续单独工作包，不在本轮一并宣称完成。
+  - **⚠️ 共享证据会话——由后续未记录的一轮会话交付，本轮核实后补记（见「本次会话」条目
+    的完整背景）**：新增 `kacore/pipelines/evidence_session.py`——`EvidenceSession`
+    （`@evidence_request` 装饰器 + `ContextVar` 实现每请求一份、`asyncio.gather` 并发
+    安全的会话隔离）：`absorb(outcomes)` 合并并发子查询结果、记录 `seen` chunk id 集合、
+    建立 `{source, target, kind}` 形式的证据关系边（`"retrieved"`/`"adjacent_after"` 等
+    字符串标记，不是类型化的支持/反驳/因果关系——见 W3 条目已更新的说明）；
+    `select(reranker, limit, weight, eligible=, pinned=)` 做候选池相对分数归一化 +
+    RRF/重排分数按权重融合，最终选择委派给 W4 的 `select_evidence()`（未修改，直接复用）；
+    `expand(roots, store, limit, token_budget=800, max_depth=2)` 做同修订、有界、非因果
+    的相邻正文续接扩展；`trace()` 序列化 `seen`/`edges`/`selections`/`nodes` 供诊断。
+    `deep_thinking_orchestrator.py`/`enhanced_recall_orchestrator.py` 的 `run()` 都套了
+    `@evidence_request`，候选/排序逻辑按「会话存在则走 `session.absorb→select→expand`，
+    会话不存在（普通模式/外部 agent）则走原有 `select_final_evidence()`/`rank_agent_pool()`
+    逻辑」分支——满足「普通模式与外部 agent 行为不变」的既定约束。`retrieval_orchestrator.py`
+    的 `retrieve()` 新增会话存在时的缓存查表（复用 W3 `evidence_cache.py` 的
+    `RetrievalCacheKey`/`EmbeddingCacheKey`，未修改）与自动 `exclude_chunk_ids =
+    frozenset(session.seen)` 推导。`kacore/domain/deep_thinking.py` 的
+    `DeepThinkingOutcome` 新增 `evidence_trace: dict` 字段，`deep_thinking_view.py`
+    的 `serialize_outcome()` 透出它。测试：新增 `test_evidence_session.py`（6 例，覆盖
+    aspect 覆盖选择、跨 aspect 共享去重、`asyncio.gather` 下的会话隔离、
+    `SingleFlightCache` 取消安全、同修订有界非因果扩展）；`test_deep_thinking_orchestrator.py`
+    一处既有断言按新的候选池相对评分语义更新并注了「为什么改」；`test_enhanced_recall_orchestrator.py`
+    无新增证据会话相关测试变更。**这条把 Phase 4「共享证据会话接入两个编排器」标记为
+    已交付，但不是字面的 Phase 2 EvidenceNode/EvidenceBranch 类型化 DAG（见 W3 说明）**。
+  - **本轮（当前会话）额外发现并处理的问题**：`kacore/repository/vector_store/
+    {base,memory,milvus_lite}.py` 的 `search()` 同批还新增了 `allowed_doc_ids:
+    frozenset[str]|None` 关键字参数（`retrieval_orchestrator.py` 用它把既有 scope 解析
+    结果下推进向量检索本身，而不只是过滤 SQL 锚点/词法路径），**没有任何单独测试覆盖**——
+    `test_vector_store.py` 新增的测试全部对应 W4 的 `exclude_chunk_ids`，一个都不测
+    `allowed_doc_ids`；只被各编排器的集成测试间接覆盖。留给后续会话补测试，本轮未处理。
+- [x] **W1/W6 替代方案：一次性维护脚本（原持久迁移基础设施已整体删除）**：
+  W1/W6 曾经交付一整套「持久迁移基础设施」——`CorpusMigrationCoordinator`（状态机+租约
+  fencing+心跳续期）、`CorpusMutationQueueDrainer`（持久写队列）、`CorpusDocumentProcessor`
+  （`DocumentProcessor` Protocol 生产实现）、`CorpusMigrationDriver`（检测+驱动到终态）、
+  `CorpusMigrationJob`（进程内进度快照）、向量库 `collection_override` staging 隔离、
+  `SourceDocumentStore` 的 `stage_revision_chunks`/`get_staged_revision_chunks`/
+  `get_staged_revision_page_chunks` staging→active 物化，以及 `kacore/api.py` 里的迁移
+  检测门（`_gate_corpus_migration`）+ 与 `rebuild_vector_store()` 的互斥锁。全部交付并测试
+  通过（全量 `pytest` 一度达到 1118 passed），但**从未接入任何生产写入口**——只有 Zotero
+  同步接了检测门，upload/delete/move/reextract 均未接线。
+
+  用户核实这套机制后提出根本性质疑：实际需求只是「识别旧版本文档，是就删掉替换重跑」，
+  当前库里的文档 100% 是旧版本（清洗规则是代码层面一次性改变的，不存在需要区分「部分
+  文档已是新版本」的场景），不需要持久任务账本/租约/断点续建/排队写入来解决这个具体
+  问题——那套机制是为「持续运行、可能反复触发、需要与并发写入共存」的迁移场景设计的，
+  不匹配「一次性、用户手动触发、执行期间可接受短暂不一致」的真实场景。
+
+  **本轮判断**：接受这个批评，删除 W1/W6 全部持久迁移基础设施，改用自包含的一次性维护
+  方法 `KnowledgeRepositoryApi.reprocess_documents_with_stale_cleaning()`（`kacore/api.py`）：
+  - 识别依据：新清洗管线产出的 chunk 都带 `chunk_kind` 元数据键（写入位置见
+    `kacore/managers/ingest_manager.py` 的 `_chunk_artifact()`），旧版 chunk 没有这个键——
+    不需要单独的 processing fingerprint 比较机制，直接查 chunk metadata 即可判断。
+  - 逐文档遍历 `source_store.list_documents()`：已是新版本（chunk 已带 `chunk_kind`）或
+    非 PDF（`reextract_document` 本身不支持，新清洗只影响 PDF 抽取路径）均跳过；其余调用
+    已有的 `IngestManager.reextract_document()` 重新抽取并重新索引。
+  - 直接操作 active 数据（不经过 staging/物化），运行期间被处理的文档立刻切换到新内容——
+    不追求「重建期间旧库持续可读」，这是独立于持久迁移系统之外的简单路径；中途失败/中断
+    可放心重新调用本方法，已处理过的文档会被跳过（天然幂等），单篇文档失败被单独记录不
+    影响其它文档。
+  - 已删除的文件：`kacore/domain/corpus.py`、`migrations/025_corpus_generations.sql`、
+    `migrations/026_corpus_staging_chunks.sql`、
+    `kacore/pipelines/{corpus_migration_coordinator,corpus_document_processor,
+    corpus_migration_driver,corpus_mutation_queue}.py`、`kacore/corpus_migration_job.py`、
+    `kacore/repository/sqlite_transaction.py`（连接共享锁——只为 `SourceDocumentStore`
+    与 `CorpusBuildRepository` 共享同一 aiosqlite 连接而存在，后者删除后不再需要，写锁
+    还原为普通 `asyncio.Lock()`）、`kacore/repository/corpus_build/`（整个目录）+ 对应
+    全部测试文件。同时从 `kacore/api.py`/`kacore/plugin_initializer.py` 移除全部相关
+    import/属性/装配/迁移检测门/互斥锁；从 `SourceDocumentStore`（`base`/`memory`/`sqlite`）
+    移除三个 staging 方法；从 `VectorStore.upsert_chunks()`（`base`/`memory`/`milvus_lite`）
+    移除 `collection_override` 参数（`search()` 的 `exclude_chunk_ids`/`allowed_doc_ids`
+    是 W4/W5 的独立能力，未受影响，予以保留）；从 `ingest_manager.py` 移除
+    `processing_fingerprint()`，把曾经提升为模块级纯函数的 `extract_artifact`/
+    `chunk_artifact`（当初是为了给 `CorpusDocumentProcessor` 复用）还原为 `IngestManager`
+    的私有方法，去掉只为批量迁移路径存在的 `chunk_id_factory` 参数；W2 交付的
+    `chunk_kind`/`footnotes` 元数据字段与 `limit_chunk_spans()` 调用不受影响，随方法还原
+    一并保留。
+  - 测试：删除后全量 `pytest` 1014 passed / 2 skipped / 2 failed（`test_embedding.py` 缺
+    `torch`，与本功能无关的既有失败）；`ruff check .`/`mypy` 全绿。`test_api.py` 里
+    `reprocess_documents_with_stale_cleaning` 的 3 个测试（跳过已是新版本、跳过非 PDF、
+    单篇失败不影响其它文档）与 `get_chunk_context()` 调 `_ensure_document_chunks_current`
+    的既有修复不受本轮影响，原样保留。
+  - **待用户决定、尚未实现**：怎么触发这个方法（聊天指令/独立脚本/其它），本轮尚未
+    敲定，留待下一步。
+- [ ] **W7 集成与交接**：Phase 6 的入口接线、回归、用户验收准备。
+
+### Known limitations（本轮有意不解决，不假装已解决）
+
+- W0 未涉及任何 SQL/接口/生产代码改动；上述发现的 3 处次要缺口（`page_chunks` 未随 reextract
+  刷新、reextract 不 notify 调度器、`rebuild_vector_store` 无锁竞争路径）是否本轮一并修复，
+  还是留到对应 Phase 顺带解决，需用户确认。`page_chunks` 未随 reextract 刷新这一条已在
+  后续未记录的会话里顺带修好（见 W2 条目），其余两条仍未处理。
+- W2–W5 是多周量级的改动（清洗重写、证据会话、两编排器整合），不在一次会话内实现完毕；
+  W1/W6 原规划的持久任务账本/代次隔离仓储已被判定为过度设计并整体删除，改用一次性维护
+  脚本（见上方 W1/W6 替代方案条目）；下一步节奏（W2–W5 剩余项优先级如何排、脚本触发方式
+  怎么定）待用户确认。
+- **本轮（当前会话）新记录的三处决策，用户均已答复，记录如下**（详见对应 W2/W5/W6
+  条目正文；这里只记结论）：
+  1. **新清洗管线的代次网关**：用户明确要求不做开关/回滚机制——接受新清洗逻辑（脚注分离/
+     结构保护/token 预算）已对新上传/同步文档直接生效这一既成事实，不需要先做灰度/开关
+     再切换。此项就此关闭，不再是待办。
+  2. **`get_chunk_context()`/`list_document_chunks()` 隐式重建不一致**：用户选择「两个都
+     自动重切」，且要求「重切一次即可，不要每次进入都切」。本轮已修：`get_chunk_context()`
+     恢复调用 `_ensure_document_chunks_current()`，与 `list_document_chunks()` 一致；
+     「只重切一次」本来就是既有机制的天然行为（重切结果落盘进 `chunks` 表，`chunk_needs_rebuild`
+     下次读到的就是已是新 schema 的 chunk，不会重复触发）——不需要额外做幂等/去重逻辑。
+     新增 `test_get_chunk_context_alone_rebuilds_legacy_chunks_once` 直接验证「单独调用
+     `get_chunk_context` 两次，只重切一次」。全量 `pytest` 1087→1088 passed，`ruff`/`mypy` 全绿。
+  3. **首次 legacy 迁移的重处理成本**：用户明确表示可以接受——「完全根据原本的文档来执行，
+     就是要给现在的已经部署实例做一次重新切片并覆盖的，没问题」，不需要设计更便宜的等价性
+     快捷路径。**这里曾有一个用户原话没有区分、但技术上必须讲清楚的关键点**：现有的
+     「读取时自动重切」机制（即上面第 2 点用到的 `chunk_needs_rebuild`/
+     `rebuild_document_chunks_from_artifact`）只重新跑「切片」这一步，复用的是已经存在的
+     `clean.md`，**不会**重新抽取原始 PDF，因此不会给已入库的旧文档补上新的脚注分离/结构
+     保护清洗（那部分逻辑只在重新读 PDF 时才跑）。用户要的「重新切片并覆盖」如果目的是让
+     旧文档也用上新清洗，字面意义上的「只重切」是不够的，需要真正重新抽取 PDF。**后续
+     核实结论**：一开始判断这需要 W1/W6 那套迁移基础设施才能做到，但用户随即指出那套
+     机制对这个一次性需求是过度设计（见上方 W1/W6 替代方案条目）——最终交付的
+     `reprocess_documents_with_stale_cleaning()` 直接调用已有的
+     `IngestManager.reextract_document()`（本来就会真正重新抽取 PDF），不需要迁移基础
+     设施就能满足这个需求。此项已解决，不再是待办。
+- **额外发现、未处理的测试覆盖缺口**：`VectorStore.search()` 新增的 `allowed_doc_ids`
+  参数没有独立单元测试（见 W5 之后条目），只被各编排器的集成测试间接覆盖，留给后续会话。
+
 ## v1.1.3：Harvard 引用降级修复 (completed)
 
 ### User constraints / 约束

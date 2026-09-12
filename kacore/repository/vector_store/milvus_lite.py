@@ -211,6 +211,16 @@ class MilvusLiteVectorStore(VectorStore):
             logger.error(f"Failed to delete chunks: {e}")
             raise RuntimeError(f"Failed to delete chunks: {e}") from e
 
+    async def retain_document_chunks(self, doc_id: str, chunk_ids: frozenset[str]) -> None:
+        await self._ensure_client()
+        expression = f"doc_id == '{_quote_filter_value(doc_id)}'"
+        if chunk_ids:
+            ids = ", ".join(f"'{_quote_filter_value(cid)}'" for cid in sorted(chunk_ids))
+            expression += f" and id not in [{ids}]"
+        await asyncio.to_thread(
+            self._client.delete, collection_name=self._collection_name, filter=expression,
+        )
+
     async def delete_collection(self, collection: str) -> None:
         await self._ensure_client()
         try:
@@ -234,8 +244,11 @@ class MilvusLiteVectorStore(VectorStore):
         query_vector: list[float],
         top_k: int,
         filter_metadata: dict | None = None,
+        *,
+        exclude_chunk_ids: frozenset[str] | None = None,
+        allowed_doc_ids: frozenset[str] | None = None,
     ) -> list[tuple[str, float]]:
-        if top_k <= 0:
+        if top_k <= 0 or allowed_doc_ids == frozenset():
             return []
 
         self._validate_vector(query_vector)
@@ -247,6 +260,14 @@ class MilvusLiteVectorStore(VectorStore):
                 if not _FILTER_KEY_RE.fullmatch(k):
                     raise ValueError(f"Invalid metadata filter key: {k!r}")
                 filter_expr += f" and {k} == '{_quote_filter_value(v)}'"
+        if allowed_doc_ids is not None:
+            docs = ", ".join(f"'{_quote_filter_value(d)}'" for d in sorted(allowed_doc_ids))
+            filter_expr += f" and doc_id in [{docs}]"
+        if exclude_chunk_ids:
+            # 用 Milvus 原生 `not in` 表达式在候选截断前下推排除，不做事后过滤
+            # （W0 隔离探针已验证 pymilvus 2.6.x + milvus-lite 3.x 对动态字段同样生效）。
+            excluded = ", ".join(f"'{_quote_filter_value(cid)}'" for cid in exclude_chunk_ids)
+            filter_expr += f" and id not in [{excluded}]"
 
         try:
             results = await asyncio.to_thread(
@@ -292,11 +313,15 @@ class MilvusLiteVectorStore(VectorStore):
     async def close(self) -> None:
         if self._client:
             try:
-                await asyncio.to_thread(self._client.close)
-            except Exception as e:
-                logger.error(f"Failed to close Milvus client: {e}")
-            self._client = None
-            self._initialized = False
+                # Lite 的 client.close 只断开 RPC；先刷盘，避免解释器退出时才调用 PyArrow。
+                if self._initialized:
+                    await asyncio.to_thread(self._client.flush, self._collection_name)
+            finally:
+                try:
+                    await asyncio.to_thread(self._client.close)
+                finally:
+                    self._client = None
+                    self._initialized = False
 
 
 __all__ = ["MilvusLiteVectorStore", "MilvusSchemaMismatchError"]

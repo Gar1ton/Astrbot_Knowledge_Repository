@@ -5,7 +5,7 @@ orchestrator 只关心控制流。两步契约：
 - PLAN-lite：纯 JSON（改写 + ≤N 个子查询），解析失败抛 JsonContractError 重试。
 - SYNTH+CHECK：markdown 正文 + 尾部 ``===VERDICT===`` 标记行 + 充分性 JSON——
   verdict 走尾部标记而非把长答案整体塞进 JSON，规避转义脆弱；标记/JSON 缺失一律
-  fail-open（整段视为答案、sufficient=True），好答案不因格式问题浪费重试调用；
+  fail-open（整段视为答案、sufficient=False），好答案不因格式问题浪费重试调用；
   仅正文为空才抛 JsonContractError（由 llm_json_call 重试）。
 """
 from __future__ import annotations
@@ -20,6 +20,8 @@ from kacore.pipelines.answer_synthesis import (
     source_tag,
 )
 from kacore.pipelines.deep_thinking_prompts import JsonContractError, extract_json_object
+from kacore.pipelines.evidence_actions import ACTION_GUIDANCE, parse_actions
+from kacore.pipelines.evidence_views import evidence_text
 
 if TYPE_CHECKING:
     from kacore.domain.models import DocumentChunk
@@ -79,12 +81,13 @@ def parse_plan_lite(raw: str) -> tuple[str, list[str]]:
 # ── SYNTH+CHECK：合成 + 内嵌充分性自检（单次调用）───────────
 @dataclass
 class SynthCheckResult:
-    """SYNTH+CHECK 解析结果。fail-open 路径下 sufficient=True、reasons/queries 为空。"""
+    """SYNTH+CHECK 解析结果。fail-open 路径下 sufficient=False、reasons/queries 为空。"""
 
     answer: str = ""
-    sufficient: bool = True
+    sufficient: bool = False
     insufficiency_reasons: list[str] = field(default_factory=list)
     corrective_queries: list[str] = field(default_factory=list)
+    actions: list[dict[str, str]] = field(default_factory=list)
 
 
 def build_synth_check_system(answer_language: str, max_corrective_queries: int) -> str:
@@ -100,7 +103,7 @@ def build_synth_check_system(answer_language: str, max_corrective_queries: int) 
         "question; when false, corrective_queries must contain at most "
         f"{max_corrective_queries} focused queries naming papers, methods, datasets, models, "
         "tables, figures or sections (never vague phrases); when true, use empty arrays. "
-        "The verdict JSON must be the last thing in your output."
+        "The verdict JSON must be the last thing in your output." + ACTION_GUIDANCE
     )
 
 
@@ -111,7 +114,8 @@ def build_synth_check_prompt(
 ) -> str:
     """与 answer_synthesis.synthesize_answer 同构的证据排版（[n] 编号 + 来源标注）。"""
     context = "\n\n---\n\n".join(
-        f"[{i + 1}]{source_tag(chunk.doc_id, source_labels)} {chunk.text}"
+        f"[{i + 1}]{source_tag(chunk.doc_id, source_labels)} "
+        f"(ID: {chunk.chunk_id}) {evidence_text(chunk)}"
         for i, chunk in enumerate(evidence)
     )
     return f"Context:\n\n{context}\n\nQuestion: {question}"
@@ -134,7 +138,7 @@ def parse_synth_check(raw: str) -> SynthCheckResult:
     """按尾部 VERDICT_MARKER 切分正文与充分性 JSON。
 
     契约：正文为空（含只有 verdict 无正文）→ JsonContractError（触发重试）；
-    标记缺失或 verdict JSON 无法解析 → fail-open：整段视为答案、sufficient=True
+    标记缺失或 verdict JSON 无法解析 → fail-open：整段视为答案、sufficient=False
     （永不劣于 default 模式的单次合成）。
     """
     text = raw.strip()
@@ -157,9 +161,10 @@ def parse_synth_check(raw: str) -> SynthCheckResult:
         return SynthCheckResult(answer=answer)
     return SynthCheckResult(
         answer=answer,
-        sufficient=bool(obj.get("sufficient", True)),
+        sufficient=obj.get("sufficient") is True,
         insufficiency_reasons=_str_items(obj.get("insufficiency_reasons")),
         corrective_queries=_str_items(obj.get("corrective_queries")),
+        actions=parse_actions(obj.get("actions")),
     )
 
 

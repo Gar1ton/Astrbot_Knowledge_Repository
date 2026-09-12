@@ -33,6 +33,14 @@ SYNTH_INSUFFICIENT = (
     '"corrective_queries":["Paper Y Table 2"]}'
 )
 SYNTH_NO_VERDICT = "plain answer without verdict [1]"
+SYNTH_SUFFICIENT_AFTER_CORRECTION = (
+    "final answer [1]\n===VERDICT===\n"
+    '{"sufficient":true,"insufficiency_reasons":[],"corrective_queries":[]}'
+)
+SYNTH_STILL_INSUFFICIENT_AFTER_CORRECTION = (
+    "final answer [1]\n===VERDICT===\n"
+    '{"sufficient":false,"insufficiency_reasons":["仍缺权威来源"],"corrective_queries":[]}'
+)
 
 
 # ── 测试替身 ────────────────────────────────────────────────
@@ -126,10 +134,10 @@ def test_parse_synth_check_three_states():
     assert bad.sufficient is False
     assert bad.insufficiency_reasons == ["缺对比证据"]
     assert bad.corrective_queries == ["Paper Y Table 2"]
-    # 标记缺失 → fail-open：整段视为答案、sufficient=True（不浪费重试）。
+    # 标记缺失 → 保留答案，但不虚报 sufficient=True（不浪费重试）。
     open_ = parse_synth_check(SYNTH_NO_VERDICT)
     assert open_.answer == SYNTH_NO_VERDICT
-    assert open_.sufficient is True
+    assert open_.sufficient is False
 
 
 def test_parse_synth_check_empty_body_raises():
@@ -168,17 +176,33 @@ async def test_happy_path_exactly_two_llm_calls():
 async def test_insufficient_triggers_corrective_round_and_resynthesis():
     outcome = _outcome([_chunk("c1"), _chunk("c2")])
     orch, retrieval, llm = _make(
-        outcome, [PLAN_OK, SYNTH_INSUFFICIENT, "final answer [1]"]
+        outcome, [PLAN_OK, SYNTH_INSUFFICIENT, SYNTH_SUFFICIENT_AFTER_CORRECTION]
     )
     result = await orch.run("papers", "原始问题")
-    assert llm.calls == 3  # PLAN + SYNTH+CHECK + 重合成。
+    assert llm.calls == 3  # PLAN + SYNTH+CHECK + 重合成（复用同一 SYNTH+CHECK 契约）。
     assert retrieval.queries[-1] == "Paper Y Table 2"  # 纠偏 query 进入检索。
     assert result.answer == "final answer [1]"
-    assert result.verified is True  # 一轮纠偏即闭环。
-    assert result.verify_notes == ["缺对比证据"]  # 缺口透明进思考过程。
+    # verified 现在来自纠偏轮自己的 verdict，不是「跑完一轮纠偏」就直接置真。
+    assert result.verified is True
+    assert result.verify_notes == []  # 纠偏轮 verdict 报告缺口已清零。
     assert len(result.trace) == 2
     assert result.trace[1].queries == ["Paper Y Table 2"]
-    assert result.trace[1].gaps == ["缺对比证据"]
+    assert result.trace[1].gaps == []
+
+
+@pytest.mark.asyncio
+async def test_corrective_round_still_insufficient_does_not_force_verified_true():
+    """核心修正：纠偏轮完成不等于已验证。若纠偏轮自己的 verdict 仍判不充分，verified
+    必须如实为 False，不能像旧行为那样只因为跑完一轮纠偏就置 True。"""
+    outcome = _outcome([_chunk("c1"), _chunk("c2")])
+    orch, _retrieval, llm = _make(
+        outcome, [PLAN_OK, SYNTH_INSUFFICIENT, SYNTH_STILL_INSUFFICIENT_AFTER_CORRECTION]
+    )
+    result = await orch.run("papers", "原始问题")
+    assert llm.calls == 3
+    assert result.answer == "final answer [1]"
+    assert result.verified is False
+    assert result.verify_notes == ["仍缺权威来源"]
 
 
 @pytest.mark.asyncio
@@ -241,7 +265,9 @@ async def test_resynthesis_failure_keeps_first_answer():
     result = await orch.run("papers", "原始问题")
     assert llm.calls == 3
     assert result.answer == "draft answer [1]"  # 重合成挂 → 保留首轮答案。
-    assert result.verified is True
+    # 纠偏轮没能产出新 verdict，必须沿用首轮已知的「不充分」判定，不能虚报为已验证。
+    assert result.verified is False
+    assert result.verify_notes == ["缺对比证据"]
 
 
 @pytest.mark.asyncio

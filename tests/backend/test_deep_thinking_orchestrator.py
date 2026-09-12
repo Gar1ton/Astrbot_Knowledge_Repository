@@ -756,8 +756,8 @@ async def test_per_aspect_ranking_surfaces_high_rrf_subquery_chunk():
         rerank_config=RerankConfig(provider="noop", keep=5),
     )
     result = await orch.run("papers", "big question")
-    # c3 在 sub_query 里 rrf 最高 → per-aspect 排序顶到首位（旧实现按插入顺序它排第 3）。
-    assert result.trace[0].kept_chunk_ids[0] == "c3"
+    # 查询池内校准，先覆盖原问题，再保留子问题的最高分 c3；不跨池比原始分数。
+    assert result.trace[0].kept_chunk_ids[:2] == ["c1", "c3"]
 
 
 def test_reranker_is_passthrough_flags():

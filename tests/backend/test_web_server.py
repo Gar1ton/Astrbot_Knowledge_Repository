@@ -82,6 +82,33 @@ async def _client(tmp_path: Path, *, auth_required: bool = False) -> TestClient:
     return client
 
 
+async def test_cleaning_maintenance_requires_auth_and_defaults_to_preview(tmp_path):
+    from types import SimpleNamespace
+
+    api = SimpleNamespace(
+        reprocess_documents_with_stale_cleaning=AsyncMock(return_value={"dry_run": True}),
+        get_document_footnotes=AsyncMock(return_value=[]),
+    )
+    client = TestClient(TestServer(build_app(
+        api=api, static_dir=tmp_path, upload_dir=tmp_path,
+        auth_required=True, username="admin", password="pw",
+    )))
+    await client.start_server()
+    try:
+        response = await client.post("/api/documents/reprocess-cleaning", json={})
+        assert response.status == 401
+        await client.post("/api/login", json={"username": "admin", "password": "pw"})
+        response = await client.post("/api/documents/reprocess-cleaning", json={})
+        assert response.status == 200
+        api.reprocess_documents_with_stale_cleaning.assert_awaited_once_with(dry_run=True)
+        response = await client.get("/api/documents/doc/footnotes")
+        assert response.status == 200 and await response.json() == []
+        response = await client.post("/api/documents/reprocess-cleaning", json={"dry_run": "false"})
+        assert response.status == 400
+    finally:
+        await client.close()
+
+
 # ── 配置校验 ────────────────────────────────────────────────────
 
 

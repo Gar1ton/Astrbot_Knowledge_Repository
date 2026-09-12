@@ -1650,7 +1650,7 @@ export async function ask(opts: {
       question: opts.question,
       collection: opts.collection ?? null,
       doc_id: opts.doc_id ?? null,
-      top_k: opts.top_k ?? 5,
+      top_k: opts.top_k ?? 6,
       conversation_id: opts.conversation_id ?? null,
       persona_enabled: opts.persona_enabled ?? false,
       retrieval_mode: opts.retrieval_mode ?? "default",

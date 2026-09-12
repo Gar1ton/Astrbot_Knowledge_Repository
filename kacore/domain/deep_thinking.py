@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kacore.domain.models import DocumentChunk
@@ -102,6 +102,7 @@ class DeepThinkingOutcome:
     # 软项（部分支持·有据推断 + 信息缺口）——仅入「思考过程」展示，不堆告警墙。
     verify_notes: list[str] = field(default_factory=list)
     degraded_reason: str = ""  # 降级原因；空字符串表示未降级
+    evidence_trace: dict[str, Any] = field(default_factory=dict)
 
 
 __all__ = [

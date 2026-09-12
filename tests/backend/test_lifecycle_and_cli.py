@@ -189,6 +189,7 @@ async def test_initializer_passes_probed_dimension_to_milvus_and_lightrag(
         assert initializer.embedding_dimension == 7
         assert initializer.config.runtime_embedding_dimension == 7
         assert captured == {"milvus": 7, "lightrag": 7}
+        assert initializer.api is not None
         await initializer.teardown()
 
 

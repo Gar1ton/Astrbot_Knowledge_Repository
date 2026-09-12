@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 from kacore.domain.deep_thinking import ChecklistItem
 from kacore.pipelines.answer_synthesis import source_tag
+from kacore.pipelines.evidence_actions import ACTION_GUIDANCE, parse_actions
+from kacore.pipelines.evidence_views import evidence_text
 
 if TYPE_CHECKING:
     from kacore.domain.deep_thinking import Checklist, EvidenceItem
@@ -29,7 +31,25 @@ class JsonContractError(ValueError):
     """LLM 有响应但 JSON 不符合契约（缺字段/非对象/无法解析）。
 
     与 LLM 调用异常（generate 抛出）语义不同：本错误可重试/按步降级，调用异常则回退。
+
+    calls/tokens/measurement 由 `llm_json.llm_json_call` 在重试耗尽后回填，记录本次
+    调用（含全部失败重试）实际消耗的调用次数与 token 量，避免调用方在 except 分支里
+    把「解析失败」误当作「零消费」（见 ingest-evidence-upgrade-plan.md 的重试丢失量契约
+    差异）。parse_fn 内部直接抛出、不经 llm_json_call 包装时保持 0/'estimated' 默认值。
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        calls: int = 0,
+        tokens: int = 0,
+        measurement: str = "estimated",
+    ) -> None:
+        super().__init__(message)
+        self.calls = calls
+        self.tokens = tokens
+        self.measurement = measurement
 
 
 def _str_list(value: Any) -> list[str]:
@@ -192,6 +212,9 @@ class SeaDiscoveredItem:
     gap_type: str = ""
 
 
+SEA_SYSTEM += ACTION_GUIDANCE
+
+
 @dataclass
 class SeaResult:
     satisfied_ids: set[str] = field(default_factory=set)
@@ -202,6 +225,7 @@ class SeaResult:
     discovered: list[SeaDiscoveredItem] = field(default_factory=list)
     # sufficient=false 时 SEA 直接给出的下一轮补检 query（REFINE 已并入 SEA）。
     next_queries: list[str] = field(default_factory=list)
+    actions: list[dict[str, str]] = field(default_factory=list)
 
 
 def build_sea_prompt(
@@ -218,7 +242,7 @@ def build_sea_prompt(
     )
     evidence_lines = "\n".join(
         f"[{item.chunk.chunk_id}]{source_tag(item.chunk.doc_id, source_labels)} "
-        f"{item.chunk.text[:clip]}"
+        f"{evidence_text(item.chunk)[:clip]}"
         for item in evidence
     )
     return (
@@ -332,6 +356,7 @@ def parse_sea(raw: str) -> SeaResult:
         coverage=coverage,
         discovered=discovered,
         next_queries=next_queries,
+        actions=parse_actions(obj.get("actions")),
     )
 
 
@@ -387,7 +412,7 @@ def build_verify_prompt(
     source_labels: dict[str, str] | None = None,
 ) -> str:
     evidence_lines = "\n".join(
-        f"[{i + 1}]{source_tag(chunk.doc_id, source_labels)} {chunk.text[:clip]}"
+        f"[{i + 1}]{source_tag(chunk.doc_id, source_labels)} {evidence_text(chunk)[:clip]}"
         for i, chunk in enumerate(evidence)
     )
     return (

@@ -901,7 +901,7 @@ export function ChatPanel({ width }: { width?: number }) {
         question,
         collection: collectionName ?? null,
         doc_id: mode === "fulltext" ? selectedDocId : null,
-        top_k: 5,
+        top_k: 6,
         conversation_id: cid,
         persona_enabled: personaEnabled,
         retrieval_mode: mode,

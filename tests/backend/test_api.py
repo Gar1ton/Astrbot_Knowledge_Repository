@@ -129,6 +129,67 @@ async def test_list_document_chunks_rebuilds_legacy_preview_chunks() -> None:
     assert rebuilt_doc is not None and rebuilt_doc.needs_reindex is True
 
 
+async def test_get_chunk_context_alone_rebuilds_legacy_chunks_once() -> None:
+    """get_chunk_context 必须和 list_document_chunks 一样自动重切旧 schema 的 chunk
+    （两个读入口行为保持一致），且只重切一次——不是每次进入都重切一遍。"""
+    store = InMemorySourceDocumentStore()
+    doc = _doc("doc-preview", "papers")
+    await store.add_document(doc)
+    await store.replace_chunks(
+        "doc-preview",
+        [DocumentChunk("doc-preview-0001", "doc-preview", 0, "legacy text", "old")],
+    )
+
+    class FakeIngestManager:
+        calls = 0
+
+        @staticmethod
+        def chunk_needs_rebuild(
+            document_id: str,
+            chunks: list[DocumentChunk],
+            local_meta: dict | None = None,
+        ) -> bool:
+            del document_id, local_meta
+            return any(
+                chunk.metadata.get("chunk_schema") != "clean_md_structural_v3"
+                for chunk in chunks
+            )
+
+        async def rebuild_document_chunks_from_artifact(self, document_id: str) -> int:
+            self.calls += 1
+            rebuilt = [
+                DocumentChunk(
+                    f"{document_id}_c0000",
+                    document_id,
+                    0,
+                    "current structural chunk",
+                    "new",
+                    metadata={
+                        "chunk_schema": "clean_md_structural_v3",
+                        "start_char": 0,
+                        "end_char": 24,
+                    },
+                )
+            ]
+            await store.replace_chunks(document_id, rebuilt)
+            return len(rebuilt)
+
+    ingest = FakeIngestManager()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        ingest_manager=ingest,  # type: ignore[arg-type]
+    )
+
+    # 直接调 get_chunk_context（不先调 list_document_chunks），它自己就必须触发重切。
+    first = await api.get_chunk_context("doc-preview", "doc-preview_c0000")
+    second = await api.get_chunk_context("doc-preview", "doc-preview_c0000")
+
+    assert ingest.calls == 1  # 第二次调用命中已重切且已落盘的 chunk，不再重切
+    assert first["matched_chunk_id"] == "doc-preview_c0000"
+    assert second["matched_chunk_id"] == "doc-preview_c0000"
+
+
 async def test_document_and_collection_notes_are_zotero_shaped() -> None:
     api = await _make_api()
     doc_note = await api.create_document_note("d1", "hello\nworld")
@@ -3072,3 +3133,124 @@ async def test_document_markdown_page_rejects_negative_max_chars(tmp_path: Path)
     api = await _make_fulltext_api(tmp_path, "body")
     with pytest.raises(ValueError, match="zero or greater"):
         await api.get_document_markdown_page("d1", max_chars=-1)
+
+
+class _FakeIngestManagerForReprocess:
+    """一次性重新清洗脚本的 IngestManager 测试替身：控制哪些文档失败/不支持。"""
+
+    def __init__(self) -> None:
+        self.reextract_calls: list[str] = []
+        self.fail_docs: set[str] = set()
+        self.not_pdf_docs: set[str] = set()
+
+    async def reextract_document(self, doc_id: str) -> dict:
+        self.reextract_calls.append(doc_id)
+        if doc_id in self.not_pdf_docs:
+            raise ValueError("reextract_document only supports PDF files")
+        if doc_id in self.fail_docs:
+            raise RuntimeError(f"boom: {doc_id}")
+        return {"chunk_count": 1, "converter_version": "v2"}
+
+
+class _FakeVectorStoreForReprocess:
+    def __init__(self) -> None:
+        self.upserted_doc_ids: list[str] = []
+
+    def set_doc_collection_mapping(self, doc_id: str, collection: str) -> None:
+        pass
+
+    async def retain_document_chunks(self, doc_id, chunk_ids) -> None:
+        pass
+
+    async def upsert_chunks(self, chunks, embeddings) -> None:
+        self.upserted_doc_ids.extend(c.doc_id for c in chunks)
+
+
+class _FakeEmbeddingProviderForReprocess:
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0] for _ in texts]
+
+
+async def test_reprocess_documents_with_stale_cleaning() -> None:
+    """一次性重新清洗脚本：按 chunk_kind 标记跳过已是新版本的文档，跳过非 PDF
+    文档（无需重新提取），重新提取成功后立刻重新索引，失败单独记录不影响其它文档。
+    """
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1_old", "c"))  # 旧版 chunk，无 chunk_kind
+    await store.replace_chunks(
+        "d1_old", [DocumentChunk("c0", "d1_old", 0, "old text", "h0", metadata={})]
+    )
+    new_doc = _doc("d2_new", "c")
+    new_doc.local_meta["processing_version"] = "cleaning-v2"
+    await store.add_document(new_doc)  # 文档处理版本，不再扫描 chunk_kind。
+    await store.replace_chunks(
+        "d2_new",
+        [DocumentChunk("c0", "d2_new", 0, "new text", "h0", metadata={"chunk_kind": "body"})],
+    )
+    not_pdf = SourceDocument(
+        doc_id="d3_txt", title="t", file_path="/data/d3.txt", content_type="text/markdown",
+        size_bytes=1, content_hash="h", collection="c",
+    )
+    await store.add_document(not_pdf)
+    await store.replace_chunks(
+        "d3_txt", [DocumentChunk("c0", "d3_txt", 0, "text doc", "h0", metadata={})]
+    )
+    await store.add_document(_doc("d4_fail", "c"))  # 重新提取会失败
+    await store.replace_chunks(
+        "d4_fail", [DocumentChunk("c0", "d4_fail", 0, "will fail", "h0", metadata={})]
+    )
+    await store.add_document(_doc("d5_empty", "c"))  # 无任何 chunk（从未成功切过）
+
+    ingest = _FakeIngestManagerForReprocess()
+    ingest.not_pdf_docs.add("d3_txt")
+    ingest.fail_docs.add("d4_fail")
+    vector_store = _FakeVectorStoreForReprocess()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        ingest_manager=ingest,  # type: ignore[arg-type]
+        vector_store=vector_store,  # type: ignore[arg-type]
+        embedding_provider=_FakeEmbeddingProviderForReprocess(),  # type: ignore[arg-type]
+    )
+
+    result = await api.reprocess_documents_with_stale_cleaning()
+
+    assert sorted(result["reprocessed"]) == ["d1_old", "d5_empty"]
+    assert result["skipped_already_new"] == ["d2_new"]
+    assert result["skipped_not_pdf"] == ["d3_txt"]
+    assert result["failed"] == [{"doc_id": "d4_fail", "error": "boom: d4_fail"}]
+    assert result["total_documents"] == 5
+    # 新处理版本与非 PDF 在抽取前跳过；单篇抽取失败仍会记录。
+    assert sorted(ingest.reextract_calls) == ["d1_old", "d4_fail", "d5_empty"]
+    # 重新索引会读取 store 里实际的 chunks；假的 reextract_document 不写入新 chunk，
+    # 所以 d5_empty（本来就没有 chunk）重新索引时读到空列表、不会调用 upsert——这符合
+    # 「无 chunk 就没什么可索引」的真实行为，本测试只验证 d1_old（有真实 chunk）被索引。
+    assert sorted(vector_store.upserted_doc_ids) == ["d1_old"]
+
+
+async def test_reprocess_documents_with_stale_cleaning_without_vector_store() -> None:
+    """没有配置向量库/embedding（如未启用 Milvus）时，仍应完成重新抽取，只是跳过索引。"""
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("d1_old", "c"))
+    await store.replace_chunks(
+        "d1_old", [DocumentChunk("c0", "d1_old", 0, "old text", "h0", metadata={})]
+    )
+    ingest = _FakeIngestManagerForReprocess()
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        ingest_manager=ingest,  # type: ignore[arg-type]
+    )
+
+    result = await api.reprocess_documents_with_stale_cleaning()
+
+    assert result["reprocessed"] == ["d1_old"]
+    assert ingest.reextract_calls == ["d1_old"]
+
+
+async def test_reprocess_documents_with_stale_cleaning_requires_ingest_manager() -> None:
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(), kb_reader=InMemoryKnowledgeBaseReader({})
+    )
+    with pytest.raises(RuntimeError, match="IngestManager"):
+        await api.reprocess_documents_with_stale_cleaning()

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from kacore.domain.llm_generation import STATUS_EMPTY, GenerationResult
+from kacore.pipelines.evidence_views import evidence_text
 
 if TYPE_CHECKING:
     from kacore.adapters.llm import LLMAdapter
@@ -134,7 +135,7 @@ async def synthesize_answer(
     base = _SYNTH_SYSTEM_DEEP if style == "deep" else _SYNTH_SYSTEM_BASE
     system = base + lang_instruction(answer_language)
     context = "\n\n---\n\n".join(
-        f"[{i + 1}]{source_tag(chunk.doc_id, source_labels)} {chunk.text}"
+        f"[{i + 1}]{source_tag(chunk.doc_id, source_labels)} {evidence_text(chunk)}"
         for i, chunk in enumerate(evidence)
     )
     user = f"Context:\n\n{context}\n\nQuestion: {question}"

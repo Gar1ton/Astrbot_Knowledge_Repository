@@ -377,7 +377,7 @@ async def test_rebuild_document_chunks_from_legacy_clean_md(tmp_path: Path) -> N
     assert "REPEATED TEST HEADER" not in clean_md
     assert "formal operations" in clean_md
     chunks = await store.list_chunks("doc1")
-    assert chunks[0].chunk_id == "doc1_c0000"
+    assert chunks[0].chunk_id.startswith("doc1_c0000_r")  # 修订身份禁止旧引用串文。
     assert chunks[0].metadata["chunk_schema"] == "clean_md_structural_v3"
 
 
@@ -427,7 +427,7 @@ async def test_artifact_bundle_and_offset_invariant(temp_pdf: Path, tmp_path: Pa
         e = c.metadata["end_char"]
         assert clean_md[s:e] == c.text
         assert c.metadata["pages"]  # 至少映射到一页
-        assert c.chunk_id == f"{document_id}_c{c.ordinal:04d}"
+        assert c.chunk_id == f"{document_id}_c{c.ordinal:04d}_r{c.metadata['revision_id']}"
 
     # 4) 页面 provenance：两页，区间连续覆盖
     pages = await store.list_page_chunks(document_id)

@@ -1,4 +1,5 @@
 """Default 与图谱混合 Ask 共用的统一证据召回。"""
+
 from __future__ import annotations
 
 import json
@@ -9,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from kacore.domain.models import DocumentChunk, DocumentLifecycle
+from kacore.pipelines.evidence_cache import EmbeddingCacheKey, RetrievalCacheKey
+from kacore.pipelines.evidence_session import current_evidence_session
 
 if TYPE_CHECKING:
     from kacore.config import Config
@@ -146,12 +149,8 @@ class RetrievalOrchestrator:
             }
         if scope.scope_type == SCOPE_COLLECTION:
             # 统一 collections 树：含后代的全部归属文档（doc 级，天然支持 local + zotero 多归属）。
-            docs = await store.list_documents_by_collection_key(
-                scope.scope_key, descendants=True
-            )
-            return {
-                d.doc_id for d in docs if d.lifecycle_state == DocumentLifecycle.ACTIVE
-            }
+            docs = await store.list_documents_by_collection_key(scope.scope_key, descendants=True)
+            return {d.doc_id for d in docs if d.lifecycle_state == DocumentLifecycle.ACTIVE}
         if scope.scope_type == SCOPE_ITEM:
             item_keys: set[str] = {scope.scope_key}
         elif scope.scope_type == SCOPE_TAG:
@@ -175,6 +174,47 @@ class RetrievalOrchestrator:
         scope: RetrievalScope | None = None,
         candidate_k: int | None = None,
         reranker: Reranker | None = None,
+        *,
+        exclude_chunk_ids: frozenset[str] | None = None,
+    ) -> RetrievalOutcome:
+        """普通调用维持排序；证据会话缓存同键检索并下推发现排除集合。"""
+        session = current_evidence_session.get()
+        excluded = (exclude_chunk_ids if exclude_chunk_ids is not None
+                    else frozenset(session.seen if session else ()))
+
+        async def compute() -> RetrievalOutcome:
+            return await self._retrieve_uncached(
+                collection,
+                query,
+                top_k,
+                scope,
+                candidate_k,
+                reranker,
+                exclude_chunk_ids=excluded,
+            )
+
+        if session is None:
+            return await compute()
+        key = RetrievalCacheKey(
+            query,
+            repr((collection, scope)),
+            "active",
+            excluded,
+            max(top_k * 2, candidate_k or 0),
+            f"{self._embedding_fingerprint}:{id(reranker)}:{top_k}",
+        )
+        return await session.cache.retrieval.get_or_compute(key, compute)
+
+    async def _retrieve_uncached(
+        self,
+        collection: str,
+        query: str,
+        top_k: int = 5,
+        scope: RetrievalScope | None = None,
+        candidate_k: int | None = None,
+        reranker: Reranker | None = None,
+        *,
+        exclude_chunk_ids: frozenset[str] = frozenset(),
     ) -> RetrievalOutcome:
         """统一证据召回。
 
@@ -212,11 +252,24 @@ class RetrievalOrchestrator:
             else:
                 engines.append("milvus")
                 try:
-                    query_vector = await self._embedding_provider.embed_query(query)
+                    session = current_evidence_session.get()
+                    if session is None:
+                        query_vector = await self._embedding_provider.embed_query(query)
+                    else:
+                        query_vector = await session.cache.embedding.get_or_compute(
+                            EmbeddingCacheKey(query, self._embedding_fingerprint or ""),
+                            lambda: self._embedding_provider.embed_query(query),
+                        )
                     vec_results = await self._vector_store.search(
                         collection=collection,
                         query_vector=query_vector,
                         top_k=pool_k,
+                        **({"exclude_chunk_ids": exclude_chunk_ids} if exclude_chunk_ids else {}),
+                        **(
+                            {"allowed_doc_ids": frozenset(allowed_doc_ids)}
+                            if allowed_doc_ids is not None
+                            else {}
+                        ),
                     )
                     dense_chunks = await self._find_local_chunks(
                         [chunk_id for chunk_id, _ in vec_results]
@@ -232,7 +285,22 @@ class RetrievalOrchestrator:
                 fallback_reason = "milvus_no_hits"
             engines.append("astrbot")
             try:
-                dense_chunks = await self._kb_reader.search(collection, query, pool_k)
+                dense_chunks = await self._kb_reader.search(
+                    collection,
+                    query,
+                    pool_k * 4 if exclude_chunk_ids or allowed_doc_ids is not None else pool_k,
+                )
+                dense_chunks = [
+                    c
+                    for c in dense_chunks
+                    if c.chunk_id not in exclude_chunk_ids
+                    and (allowed_doc_ids is None or c.doc_id in allowed_doc_ids)
+                ]
+                if len(dense_chunks) < pool_k and (
+                    exclude_chunk_ids or allowed_doc_ids is not None
+                ):
+                    fallback_reason = (fallback_reason or "astrbot") + ":candidate_exhausted"
+                dense_chunks = dense_chunks[:pool_k]
             except Exception as exc:
                 logger.error("AstrBot native search fallback failed: %s", exc)
 
@@ -240,12 +308,12 @@ class RetrievalOrchestrator:
         lexical_chunks: list[DocumentChunk] = []
         try:
             anchor_chunks = await self._search_anchor_sqlite(
-                collection, query, pool_k, allowed_doc_ids
+                collection, query, pool_k, allowed_doc_ids, exclude_chunk_ids
             )
             if anchor_chunks:
                 engines.append("sqlite_anchor")
             lexical_chunks = await self._search_lexical_sqlite(
-                collection, query, pool_k, allowed_doc_ids
+                collection, query, pool_k, allowed_doc_ids, exclude_chunk_ids
             )
             if lexical_chunks:
                 engines.append("sqlite_lexical")
@@ -290,11 +358,7 @@ class RetrievalOrchestrator:
         # 重排：有真实 cross-encoder 且候选多于 top_k 时，对候选池二次联合打分再取 top_k；
         # 否则退回 RRF 名次截断（保留既有行为）。candidate_k 已让候选池更宽，重排在此收口。
         candidates = deduped[:pool_k]
-        if (
-            reranker is not None
-            and not reranker.is_passthrough
-            and len(candidates) > top_k
-        ):
+        if reranker is not None and not reranker.is_passthrough and len(candidates) > top_k:
             try:
                 scored = await reranker.rerank(
                     query, [chunk for chunk, _ in candidates], top_n=top_k
@@ -359,10 +423,7 @@ class RetrievalOrchestrator:
         if allowed_doc_ids is not None:
             return list(allowed_doc_ids)
         if collection:
-            sql = (
-                "SELECT doc_id FROM documents "
-                "WHERE collection = ? AND lifecycle_state = 'active'"
-            )
+            sql = "SELECT doc_id FROM documents WHERE collection = ? AND lifecycle_state = 'active'"
             params: tuple[str, ...] = (collection,)
         else:
             sql = "SELECT doc_id FROM documents WHERE lifecycle_state = 'active'"
@@ -379,6 +440,7 @@ class RetrievalOrchestrator:
         query: str,
         limit: int,
         allowed_doc_ids: set[str] | None = None,
+        exclude_chunk_ids: frozenset[str] = frozenset(),
     ) -> list[DocumentChunk]:
         anchors = self._structural_anchors(query)
         if not anchors:
@@ -387,9 +449,7 @@ class RetrievalOrchestrator:
         if db_conn is None:
             return []
 
-        doc_ids = await self._resolve_candidate_doc_ids(
-            db_conn, collection, allowed_doc_ids
-        )
+        doc_ids = await self._resolve_candidate_doc_ids(db_conn, collection, allowed_doc_ids)
         if not doc_ids:
             return []
 
@@ -401,11 +461,11 @@ class RetrievalOrchestrator:
         matched: list[DocumentChunk] = []
         async with db_conn.execute(sql, doc_ids) as cursor:
             async for row in cursor:
+                if row[0] in exclude_chunk_ids:
+                    continue
                 metadata = _loads_metadata(row[5])
                 if self._metadata_matches_anchor(metadata, anchors):
-                    matched.append(
-                        DocumentChunk(row[0], row[1], row[2], row[3], row[4], metadata)
-                    )
+                    matched.append(DocumentChunk(row[0], row[1], row[2], row[3], row[4], metadata))
                     if len(matched) >= limit:
                         break
         return matched
@@ -416,6 +476,7 @@ class RetrievalOrchestrator:
         query: str,
         limit: int,
         allowed_doc_ids: set[str] | None = None,
+        exclude_chunk_ids: frozenset[str] = frozenset(),
     ) -> list[DocumentChunk]:
         terms = self._lexical_terms(query)
         if not terms:
@@ -426,9 +487,7 @@ class RetrievalOrchestrator:
             return []
 
         # 候选文档集（单集合 / 子树 / 全局）统一解析；detached 文档不进候选（生命态约束）。
-        doc_ids = await self._resolve_candidate_doc_ids(
-            db_conn, collection, allowed_doc_ids
-        )
+        doc_ids = await self._resolve_candidate_doc_ids(db_conn, collection, allowed_doc_ids)
         if not doc_ids:
             return []
 
@@ -443,14 +502,18 @@ class RetrievalOrchestrator:
             return []
 
         sql = (
-            "SELECT chunk_id, doc_id, ordinal, text, content_hash FROM chunks "
+            "SELECT chunk_id, doc_id, ordinal, text, content_hash, metadata FROM chunks "
             f"WHERE doc_id IN ({doc_placeholders}) AND ({' OR '.join(like_parts)}) "
             "ORDER BY ordinal ASC"
         )
         matched: list[tuple[DocumentChunk, float]] = []
         async with db_conn.execute(sql, params) as cursor:
             async for row in cursor:
-                chunk = DocumentChunk(row[0], row[1], row[2], row[3], row[4])
+                if row[0] in exclude_chunk_ids:
+                    continue
+                chunk = DocumentChunk(
+                    row[0], row[1], row[2], row[3], row[4], _loads_metadata(row[5])
+                )
                 matched.append((chunk, self._lexical_score(chunk.text, terms)))
         matched.sort(key=lambda item: (-item[1], item[0].ordinal))
         return [item[0] for item in matched[:limit]]
@@ -474,9 +537,7 @@ class RetrievalOrchestrator:
             if count <= 0:
                 continue
             if re.fullmatch(r"t\d{1,3}[a-z]?", term):
-                heading_re = re.compile(
-                    rf"(?im)^[\s#*_`>]*{re.escape(term)}[\s*_`#>]*$"
-                )
+                heading_re = re.compile(rf"(?im)^[\s#*_`>]*{re.escape(term)}[\s*_`#>]*$")
                 score += 100.0 if heading_re.search(text) else 10.0 * count
             elif term.isdigit() or len(term) <= 2:
                 score += 0.25 * count
@@ -543,9 +604,7 @@ class RetrievalOrchestrator:
         return {key: value for key, value in anchors.items() if value}
 
     @staticmethod
-    def _metadata_matches_anchor(
-        metadata: dict[str, object], anchors: dict[str, set[str]]
-    ) -> bool:
+    def _metadata_matches_anchor(metadata: dict[str, object], anchors: dict[str, set[str]]) -> bool:
         section_label = str(metadata.get("section_label") or "")
         section_labels = metadata.get("section_labels") or []
         subsection_label = str(metadata.get("subsection_label") or "")
@@ -559,9 +618,7 @@ class RetrievalOrchestrator:
             return True
         if isinstance(section_labels, list) and "section_label" in anchors:
             normalized_labels = {_normalize_anchor(str(value)) for value in section_labels}
-            if normalized_labels & {
-                _normalize_anchor(value) for value in anchors["section_label"]
-            }:
+            if normalized_labels & {_normalize_anchor(value) for value in anchors["section_label"]}:
                 return True
         if "subsection_label" in anchors and _normalize_anchor(subsection_label) in {
             _normalize_anchor(value) for value in anchors["subsection_label"]
@@ -572,18 +629,14 @@ class RetrievalOrchestrator:
         }:
             return True
         if isinstance(anchor_labels, list) and "anchor_label" in anchors:
-            normalized_anchor_labels = {
-                _normalize_anchor(str(value)) for value in anchor_labels
-            }
+            normalized_anchor_labels = {_normalize_anchor(str(value)) for value in anchor_labels}
             if normalized_anchor_labels & {
                 _normalize_anchor(value) for value in anchors["anchor_label"]
             }:
                 return True
         if isinstance(section_path, list) and "section_path" in anchors:
             normalized_path = {_normalize_anchor(str(value)) for value in section_path}
-            if normalized_path & {
-                _normalize_anchor(value) for value in anchors["section_path"]
-            }:
+            if normalized_path & {_normalize_anchor(value) for value in anchors["section_path"]}:
                 return True
         if isinstance(section_paths, list) and "section_path" in anchors:
             normalized_paths: set[str] = set()
@@ -592,9 +645,7 @@ class RetrievalOrchestrator:
                     normalized_paths.update(_normalize_anchor(str(value)) for value in path)
                 else:
                     normalized_paths.add(_normalize_anchor(str(path)))
-            if normalized_paths & {
-                _normalize_anchor(value) for value in anchors["section_path"]
-            }:
+            if normalized_paths & {_normalize_anchor(value) for value in anchors["section_path"]}:
                 return True
         return False
 

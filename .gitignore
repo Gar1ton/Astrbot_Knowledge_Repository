@@ -43,6 +43,8 @@ run_config.py          # 由 dev/run_config.example.py 复制而来，含本地�
 *.sqlite
 *.log
 /data/                 # 运行态数据/原件目录（含知识内容，不入库）
+# 私有论文 PDF + 抽取全文，仅本地核对切片用，见该目录 README
+/docs/chunk_preview_samples/
 
 # ── 前端（仅当存在 web/frontend/）───────────────────────
 web/frontend/node_modules/

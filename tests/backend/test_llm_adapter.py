@@ -15,6 +15,51 @@ from kacore.domain.llm_generation import (
 )
 
 
+async def test_independent_endpoint_supports_json_contract_and_counts_http_retries():
+    import json
+
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    from kacore.adapters.llm import LMStudioLLMAdapter
+    from kacore.pipelines.llm_json import llm_json_call
+    from kacore.utils.usage_ledger import current_usage, usage_request
+
+    attempts = 0
+
+    async def respond(request):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return web.json_response({"error": "busy"}, status=503)
+        return web.json_response({
+            "model": "test-model",
+            "choices": [{"message": {"content": '{"ok":true}'}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 2},
+        })
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", respond)
+    server = TestServer(app)
+    await server.start_server()
+
+    @usage_request
+    async def run():
+        adapter = LMStudioLLMAdapter(str(server.make_url("/v1")), "test-model",
+                                     retry_backoff_seconds=0, max_retries=1)
+        parsed, calls, tokens = await llm_json_call(adapter, "q", "sys", json.loads, 0)
+        return parsed, calls, tokens, current_usage.get().summary()
+
+    try:
+        parsed, calls, tokens, usage = await run()
+        assert parsed == {"ok": True} and calls == 1 and tokens == 42
+        assert usage["call_count"] == 2 and usage["unknown_calls"] == 1
+        assert usage["calls"][1]["model"] == "test-model"
+        assert usage["calls"][1]["measurement"] == "actual"
+    finally:
+        await server.close()
+
+
 class _ProviderMeta:
     id = "default-chat"
 
@@ -304,6 +349,38 @@ async def test_generate_result_ok_carries_finish_reason_and_tokens() -> None:
     assert result.provider_id == "default-chat"
     assert result.model == "deepseek-v4-flash"
     assert result.reasoning_present is False
+
+
+async def test_generate_result_missing_usage_is_none_not_zero() -> None:
+    """provider 完全没报用量时，prompt_tokens/completion_tokens 必须是 None（未知）
+    而不是 0（已知为零）——二者语义不同，见 GenerationResult 契约。"""
+    response = _LLMResponse("real answer", finish_reason="stop")
+    adapter = LLMAdapter(_AstrBotContext(response))
+
+    result = await adapter.generate_result("question", allow_mock=False)
+
+    assert result.prompt_tokens is None
+    assert result.completion_tokens is None
+
+
+async def test_generate_result_reported_zero_usage_is_preserved() -> None:
+    """provider 明确报告 0 token（如极短 prompt）时应如实保留为 0，不视为「未知」。"""
+
+    class _Usage:
+        prompt_tokens = 0
+        completion_tokens = 0
+
+    class _RawCompletion:
+        usage = _Usage()
+
+    response = _LLMResponse("ok", finish_reason="stop")
+    response.raw_completion = _RawCompletion()
+    adapter = LLMAdapter(_AstrBotContext(response))
+
+    result = await adapter.generate_result("question", allow_mock=False)
+
+    assert result.prompt_tokens == 0
+    assert result.completion_tokens == 0
 
 
 async def test_generate_result_true_empty_status() -> None:

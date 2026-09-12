@@ -38,6 +38,12 @@ class InMemoryVectorStore(VectorStore):
         for cid in chunk_ids:
             self._data.pop(cid, None)
 
+    async def retain_document_chunks(self, doc_id: str, chunk_ids: frozenset[str]) -> None:
+        self._data = {
+            cid: item for cid, item in self._data.items()
+            if item[0].doc_id != doc_id or cid in chunk_ids
+        }
+
     async def delete_collection(self, collection: str) -> None:
         # 在内存库中，我们基于 doc_to_col 映射判定 chunk 是否属于要删除的 collection。
         # SQLite source_store 仍是文档的事实源，本内存库仅保持同步状态。
@@ -60,6 +66,9 @@ class InMemoryVectorStore(VectorStore):
         query_vector: list[float],
         top_k: int,
         filter_metadata: dict | None = None,
+        *,
+        exclude_chunk_ids: frozenset[str] | None = None,
+        allowed_doc_ids: frozenset[str] | None = None,
     ) -> list[tuple[str, float]]:
         if top_k <= 0:
             return []
@@ -67,6 +76,11 @@ class InMemoryVectorStore(VectorStore):
         candidates = []
         doc_to_col = getattr(self, "_doc_to_col", {})
         for cid, (chunk, emb) in self._data.items():
+            if allowed_doc_ids is not None and chunk.doc_id not in allowed_doc_ids:
+                continue
+            if exclude_chunk_ids and cid in exclude_chunk_ids:
+                continue
+
             # 过滤 collection (利用已注册的映射)
             col_mapped = doc_to_col.get(chunk.doc_id)
             if col_mapped and col_mapped != collection:

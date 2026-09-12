@@ -324,6 +324,8 @@ class EnhancedRecallConfig:
     corrective_enabled: bool = True  # 首轮自检不充分时的一轮纠正检索 + 重合成。
     max_corrective_queries: int = 3
     json_max_retries: int = 1
+    token_budget: int = 24000  # 纠偏前的消费安全阀，未知模型时为估计。
+    output_reserve: int = 4000  # 开始下一次合成前预留输出预算。
 
 
 # Zotero 同步模式常量（杜绝魔法字面量散落）。

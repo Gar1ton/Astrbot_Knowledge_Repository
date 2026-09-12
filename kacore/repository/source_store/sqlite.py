@@ -260,7 +260,11 @@ def _locked_write(fn: Callable[..., Awaitable[_T]]) -> Callable[..., Awaitable[_
     @functools.wraps(fn)
     async def wrapper(self: SQLiteSourceDocumentStore, *args: Any, **kwargs: Any) -> _T:
         async with self._write_lock:
-            return await fn(self, *args, **kwargs)
+            try:
+                return await fn(self, *args, **kwargs)
+            except BaseException:
+                await self._db.rollback()
+                raise
 
     return wrapper
 
@@ -651,6 +655,14 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
             return cursor.rowcount > 0
 
     # ── 分块 ────────────────────────────────────────────────────
+
+    @_locked_write
+    async def commit_document_processing(
+        self, document: SourceDocument, chunks: list[DocumentChunk], pages: list[PageChunk],
+    ) -> None:
+        from .processing import commit_processing
+
+        await commit_processing(self._db, document, chunks, pages)
 
     @_locked_write
     async def replace_chunks(self, doc_id: str, chunks: list[DocumentChunk]) -> None:

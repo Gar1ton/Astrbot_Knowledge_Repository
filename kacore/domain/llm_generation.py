@@ -24,16 +24,19 @@ class GenerationResult:
     """一次 LLM 生成调用的结构化结果。
 
     text 为空时不代表调用失败——status 才是判断依据（如 reasoning_only 时 text 也是
-    空串，但语义与 empty/error 不同）。finish_reason/prompt_tokens/completion_tokens/
-    provider_id/model 均为 best-effort（AstrBot LLMResponse 演进/不同 provider 实现下
-    可能取不到，缺省值不代表真的是 0 或未知）。
+    空串，但语义与 empty/error 不同）。finish_reason/provider_id/model 均为 best-effort
+    （AstrBot LLMResponse 演进/不同 provider 实现下可能取不到）。
+
+    prompt_tokens/completion_tokens 为 None 表示 provider 未报告用量（真正未知，不能
+    当作 0 计入台账）；为 int 表示 provider 确有报告，即便报告值恰好是 0 也如实保留——
+    调用方靠 is None 区分「未知」与「已知为零」，不得混用。
     """
 
     text: str
     status: str = STATUS_OK
     finish_reason: str = ""
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
     reasoning_present: bool = False
     provider_id: str = ""
     model: str = ""

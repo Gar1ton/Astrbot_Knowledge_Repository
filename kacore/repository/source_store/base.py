@@ -165,6 +165,18 @@ class SourceDocumentStore(ABC):
     # ── 分块 ────────────────────────────────────────────────────
 
     @abstractmethod
+    async def commit_document_processing(
+        self, document: SourceDocument, chunks: list[DocumentChunk], pages: list[PageChunk],
+    ) -> None:
+        """原子替换正文块、页映射与处理元数据，标记 needs_reindex=True。
+
+        成功清除 processing_pending，更新 converter/version、chunk_schema/processing_version；
+        保留其他文档字段。异常或取消须回滚整个操作，保留先前持久化的待恢复标记。
+        文档不存在抛 FileNotFoundError。文件制品由调用方先发布，本接口不操作文件/向量。
+        """
+        ...
+
+    @abstractmethod
     async def replace_chunks(self, doc_id: str, chunks: list[DocumentChunk]) -> None:
         """以新分块整体替换某文档的旧分块。同步顺序：先删该 doc 旧 chunks → 再插入新 chunks。"""
         ...

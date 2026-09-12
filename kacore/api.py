@@ -45,6 +45,7 @@ from kacore.domain.models import (
     NOTION_PUSH_SYNCED,
     Collection,
     ConsoleScopeState,
+    DocumentLifecycle,
     DocumentOrigin,
     ScopedNote,
     SourceDocument,
@@ -88,7 +89,9 @@ from kacore.retrieval_modes import (
     VALID_RETRIEVAL_MODES,
     normalize_retrieval_mode,
 )
+from kacore.utils.processing_lock import ProcessingLock, serialized_processing
 from kacore.utils.text_chunks import clip_at_sentence
+from kacore.utils.usage_ledger import current_usage, usage_request
 from kacore.zotero_sync_job import (
     ZOTERO_SYNC_ERROR,
     ZOTERO_SYNC_PARTIAL,
@@ -691,6 +694,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         r2_backup_manager: Any | None = None,
         runtime_event_sink: RuntimeEventSink | None = None,
     ) -> None:
+        self._processing_lock = (
+            getattr(ingest_manager, "_processing_lock", None) or ProcessingLock()
+        )
         self._source_store = source_store
         self._kb_reader = kb_reader
         self._vector_store = vector_store
@@ -854,6 +860,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             )
         )
 
+    @serialized_processing
     async def delete_collection(self, name: str) -> bool:
         """删除集合。非空集合的文档将迁入 _uncategorized 系统集合。返回 False 表示 name 不存在。
 
@@ -1054,22 +1061,45 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         """取单个文档；不存在返回 None。"""
         return await self._source_store.get_document(doc_id)
 
+    @serialized_processing
     async def list_document_chunks(self, doc_id: str) -> list[DocumentChunk]:
         """列出单个文档的本地文本分块，供管理端展示摘要统计。"""
         chunks = await self._source_store.list_chunks(doc_id)
         return await self._ensure_document_chunks_current(doc_id, chunks)
 
+    @serialized_processing
     async def get_document_markdown_content(self, doc_id: str) -> str | None:
         """读取文档制品包中的 clean.md；文档不存在返回 None。"""
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             return None
+        if doc.local_meta.get("processing_pending"):
+            raise RuntimeError(f"Document processing recovery required: {doc_id}")
         rel_path = doc.markdown_rel_path or "clean.md"
         artifact_path = self._resolve_document_artifact_path(doc, rel_path)
         if artifact_path is None:
             raise FileNotFoundError(f"Markdown artifact not found for {doc_id}: {rel_path}")
         return await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
 
+    @serialized_processing
+    async def get_document_footnotes(self, doc_id: str) -> list[dict[str, Any]] | None:
+        """显式读取所有脚注（含无正文页面）；不触发重建，找不到文档返回 None。"""
+        from dataclasses import asdict
+
+        from kacore.managers.artifact_provenance import load_provenance
+
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return None
+        if doc.local_meta.get("processing_pending"):
+            raise RuntimeError(f"Document processing recovery required: {doc_id}")
+        path = self._resolve_document_artifact_path(doc, doc.markdown_rel_path or "clean.md")
+        if path is None:
+            return []
+        _, notes = await asyncio.to_thread(load_provenance, path.parent)
+        return [asdict(note) for note in notes]
+
+    @serialized_processing
     async def _load_fulltext_document(self, doc_id: str) -> tuple[SourceDocument, str]:
         """读出文档实体与整篇 clean.md；任一环节缺失统一转成可分类的领域异常。
 
@@ -1080,12 +1110,21 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             raise FullTextDocumentUnavailableError(doc_id, "document_not_found")
+        if doc.local_meta.get("processing_pending"):
+            raise FullTextDocumentUnavailableError(doc_id, "processing_pending")
         try:
             content = await self.get_document_markdown_content(doc_id)
         except FileNotFoundError as exc:
             raise FullTextDocumentUnavailableError(doc_id, "artifact_missing") from exc
         if content is None:
             raise FullTextDocumentUnavailableError(doc_id, "document_not_found")
+        artifact_path = self._resolve_document_artifact_path(
+            doc, doc.markdown_rel_path or "clean.md"
+        )
+        if artifact_path is not None:
+            from kacore.managers.artifact_provenance import fulltext_with_notes
+
+            content = await asyncio.to_thread(fulltext_with_notes, content, artifact_path.parent)
         return doc, content
 
     def _require_fulltext_confirmation(
@@ -1111,6 +1150,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             estimated_tokens=_est_context_tokens(content[:requested_chars]),
         )
 
+    @serialized_processing
     async def get_document_markdown_page(
         self,
         doc_id: str,
@@ -1467,6 +1507,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
     async def get_lightrag_index_status(self, doc_id: str) -> dict[str, str] | None:
         return await self._source_store.get_lightrag_index_status(doc_id)
 
+    @serialized_processing
     async def register_document(
         self,
         *,
@@ -1697,6 +1738,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         await self._source_store.update_document(doc)
         return doc
 
+    @serialized_processing
     async def delete_document(self, doc_id: str) -> bool:
         """删除文档、图谱贡献、远端镜像和插件托管原件。
 
@@ -1746,6 +1788,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             self._unlink_managed_document(doc.file_path, doc.doc_id)
         return deleted
 
+    @serialized_processing
     async def reextract_document(self, doc_id: str) -> dict:
         """从制品包中已存储的原件重新提取 Markdown，覆写 clean.md/pages.json，并重新分块。
 
@@ -1754,7 +1797,89 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         """
         if self._ingest_manager is None:
             raise RuntimeError("IngestManager not configured")
-        return await self._ingest_manager.reextract_document(doc_id)
+        result = await self._ingest_manager.reextract_document(doc_id)
+        await self._mark_document_needs_reindex(doc_id)
+        return result
+
+    @serialized_processing
+    async def reprocess_documents_with_stale_cleaning(
+        self, *, dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """手动重抽取旧 PDF 并索引；版本按文档元数据比较，失败索引下次继续。
+
+        dry_run 只列待处理 PDF，不读 chunks、不触发隐式重切。逐篇更新当前数据，
+        不提供全库原子发布或断点任务；原始 PDF 保留，失败记录不阻止后续文档。
+        """
+        if self._ingest_manager is None:
+            raise RuntimeError("IngestManager not configured")
+
+        docs = await self._source_store.list_documents()
+        if dry_run:
+            from kacore.managers.artifact_provenance import PROCESSING_VERSION
+
+            return {"dry_run": True, "document_ids": [
+                d.doc_id for d in docs
+                if (d.content_type == "application/pdf" or d.file_path.lower().endswith(".pdf"))
+                and (d.local_meta.get("processing_version") != PROCESSING_VERSION
+                     or d.needs_reindex or d.local_meta.get("processing_pending"))
+            ]}
+        reprocessed: list[str] = []
+        skipped_already_new: list[str] = []
+        skipped_not_pdf: list[str] = []
+        failed: list[dict[str, str]] = []
+        pending_reindex: list[str] = []
+
+        for doc in docs:
+            from kacore.managers.artifact_provenance import PROCESSING_VERSION
+
+            current = (doc.local_meta.get("processing_version") == PROCESSING_VERSION
+                       and not doc.local_meta.get("processing_pending"))
+            if current and not doc.needs_reindex:
+                skipped_already_new.append(doc.doc_id)
+                continue
+            if doc.content_type != "application/pdf" and not doc.file_path.lower().endswith(".pdf"):
+                skipped_not_pdf.append(doc.doc_id)
+                continue
+            try:
+                if not current:
+                    await self.reextract_document(doc.doc_id)
+            except Exception as exc:
+                logger.error("Reprocess failed for %s: %s", doc.doc_id, exc, exc_info=True)
+                failed.append({"doc_id": doc.doc_id, "error": str(exc)})
+                continue
+
+            if (doc.lifecycle_state == DocumentLifecycle.ACTIVE
+                    and self._vector_store is not None and self._embedding_provider is not None
+                    and (self._config is None or self._milvus_index_is_compatible())):
+                try:
+                    await self._index_document_chunks_with_retry(
+                        doc.doc_id, doc.collection, context="one-time cleaning reprocess"
+                    )
+                    await self._clear_document_needs_reindex(doc.doc_id)
+                except Exception as exc:
+                    logger.error(
+                        "Re-index failed for %s after reprocessing: %s",
+                        doc.doc_id, exc, exc_info=True,
+                    )
+                    failed.append({"doc_id": doc.doc_id, "error": f"reindex failed: {exc}"})
+                    continue
+            latest = await self._source_store.get_document(doc.doc_id)
+            if latest is not None and latest.needs_reindex:
+                pending_reindex.append(doc.doc_id)
+            reprocessed.append(doc.doc_id)
+            logger.info(
+                "Reprocessed %s with new cleaning rules (%d/%d done)",
+                doc.doc_id, len(reprocessed), len(docs),
+            )
+
+        return {
+            "total_documents": len(docs),
+            "reprocessed": reprocessed,
+            "pending_reindex": pending_reindex,
+            "skipped_already_new": skipped_already_new,
+            "skipped_not_pdf": skipped_not_pdf,
+            "failed": failed,
+        }
 
     # ── AstrBot 知识库（调用 / 检索）────────────────────────────
 
@@ -1856,10 +1981,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             "full_text_used": False,
         }
 
+    @serialized_processing
     async def get_chunk_context(
         self, doc_id: str, chunk_id: str, window: int = 2
     ) -> dict:
-        """返回指定 chunk 及其前后 window 个相邻 chunk（按 ordinal 排序）。"""
+        """返回指定 chunk 及其前后 window 个相邻 chunk（按 ordinal 排序）。
+
+        与 `list_document_chunks()` 保持一致：读到旧 schema 的 chunk 时自动重切一次并
+        持久化（`chunk_needs_rebuild` 判据 + `replace_chunks` 落盘），此后同一文档的
+        chunks 已是新 schema，后续调用不会重复重切。
+        """
         all_chunks = await self._ensure_document_chunks_current(doc_id)
         all_chunks.sort(key=lambda c: c.ordinal)
         matched_idx = next(
@@ -1881,6 +2012,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             "matched_chunk_id": chunk_id,
         }
 
+    @serialized_processing
     async def rebuild_vector_store(self, job: MilvusBuildJob | None = None) -> dict[str, Any]:
         """清除并从 SQLite 事实源全量 rebuild 本地向量数据库。
 
@@ -1976,6 +2108,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             await self._clear_document_needs_reindex(doc.doc_id)
         return {"rebuilt_chunks": total_chunks, "failed_docs": 0, "errors": []}
 
+    @serialized_processing
     async def rebuild_index_pending(self, job: MilvusBuildJob | None = None) -> dict[str, Any]:
         """仅对 needs_reindex=True 的文档进行增量索引重建，完成后清除标记。
 
@@ -2406,11 +2539,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             "thinking_trace": None,
         }
 
+    @usage_request
     async def ask(
         self,
         question: str,
         collection: str | None = None,
-        top_k: int = 5,
+        top_k: int = 6,
         conversation_id: str | None = None,
         persona_enabled: bool = False,
         retrieval_mode: str = "default",
@@ -2960,6 +3094,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             # 历史回放自包含不丢提示（实时响应用结构化 answer_notice 字段）。
             # v1.1.0：由追加改为前置——校验未通过的告警必须在读正文之前就看到，读完整篇才
             # 发现「本回答未通过证据校验」为时已晚。三个渲染出口（Web/AstrBot/历史回放）同序。
+            ledger = current_usage.get()
+            if deep_outcome is not None and ledger is not None:
+                deep_outcome.evidence_trace["usage"] = ledger.summary()
+                if sources:
+                    sources[0]["request_trace"] = deep_outcome.evidence_trace
             stored_answer = f"{answer_notice}\n\n---\n\n{answer}" if answer_notice else answer
             try:
                 await self._source_store.add_chat_message(cid, "user", question)
@@ -5056,6 +5195,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             return
+        if doc.local_meta.get("processing_pending"):
+            raise RuntimeError(f"Document processing recovery required: {doc_id}")
         if doc.needs_reindex:
             doc.needs_reindex = False
             await self._source_store.update_document(doc)
@@ -5148,6 +5289,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
 
         return failed_doc_ids, errors
 
+    @serialized_processing
     async def _ensure_document_chunks_current(
         self, doc_id: str, chunks: list[DocumentChunk] | None = None
     ) -> list[DocumentChunk]:
@@ -5155,6 +5297,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             return chunks
+        if doc.local_meta.get("processing_pending"):
+            if self._ingest_manager is None:
+                raise RuntimeError(f"Document processing recovery required: {doc_id}")
+            await self._ingest_manager.reextract_document(doc_id)
+            return await self._source_store.list_chunks(doc_id)
         rebuilder = getattr(self._ingest_manager, "rebuild_document_chunks_from_artifact", None)
         needs_rebuild = getattr(self._ingest_manager, "chunk_needs_rebuild", None)
         if not (callable(rebuilder) and callable(needs_rebuild)):
@@ -5164,20 +5311,30 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
                 await rebuilder(doc.doc_id)
                 return await self._source_store.list_chunks(doc_id)
         except FileNotFoundError as exc:
+            latest = await self._source_store.get_document(doc_id)
+            if latest is not None and latest.local_meta.get("processing_pending"):
+                raise
             logger.warning("Legacy chunk rebuild skipped for %s: %s", doc_id, exc)
         return chunks
 
+    @serialized_processing
     async def _index_document_chunks_with_retry(
         self, doc_id: str, collection: str, *, context: str
     ) -> int:
         chunks = await self._ensure_document_chunks_current(doc_id)
         if not chunks:
+            if self._vector_store is not None:
+                await self._vector_store.retain_document_chunks(doc_id, frozenset())
             return 0
-        return await self._upsert_milvus_chunks_with_retry(
+        count = await self._upsert_milvus_chunks_with_retry(
             chunks,
             collection=collection,
             context=f"{context}: doc={doc_id}",
         )
+        await self._vector_store.retain_document_chunks(
+            doc_id, frozenset(c.chunk_id for c in chunks),
+        )
+        return count
 
     async def _upsert_milvus_chunks_with_retry(
         self, chunks: list[DocumentChunk], *, collection: str, context: str
@@ -5229,6 +5386,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
 
     # ── Zotero 同步副作用回调（供 ZoteroSyncPipeline 注入）──────────
 
+    @serialized_processing
     async def _index_document(self, doc_id: str, collection: str) -> None:
         """把某文档的 chunk 嵌入并写入 Milvus（与 register_document 自动索引同语义）。"""
         if not (self._config and self._milvus_index_is_compatible()):
@@ -5244,6 +5402,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             logger.error("Milvus indexing failed after retries for Zotero doc %s: %s", doc_id, exc)
             await self._mark_document_needs_reindex(doc_id)
 
+    @serialized_processing
     async def _remove_document_index(self, doc_id: str) -> None:
         """从 Milvus 移除某文档的全部 chunk（strict 脱管 / conservative 删除时调用）。"""
         if not self._vector_store:
@@ -5830,6 +5989,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         """返回上一次 Zotero Pull 的结果摘要（含 status；无则空）。"""
         return dict(self._last_zotero_sync)
 
+    @serialized_processing
     async def _sync_milvus_collection_move(self, doc_id: str, collection: str) -> None:
         if not self._config or self._config.get_vector_db_config().backend != "milvus":
             return

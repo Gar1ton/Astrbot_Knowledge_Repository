@@ -238,6 +238,24 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
 
     # ── 分块 ────────────────────────────────────────────────────
 
+    async def commit_document_processing(
+        self, document: SourceDocument, chunks: list[DocumentChunk], pages: list[PageChunk],
+    ) -> None:
+        if document.doc_id not in self._documents:
+            raise FileNotFoundError(document.doc_id)
+        updated = copy.deepcopy(self._documents[document.doc_id])
+        updated.converter = document.converter
+        updated.converter_version = document.converter_version
+        updated.needs_reindex = True
+        for key in ("chunk_schema", "processing_version"):
+            if key in document.local_meta:
+                updated.local_meta[key] = document.local_meta[key]
+        updated.local_meta.pop("processing_pending", None)
+        new_chunks, new_pages = copy.deepcopy(chunks), copy.deepcopy(pages)
+        self._documents[document.doc_id] = updated
+        self._chunks[document.doc_id] = new_chunks
+        self._page_chunks[document.doc_id] = new_pages
+
     async def replace_chunks(self, doc_id: str, chunks: list[DocumentChunk]) -> None:
         self._chunks[doc_id] = [copy.deepcopy(c) for c in chunks]
 

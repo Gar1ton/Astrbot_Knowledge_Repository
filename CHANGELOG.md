@@ -2,6 +2,56 @@
 
 ## [Unreleased]
 
+## [v1.2.0-preview] — 2026-09-12
+
+### 新增 (Added)
+
+- **清洗与证据来源**：`artifact_cleaning` / `artifact_provenance` / `footnote_linking` 保留逐页
+  原始抽取与脚注，全文阅读补入脚注，新增受鉴权保护的脚注读取入口。`chunking` /
+  `chunk_token_limits` 接入通用章节和 estimated token 边界；新 chunk ID 包含修订，避免旧引用串文。
+- **增强/深度证据会话**：`evidence_session` / `evidence_selection` / `evidence_views` /
+  `evidence_actions` 复用请求内检索、embedding 和重排结果，按方面覆盖选择，受预算约束地读取
+  同修订相邻正文与脚注。视图单独记录来源，不覆写 canonical chunk；普通与外部 agent 排序路径不启用新会话。
+- **维护与评测入口**：`api.reprocess_documents_with_stale_cleaning` / `web/server.py` /
+  `tools/reprocess_cleaning.py` 提供默认只预览的手动重处理；处理版本与 needs_reindex 决定跳过或重试。
+  `tools/export_evidence_comparison.py` 从保存的 Ask JSON 导出不含正文的评测 JSONL。
+
+### 修复 (Fixed)
+
+- **旧库重处理一致性**：`IngestManager` 在更新派生制品前持久标记 processing_pending 与
+  needs_reindex；`SourceDocumentStore.commit_document_processing` 及 SQLite/memory 实现
+  一次提交正文块、页映射与处理元数据，异常回滚。重启后重切/索引先恢复未完成处理，
+  原件缺失保持待恢复；全文/脚注纯读入口拒绝待恢复制品，防止定位混用。
+- **维护与索引互斥**：`processing_lock` / `api` / `IngestManager` 共用同 Task 可重入锁，
+  手动处理与自动/手动向量重建串行；取消等待者不解锁其他任务，文件线程退出后才释放锁。维护结果增加
+  pending_reindex，不向不兼容索引直接写入，不把抽取错误误报为非 PDF 跳过。
+- **预发布版本**：`metadata.yaml`、`main.py`、README 统一为 v1.2.0-preview；升级指南同步
+  恢复流程和进程内互斥边界，不新增 SQL schema 或持久迁移队列。
+
+- `LLMAdapter` / `LMStudioLLMAdapter` / `usage_ledger` / `llm_json` 区分 actual、estimated、unknown，
+  保留 JSON 重试与 provider fallback 消费；补齐独立 endpoint 的 `generate_result()`，避免两模式配置
+  独立 endpoint 后因接口缺失降级。未知 usage 不冒充零消费。
+- `enhanced_recall_orchestrator` 缺失/无效自检不再虚报 verified；纠偏失败恢复原答案、证据与视图。
+  `deep_thinking_orchestrator` 接通共享候选和既有 SEA 来源关系，保留 VERIFY 路径。
+- `IngestManager` 重切保存脚注及空正文页面，重新抽取下放线程；更新 chunks 时同步页映射，
+  API 重抽取通知索引调度。`markdown_extractor` 清理页边噪声时保护代码和公式数值。
+- `VectorStore` / memory / Milvus 支持候选排除与文档范围下推；新修订向量成功写入后清理同文档旧向量。
+  Milvus 关闭前显式 flush，修复测试中未落盘状态延迟到 atexit 时触发的 PyArrow 退出段错误。
+
+### 验证
+
+- 全量 1037 passed / 2 skipped / 2 deselected（两项既有用例缺 torch），62.06s；最后补充
+  文件线程取消保护后，摄入/API/恢复回归 151 passed，4.93s。新增 `test_processing_recovery.py`
+  10 项覆盖 SQLite 页写入失败回滚、重开恢复、原件缺失、取消与维护/自动索引互斥。
+  `ruff check .`、`python -m mypy`、`git diff --check` 通过，版本声明一致。
+  未操作真实库或运行真实语料/收费模型效果评测。
+
+### 说明
+
+- 采用用户后续确认的手动逐篇重处理方案，不恢复已取消的持久代次/租约/队列基础设施。
+- 原始 PDF 未改；真实脚注识别质量、导入提速及 enhanced 总 token ≤旧版 120% 仍待用户实测。
+
+
 ## [v1.1.3] — 2026-09-04
 
 ### 修复 (Fixed)

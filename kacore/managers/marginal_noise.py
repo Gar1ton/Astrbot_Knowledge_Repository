@@ -4,6 +4,26 @@ from __future__ import annotations
 
 import re
 
+_ACCESS_STAMP_RE = re.compile(
+    r"This content downloaded from\s+\S+\s+on\s+.+?\s+UTC\.?",
+    re.I,
+)
+_ACCESS_TERMS_RE = re.compile(
+    r"All use subject to\s+(?:https?://\S+|JSTOR Terms and Conditions)\.?",
+    re.I,
+)
+_INLINE_ACCESS_PATTERNS = (
+    re.compile(
+        r"This content downloaded from\s+\S+\s+on\s+.*?\bUTC\b\.?",
+        re.I,
+    ),
+    re.compile(
+        r"All use subject to\s+(?:https?://about\.jstor\.org/terms/?|"
+        r"JSTOR Terms and Conditions)\.?",
+        re.I,
+    ),
+)
+
 
 def is_publication_footer(line: str) -> bool:
     """只接受以出版标识起始的组合声明，不因正文/书目含 DOI 或版权词而删除。"""
@@ -40,4 +60,45 @@ def publication_footer_indices(lines: list[str], margins: set[int]) -> set[int]:
     return found
 
 
-__all__ = ["is_publication_footer", "is_running_heading", "publication_footer_indices"]
+def access_stamp_indices(lines: list[str]) -> set[int]:
+    """识别完整或至多三行折行的数据库下载戳，位置不限但必须整段严格匹配。
+
+    这类戳在 PDF 文本流中不一定落在视觉页脚，因此不能仅检查首尾行；反过来，使用
+    fullmatch、固定开头和 UTC 结尾，避免删除正文里对下载声明的普通讨论。
+    """
+    found: set[int] = set()
+    for start, line in enumerate(lines):
+        plain = re.sub(r"[*_`#]", "", line).strip()
+        if _ACCESS_TERMS_RE.fullmatch(plain):
+            found.add(start)
+            continue
+        if not re.match(r"This content downloaded from\b", plain, re.I):
+            continue
+        combined = ""
+        for end in range(start, min(len(lines), start + 3)):
+            fragment = re.sub(r"[*_`#]", "", lines[end]).strip()
+            if fragment:
+                combined = f"{combined} {fragment}".strip()
+            if _ACCESS_STAMP_RE.fullmatch(combined):
+                found.update(range(start, end + 1))
+                break
+    return found
+
+
+def remove_inline_access_stamps(line: str, *, preserve_offsets: bool = False) -> str:
+    """删除被转换器并入正文行的访问戳；完整替换范围严格，代码/公式保护由调用方负责。"""
+    for pattern in _INLINE_ACCESS_PATTERNS:
+        line = pattern.sub(
+            (lambda match: " " * len(match.group(0))) if preserve_offsets else " ",
+            line,
+        )
+    return line
+
+
+__all__ = [
+    "access_stamp_indices",
+    "is_publication_footer",
+    "is_running_heading",
+    "publication_footer_indices",
+    "remove_inline_access_stamps",
+]

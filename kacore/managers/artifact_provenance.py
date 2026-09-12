@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from kacore.managers.markdown_extractor import MarkdownArtifact
 
 PROVENANCE_FILE = "provenance.json"
-PROCESSING_VERSION = "cleaning-v2"
+PROCESSING_VERSION = "cleaning-v3"
 
 
 def save_provenance(directory: Path, artifact: MarkdownArtifact) -> None:

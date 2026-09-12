@@ -11,7 +11,7 @@ import { Z } from "@/lib/zLayers";
 import { useConsole } from "@/lib/ConsoleContext";
 import { useToast } from "@/components/ui/Toast";
 import { useI18n, type I18nKey } from "@/lib/i18n";
-import { buildCitationIndex, splitByCitations } from "@/lib/citationIndex";
+import { AnswerMarkdown } from "@/components/panels/AnswerMarkdown";
 import { FullTextConfirmDialog } from "@/components/panels/FullTextConfirmDialog";
 import {
   AskResult, AskSource, ApiError, AskTaskTimeoutError, FullTextConfirmation, GraphBuildEstimate, ThinkingTrace,
@@ -280,53 +280,6 @@ function formatDuration(seconds?: number | null): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-// ─── renderAnswer: **bold** + [n] citation sups ───────────────
-
-const CITE_STYLE: React.CSSProperties = {
-  cursor: "pointer",
-  color: "var(--accent)",
-  background: "var(--accent-soft)",
-  borderRadius: 3,
-  padding: "0 3px",
-  fontWeight: 600,
-  margin: "0 1px",
-};
-
-function renderAnswer(
-  text: string,
-  sources: AskSource[] | undefined,
-  onCite: (n: number) => void,
-): React.ReactNode {
-  // v1.1.0：正文里的引用已是 Harvard 短引 `(Vaswani et al., 2017, p. 3)`；索引把它映射回
-  // 来源序号。历史消息里的裸 `[n]` 由 index 内置的兜底分支继续支持。
-  const index = buildCitationIndex(sources);
-  return text.split("\n").map((line, li, lines) => {
-    const bold = line.split(/(\*\*[^*]+\*\*)/g);
-    return (
-      <React.Fragment key={li}>
-        {bold.map((chunk, ci) => {
-          if (/^\*\*[^*]+\*\*$/.test(chunk))
-            return <strong key={ci} style={{ fontWeight: 700, color: "var(--heading)" }}>{chunk.slice(2, -2)}</strong>;
-          return (
-            <React.Fragment key={ci}>
-              {splitByCitations(chunk, index).map((part, pi) =>
-                part.n === null ? (
-                  part.text
-                ) : (
-                  <span key={pi} onClick={() => onCite(part.n as number)} style={CITE_STYLE}>
-                    {part.text}
-                  </span>
-                ),
-              )}
-            </React.Fragment>
-          );
-        })}
-        {li < lines.length - 1 && <br />}
-      </React.Fragment>
-    );
-  });
-}
-
 // ─── SourceMini card ──────────────────────────────────────────
 
 function SourceMini({ s, onClick }: { s: AskSource; onClick: () => void }) {
@@ -489,9 +442,7 @@ function MessageBubble({
             ⚠️ {msg.answerNotice.replace(/\*\*/g, "")}
           </div>
         )}
-        <div style={{ fontSize: 12.5, lineHeight: 1.7, color: "var(--fg)" }}>
-          {renderAnswer(msg.content, msg.sources, onCite)}
-        </div>
+        <AnswerMarkdown text={msg.content} sources={msg.sources} onCite={onCite} />
         {msg.sources && msg.sources.length > 0 && (
           <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
             <div

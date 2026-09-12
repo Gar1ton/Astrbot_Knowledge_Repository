@@ -34,6 +34,51 @@ def test_single_publication_footer_removed_without_deleting_citations():
     assert _remove_marginal_noise(standalone, set()) == standalone
 
 
+def test_database_access_stamp_removed_anywhere_but_literal_examples_are_protected():
+    stamp = "This content downloaded from 131.111.98.148 on Fri, 11 Sep 2026 03:07:28 UTC"
+    prose = "The argument continues across the page."
+    raw = f"Opening paragraph.\n\n{stamp}\n\n{prose}"
+    cleaned_raw = _remove_marginal_noise(raw, set())
+    assert stamp not in cleaned_raw
+    assert cleaned_raw.startswith("Opening paragraph.")
+    assert cleaned_raw.endswith(prose)
+
+    wrapped = (
+        "Opening paragraph.\n\nThis content downloaded from 131.111.98.148 on Fri,\n"
+        f"11 Sep 2026 03:07:28 UTC\n\n{prose}"
+    )
+    cleaned_wrapped = _remove_marginal_noise(wrapped, set())
+    assert "This content downloaded" not in cleaned_wrapped
+    assert "All use subject" not in _remove_marginal_noise(
+        f"{prose}\nAll use subject to https://about.jstor.org/terms", set()
+    )
+
+    code = f"```text\n{stamp}\n```"
+    assert _remove_marginal_noise(code, set()) == code
+    discussion = "The phrase ‘This content downloaded from’ is discussed as a watermark."
+    assert _remove_marginal_noise(discussion, set()) == discussion
+
+    flattened = f"The planetary argument is {stamp} continued by this clause."
+    assert _remove_marginal_noise(flattened, set()) == (
+        "The planetary argument is   continued by this clause."
+    )
+
+    interrupted = f"The planetary argument is\n\n{stamp}\n\ncontinued by this clause."
+    cleaned_interrupted = _remove_marginal_noise(interrupted, set())
+    assert "\n" not in cleaned_interrupted
+    assert cleaned_interrupted.startswith("The planetary argument is ")
+    assert cleaned_interrupted.endswith(" continued by this clause.")
+
+
+def test_database_access_stamp_offset_mask_is_length_preserving():
+    stamp = "This content downloaded from 131.111.98.148 on Fri, 11 Sep 2026 03:07:28 UTC"
+    raw = f"Before.\n{stamp}\nAfter."
+    masked = _remove_marginal_noise(raw, set(), preserve_offsets=True)
+    assert len(masked) == len(raw)
+    assert masked.index("After.") == raw.index("After.")
+    assert stamp not in masked
+
+
 def test_alternating_short_running_headings_removed_but_real_headings_kept():
     pages = [f'#### {"hui" if i % 2 else "machine and ecology"}\nBody {i}.' for i in range(8)]
     repeated = _detect_repeated_marginal_headers(pages)

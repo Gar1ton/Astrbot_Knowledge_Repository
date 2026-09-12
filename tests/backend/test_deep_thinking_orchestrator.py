@@ -784,6 +784,9 @@ async def test_synthesize_answer_deep_style_selects_deep_system():
     llm = ScriptedLLM(["ans"])
     await synthesize_answer(llm, "q", [_chunk("c1")], "zh", style="deep")
     assert "mechanism" in llm.system_prompts[0].lower()
+    assert "Begin with a concise, direct answer" in llm.system_prompts[0]
+    assert "or begin with an inventory" in llm.system_prompts[0]
+    assert "do not repeat the same citation" in llm.system_prompts[0]
     llm2 = ScriptedLLM(["ans"])
     await synthesize_answer(llm2, "q", [_chunk("c1")], "zh")
     assert "mechanism" not in llm2.system_prompts[0].lower()

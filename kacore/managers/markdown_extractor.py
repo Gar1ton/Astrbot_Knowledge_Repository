@@ -20,7 +20,12 @@ from typing import Any
 from kacore.domain.footnotes import FootnoteBlock
 from kacore.managers.artifact_cleaning import clean_page_structure
 from kacore.managers.footnote_linking import link_footnotes
-from kacore.managers.marginal_noise import is_running_heading, publication_footer_indices
+from kacore.managers.marginal_noise import (
+    access_stamp_indices,
+    is_running_heading,
+    publication_footer_indices,
+    remove_inline_access_stamps,
+)
 from kacore.managers.structural_protection import protected_line_mask
 
 # 与 requirements.txt 的 `pymupdf4llm>=0.0.17,<0.1.0` 对齐的内置参考版本。
@@ -121,6 +126,7 @@ def _remove_marginal_noise(
     nonempty = [idx for idx, line in enumerate(lines) if line.strip()]
     edges = set(nonempty[:1] + nonempty[-1:])
     publication = publication_footer_indices(lines, marginal_indices)
+    access_stamps = access_stamp_indices(lines)
     cleaned: list[str] = []
     for idx, line in enumerate(lines):
         stripped = line.strip()
@@ -131,22 +137,46 @@ def _remove_marginal_noise(
         if protected[idx] and not running:
             cleaned.append(line)
             continue
-        if running or idx in publication:
-            if preserve_offsets:
-                cleaned.append(" " * len(line))
+        if running or idx in publication or idx in access_stamps:
+            cleaned.append(" " * len(line) if preserve_offsets else "")
             continue
         if idx in marginal_indices and _PAGE_NUMBER_RE.match(stripped):
-            if preserve_offsets:
-                cleaned.append(" " * len(line))
+            cleaned.append(" " * len(line) if preserve_offsets else "")
             continue
         if (idx in marginal_indices
                 and not re.match(r"^(?:#{1,6}\s|§\s*\d|(?:Chapter|Part)\s+)", stripped, re.I)
                 and _normalize_marginal_line(stripped) in repeated_headers):
-            if preserve_offsets:
-                cleaned.append(" " * len(line))
+            cleaned.append(" " * len(line) if preserve_offsets else "")
             continue
-        cleaned.append(line)
-    return "\n".join(cleaned)
+        cleaned.append(remove_inline_access_stamps(line, preserve_offsets=preserve_offsets))
+
+    # 水印可能插进同一句的两个视觉行之间。若前文无终止标点且后文仍像正文续行，把水印及
+    # 周围空行占据的换行符替换为空格：既消除假段落边界，preserve_offsets 模式下又不改变
+    # 任一后续字符的位置。真正位于两个完整段落之间的水印不会触发此桥接。
+    separators = ["\n"] * max(0, len(lines) - 1)
+    effective_access = sorted(idx for idx in access_stamps if not protected[idx])
+    groups: list[tuple[int, int]] = []
+    for idx in effective_access:
+        if groups and idx == groups[-1][1] + 1:
+            groups[-1] = (groups[-1][0], idx)
+        else:
+            groups.append((idx, idx))
+    for start, end in groups:
+        left = next((i for i in range(start - 1, -1, -1) if lines[i].strip()), None)
+        right = next((i for i in range(end + 1, len(lines)) if lines[i].strip()), None)
+        if left is None or right is None or protected[left] or protected[right]:
+            continue
+        if (
+            lines[left].rstrip()[-1:] not in "。？！.!?:;"
+            and _CONTINUATION_START_RE.match(lines[right].lstrip())
+        ):
+            for separator_idx in range(left, right):
+                separators[separator_idx] = " "
+
+    return "".join(
+        line + (separators[idx] if idx < len(separators) else "")
+        for idx, line in enumerate(cleaned)
+    )
 
 
 def _repair_wrapped_text(text: str) -> str:

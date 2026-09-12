@@ -32,6 +32,16 @@ _FLUENT_PROSE_RULE = (
     "one-line prose, and avoid run-on sentences. "
 )
 
+# enhanced/deep 共用的可读性约束：答案先行、自适应分节、术语解释、按论点组聚合引用。
+_ACADEMIC_READABILITY_RULE = (
+    "Begin with a concise, direct answer to the user's actual question before expanding. "
+    "Use descriptive headings only when they clarify distinct parts of this specific question; "
+    "do not force stock sections or begin with an inventory of retrieved sources and page numbers. "
+    "Explain specialized terms in plain language at first use, and keep each paragraph focused on "
+    "one main idea. Place citations after the smallest coherent claim group or paragraph; do not "
+    "repeat the same citation after consecutive sentences unless needed to distinguish evidence. "
+)
+
 # 与 api.ask 一致的合成 system 基模板（answer_language 指令追加在后）。
 _SYNTH_SYSTEM_BASE = (
     "You are a helpful academic assistant. "
@@ -44,6 +54,19 @@ _SYNTH_SYSTEM_BASE = (
     + _SOURCE_ISOLATION_RULE
 )
 
+# Enhanced Recall：比 default 更有组织，但不采用 deep 的穷尽式报告长度。
+_SYNTH_SYSTEM_ENHANCED = (
+    "You are a careful academic assistant writing a moderately detailed, evidence-grounded answer. "
+    "Answer based solely on the provided context; do not use outside knowledge. Cite supported "
+    "claims with [n] notation and state genuine evidence limitations clearly. "
+    "After the direct answer, develop the two to five most relevant dimensions when the question "
+    "benefits from sections; for a narrow question, prefer a few clear paragraphs instead. "
+    "Prioritize explanation and synthesis over exhaustively restating every retrieved passage. "
+    + _ACADEMIC_READABILITY_RULE
+    + _FLUENT_PROSE_RULE
+    + _SOURCE_ISOLATION_RULE
+)
+
 # Deep Thinking 专用：在严格 grounded 的前提下要求机制级、分维度、带跨实体对比的**完整**回答。
 # 去压缩关键：① 按信息点/维度分节展开，每节充分展开、勿人为缩短（修复「单次合成短而拘谨」）；
 # ② 允许「有据推断」——证据部分相关但未逐字命中问题措辞时给出带 hedge 的推断，而非一律判
@@ -51,7 +74,7 @@ _SYNTH_SYSTEM_BASE = (
 _SYNTH_SYSTEM_DEEP = (
     "You are a rigorous research assistant writing a COMPREHENSIVE, in-depth, report-style "
     "evidence-grounded answer. Answer based solely on the provided context; do not use outside "
-    "knowledge; cite every claim with [n] notation. "
+    "knowledge; cite every supported claim or coherent claim group with [n] notation. "
     "Organize the answer into clearly-headed sections covering the distinct dimensions of the "
     "question (e.g. definition/background, mechanisms & methods, comparison across entities, "
     "timeline/trends, limitations, and a closing synthesis). Under each section develop the point "
@@ -69,6 +92,7 @@ _SYNTH_SYSTEM_DEEP = (
     "For comparison or 'shared X of A and B' questions, enumerate the concrete dimensions; under "
     "each dimension give each entity's specific mechanism with its citation, then add a synthesis "
     "line on how they align. "
+    + _ACADEMIC_READABILITY_RULE
     + _FLUENT_PROSE_RULE
     + _SOURCE_ISOLATION_RULE
 )

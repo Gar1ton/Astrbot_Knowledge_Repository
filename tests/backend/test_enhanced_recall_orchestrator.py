@@ -153,6 +153,11 @@ def test_synth_check_system_embeds_verdict_contract():
     assert '"sufficient"' in system
     assert "at most 3" in system
     assert "中文" in system  # answer_language 指令保留。
+    assert "moderately detailed" in system
+    assert "Begin with a concise, direct answer" in system
+    assert "do not force stock sections" in system
+    assert "do not repeat the same citation" in system
+    assert "COMPREHENSIVE" not in system  # enhanced 不再误用 deep 的穷尽式报告模板。
 
 
 # ── 编排流程 ────────────────────────────────────────────────

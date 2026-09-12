@@ -2722,6 +2722,26 @@ async def test_ask_enriches_local_document_from_local_meta() -> None:
     assert "[1]" not in result["answer"]
 
 
+async def test_ask_normalizes_filename_style_title_in_reference_list() -> None:
+    """末尾书目不得输出 `Anon. (n.d.) Hui (2021) - Title.pdf.` 这类重复文件名。"""
+    store = InMemorySourceDocumentStore()
+    doc = _doc("d1", "kb1")
+    doc.title = "Hui (2021) - Art and Cosmotechnics.pdf"
+    await store.add_document(doc)
+    kb = InMemoryKnowledgeBaseReader(
+        {"kb1": [DocumentChunk("c0", "d1", 0, "relevant text", "h0")]}
+    )
+    api = KnowledgeRepositoryApi(
+        source_store=store, kb_reader=kb, llm_adapter=_HarvardLLM()  # type: ignore[arg-type]
+    )
+
+    result = await api.ask(question="relevant", collection="kb1")
+
+    assert "(Hui, 2021)" in result["answer"]
+    assert result["references"] == ["Hui (2021) Art and Cosmotechnics."]
+    assert ".pdf" not in result["answer"]
+
+
 async def test_ask_enriches_zotero_document_with_full_bibliography() -> None:
     from kacore.domain.models import ZoteroItem
 
@@ -3175,13 +3195,15 @@ async def test_reprocess_documents_with_stale_cleaning() -> None:
     """一次性重新清洗脚本：按 chunk_kind 标记跳过已是新版本的文档，跳过非 PDF
     文档（无需重新提取），重新提取成功后立刻重新索引，失败单独记录不影响其它文档。
     """
+    from kacore.managers.artifact_provenance import PROCESSING_VERSION
+
     store = InMemorySourceDocumentStore()
     await store.add_document(_doc("d1_old", "c"))  # 旧版 chunk，无 chunk_kind
     await store.replace_chunks(
         "d1_old", [DocumentChunk("c0", "d1_old", 0, "old text", "h0", metadata={})]
     )
     new_doc = _doc("d2_new", "c")
-    new_doc.local_meta["processing_version"] = "cleaning-v2"
+    new_doc.local_meta["processing_version"] = PROCESSING_VERSION
     await store.add_document(new_doc)  # 文档处理版本，不再扫描 chunk_kind。
     await store.replace_chunks(
         "d2_new",

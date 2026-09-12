@@ -1,5 +1,50 @@
 # TODO
 
+## 2026-09-12 Reference list 文件名式标题去重（completed）
+
+- [x] 在 `citation_rendering.build_citation_refs` 的单一映射点识别
+  `Author (Year) - Title.pdf` / `Author - Year - Title.pdf`：reference title 只保留净标题；
+  creators/year 仅在结构化字段为空时由文件名补空，绝不覆盖 Zotero 权威元数据。
+- [x] 补 pipeline/API 回归，覆盖 `Anon. (n.d.) Hui (2021) - …pdf.` 的真实失败形态、
+  权威字段优先和普通标题不受影响；跑相关测试与静态检查，完成后更新 CHANGELOG。
+- 验证：引用/Harvard/文件名解析/API 定向 93 passed；最终全量 1066 passed / 2 skipped /
+  2 deselected（仍仅排除两个既有缺 `torch` 用例）；本轮文件 ruff 与 `git diff --check` 通过。
+
+## 2026-09-12 PDF 访问水印与回答结构修复（completed）
+
+### User constraints / 约束
+
+- [x] 仅执行已批准方案的 Phase 2、3、4：修复 PDF 访问水印、enhanced/deep 回答组织和
+  WebUI Markdown 展示，并完成验证闭环。
+- [x] Harvard 元数据与引用生成本轮明确不改；用户将删除持久化数据后从空库重新导入，
+  因此不增加旧制品、旧消息或持久迁移兼容方案。
+- [x] 未操作真实运行实例、Git 远端或发布版本；`pages/` 仅由前端构建与同步脚本生成。
+
+### Technical implementation path
+
+- [x] **Phase 2 — 水印清洗**：严格识别完整、折行及被转换器并入正文行的
+  `This content downloaded from … UTC` / `All use subject to …`，在非代码/公式区域直接删除；
+  水印插入续句时桥接前后正文，避免制造假段落和切片断层。`PROCESSING_VERSION` 升至
+  `cleaning-v3` 标记新清洗产物；不实现旧库迁移路径。
+- [x] **Phase 3 — 回答结构与展示**：为 enhanced 提供区别于 deep 的中等篇幅、答案优先、
+  自适应分节与低重复引用规则；从巨型 `ChatPanel` 抽出安全 Markdown 展示组件，支持标题、
+  段落、列表、粗体、行内/块代码及参考文献区块，并保留现有 Harvard/`[n]` 点击引用。
+- [x] **Phase 4 — 验证与治理**：补后端与前端行为回归，重跑真实 PDF 切片样本，执行
+  pytest/ruff/mypy、前端 tsc/eslint/build，并经 `tools/sync_frontend.py` 更新 `pages/`；
+  完成后追加 CHANGELOG。
+
+### Verification
+
+- 合成 PDF 生产抽取集成测试复现“整页先被合并为一行”的真实转换行为，确认两类水印均删除、
+  前后续句恢复；水印/结构/提示词/前端 parser 与引用索引定向回归 32 passed。
+- Massumi 真实 PDF 重跑：150 页、214 chunks、offset 不变量 214/214，通过且无访问水印命中。
+- 全量 pytest（仅排除两个既有缺 `torch` 用例）1062 passed / 2 skipped / 2 deselected；
+  两个排除项仍为 `test_embedding.py` 的既有环境依赖，不属于本轮。
+- 本轮 Python 文件 `ruff` 全绿，`mypy`（既有 7 个 domain 文件）通过；全仓 `ruff` 仍只有
+  `tools/chunk_preview.py` 3 个既有 E402。前端本轮文件 ESLint 与 `tsc --noEmit` 通过；全仓
+  ESLint 仍有 `ModelRuntimePanel.tsx` 1 个既有 error、`lib/api.ts` 1 个既有 warning。
+- Next.js production build 成功，`tools/sync_frontend.py` 已把 357 个文件同步至 `pages/`。
+
 ## 2026-09-12 旧 chunk 升级未自动触发修复（completed）
 
 - 根因：上次分块重写未升 `CHUNK_SCHEMA`（用户决定不 bump），`chunk_needs_rebuild` 只看 schema/ID 前缀/offset，旧数据全部判为最新；且启动只在 embedding/collection 变化时才入队，升级插件不会把旧文档推进 `needs_reindex` 队列。

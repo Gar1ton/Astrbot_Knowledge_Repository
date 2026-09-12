@@ -24,6 +24,7 @@ from kacore.domain.citation import (
     normalize_creators,
     reference_sort_key,
 )
+from kacore.domain.filename_biblio import parse_filename_biblio
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, MutableMapping, Sequence
@@ -87,7 +88,18 @@ def build_citation_refs(sources: Sequence[Mapping[str, Any]]) -> dict[int, Citat
             continue
         if n <= 0 or n in refs:
             continue
+        title = str(source.get("title") or "").strip()
         surnames, initials = normalize_creators(source.get("creators"))
+        year = _first_str(source, "year")
+        filename_biblio = parse_filename_biblio(title)
+        if filename_biblio is not None:
+            # title 仍是附件文件名时，reference list 不能再次打印作者/年份和扩展名。
+            # 文件名解析值只补结构化字段的空缺，Zotero/用户填写的权威值永远优先。
+            title = filename_biblio.title
+            if not surnames:
+                surnames, initials = normalize_creators(filename_biblio.authors)
+            if not year:
+                year = filename_biblio.year
         metadata = source.get("metadata")
         pages_raw = source.get("pages")
         if not pages_raw and isinstance(metadata, dict):
@@ -102,10 +114,10 @@ def build_citation_refs(sources: Sequence[Mapping[str, Any]]) -> dict[int, Citat
         refs[n] = CitationRef(
             source_n=n,
             doc_id=str(source.get("doc_id") or source.get("document_id") or ""),
-            title=str(source.get("title") or "").strip(),
+            title=title,
             surnames=surnames,
             initials=initials,
-            year=_first_str(source, "year"),
+            year=year,
             pages=tuple(sorted({p for p in pages if p > 0})),
             venue=_first_str(source, "venue"),
             doi=_first_str(source, "doi"),

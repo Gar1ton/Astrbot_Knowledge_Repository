@@ -76,6 +76,24 @@ def test_extract_pdf_markdown_keeps_ordinary_numbered_text_intact(tmp_path: Path
     assert "Third item closes out the list" in artifact.clean_markdown
 
 
+def test_extract_pdf_markdown_removes_jstor_access_stamp_and_repairs_seam(
+    tmp_path: Path,
+) -> None:
+    """访问戳即使落在文本流中间也应删除，前后续句不能被切成两个假段落。"""
+    stamp = "This content downloaded from 131.111.98.148 on Fri, 11 Sep 2026 03:07:28 UTC"
+    pdf_path = _make_pdf(
+        tmp_path,
+        "The planetary argument is\n" + stamp + "\ncontinued by this clause.\n"
+        "All use subject to https://about.jstor.org/terms",
+    )
+
+    artifact = extract_pdf_markdown(str(pdf_path))
+
+    assert "This content downloaded" not in artifact.clean_markdown
+    assert "All use subject to" not in artifact.clean_markdown
+    assert "The planetary argument is continued by this clause." in artifact.clean_markdown
+
+
 def test_marginal_numeric_noise_does_not_delete_formula_or_code():
     from kacore.managers.markdown_extractor import _remove_marginal_noise
 

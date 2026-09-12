@@ -53,6 +53,31 @@ def test_build_citation_refs_skips_invalid_n() -> None:
     assert build_citation_refs([_source(0), {"doc_id": "x"}, _source(-1)]) == {}
 
 
+def test_build_citation_refs_normalizes_filename_style_title_and_fills_missing_biblio() -> None:
+    source = _source(1, title="Hui (2021) - Art and Cosmotechnics.pdf")
+
+    ref = build_citation_refs([source])[1]
+
+    assert ref.title == "Art and Cosmotechnics"
+    assert ref.surnames == ("Hui",)
+    assert ref.year == "2021"
+
+
+def test_filename_biblio_never_overrides_authoritative_creator_or_year() -> None:
+    source = _source(
+        1,
+        title="FilenameAuthor (1999) - Clean title.pdf",
+        creators=["Aoki, Ann"],
+        year="2020",
+    )
+
+    ref = build_citation_refs([source])[1]
+
+    assert ref.title == "Clean title"
+    assert ref.surnames == ("Aoki",)
+    assert ref.year == "2020"
+
+
 # ── 基本改写 ──────────────────────────────────────────────────
 
 
@@ -220,6 +245,20 @@ def test_render_appends_reference_block_and_mutates_sources_in_place() -> None:
     assert sources[0]["harvard_in_text"] == "Aoki, 2020, p. 3"
     assert sources[0]["harvard_reference"] == "Aoki, A. (2020) Paper A."
     assert sources[1]["harvard_in_text"] == "Bell, 2021, p. 7"
+
+
+def test_render_reference_list_does_not_repeat_filename_author_year_or_extension() -> None:
+    source = _source(1, title="Hui (2021) - Art and Cosmotechnics.pdf")
+
+    body, references = render_answer_with_references("结论 [1]。", [source])
+
+    assert body == (
+        "结论 (Hui, 2021)。\n\n"
+        "**参考文献**\n\n"
+        "- Hui (2021) Art and Cosmotechnics."
+    )
+    assert references == ["Hui (2021) Art and Cosmotechnics."]
+    assert source["harvard_in_text"] == "Hui, 2021"
 
 
 def test_render_with_empty_sources_returns_answer_unchanged() -> None:

@@ -13,7 +13,6 @@ from kacore.domain.footnotes import FootnoteBlock, FootnoteLinkStatus
 from kacore.managers.footnote_linking import extract_footnote_candidates, link_footnotes
 from kacore.managers.structural_protection import repair_wrapped_text_preserving_blocks
 
-_DOWNLOAD = re.compile(r"^\s*(?:This content downloaded from\b|All use subject to https?://)", re.I)
 _BIBLIO = re.compile(
     r"(?:\b(?:Ibid|See|Press|University|Journal|Vol|pp)\b|\b(?:18|19|20)\d{2}\b|[“”\"])", re.I
 )
@@ -30,12 +29,6 @@ def clean_page_structure(raw: str, *, page: int) -> tuple[str, list[FootnoteBloc
     )
     if not credible or any(_HEADING.match(line) for line in raw[len(body) :].splitlines()):
         body, linked = raw, []
-    lines = body.splitlines()
-    nonempty = [i for i, line in enumerate(lines) if line.strip()]
-    margins = set(nonempty[:4] + nonempty[-4:])
-    body = "\n".join(
-        line for i, line in enumerate(lines) if not (i in margins and _DOWNLOAD.match(line))
-    )
     cleaned = repair_wrapped_text_preserving_blocks(body).strip("\n")
     # 修复换行会改变引用位置，只在同页清洗正文重新定位；source 范围仍指向 raw。
     notes = link_footnotes(

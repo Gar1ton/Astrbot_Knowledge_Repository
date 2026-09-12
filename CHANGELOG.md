@@ -4,6 +4,24 @@
 
 ### 修复 (Fixed)
 
+- **PDF 数据库访问水印污染正文与切片**：把 JSTOR 类
+  `This content downloaded from … UTC` / `All use subject to …` 清洗收口到
+  `marginal_noise`，覆盖完整行、至多三行折行，以及 PyMuPDF4LLM 先把整页合并后嵌入正文行的
+  情况；匹配不限视觉页脚，但使用完整访问戳边界避免误删普通讨论，代码块/公式保持原样。
+  水印夹在续句中时同时桥接前后文本，避免删除后留下假段落边界。处理版本升为
+  `cleaning-v3`；按用户决定以空持久库重新导入，不新增旧制品迁移方案。
+- **enhanced/deep 回答冗长、难读且引用重复**：enhanced 不再复用 deep 的穷尽式报告模板，改为
+  中等篇幅、答案先行、按问题自适应 2–5 个维度；enhanced/deep 共用术语首次解释、单段单意、
+  不以来源/页码清单开场、按最小完整论点组放置引用的可读性规则。
+- **聊天回答把 Markdown 标记和参考文献打印成纯文本**：从 `ChatPanel` 抽出不执行原始 HTML 的
+  `AnswerMarkdown`，支持标题、段落、有序/无序列表、粗体、行内代码、代码块和分隔线；独立粗体
+  “参考文献”按小节标题展示，条目按列表展示，并保留既有 Harvard 与 `[n]` 点击来源映射。
+- **参考文献重复打印文件名中的作者、年份与 `.pdf`**：`citation_rendering` 在统一的
+  source → `CitationRef` 映射点复用文件名书目解析器，把
+  `Anon. (n.d.) Hui (2021) - Art and Cosmotechnics.pdf.` 规范化为
+  `Hui (2021) Art and Cosmotechnics.`。解析出的作者/年份只补结构化字段空缺，绝不覆盖 Zotero
+  或用户填写的权威值；正文短引、source 旁车和末尾 reference list 使用同一个规范化结果。
+
 - **升级后旧 chunk 不会自动重切/重建索引**：v1.2.0-preview 重写了分块逻辑但未升 `CHUNK_SCHEMA`
   （保持 `clean_md_structural_v3`），`IngestManager.chunk_needs_rebuild` 只比对 schema/ID 前缀/offset，
   旧库全部被判为最新；且启动只在 embedding 指纹或 Milvus collection 变化时才把文档推进 `needs_reindex`

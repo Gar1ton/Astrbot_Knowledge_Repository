@@ -641,33 +641,3 @@ async def test_ka_r2_force_pull_confirmation_and_auto_restart(
         mock_restart.assert_awaited_once()
 
     await plugin.terminate()
-
-
-async def test_startup_marks_stale_processing_documents_needs_reindex_once(
-    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
-) -> None:
-    """升级后首次启动：旧 processing_version 文档进 needs_reindex 队列，当前版本不动。"""
-    from kacore.domain.models import SourceDocument
-    from kacore.managers.artifact_provenance import PROCESSING_VERSION
-    from kacore.repository.source_store.memory import InMemorySourceDocumentStore
-
-    initializer = PluginInitializer(mock_context, raw_config, temp_dir)
-    store = InMemorySourceDocumentStore()
-    initializer.source_store = store  # type: ignore[assignment]
-
-    def _doc(doc_id: str, **meta: Any) -> SourceDocument:
-        return SourceDocument(
-            doc_id, doc_id, f"/x/{doc_id}.pdf", "application/pdf", 1, doc_id,
-            "papers", local_meta=meta,
-        )
-
-    await store.add_document(_doc("legacy-no-version"))
-    await store.add_document(_doc("legacy-old-version", processing_version="cleaning-v1"))
-    await store.add_document(_doc("current", processing_version=PROCESSING_VERSION))
-
-    assert await initializer._mark_stale_processing_documents_needs_reindex() == 2
-    pending = {d.doc_id for d in await store.list_pending_reindex_documents()}
-    assert pending == {"legacy-no-version", "legacy-old-version"}
-
-    # 已标记的不重复计数：第二次扫描为 0（一次性语义）。
-    assert await initializer._mark_stale_processing_documents_needs_reindex() == 0

@@ -3254,3 +3254,85 @@ async def test_reprocess_documents_with_stale_cleaning_requires_ingest_manager()
     )
     with pytest.raises(RuntimeError, match="IngestManager"):
         await api.reprocess_documents_with_stale_cleaning()
+
+
+async def test_mark_stale_processing_documents_needs_reindex_is_one_shot() -> None:
+    """升级后首次扫描：旧 processing_version 文档进 needs_reindex 队列并唤醒调度器；
+    当前版本不动；第二次扫描为 0（一次性语义）。"""
+    from kacore.managers.artifact_provenance import PROCESSING_VERSION
+
+    store = InMemorySourceDocumentStore()
+    legacy_no_version = _doc("legacy-no-version")
+    legacy_old_version = _doc("legacy-old-version")
+    legacy_old_version.local_meta = {"processing_version": "cleaning-v1"}
+    current = _doc("current")
+    current.local_meta = {"processing_version": PROCESSING_VERSION}
+    for doc in (legacy_no_version, legacy_old_version, current):
+        await store.add_document(doc)
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        sync_targets={},
+    )
+
+    class FakeScheduler:
+        notified = 0
+
+        def notify(self) -> None:
+            self.notified += 1
+
+    scheduler = FakeScheduler()
+    api.attach_auto_reindex_scheduler(scheduler)
+
+    assert await api.mark_stale_processing_documents_needs_reindex() == 2
+    pending = {d.doc_id for d in await store.list_pending_reindex_documents()}
+    assert pending == {"legacy-no-version", "legacy-old-version"}
+    assert scheduler.notified == 1
+
+    assert await api.mark_stale_processing_documents_needs_reindex() == 0
+    assert scheduler.notified == 1  # 没扫到东西就不打信号。
+
+
+async def test_zotero_pull_marks_stale_documents_after_sync() -> None:
+    """增量同步整篇跳过未变更文档，因此拉取结束必须补一次旧数据扫描并唤醒调度器。"""
+    from datetime import datetime, timezone
+
+    from kacore.pipelines.zotero_sync_pipeline import ZoteroSyncResult
+    from kacore.zotero_sync_job import ZOTERO_SYNC_SUCCESS, ZoteroSyncJob
+
+    store = InMemorySourceDocumentStore()
+    await store.add_document(_doc("legacy"))  # 无 processing_version = 旧分块逻辑处理过
+    api = KnowledgeRepositoryApi(
+        source_store=store,
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        sync_targets={},
+    )
+
+    class FakePipeline:
+        async def pull(self, *, incremental: bool, progress: ZoteroSyncJob) -> ZoteroSyncResult:
+            del incremental, progress
+            return ZoteroSyncResult(
+                sync_mode="conservative",
+                storage_mode="linked",
+                started_at=datetime.now(timezone.utc),
+                skipped_unchanged=1,
+            )
+
+    class FakeScheduler:
+        notified = 0
+
+        def notify(self) -> None:
+            self.notified += 1
+
+    scheduler = FakeScheduler()
+    api.attach_zotero_pipeline(FakePipeline())
+    api.attach_auto_reindex_scheduler(scheduler)
+
+    job = ZoteroSyncJob(incremental=True)
+    await api._run_zotero_pull(job, incremental=True)
+
+    assert job.status == ZOTERO_SYNC_SUCCESS
+    assert api._last_zotero_sync is not None
+    assert api._last_zotero_sync["stale_marked"] == 1
+    assert [d.doc_id for d in await store.list_pending_reindex_documents()] == ["legacy"]
+    assert scheduler.notified == 1

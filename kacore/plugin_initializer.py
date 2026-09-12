@@ -655,7 +655,8 @@ class PluginInitializer:
         if vdb_cfg.backend == "milvus":
             from kacore.auto_reindex import AutoReindexScheduler
 
-            await self._mark_stale_processing_documents_needs_reindex()
+            # 升级后旧分块逻辑处理的文档一次性入队（Zotero 拉取结束也会再扫一次，见 api）。
+            await self.api.mark_stale_processing_documents_needs_reindex()
             self.auto_reindex_scheduler = AutoReindexScheduler(
                 pending_count=self.api.get_pending_reindex_count,
                 run_rebuild=self.api.run_milvus_rebuild_to_completion,
@@ -946,34 +947,6 @@ class PluginInitializer:
                     await self.source_store.update_document(doc)
                 except Exception as exc:
                     logger.error("Failed to mark document %s for reindex: %s", doc.doc_id, exc)
-
-    async def _mark_stale_processing_documents_needs_reindex(self) -> int:
-        """把清洗/分块逻辑升级前处理的文档一次性推进 `needs_reindex` 队列。
-
-        轻量：只做一次 `list_documents()`，只比对 local_meta 里的 `processing_version`，
-        不读 chunk、不读制品。重建成功后 IngestManager 会写回当前版本，之后每次启动
-        这里都扫不到东西，因此是事实上的一次性迁移。返回本次新标记的文档数。
-        """
-        if self.source_store is None:
-            return 0
-        from kacore.managers.artifact_provenance import PROCESSING_VERSION
-
-        marked = 0
-        for doc in await self.source_store.list_documents():
-            if doc.needs_reindex or doc.local_meta.get("processing_version") == PROCESSING_VERSION:
-                continue
-            doc.needs_reindex = True
-            try:
-                await self.source_store.update_document(doc)
-                marked += 1
-            except Exception as exc:
-                logger.error("Failed to mark stale document %s for reindex: %s", doc.doc_id, exc)
-        if marked:
-            logger.info(
-                "检测到 %d 个文档由旧清洗/分块逻辑处理（processing_version != %s），已标记待重建。",
-                marked, PROCESSING_VERSION,
-            )
-        return marked
 
     # ── 关闭：与构造顺序相反释放 ────────────────────────────────
     async def teardown(self) -> None:

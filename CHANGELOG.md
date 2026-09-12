@@ -9,11 +9,13 @@
   旧库全部被判为最新；且启动只在 embedding 指纹或 Milvus collection 变化时才把文档推进 `needs_reindex`
   队列，升级插件后自动重建调度器查到空队列直接收工。修复：`chunk_needs_rebuild` 增加
   `local_meta.processing_version != PROCESSING_VERSION` 判据（只读 local_meta，不读 chunk）；
-  `rebuild_document_chunks_from_artifact` 重切后写回 `processing_version`；`plugin_initializer`
-  在自动重建调度器起跑前新增 `_mark_stale_processing_documents_needs_reindex()`：单次
-  `list_documents()`、仅比对 local_meta，把处理版本过期的文档标记待重建。重建完成后版本落盘，
-  之后启动扫描为空，因此是一次性迁移。涉及 `kacore/managers/ingest_manager.py`、
-  `kacore/plugin_initializer.py`；新增回归 3 项。
+  `rebuild_document_chunks_from_artifact` 重切后写回 `processing_version`；新增
+  `api.mark_stale_processing_documents_needs_reindex()`：单次 `list_documents()`、仅比对
+  local_meta，把处理版本过期的文档标记待重建并唤醒自动重建调度器。触发点两处：
+  `plugin_initializer` 在调度器起跑前；`api._run_zotero_pull` 拉取结束后（增量同步整篇跳过
+  Zotero 侧未变更的文档，不补扫旧库永远不会被带上来；结果写入 `_last_zotero_sync.stale_marked`）。
+  重建完成后版本落盘，之后再扫为空，因此是一次性迁移。涉及 `kacore/api.py`、
+  `kacore/managers/ingest_manager.py`、`kacore/plugin_initializer.py`；新增回归 4 项。
 
 ## [v1.2.0-preview] — 2026-09-12
 

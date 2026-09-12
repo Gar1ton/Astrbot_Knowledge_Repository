@@ -2209,6 +2209,35 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         docs = await self._source_store.list_pending_reindex_documents()
         return len(docs)
 
+    async def mark_stale_processing_documents_needs_reindex(self) -> int:
+        """把清洗/分块逻辑升级前处理的文档一次性推进 `needs_reindex` 队列并唤醒调度器。
+
+        触发点：插件启动、每次 Zotero 拉取结束（本地上传与 Zotero 同步是同一设计目的，
+        用户从任一入口「同步」都应把旧数据带上来）。轻量：只做一次 `list_documents()`、
+        只比对 local_meta 里的 `processing_version`，不读 chunk、不读制品。重建成功后
+        IngestManager 会写回当前版本，之后再扫都为空，因此是事实上的一次性迁移。
+        返回本次新标记的文档数。
+        """
+        from kacore.managers.artifact_provenance import PROCESSING_VERSION
+
+        marked = 0
+        for doc in await self._source_store.list_documents():
+            if doc.needs_reindex or doc.local_meta.get("processing_version") == PROCESSING_VERSION:
+                continue
+            doc.needs_reindex = True
+            try:
+                await self._source_store.update_document(doc)
+                marked += 1
+            except Exception as exc:  # noqa: BLE001 - 单文档失败不阻断整批扫描
+                logger.error("Failed to mark stale document %s for reindex: %s", doc.doc_id, exc)
+        if marked:
+            logger.info(
+                "检测到 %d 个文档由旧清洗/分块逻辑处理（processing_version != %s），已标记待重建。",
+                marked, PROCESSING_VERSION,
+            )
+            self._notify_auto_reindex()
+        return marked
+
     # ── Milvus 后台重建（进度条）─────────────────────────────────
 
     async def start_milvus_rebuild(self) -> dict[str, Any]:
@@ -5917,6 +5946,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             payload["status"] = status
             if result.errors:
                 payload["message"] = result.errors[0]
+            # 增量同步会整篇跳过 Zotero 侧未变更的文档，旧分块逻辑处理过的库不会在这里被重切；
+            # 同步结束补一次轻量扫描，把它们推进待重建队列（一次性，写回版本后不再命中）。
+            try:
+                payload["stale_marked"] = await self.mark_stale_processing_documents_needs_reindex()
+            except Exception as exc:  # noqa: BLE001 - 扫描失败不应改变同步终态
+                logger.warning("Stale document scan after Zotero pull failed: %s", exc)
             if result.needs_milvus_rebuild:
                 try:
                     payload["milvus_rebuild"] = await self.rebuild_vector_store()

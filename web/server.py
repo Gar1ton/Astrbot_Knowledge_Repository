@@ -817,6 +817,16 @@ async def handle_plugin_restart(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "message": str(exc)}, status=503)
 
 
+async def handle_clear_milvus_lock(request: web.Request) -> web.Response:
+    _mw_logger.info("Milvus lock clear requested")
+    try:
+        result = await _api(request).clear_milvus_lock()
+        return web.json_response(result)
+    except Exception as exc:  # noqa: BLE001
+        _mw_logger.error("Milvus lock clear failed: %s", exc, exc_info=True)
+        return web.json_response({"status": "error", "message": str(exc)}, status=503)
+
+
 async def handle_rebuild_index_pending(request: web.Request) -> web.Response:
     _mw_logger.info("Index rebuild requested")
     try:
@@ -1794,6 +1804,7 @@ def build_app(
     app.router.add_get("/api/config/effective", handle_effective_config)
     app.router.add_post("/api/config/update", handle_update_config)
     app.router.add_post("/api/plugin/restart", handle_plugin_restart)
+    app.router.add_post("/api/milvus/clear-lock", handle_clear_milvus_lock)
     app.router.add_post("/api/config/test-embedding", handle_test_embedding)
     app.router.add_post("/api/documents/rebuild-index", handle_rebuild_index_pending)
     app.router.add_get("/api/documents/rebuild-index/active", handle_milvus_build_active)

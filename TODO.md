@@ -1,5 +1,78 @@
 # TODO
 
+## 2026-09-22 Milvus 锁定诊断与「确认后清除锁定」（completed）
+
+- 用户反馈：Milvus 因过去实例未关闭干净而无法启动，且数据流页「向量库」节点反复黄色
+  要求重建，看不出真实原因。经真实运行日志核实根因：Milvus Lite 用 OS 级 advisory lock
+  （`vector_store.db/LOCK`），只在持锁进程真正退出时释放；`DataDirLockedError` 发生时
+  `plugin_initializer.py` 只把异常写进终端日志，`capabilities` 面板固定显示套话，前端
+  已有的「展示原因 + 重建」UI 因此收不到有用信息。
+- [x] Phase 1：`PluginInitializer` 记录 `_vector_store_init_error`，经 `api.py` 透传给
+  `api_capabilities.py::_milvus_runtime_health()` / `vector_store_unavailable_reason()`，
+  节点卡片显示具体原因（前端 UI 早已就绪，只是后端没喂真实数据）。
+- [x] Phase 2：`kacore/capabilities.py` 新增 `milvus_lock_error_hint()`，识别「数据目录被占用」
+  类异常并给出可执行提示；`log_capture.py` 复用同一份文案（原先两处各写一份）。
+- [x] Phase 3：新增「确认后清除锁定」按钮（`FlowNode.tsx`，仅锁定问题时显示）→
+  `POST /api/milvus/clear-lock` → `KnowledgeRepositoryApi.clear_milvus_lock()` →
+  `PluginInitializer.clear_stale_milvus_lock()`；只删 `LOCK` 标记文件本身，前置守卫（backend
+  是否 milvus、是否真的检测到锁定问题、vector_store 是否已就绪）全部在
+  `clear_stale_milvus_lock()` 里做；不做自动破锁判断，风险由前端确认对话框向用户说明。
+- 验证：新增/扩充测试 `test_capabilities.py`（`milvus_lock_error_hint` 3 项）、
+  `test_lifecycle_and_cli.py`（异常记录 + 清锁守卫/成功路径 4 项）、`test_api.py`（
+  `clear_milvus_lock` 委派 2 项）、`test_web_server.py`（路由 2 项）；全量 pytest（仅排除两个
+  既有缺 `torch` 用例）1152 passed / 2 skipped；本轮改动文件 `ruff` 全绿；`mypy`（domain 7 个
+  文件）通过；`git diff --check` 干净。前端：`tsc --noEmit --incremental false` 无输出、
+  改动文件 ESLint 无新增问题（`lib/api.ts` 1 处既有 warning 未动）；`npm run build` 成功，
+  `tools/sync_frontend.py` 已同步 357 个文件到 `pages/`。
+
+## 2026-09-19 embedding.provider=astr：复用 AstrBot EmbeddingProvider（completed）
+
+### 接口核对结论（只读阶段，已完成）
+
+- [x] 本机只有 AstrBot 4.27.4（uv tool）与 4.26.7（uv 缓存），**没有 4.26.8**；两版
+  `EmbeddingProvider` 抽象契约一致：`get_embedding(text)` / `get_embeddings(list)` / `get_dim()`，
+  `Context.get_provider_by_id`（同步）/ `get_all_embedding_providers()` 也一致。
+- [x] 坑 1：`get_dim()` 在未配置 `embedding_dimensions` 时返回 **0**（OpenAI 源）→ 0 视为“未声明”，
+  不与实测比较，改以首个实测向量锁定维度。
+- [x] 坑 2：OpenAI/Gemini embedding 源不调用 `set_model()`，公开的 `get_model()` / `meta().model`
+  为空串 → 模型标识不可靠，指纹采用 provider ID + adapter 类型 + 维度，模型仅“有则计入”。
+- [x] 坑 3：`EmbeddingProvider` 类只在 `astrbot.core.provider.provider` 可导入，`astrbot.api.provider`
+  未导出 → 先试 api 门面、回退 core 路径，均失败则 fail-closed。
+- [x] 坑 4：AstrBot `terminate_provider` 会关闭并替换实例，且不从 `embedding_provider_insts`
+  移除旧实例 → 适配器每次调用按 ID 重新解析（跟随热重载），自动选择时用 `get_provider_by_id`
+  身份比对剔除陈旧实例；身份漂移时拒绝写入而不是混入不同模型向量。
+- [x] 坑 5：4.26.7 的 `get_embeddings_batch` 并发下按完成顺序拼接（4.27.4 才修）→ 只用
+  `get_embeddings`，不碰 `get_embeddings_batch`。
+
+### Phases
+
+- [x] **Phase 1 — 配置模型**：`EmbeddingConfig.astrbot_provider_id`；`_conf_schema.json`（options + 新字段 + hint）；
+  `to_public_dict` / `get_diagnostics`；`CONFIG_KEY_POLICY`（API 可写 + 持久化 + REBUILD）；
+  `api.update_config_value` 接受 `astr` 并校验 provider ID。local/external 指纹字节级不变。
+- [x] **Phase 2 — 适配器**：`repository/embedding/base.py` 增加非机密 `identity` 契约；新增
+  `repository/embedding/astrbot.py`（适配器）+ `astrbot_resolver.py`（解析规则、身份读取、脱敏错误）。
+  实现完成后 `astrbot.py` 543 行超 400 行警告线，按「解析 / 适配」拆成两个文件（274 + 314 行）。
+- [x] **Phase 3 — 组合根接线**：`EmbeddingProviderFactory.create_provider(..., context=)`；
+  `CachedEmbeddingProvider` namespace 并入 `identity`；`embedding_fingerprint` 并入 astr 身份；
+  `PluginInitializer` 传入 `self._context`、astr 专属探针超时文案与降级诊断。
+- [x] **Phase 4 — 能力面板 / 状态展示**：`capabilities.detect_pipeline`、`Config.describe_embedding`
+  （`/ka status`、日志、LightRAG model_name 共用）。
+- [x] **Phase 5 — 测试**：`test_astrbot_embedding.py`（解析/校验/脱敏/生命周期/漂移，41 项）+
+  `test_astrbot_embedding_wiring.py`（配置/缓存/指纹/工厂/API/组合根，34 项）。另用本机真实
+  AstrBot 4.27.4 的 `EmbeddingProvider` / OpenAI / Ollama 源类做一次契约冒烟（不入库）。
+  变异检查：故意破坏缓存 namespace、指纹身份、批量数量校验、`unload` 调 `terminate`，各有对应用例转红。
+- [x] **Phase 6 — 文档与收尾**：README「复用 AstrBot 已配置的 Embedding」、PROJECT_STRUCTURE、CHANGELOG。
+- [ ] 未做（本轮范围外，需另行确认）：Web 控制台前端为 astr 增加 `astrbot_provider_id` 输入项与
+  i18n，并经 `npm run build` + `tools/sync_frontend.py` 更新 `pages/`；可选的 AstrBot 侧分批配置。
+
+### Verification
+
+- 全量 pytest（仅排除两个既有缺 `torch` 用例）1141 passed / 2 skipped / 2 deselected
+  （改动前基线 1066 passed，新增 75 项）；`mypy`（domain 7 个文件）通过；`git diff --check` 干净；
+  全仓 `ruff` 仍只有 `tools/chunk_preview.py` 3 个既有 E402（纯净 HEAD 上同样存在），本轮文件全绿。
+- 真实 AstrBot 4.27.4 冒烟：判型类取自真实 `EmbeddingProvider`；OpenAI 源 `get_dim()==0` 且
+  `get_model()==''`，适配器由探针实测向量确定维度；聊天 provider 被拒；Ollama 源可取到模型名。
+
 ## 2026-09-12 Reference list 文件名式标题去重（completed）
 
 - [x] 在 `citation_rendering.build_citation_refs` 的单一映射点识别

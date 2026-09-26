@@ -450,7 +450,7 @@ def _assert_doc_writable(doc: SourceDocument) -> None:
         )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from kacore.adapters.llm import LLMAdapter
     from kacore.ask_progress import ProgressStore
@@ -679,6 +679,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         llm_adapter: LLMAdapter | None = None,
         managed_documents_dir: Path | None = None,
         vector_store: VectorStore | None = None,
+        vector_store_init_error: str | None = None,
+        clear_milvus_lock_callback: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         embedding_provider: EmbeddingProvider | None = None,
         retrieval_orchestrator: RetrievalOrchestrator | None = None,
         deep_thinking_orchestrator: DeepThinkingOrchestrator | None = None,
@@ -700,6 +702,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         self._source_store = source_store
         self._kb_reader = kb_reader
         self._vector_store = vector_store
+        self._vector_store_init_error = vector_store_init_error
+        # 「清除残留 Milvus 锁」回调（组合根注入 PluginInitializer.clear_stale_milvus_lock；
+        # 为空表示当前环境不支持程序化清除）。
+        self._clear_milvus_lock_callback = clear_milvus_lock_callback
         self._embedding_provider = embedding_provider
         self._retrieval_orchestrator = retrieval_orchestrator
         self._deep_thinking_orchestrator = deep_thinking_orchestrator
@@ -3660,7 +3666,6 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         """
         if self._config is None:
             return {}
-        emb = self._config.get_embedding_config()
         vdb = self._config.get_vector_db_config()
         rerank = self._config.get_rerank_config()
         deep = self._config.get_deep_thinking_config()
@@ -3671,7 +3676,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         web = self._config.get_web_console_config()
         return {
             "models": {
-                "embedding": f"{emb.provider}:{emb.model}",
+                "embedding": self._config.describe_embedding(),
                 "vector_db": vdb.backend,
                 "rerank": (
                     "noop" if rerank.provider == "noop" else f"{rerank.provider}:{rerank.model}"
@@ -3753,8 +3758,23 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
                 f"'{section}.{key}' 为结构性参数，修改后需手动重建索引。"
                 "请直接修改插件配置文件并重启插件，而非通过此接口写入。"
             )
-        if section == "embedding" and key == "provider" and value not in {"local", "external"}:
-            raise ValueError("embedding.provider must be 'local' or 'external'.")
+        if section == "embedding" and key == "provider" and value not in {
+            "local",
+            "external",
+            "astr",
+        }:
+            raise ValueError("embedding.provider must be 'local', 'external' or 'astr'.")
+        if section == "embedding" and key == "astrbot_provider_id":
+            # 与 Config.get_embedding_config 同口径（strip），否则「同值重存」会因首尾空白
+            # 被判为已变更，误触发全量索引失效。
+            if not isinstance(value, str):
+                raise ValueError("embedding.astrbot_provider_id must be a string.")
+            value = value.strip()
+            if len(value) > 200 or any(ord(ch) < 32 for ch in value):
+                raise ValueError(
+                    "embedding.astrbot_provider_id must be the AstrBot provider ID "
+                    "(a single line, at most 200 characters)."
+                )
         if section == "vector_db" and key == "backend" and value not in {"milvus", "astr"}:
             raise ValueError("vector_db.backend must be 'milvus' or 'astr'.")
         if section == "rerank" and key == "provider" and value not in {"cross_encoder", "noop"}:
@@ -3843,6 +3863,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         )
         logger.info("plugin soft restart scheduled")
         return {"status": "restarting", "message": "插件正在重启，稍后将自动重连。"}
+
+    async def clear_milvus_lock(self) -> dict[str, Any]:
+        """清除 Milvus 数据目录残留的 LOCK 标记（仅在已探测到锁定问题时可用）。
+
+        委派给组合根注入的 `PluginInitializer.clear_stale_milvus_lock`，实际的前置守卫
+        （backend 是否 milvus、是否真的检测到锁定问题）都在那里做；这里只是薄委派。
+        """
+        if self._clear_milvus_lock_callback is None:
+            return {"status": "unsupported", "message": "当前环境不支持清除锁定，请手动处理。"}
+        return await self._clear_milvus_lock_callback()
 
     async def test_embedding_connection(self, base_url: str, model_name: str) -> dict:
         """临时创建一个 ExternalEmbeddingProvider 并发送测试请求，验证云端 API 可连通性。"""

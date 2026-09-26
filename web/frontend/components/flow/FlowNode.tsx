@@ -164,6 +164,8 @@ export function FlowNode({
   onRefresh,
   onInstall,
   onRebuildIndex,
+  onClearMilvusLock,
+  clearingMilvusLock,
   onClose,
 }: {
   stage: PipelineStage;
@@ -184,6 +186,8 @@ export function FlowNode({
   onRefresh?: () => Promise<void>;
   onInstall: (dep: DependencyStatus) => void;
   onRebuildIndex: () => void;
+  onClearMilvusLock?: () => void;
+  clearingMilvusLock?: boolean;
   onClose?: () => void;
 }) {
   // 头部徽章承担唯一保存入口：草稿态由 QuickConfigPanel 经 onDirtyChange 上报，save 经 ref 触发。
@@ -232,6 +236,7 @@ export function FlowNode({
     typeof stage.detail.reason === "string" && stage.detail.reason
       ? stage.detail.reason
       : "";
+  const milvusLockDetected = id === "vector_store" && stage.detail.lock_detected === true;
 
   return (
     <div
@@ -342,6 +347,26 @@ export function FlowNode({
               }}
             >
               {rebuildingIndex ? t("flow_milvus_rebuild_running") : t("flow_milvus_rebuild")}
+            </button>
+          </div>
+        )}
+
+        {needsMilvusRebuild && milvusLockDetected && onClearMilvusLock && (
+          <div className="flow-dep-row" onClick={(event) => event.stopPropagation()}>
+            <span className="flow-dep-icon"><AlertIcon /></span>
+            <div className="flow-dep-text">
+              <span className="flow-dep-name">{t("flow_milvus_lock_detected")}</span>
+            </div>
+            <button
+              type="button"
+              className="flow-dep-button"
+              disabled={clearingMilvusLock}
+              onClick={(event) => {
+                event.stopPropagation();
+                onClearMilvusLock();
+              }}
+            >
+              {clearingMilvusLock ? t("flow_milvus_clear_lock_running") : t("flow_milvus_clear_lock")}
             </button>
           </div>
         )}

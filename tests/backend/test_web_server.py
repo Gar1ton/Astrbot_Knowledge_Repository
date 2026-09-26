@@ -1469,13 +1469,21 @@ async def test_config_update_route(tmp_path: Path) -> None:
             await resp_invalid_notion_mode.json()
         )["message"]
 
-        # 2. 拒绝尚未实现的 AstrBot Embedding 配置，避免保存后静默禁用召回。
-        resp_invalid_provider = await client.post(
+        # 2. astr（复用 AstrBot Embedding）已支持：可写、且与其它 provider 一样要求重建索引；
+        #    未知取值仍被拒绝。
+        resp_astr_provider = await client.post(
             "/api/config/update",
             json={"section": "embedding", "key": "provider", "value": "astr"},
         )
+        assert resp_astr_provider.status == 200
+        assert (await resp_astr_provider.json())["rebuild_required"] is True
+
+        resp_invalid_provider = await client.post(
+            "/api/config/update",
+            json={"section": "embedding", "key": "provider", "value": "bogus"},
+        )
         assert resp_invalid_provider.status == 400
-        assert "must be 'local' or 'external'" in (
+        assert "must be 'local', 'external' or 'astr'" in (
             await resp_invalid_provider.json()
         )["message"]
 
@@ -2272,6 +2280,53 @@ async def test_successful_poll_get_is_quiet_but_failed_mutation_is_not(tmp_path:
         assert log_handler.get_lines() == []
         assert (await client.post("/api/documents/rebuild-index")).status == 503
         assert len(log_handler.get_lines()) == 2
+    finally:
+        await client.close()
+
+
+async def test_clear_milvus_lock_route_delegates_and_returns_json(tmp_path: Path) -> None:
+    async def _clear() -> dict:
+        return {"status": "ok", "message": "锁定标记已清除，请重启插件以重新装配 Milvus。"}
+
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        clear_milvus_lock_callback=_clear,
+    )
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/milvus/clear-lock")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["status"] == "ok"
+    finally:
+        await client.close()
+
+
+async def test_clear_milvus_lock_route_reports_unsupported_without_callback(
+    tmp_path: Path,
+) -> None:
+    api = await _make_api()
+    app = build_app(
+        api=api,
+        static_dir=tmp_path / "frontend",
+        upload_dir=tmp_path / "uploads",
+        auth_required=False,
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/api/milvus/clear-lock")
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["status"] == "unsupported"
     finally:
         await client.close()
 

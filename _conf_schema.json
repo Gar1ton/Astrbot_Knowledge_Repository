@@ -140,7 +140,7 @@
   "embedding": {
     "description": "Embedding 模型",
     "type": "object",
-    "hint": "向量检索和知识图谱共用的文本向量化模型。local 模式需安装可选依赖；external 使用兼容 OpenAI Embeddings 的 API，密钥通过环境变量 KR_EMBEDDING_API_KEY 注入",
+    "hint": "向量检索和知识图谱共用的文本向量化模型。local 模式需安装可选依赖；external 使用兼容 OpenAI Embeddings 的 API，密钥通过环境变量 KR_EMBEDDING_API_KEY 注入；astr 复用 AstrBot「模型提供商」中已配置的 Embedding 模型，密钥/地址/模型均由 AstrBot 管理",
     "items": {
       "provider": {
         "description": "Embedding 来源",
@@ -148,21 +148,28 @@
         "default": "local",
         "options": [
           "local",
-          "external"
+          "external",
+          "astr"
         ],
-        "hint": "local：本地运行模型，需手动安装 requirements-additional.txt（含 PyTorch，体积较大）；external：调用外部 API，轻量但需网络和密钥"
+        "hint": "local：本地运行模型，需手动安装 requirements-additional.txt（含 PyTorch，体积较大）；external：调用外部 API，轻量但需网络和密钥；astr：复用 AstrBot 已配置的 Embedding Provider（需在下方填写其 ID，或在 AstrBot 中只启用一个 Embedding Provider 以便自动选择），本插件不保存其 API Key"
+      },
+      "astrbot_provider_id": {
+        "description": "AstrBot Embedding Provider ID（仅 astr 模式）",
+        "type": "string",
+        "default": "",
+        "hint": "填写 AstrBot「模型提供商」中 Embedding Provider 的 ID（不是模型名）。留空时：AstrBot 中恰好有一个已启用的 Embedding Provider 才会自动选用；有多个或没有则报错，不会静默选第一个。API Key、API Base、模型名和维度都在 AstrBot 侧配置，本插件只通过 AstrBot 的 EmbeddingProvider 接口取向量。更换 Provider 或其模型后需重建所有向量索引"
       },
       "model": {
-        "description": "模型名称",
+        "description": "模型名称（仅 local / external 模式）",
         "type": "string",
         "default": "intfloat/multilingual-e5-small",
-        "hint": "local 模式填写 HuggingFace 模型 ID；external 模式填写 API 端点支持的模型名。切换模型后需重建所有向量索引"
+        "hint": "local 模式填写 HuggingFace 模型 ID；external 模式填写 API 端点支持的模型名；astr 模式忽略此项（模型由 AstrBot 的 Provider 决定）。切换模型后需重建所有向量索引"
       },
       "base_url": {
         "description": "API 地址（仅 external 模式）",
         "type": "string",
         "default": "https://api.openai.com/v1",
-        "hint": "兼容 OpenAI Embeddings 接口的端点，例如 https://api.openai.com/v1 或自建代理地址"
+        "hint": "兼容 OpenAI Embeddings 接口的端点，例如 https://api.openai.com/v1 或自建代理地址；astr 模式忽略此项"
       },
       "load_timeout_seconds": {
         "description": "模型就绪等待上限（秒）",

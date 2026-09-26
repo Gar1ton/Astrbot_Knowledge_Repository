@@ -2498,6 +2498,27 @@ async def test_restart_plugin_schedules_reload() -> None:
     await asyncio.wait_for(reloaded.wait(), timeout=3.0)
 
 
+async def test_clear_milvus_lock_unsupported_without_callback() -> None:
+    """未注入 clear_milvus_lock_callback 时返回 unsupported，不报错。"""
+    api = await _make_api()
+    result = await api.clear_milvus_lock()
+    assert result["status"] == "unsupported"
+
+
+async def test_clear_milvus_lock_delegates_to_callback() -> None:
+    """注入回调时薄委派：返回值原样透传，不在 api 层重复做守卫判断。"""
+    async def _clear() -> dict:
+        return {"status": "ok", "message": "锁定标记已清除，请重启插件以重新装配 Milvus。"}
+
+    api = KnowledgeRepositoryApi(
+        source_store=InMemorySourceDocumentStore(),
+        kb_reader=InMemoryKnowledgeBaseReader({}),
+        clear_milvus_lock_callback=_clear,
+    )
+    result = await api.clear_milvus_lock()
+    assert result["status"] == "ok"
+
+
 async def test_capabilities_excludes_detached_documents_from_vector_stats(tmp_path: Path) -> None:
     from kacore.config import Config
     from kacore.index_compatibility import IndexCompatibilityStore

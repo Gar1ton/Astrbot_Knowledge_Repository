@@ -54,11 +54,33 @@ class CachedEmbeddingProvider(EmbeddingProvider):
         self._initialized = True
         logger.info(f"Initialized SQLite embedding cache at {self._db_path}")
 
-    def _get_hash(self, text: str) -> str:
-        """Hash the provider/model namespace and text into one cache key."""
+    def _current_namespace(self) -> str:
+        """静态 namespace + 被包装 provider 的运行时身份（若有）。
+
+        local/external 的 `identity` 为空，namespace 与引入该机制前逐字节一致，既有缓存继续命中。
+        astr 的身份含 provider ID / adapter 类型 / 模型 / 实测维度，任一变化即换一套 key，
+        不会把旧模型的向量当成新模型的命中。每次现读：实测维度在首次嵌入后才确定。
+        """
+        identity = getattr(self._inner, "identity", None)
+        if not identity:
+            return self._namespace
+        canonical = json.dumps(identity, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        return f"{self._namespace}\0{canonical}"
+
+    @staticmethod
+    def _hash(namespace: str, text: str) -> str:
         import hashlib
 
-        return hashlib.sha256(f"{self._namespace}\0{text}".encode()).hexdigest()
+        return hashlib.sha256(f"{namespace}\0{text}".encode()).hexdigest()
+
+    def _get_hash(self, text: str) -> str:
+        """Hash the provider/model namespace and text into one cache key."""
+        return self._hash(self._current_namespace(), text)
+
+    @property
+    def identity(self) -> dict[str, str]:
+        """透传被包装 provider 的身份：组合根拿到的是本装饰器，指纹要用里层的身份。"""
+        return getattr(self._inner, "identity", None) or {}
 
     async def embed_query(self, text: str) -> list[float]:
         # 查询通常不缓存（因为高频提问且变动大，防止缓存无限膨胀），直接穿透
@@ -70,7 +92,8 @@ class CachedEmbeddingProvider(EmbeddingProvider):
 
         await self._lazy_init_db()
         
-        hashes = [self._get_hash(t) for t in texts]
+        namespace = self._current_namespace()
+        hashes = [self._hash(namespace, t) for t in texts]
         results: list[list[float] | None] = [None] * len(texts)
         missing_indices: list[int] = []
         missing_texts: list[str] = []

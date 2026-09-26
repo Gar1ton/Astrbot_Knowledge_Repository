@@ -95,6 +95,7 @@ python tools/sync_frontend.py --check
 - [`requirements.txt`](../requirements.txt)：基础依赖，会被 AstrBot 插件安装器自动安装。
 - [`requirements-additional.txt`](../requirements-additional.txt)：手动可选依赖，覆盖本地 Embedding、LightRAG、R2 和开发测试工具。
 - 机密配置优先通过环境变量注入，例如 `KR_WEB_PASSWORD`、`KR_R2_SECRET_ACCESS_KEY`、`KR_EMBEDDING_API_KEY`。
+  `embedding.provider=astr` 时 Embedding 的密钥由 AstrBot 自己的 provider 配置管理，本插件不持有。
 
 ## 维护规则摘要
 

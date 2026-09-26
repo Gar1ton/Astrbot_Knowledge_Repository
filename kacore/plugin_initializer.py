@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import re
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -99,6 +100,10 @@ class PluginInitializer:
         self.api: KnowledgeRepositoryApi | None = None
         self.lightrag_registry: Any | None = None
         self.vector_store: VectorStore | None = None
+        # 最近一次 Milvus 装配失败的具体异常文本；vector_store 装配成功时清空。
+        # 供 capabilities 面板展示具体原因（而非套话），以及「清除残留锁」的前置守卫。
+        self._vector_store_init_error: str | None = None
+        self._milvus_db_path: Path | None = None
         self.embedding_provider: EmbeddingProvider | None = None
         self.embedding_dimension: int | None = None
         self.embedding_fingerprint: str | None = None
@@ -263,19 +268,19 @@ class PluginInitializer:
             )
 
         if (vdb_cfg.backend == "milvus" or graph_cfg.enabled) and embedding_runtime_available:
+            from kacore.repository.embedding.astrbot import AstrBotEmbeddingError
             from kacore.repository.embedding.factory import EmbeddingProviderFactory
 
             logger.info(
-                "开始 Embedding 维度探针：provider=%s model=%s 超时上限 %ss",
-                embedding_cfg.provider,
-                embedding_cfg.model,
+                "开始 Embedding 维度探针：%s 超时上限 %ss",
+                self._config.describe_embedding(),
                 embedding_cfg.load_timeout_seconds or "不限",
             )
 
             probe_started = time.monotonic()
             try:
                 self.embedding_provider = EmbeddingProviderFactory.create_provider(
-                    self._config, db_dir=str(self._data_dir)
+                    self._config, db_dir=str(self._data_dir), context=self._context
                 )
                 probe = await self._probe_embedding_dimension(
                     self.embedding_provider, embedding_cfg
@@ -283,14 +288,18 @@ class PluginInitializer:
                 if not probe:
                     raise RuntimeError("Embedding dimension probe returned an empty vector")
                 self.embedding_dimension = len(probe)
+                # 身份现读（探针后实测维度才确定）；测试替身可能没有该属性，故用 getattr。
+                embedding_identity = dict(getattr(self.embedding_provider, "identity", None) or {})
                 self.embedding_fingerprint = embedding_fingerprint(
-                    embedding_cfg, self.embedding_dimension
+                    embedding_cfg, self.embedding_dimension, embedding_identity
                 )
                 self._config.set_embedding_dimension(self.embedding_dimension)
+                self._config.set_embedding_identity(
+                    embedding_identity if embedding_cfg.uses_astrbot else None
+                )
                 logger.info(
-                    "Embedding 维度探针完成：provider=%s model=%s dim=%d 耗时 %.1fs",
-                    embedding_cfg.provider,
-                    embedding_cfg.model,
+                    "Embedding 维度探针完成：%s dim=%d 耗时 %.1fs",
+                    self._config.describe_embedding(),
                     self.embedding_dimension,
                     time.monotonic() - probe_started,
                 )
@@ -302,7 +311,7 @@ class PluginInitializer:
                 )
                 self._config.add_diagnostic(str(exc))
                 self.embedding_provider = None
-            except NotImplementedError as exc:
+            except (NotImplementedError, AstrBotEmbeddingError) as exc:
                 logger.warning(
                     "Embedding provider 初始化失败，图谱/向量检索功能已禁用：%s", exc
                 )
@@ -331,6 +340,8 @@ class PluginInitializer:
             )
 
             milvus_path = self._data_dir / vdb_cfg.db_filename
+            self._milvus_db_path = milvus_path
+            self._vector_store_init_error = None
             is_new_index = not milvus_path.exists()
             try:
                 milvus = MilvusLiteVectorStore(
@@ -383,6 +394,7 @@ class PluginInitializer:
                     "Milvus initialization failed; AstrBot fallback remains active: %s", exc
                 )
                 self._config.add_diagnostic(f"Milvus unavailable: {exc}")
+                self._vector_store_init_error = str(exc)
                 self.vector_store = None
         elif (
             vdb_cfg.backend == "milvus"
@@ -454,7 +466,7 @@ class PluginInitializer:
                     embedding_provider=self.embedding_provider,
                     embedding_dim=self.embedding_dimension,
                     max_token_size=embedding_cfg.max_token_size,
-                    embedding_model=embedding_cfg.model,
+                    embedding_model=self._lightrag_embedding_model_name(embedding_cfg),
                 )
                 incompatible_lightrag = [
                     collection
@@ -472,7 +484,7 @@ class PluginInitializer:
         elif graph_cfg.enabled and self.embedding_provider is None:
             logger.warning(
                 "graph.enabled=true 但 embedding provider 不可用，LightRAG Core 已跳过。"
-                " 请在配置中将 embedding.provider 改为 'local' 或 'external'。"
+                " 请检查 embedding 配置（provider 可选 'local' / 'external' / 'astr'）。"
             )
 
         # 4.7) 构造统一检索编排器 (RetrievalOrchestrator)
@@ -583,6 +595,8 @@ class PluginInitializer:
             llm_adapter=llm_adapter,
             managed_documents_dir=self._data_dir / "library",
             vector_store=self.vector_store,
+            vector_store_init_error=self._vector_store_init_error,
+            clear_milvus_lock_callback=self.clear_stale_milvus_lock,
             embedding_provider=self.embedding_provider,
             retrieval_orchestrator=self.retrieval_orchestrator,
             deep_thinking_orchestrator=self.deep_thinking_orchestrator,
@@ -731,11 +745,29 @@ class PluginInitializer:
                 "本次启动已跳过向量检索与知识图谱（AstrBot/SQLite 基础召回仍可用）；"
                 "下载完成后请再次点击「重启插件」。"
             )
+        if getattr(embedding_cfg, "uses_astrbot", False):
+            label = self._config.describe_embedding()
+            raise _EmbeddingProbeTimeout(
+                f"AstrBot Embedding 探测超时（{timeout_seconds:g}s，{label}）："
+                "API Key、Base URL 与超时由 AstrBot 管理，请在 AstrBot「模型提供商」中检查该 "
+                "Embedding Provider 的配置与网络后重启插件。"
+                "本次启动已跳过向量检索与知识图谱（AstrBot/SQLite 基础召回仍可用）。"
+            )
         raise _EmbeddingProbeTimeout(
             f"Embedding 接口探测超时（{timeout_seconds:g}s，model={embedding_cfg.model}）："
             "请检查 base_url、网络与 KR_EMBEDDING_API_KEY 后重启插件。"
             "本次启动已跳过向量检索与知识图谱（AstrBot/SQLite 基础召回仍可用）。"
         )
+
+    def _lightrag_embedding_model_name(self, embedding_cfg: Any) -> str:
+        """LightRAG EmbeddingFunc 的 model_name。
+
+        local/external 保持 `embedding.model`。astr 下该配置被忽略（默认值是本地模型名，会误导），
+        改用 AstrBot provider 身份；只保留文件名安全字符，因为部分 LightRAG 存储会拿它拼标识。
+        """
+        if not getattr(embedding_cfg, "uses_astrbot", False):
+            return embedding_cfg.model
+        return re.sub(r"[^A-Za-z0-9_.-]", "_", self._config.describe_embedding())
 
     def _on_late_embedding_probe(self, task: asyncio.Task[Any]) -> None:
         """超时后仍在后台跑的探针有了结果时补记一条日志/诊断。
@@ -947,6 +979,41 @@ class PluginInitializer:
                     await self.source_store.update_document(doc)
                 except Exception as exc:
                     logger.error("Failed to mark document %s for reindex: %s", doc.doc_id, exc)
+
+    async def clear_stale_milvus_lock(self) -> dict[str, Any]:
+        """删除 Milvus 数据目录里残留的 0 字节 LOCK 标记文件。
+
+        仅在已探测到「Milvus 数据目录被其他进程占用」时才允许调用（见
+        `capabilities.milvus_lock_error_hint`）；只删这一个标记文件，绝不碰
+        collections/ 等真实数据。是否真的没有第二个进程在用，由用户在前端确认——
+        这一步做不到自动验证，误删的后果由既有的「可重建投影索引」契约兜底
+        （最坏情况是索引被写坏，需要重新全量构建，不会丢失 SQLite 里的原始文档）。
+        """
+        from kacore.capabilities import milvus_lock_error_hint
+
+        if self._config is None or self._config.get_vector_db_config().backend != "milvus":
+            return {"status": "error", "message": "当前向量库后端不是 milvus，无需清除锁定。"}
+        if self.vector_store is not None:
+            return {"status": "error", "message": "Milvus 已正常装配，无需清除锁定。"}
+        if not self._vector_store_init_error or not milvus_lock_error_hint(
+            self._vector_store_init_error
+        ):
+            return {"status": "error", "message": "未检测到 Milvus 数据目录锁定问题，拒绝清除。"}
+        if self._milvus_db_path is None:
+            return {"status": "error", "message": "尚未确定 Milvus 数据目录路径，无法清除。"}
+
+        lock_path = self._milvus_db_path / "LOCK"
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.error("清除 Milvus LOCK 文件失败：%s", exc)
+            return {"status": "error", "message": f"清除失败：{exc}"}
+
+        logger.warning(
+            "已手动清除 Milvus LOCK 文件：%s（用户已在前端确认没有残留进程）", lock_path
+        )
+        self._vector_store_init_error = None
+        return {"status": "ok", "message": "锁定标记已清除，请重启插件以重新装配 Milvus。"}
 
     # ── 关闭：与构造顺序相反释放 ────────────────────────────────
     async def teardown(self) -> None:

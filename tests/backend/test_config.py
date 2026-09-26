@@ -306,10 +306,11 @@ def test_embedding_diagnostics_report_unsupported_or_unconfigured_provider(
 ) -> None:
     monkeypatch.delenv(ENV_EMBEDDING_API_KEY, raising=False)
 
-    assert (
-        "embedding.provider=astr is not implemented; choose local or external."
-        in Config({"embedding": {"provider": "astr"}}).get_diagnostics()
-    )
+    # astr 已实现：静态配置无可诊断项（既不再报「未实现」，也不要求 KR_EMBEDDING_API_KEY——
+    # 密钥在 AstrBot 侧）。解析失败的原因由组合根在运行期追加。
+    astr_diagnostics = Config({"embedding": {"provider": "astr"}}).get_diagnostics()
+    assert not any("embedding.provider=astr" in item for item in astr_diagnostics)
+    assert not any("KR_EMBEDDING_API_KEY" in item for item in astr_diagnostics)
     assert (
         "KR_EMBEDDING_API_KEY is required when embedding.provider=external."
         in Config({"embedding": {"provider": "external"}}).get_diagnostics()

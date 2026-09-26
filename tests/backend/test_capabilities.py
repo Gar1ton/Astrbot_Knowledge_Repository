@@ -16,6 +16,7 @@ from kacore.capabilities import (
     STATUS_READY,
     dependency_statuses,
     detect_pipeline,
+    milvus_lock_error_hint,
     resolve_install_spec,
     resolve_install_specs,
 )
@@ -210,3 +211,23 @@ def test_ask_rerank_degraded_when_explicit_cross_encoder_without_st(
     assert ask["status"] == STATUS_DEGRADED
     assert ask["detail"]["rerank_provider"] == "cross_encoder"
     assert "local_embedding" in ask["required_deps"]
+
+
+def test_milvus_lock_error_hint_matches_datadirlockederror() -> None:
+    text = (
+        "DataDirLockedError: another process holds the lock on "
+        "'/data/vector_store.db': [Errno 13] Permission denied"
+    )
+    hint = milvus_lock_error_hint(text)
+    assert hint is not None
+    assert "第二个" in hint
+    assert "不要直接删除锁文件" in hint
+
+
+def test_milvus_lock_error_hint_case_insensitive() -> None:
+    assert milvus_lock_error_hint("ANOTHER PROCESS HOLDS THE LOCK on X") is not None
+
+
+def test_milvus_lock_error_hint_none_for_unrelated_error() -> None:
+    assert milvus_lock_error_hint("ConnectionRefusedError: connection refused") is None
+    assert milvus_lock_error_hint("") is None

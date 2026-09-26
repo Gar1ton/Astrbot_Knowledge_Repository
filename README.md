@@ -6,7 +6,7 @@
 
 **AstrBot 知识库原件管理、同步备份与 Research Agent 插件**
 
-[![version](https://img.shields.io/badge/版本-v1.2.0--preview-blueviolet)](metadata.yaml)
+[![version](https://img.shields.io/badge/版本-v1.2.0--preview--2-blueviolet)](metadata.yaml)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-6f42c1)](https://github.com/AstrBotDevs/AstrBot)
 
@@ -289,7 +289,7 @@ python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py as
 | Web 控制台 | AstrBot 面板 `web_console.enabled` | 关 |
 | R2 备份 | AstrBot 面板 `r2_sync.enabled` | 关 |
 | Notion 镜像 | AstrBot 面板 `notion_sync.enabled` | 关 |
-| Embedding 提供方 | AstrBot 面板 `embedding.provider` | `local` |
+| Embedding 提供方 | AstrBot 面板 `embedding.provider`（`local` / `external` / `astr`） | `local` |
 | Zotero 同步 | WebUI 设置页 / 数据流页 | 关 |
 | LightRAG 图谱 | WebUI 设置页 / 数据流页 | 关 |
 
@@ -301,6 +301,37 @@ python .agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py as
 | `embedding.load_timeout_seconds` | 180 | 首次加载（含下载权重）的等待上限，仅对尚未加载时的那次调用生效 |
 | `ask.llm_timeout_seconds` | 300 | 单次 LLM 调用超时 |
 | `ask.task_timeout_seconds` | 900 | 一次 Ask 的任务级总超时。到点只是**放弃等待**、不取消后台任务：答案仍会写入历史，前端自动补拉回来 |
+
+### 复用 AstrBot 已配置的 Embedding（`embedding.provider = astr`）
+
+已经在 AstrBot「模型提供商」里配好 Embedding 模型的话，不必在本插件里重复配一遍：
+
+```json
+{
+  "embedding": {
+    "provider": "astr",
+    "astrbot_provider_id": "my_embedding_provider"
+  }
+}
+```
+
+- `astrbot_provider_id` 是 AstrBot「模型提供商」里那条 **Embedding Provider 的 ID**（不是模型名）。
+  API Key、API Base、模型名、维度、代理与超时**全部由 AstrBot 管理**，本插件不保存任何副本，
+  `KR_EMBEDDING_API_KEY` 在此模式下不需要；`embedding.model` / `embedding.base_url` 被忽略。
+- 留空 ID 时：AstrBot 里**恰好有一个**已启用的 Embedding Provider 才会自动选用；有多个或没有都会
+  在诊断里明确报错，**不会静默取第一个**。只允许 Embedding 类型的 provider，填成聊天/重排/语音会被拒绝。
+- 本插件只通过 AstrBot 的 `EmbeddingProvider` 抽象（`get_embedding` / `get_embeddings` / `get_dim`）
+  取向量，不直接调用任何服务商 API。**实际兼容性取决于对应 AstrBot provider 是否正确实现了这一契约**；
+  输入格式、批量上限、向量维度与超时都由该 provider 决定。本插件不会截断、填充或转换维度不一致的向量，
+  返回空向量、数量不符或维度不符时会报错并给出修复建议。
+- **更换 provider 或其模型后需要重建向量索引**：provider ID、adapter 类型、模型名（provider 自己报告时）
+  与实测维度都会进入索引指纹，任一变化都会把旧的 Milvus / LightRAG 索引判为不兼容并走既有重建流程。
+  注意：AstrBot 的 OpenAI / Gemini 类 Embedding provider 不向外报告模型名，此时只改模型名而 ID 与维度
+  不变，插件**无法察觉**，请手动重建索引。
+- 共享 provider 归 AstrBot 所有：本插件不会关闭它、不会改它的配置，顶栏「卸载模型」对它也是空操作。
+  AstrBot 热重载该 provider 后会自动跟随新实例；若其模型/维度在运行中变了，插件会拒绝继续写入
+  （避免把不同向量空间的数据混进同一份索引），重启插件并重建索引即可。
+- 解析或探测失败时，向量检索与知识图谱标记为不可用，其余功能（含 AstrBot/SQLite 基础召回）照常启动。
 
 ### 推荐部署组合
 

@@ -54,6 +54,7 @@ CONFIG_POLICIES: dict[str, dict[str, str]] = {
         "provider": "rebuild",
         "model": "rebuild",
         "base_url": "rebuild",
+        "astrbot_provider_id": "rebuild",
         "load_timeout_seconds": "restart",
         "device": "restart",
     },

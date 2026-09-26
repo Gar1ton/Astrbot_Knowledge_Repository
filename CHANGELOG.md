@@ -2,8 +2,73 @@
 
 ## [Unreleased]
 
+## [v1.2.0-preview-2] — 2026-09-26
+
+### 新增 (Added)
+
+- **`embedding.provider=astr`：复用 AstrBot 已配置的 EmbeddingProvider**。此前该取值被配置层拒绝、
+  工厂抛 `NotImplementedError`；现在经 `Context.get_provider_by_id` /
+  `get_all_embedding_providers` 取得 AstrBot 的 Embedding Provider，只通过其公开抽象
+  （`get_embedding` / `get_embeddings` / `get_dim`）取向量，API Key / Base URL / 模型 / 维度均由
+  AstrBot 管理，本插件不保存副本，也不碰 `provider.client` 或任何服务商 API。
+  - 新增 `kacore/repository/embedding/astrbot.py`（适配器）与 `astrbot_resolver.py`（解析、身份读取、
+    脱敏错误）。解析规则：给了 `embedding.astrbot_provider_id` 就按 ID 取并要求是 AstrBot
+    EmbeddingProvider 实例（聊天/重排/语音一律拒绝）；未给则仅当存活的 Embedding Provider 恰好一个时
+    自动选用，0 个/多个报带修复建议的诊断，绝不静默取第一个；自动选择时用 `get_provider_by_id` 身份
+    比对剔除 AstrBot `terminate_provider` 遗留在列表里的陈旧实例。
+  - 返回值检查：向量须为非空有限数值列表、批量数量与输入一致、各向量维度一致、与 provider 声明维度
+    （`get_dim()>0`）及此前观测维度一致；`get_dim()==0`（OpenAI 源未配维度）视为未声明，由首个实测向量
+    锁定。不截断/填充/转换；空输入不发请求。错误含 provider ID、类型、模型（provider 报告时）、阶段与
+    修复建议，凭据形态被脱敏且原始异常链被切断。
+  - 生命周期：不调用 `terminate()`、不关闭其 client、不改其配置，`unload()` 空操作；每次调用按 ID
+    重新解析以跟随 AstrBot 热重载，adapter 类型/模型/声明维度漂移时拒绝写入。
+  - 缓存与指纹：`EmbeddingProvider` 基类新增非机密 `identity` 契约（默认空）；`CachedEmbeddingProvider`
+    把 `identity`（provider ID / adapter 类型 / 模型 / 实测维度）并入 namespace，`embedding_fingerprint`
+    对 astr 改用该身份（忽略无意义的 `embedding.model`/`base_url`）。local/external 的 namespace 与
+    指纹逐字节不变（用改动前的实测值冻结在回归测试里），既有索引不会被误判为不兼容。
+  - 配置：`EmbeddingConfig.astrbot_provider_id`；`_conf_schema.json` 增加 `astr` 选项与该字段；
+    `CONFIG_KEY_POLICY` 登记为 API 可写 + 可持久化 + `rebuild`；`update_config_value` 接受 `astr` 并
+    校验/规范化 ID；有效配置展示 ID 与运行期解析出的身份；`Config.describe_embedding()` 统一日志与
+    `/ka status` 的展示；能力面板把 astr 列为受支持来源。
+  - 组合根：`EmbeddingProviderFactory.create_provider(..., context=)`，`PluginInitializer` 传入
+    `self._context`；解析/探测失败沿用既有降级（向量与图谱不可用，其余功能照常启动）并追加带 ID 的
+    诊断；astr 专属的探针超时提示不再让用户去查 `KR_EMBEDDING_API_KEY`。
+  - 涉及 `kacore/config.py`、`kacore/api.py`、`kacore/capabilities.py`、`kacore/index_compatibility.py`、
+    `kacore/plugin_initializer.py`、`kacore/repository/embedding/{base,cached,factory}.py`、
+    `_conf_schema.json`、`.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py`
+    （配置策略快照同步）；新增测试 75 项（`tests/backend/test_astrbot_embedding*.py`、
+    `tests/mocks/astrbot_fakes.py`），并更新两处旧的「astr 不支持」断言。
+  - 已知限制：AstrBot 的 OpenAI/Gemini 类 provider 的 `get_model()` 为空，此时只改模型名而 ID/类型/维度
+    不变无法自动察觉；本插件不对 AstrBot provider 分批（一次 `embed_documents` 会把一篇文档的全部
+    chunk 交给 `get_embeddings`，批量上限由该 provider 决定）；Web 控制台前端尚未增加 astr 的输入项
+    （`pages/` 未重新生成）。
+
 ### 修复 (Fixed)
 
+- **Milvus 装配失败时只显示套话，数据流面板「向量库」节点反复黄色却看不出原因**：
+  `plugin_initializer.py` 里 Milvus 通用装配异常（如数据目录被其他进程占用的
+  `DataDirLockedError`）此前只写进终端日志，`capabilities` 面板固定显示
+  「向量库在启动时装配失败，请在终端日志中查看」，前端已有的「展示原因 + 重建」卡片
+  （`FlowNode.tsx` 的 `needsMilvusRebuild` 区块）因此始终收不到有用内容。现在
+  `PluginInitializer` 记录具体异常文本（`_vector_store_init_error`），经 `KnowledgeRepositoryApi`
+  透传给 `api_capabilities.py::_milvus_runtime_health()`/`vector_store_unavailable_reason()`，
+  节点卡片直接显示真实原因。
+  - 新增 `kacore/capabilities.py::milvus_lock_error_hint()`：识别「数据目录被占用」类异常文本，
+    给出可执行提示（确认无第二个 AstrBot/插件进程、不要直接删除锁文件），与 `log_capture.py`
+    的日志诊断共用同一份文案（此前两处各写一份）。
+  - **新增「确认后清除 Milvus 锁定」按钮**：仅当探测到「数据目录被占用」时，向量库节点显示
+    「清除锁定」按钮；前端弹出风险确认对话框，确认后调用新接口
+    `POST /api/milvus/clear-lock` → `KnowledgeRepositoryApi.clear_milvus_lock()` →
+    `PluginInitializer.clear_stale_milvus_lock()`，只删除数据目录里 0 字节的 `LOCK`
+    标记文件本身（绝不碰 `collections/` 等真实数据），成功后复用既有软重启流程。
+    是否真的没有其他进程在用由用户自行确认，插件不做自动判断；此前
+    `TODO.md`/`docs` 记录的「不自动破锁」原则不变——这里加的是更清楚的人工确认入口，
+    不是自动破锁。
+  - 涉及 `kacore/plugin_initializer.py`、`kacore/api.py`、`kacore/api_capabilities.py`、
+    `kacore/capabilities.py`、`kacore/log_capture.py`、`web/server.py`；前端
+    `web/frontend/lib/{api.ts,i18n.ts}`、`web/frontend/components/flow/{FlowNode,FlowDiagram}.tsx`、
+    `web/frontend/components/panels/FlowPageContent.tsx`；新增/扩充测试见
+    `tests/backend/{test_capabilities,test_lifecycle_and_cli,test_api,test_web_server}.py`。
 - **PDF 数据库访问水印污染正文与切片**：把 JSTOR 类
   `This content downloaded from … UTC` / `All use subject to …` 清洗收口到
   `marginal_noise`，覆盖完整行、至多三行折行，以及 PyMuPDF4LLM 先把整页合并后嵌入正文行的

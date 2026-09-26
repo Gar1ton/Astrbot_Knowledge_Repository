@@ -399,6 +399,108 @@ async def test_initializer_keeps_mismatched_milvus_available_for_manual_rebuild(
         await initializer.teardown()
 
 
+async def test_initializer_records_milvus_init_error_for_generic_failure(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    """通用装配异常（如 DataDirLockedError）必须被记录，喂给 capabilities 面板与清锁守卫。"""
+
+    class Provider:
+        async def embed_query(self, text: str) -> list[float]:
+            return [0.1] * 7
+
+    class Milvus:
+        def __init__(self, *, db_path: str, dim: int) -> None:
+            pass
+
+        def validate_schema(self) -> None:
+            raise RuntimeError(
+                "DataDirLockedError: another process holds the lock on "
+                "'/data/vector_store.db': [Errno 13] Permission denied"
+            )
+
+    config = {
+        **raw_config,
+        "vector_db": {"backend": "milvus"},
+        "graph": {"enabled": False},
+    }
+    with (
+        patch(
+            "kacore.repository.embedding.factory.EmbeddingProviderFactory.create_provider",
+            return_value=Provider(),
+        ),
+        patch("kacore.repository.vector_store.milvus_lite.MilvusLiteVectorStore", Milvus),
+        patch("kacore.plugin_initializer._module_available", return_value=True),
+    ):
+        initializer = PluginInitializer(mock_context, config, temp_dir)
+        await initializer.initialize()
+
+        assert initializer.vector_store is None
+        assert initializer._vector_store_init_error is not None
+        assert "another process holds the lock" in initializer._vector_store_init_error
+        # 组合根必须把它接到 api，供 capabilities 面板展示。
+        assert initializer.api is not None
+        assert initializer.api._vector_store_init_error == initializer._vector_store_init_error
+        await initializer.teardown()
+
+
+async def test_clear_stale_milvus_lock_rejects_when_not_lock_issue(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    """向导护栏：没有检测到锁定问题时拒绝清除（不同的失败原因不该被这个按钮处理）。"""
+    config = {**raw_config, "vector_db": {"backend": "milvus"}, "graph": {"enabled": False}}
+    initializer = PluginInitializer(mock_context, config, temp_dir)
+    initializer.vector_store = None
+    initializer._vector_store_init_error = "some unrelated schema error"
+
+    result = await initializer.clear_stale_milvus_lock()
+
+    assert result["status"] == "error"
+    assert "未检测到" in result["message"]
+
+
+async def test_clear_stale_milvus_lock_rejects_when_vector_store_ready(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    """守卫：vector_store 已经装配成功时不该允许清锁（那把锁此时是正当持有）。"""
+    config = {**raw_config, "vector_db": {"backend": "milvus"}, "graph": {"enabled": False}}
+    initializer = PluginInitializer(mock_context, config, temp_dir)
+    initializer.vector_store = object()  # 假装已装配成功
+    initializer._vector_store_init_error = None
+
+    result = await initializer.clear_stale_milvus_lock()
+
+    assert result["status"] == "error"
+    assert "无需清除" in result["message"]
+
+
+async def test_clear_stale_milvus_lock_removes_only_lock_file(
+    temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
+) -> None:
+    """成功路径：只删 LOCK 标记文件本身，同目录下的真实数据必须原封不动。"""
+    config = {**raw_config, "vector_db": {"backend": "milvus"}, "graph": {"enabled": False}}
+    initializer = PluginInitializer(mock_context, config, temp_dir)
+    initializer.vector_store = None
+    initializer._vector_store_init_error = (
+        "DataDirLockedError: another process holds the lock on "
+        "'/data/vector_store.db': [Errno 13] Permission denied"
+    )
+    db_dir = temp_dir / "vector_store.db"
+    db_dir.mkdir(parents=True)
+    (db_dir / "LOCK").write_bytes(b"")
+    collections_dir = db_dir / "collections"
+    collections_dir.mkdir()
+    (collections_dir / "kb_chunks.marker").write_text("real data, do not touch")
+    initializer._milvus_db_path = db_dir
+
+    result = await initializer.clear_stale_milvus_lock()
+
+    assert result["status"] == "ok"
+    assert not (db_dir / "LOCK").exists()
+    assert (collections_dir / "kb_chunks.marker").read_text() == "real data, do not touch"
+    # 清除成功后应重置，避免陈旧错误继续挡下一次的正常装配判断。
+    assert initializer._vector_store_init_error is None
+
+
 async def test_initializer_marks_recreated_empty_milvus_incompatible_when_docs_exist(
     temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
 ) -> None:

@@ -74,6 +74,8 @@ export function FlowDiagram({
   onRefresh,
   onInstall,
   onRebuildIndex,
+  onClearMilvusLock,
+  clearingMilvusLock,
   onEditingChange,
   onClose,
 }: {
@@ -93,6 +95,8 @@ export function FlowDiagram({
   onRefresh?: () => Promise<void>;
   onInstall: (dep: DependencyStatus) => void;
   onRebuildIndex: () => void;
+  onClearMilvusLock?: () => void;
+  clearingMilvusLock?: boolean;
   onClose?: () => void;
 }) {
   const knownStages = useMemo(() => {
@@ -400,6 +404,8 @@ export function FlowDiagram({
                   onRefresh={onRefresh}
                   onInstall={onInstall}
                   onRebuildIndex={onRebuildIndex}
+                  onClearMilvusLock={onClearMilvusLock}
+                  clearingMilvusLock={clearingMilvusLock}
                   onClose={onClose}
                 />
               </div>

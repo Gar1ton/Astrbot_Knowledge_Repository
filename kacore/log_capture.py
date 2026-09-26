@@ -18,6 +18,8 @@ import time
 from collections import deque
 from typing import Any, Protocol
 
+from kacore.capabilities import milvus_lock_error_hint
+
 LOG_BUFFER_MAXLEN = 2000
 
 # ── 噪声控制 ──────────────────────────────────────────────────
@@ -304,21 +306,10 @@ def _exception_metadata(record: logging.LogRecord, exc_text: str) -> dict[str, A
     if chain:
         metadata["exception_type"] = type(chain[0]).__name__
         metadata["root_cause_type"] = type(chain[-1]).__name__
-    diagnostic_text = f"{record.name} {record.getMessage()} {exc_text}".lower()
-    if (
-        "datadirlockederror" in diagnostic_text
-        or "another process holds the lock" in diagnostic_text
-    ):
-        metadata.update(
-            {
-                "diagnostic_code": "milvus_data_dir_locked",
-                "hint": (
-                    "Milvus 数据目录正被其他进程占用；请先确认没有第二个 AstrBot/插件进程，"
-                    "正常停止占用者后重启。若确认无重复进程，再检查目录 ACL 或安全软件；"
-                    "不要直接删除锁文件或向量数据目录。"
-                ),
-            }
-        )
+    diagnostic_text = f"{record.name} {record.getMessage()} {exc_text}"
+    lock_hint = milvus_lock_error_hint(diagnostic_text)
+    if lock_hint:
+        metadata.update({"diagnostic_code": "milvus_data_dir_locked", "hint": lock_hint})
     return metadata
 
 

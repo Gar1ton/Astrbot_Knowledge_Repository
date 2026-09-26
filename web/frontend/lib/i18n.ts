@@ -503,6 +503,15 @@ const zh = {
   flow_milvus_rebuild_running: "重建中",
   flow_milvus_rebuild_done: "已重建 {docs} 个文档 / {chunks} 个分块",
   flow_milvus_rebuild_failed: "Milvus 索引重建失败",
+  flow_milvus_lock_detected: "检测到 Milvus 数据目录被其他进程占用",
+  flow_milvus_clear_lock: "清除锁定",
+  flow_milvus_clear_lock_running: "清除中…",
+  flow_milvus_clear_lock_confirm:
+    "清除前请先在任务管理器/进程列表中确认没有第二个 AstrBot 或本插件进程在运行。\n" +
+    "如果实际上还有进程在使用 Milvus，清除后两边同时写入可能把索引写坏，需要重新全量构建。\n" +
+    "确认没有残留进程后再继续？",
+  flow_milvus_clear_lock_done: "锁定标记已清除，正在重启插件…",
+  flow_milvus_clear_lock_failed: "清除锁定失败",
   flow_stage_zotero: "Zotero 文献库",
   flow_stage_zotero_desc: "可选来源：只读镜像本地 Zotero 的条目/集合/标签/PDF 附件并清洗为干净 Markdown，汇入数据流。未启用时插件仍可本地上传运作。",
   flow_stage_ingest: "上传 / 分块",
@@ -1406,6 +1415,17 @@ const en: Record<keyof typeof zh, string> = {
   flow_milvus_rebuild_running: "Rebuilding",
   flow_milvus_rebuild_done: "Rebuilt {docs} docs / {chunks} chunks",
   flow_milvus_rebuild_failed: "Milvus index rebuild failed",
+  flow_milvus_lock_detected: "Milvus data directory is held by another process",
+  flow_milvus_clear_lock: "Clear lock",
+  flow_milvus_clear_lock_running: "Clearing…",
+  flow_milvus_clear_lock_confirm:
+    "Before clearing, check Task Manager / process list to confirm there is no second AstrBot " +
+    "or plugin process running.\n" +
+    "If another process is genuinely still using Milvus, clearing the lock can let both write " +
+    "at once and corrupt the index, requiring a full rebuild.\n" +
+    "Continue once you've confirmed there's no leftover process?",
+  flow_milvus_clear_lock_done: "Lock cleared, restarting plugin…",
+  flow_milvus_clear_lock_failed: "Failed to clear lock",
   flow_stage_zotero: "Zotero library",
   flow_stage_zotero_desc: "Optional source: read-only mirror of local Zotero items/collections/tags/PDF attachments, cleaned to Markdown and fed into the flow. The plugin still works with local uploads when disabled.",
   flow_stage_ingest: "Upload / Chunk",

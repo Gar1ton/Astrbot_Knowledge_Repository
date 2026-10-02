@@ -3379,3 +3379,24 @@ async def test_zotero_pull_marks_stale_documents_after_sync() -> None:
     assert api._last_zotero_sync["stale_marked"] == 1
     assert [d.doc_id for d in await store.list_pending_reindex_documents()] == ["legacy"]
     assert scheduler.notified == 1
+
+
+async def test_notion_initialize_persists_both_data_sources_and_exposes_auto_sync() -> None:
+    class Pipeline:
+        async def initialize_databases(self, **kwargs) -> dict:
+            return {
+                "status": "success", "database_id": "articles", "qa_database_id": "qa",
+                "data_source_id": "articles-source", "qa_data_source_id": "qa-source",
+            }
+    api = _notion_api(InMemorySourceDocumentStore(), Pipeline())
+    persisted = []
+    api._config_persist = lambda section, key, value: persisted.append((section, key, value))
+    result = await api.initialize_notion_database()
+    assert result["status"] == "success"
+    assert ("notion_sync", "data_source_id", "articles-source") in persisted
+    assert ("notion_sync", "qa_data_source_id", "qa-source") in persisted
+    status = await api.get_notion_push_status()
+    assert status["data_source_id"] == "articles-source"
+    assert status["qa_data_source_id"] == "qa-source"
+    assert status["auto_sync_enabled"] is True
+    assert status["auto_sync_interval_sec"] == 300

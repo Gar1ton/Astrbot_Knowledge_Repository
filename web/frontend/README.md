@@ -2,6 +2,12 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
+Notion 设置包含本地变更自动同步开关和周期补偿间隔（默认 300 秒）。间隔设为 0
+只关闭周期补偿；关闭全部自动推送请关闭自动同步开关。共享进度条显示本轮笔记
+检查/标记数、MCP 调用尝试数、耗时及模型 token（0）。修改前端后先构建静态导出，
+再从仓库根目录运行 `python tools/sync_frontend.py` 更新随插件发布的 `pages/`。
+运行升级和筛选视图见 [Notion 同步指南](../../docs/NOTION_SYNC.md)。
+
 First, run the development server:
 
 ```bash

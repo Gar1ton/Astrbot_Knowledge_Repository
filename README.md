@@ -68,10 +68,12 @@ git clone https://github.com/Gar1ton/Astrbot_Knowledge_Repository astrbot_plugin
 > AstrBot 面板只承载 Web 控制台、R2、Notion、Embedding 四组基础配置；
 > Zotero、LightRAG 图谱与检索调优在 **WebUI 设置页 / 数据流页**配置，持久化到 `runtime_config.json`。
 
-> **Notion MCP 版本要求：** 当前适配器使用 `@suekou/mcp-notion-server` v1.2.x 的
-> `notion_query_database` / `notion_create_database_item` 工具契约。v2 已切换到 Data Source API；
-> 请在 AstrBot 的 MCP 配置中把启动包锁为 `@suekou/mcp-notion-server@1.2.4`，不要使用未锁版本的
-> `npx -y @suekou/mcp-notion-server`。宿主配置位于本仓库外，本插件不会自动修改。
+> **Notion MCP 版本要求：** 使用 Node.js 22+，在 AstrBot 的 MCP 配置中把启动包锁为
+> `@suekou/mcp-notion-server@2.0.2`。适配器使用 Data Source API，初始化可复用已有
+> Articles / QA 数据库并回填两个 Data Source ID。Articles 只更新属性，保留正文，
+> 不再生成 Chunks Preview；简单正文规则自动勾选“已做笔记”，可在 Notion 视图筛选。
+> 开启 Notion 后默认合并本地变更 10 秒自动推送、每 300 秒补查。宿主 MCP 配置不会自动修改。
+> 升级步骤、筛选视图和消耗说明见 [Notion 同步指南](docs/NOTION_SYNC.md)。
 
 ### 可选依赖
 

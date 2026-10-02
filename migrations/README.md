@@ -20,6 +20,10 @@
 
 ## 规则
 
+- `025_notion_scan_state.sql` 新增按 database/data source 隔离的正文扫描水位，以及
+  documents / collections / document_collections 的已提交修订号。迁移保留原有数据，
+  Notion 账本与扫描水位写入不触发本地内容变更；失败扫描不推进水位。
+
 - 迁移**只增不改**：已发布的迁移文件视为不可变历史；修正错误用新的更高编号迁移。
 - 每个迁移**单一意图**，可独立回顾。
 - 编号即顺序：不要跳号、不要复用编号。

@@ -122,8 +122,8 @@
       "auto_sync_interval_sec": {
         "description": "周期自动推送间隔（秒）",
         "type": "int",
-        "default": 0,
-        "hint": "0 表示关闭定时推送；>0 时每隔该秒数自动增量推送一次（改动后重启生效）"
+        "default": 300,
+        "hint": "自动同步开启时的周期补偿间隔，默认 300 秒；0 只关闭周期补偿，本地变更仍自动推送。关闭全部自动推送请关闭 auto_sync_enabled。运行期修改即时生效。"
       },
       "sync_mode": {
         "description": "Notion 同步模式",
@@ -134,6 +134,24 @@
           "strict"
         ],
         "hint": "preserve：保留 detached 页面；strict：下次同步归档所有 detached Articles 页面，并阻止同步恢复，直到文献重新变为 active"
+      },
+      "data_source_id": {
+        "description": "Articles Data Source ID（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "单源库初始化时自动解析并回填；多源库必须明确选择，不可与 Database ID 混用"
+      },
+      "qa_data_source_id": {
+        "description": "QA Data Source ID（可选）",
+        "type": "string",
+        "default": "",
+        "hint": "QA 单源库初始化时自动解析并回填；多源库必须明确选择"
+      },
+      "auto_sync_enabled": {
+        "description": "自动同步本地变更",
+        "type": "bool",
+        "default": true,
+        "hint": "Notion 功能启用后，连续变更合并 10 秒推送；关闭后仍可手动同步"
       }
     }
   },

@@ -129,17 +129,20 @@ NOTION_SYNC_STRICT = "strict"
 class NotionSyncConfig:
     """Notion 单向镜像配置。经 mcp_server_name 指向的 MCP server 调用，本侧不持 token。
 
-    max_upload_mib 固定为 Notion API 限制（5 MiB），不暴露给用户配置。
-    rate_limit_rps 固定为平台限速（3 req/s），不暴露给用户配置（改高会触发 429）。
+    max_upload_mib 保留旧配置/诊断接口；Articles 不上传正文或二进制文件。
+    rate_limit_rps 保留保守的客户端频控（3 req/s），不暴露给用户配置。
     """
 
     enabled: bool = False
     mcp_server_name: str = "notion"
     database_id: str = ""
     qa_database_id: str = ""
+    data_source_id: str = ""
+    qa_data_source_id: str = ""
     parent_page_id: str = ""
     database_title: str = "Knowledge Arch"
-    auto_sync_interval_sec: int = 0
+    auto_sync_enabled: bool = True
+    auto_sync_interval_sec: int = 300
     sync_mode: str = NOTION_SYNC_PRESERVE
     max_upload_mib: int = 5
     rate_limit_rps: int = _NOTION_RATE_LIMIT_RPS
@@ -473,6 +476,9 @@ class Config:
                 "mcp_server_name": notion.mcp_server_name,
                 "database_id": notion.database_id,
                 "qa_database_id": notion.qa_database_id,
+                "data_source_id": notion.data_source_id,
+                "qa_data_source_id": notion.qa_data_source_id,
+                "auto_sync_enabled": notion.auto_sync_enabled,
                 "parent_page_id": notion.parent_page_id,
                 "database_title": notion.database_title,
                 "auto_sync_interval_sec": notion.auto_sync_interval_sec,
@@ -672,6 +678,9 @@ class Config:
             mcp_server_name=s.get("mcp_server_name", NotionSyncConfig.mcp_server_name),
             database_id=s.get("database_id", NotionSyncConfig.database_id),
             qa_database_id=s.get("qa_database_id", NotionSyncConfig.qa_database_id),
+            data_source_id=s.get("data_source_id", NotionSyncConfig.data_source_id),
+            qa_data_source_id=s.get("qa_data_source_id", NotionSyncConfig.qa_data_source_id),
+            auto_sync_enabled=bool(s.get("auto_sync_enabled", NotionSyncConfig.auto_sync_enabled)),
             parent_page_id=s.get("parent_page_id", NotionSyncConfig.parent_page_id),
             database_title=s.get("database_title", NotionSyncConfig.database_title),
             auto_sync_interval_sec=int(
@@ -1039,6 +1048,9 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "database_id": ConfigKeyPolicy(False, True),
         "qa_database_id": ConfigKeyPolicy(False, True),
+        "data_source_id": ConfigKeyPolicy(False, True),
+        "qa_data_source_id": ConfigKeyPolicy(False, True),
+        "auto_sync_enabled": ConfigKeyPolicy(True, True),
         "parent_page_id": ConfigKeyPolicy(False, True),
         "database_title": ConfigKeyPolicy(False, True),
         "auto_sync_interval_sec": ConfigKeyPolicy(True, True),

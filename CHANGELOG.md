@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### 改进 (Changed)
+
+- **Notion MCP v2 与正文笔记标记**：适配器迁移到 `@suekou/mcp-notion-server@2.0.2`
+  / Notion Data Source API；解析并回填 Articles / QA 的 data source ID，多源歧义显式报错，
+  QA relation 使用 Articles data source。Articles 新建、更新、原件变化与强制推送仅写属性，
+  不生成 Chunks Preview / 大文件提示，不清空旧正文；QA 正文契约保持原有方式。
+- **正文笔记筛选**：新增 `已做笔记` checkbox，固定规则经 MCP 分页读取正文；忽略空白、
+  分隔线与旧程序摘要/提示，只勾选、不清除、不检查评论。按远端编辑时间增量检查，
+  迁移 `025_notion_scan_state.sql` 保存扫描水位，失败不推进；笔记标记不参与 preserve / strict 清理。
+- **默认自动同步与消耗可见性**：本地已提交文档/集合变更合并 10 秒推送、默认 300 秒周期补偿；
+  `auto_sync_enabled` 热开关，间隔 0 只关周期，旧显式 0 保留。忙时等待、失败退避，卸载时关闭
+  调度与推送任务。任务及前端显示 MCP 调用尝试数、耗时、笔记统计与模型 token=0。
+  涉及 `kacore/adapters/notion_mcp.py`、`notion_auto_sync.py`、`notion_sync_job.py`、
+  `repository/sync_targets/notion*.py`、`repository/source_store/`、`pipelines/notion_sync_pipeline.py`、
+  `plugin_initializer.py`、`api.py`、配置策略/schema、前端设置/进度条与生成的 `pages/`。
+  升级宿主 MCP、初始化已有库、建立 Notion 筛选视图和消耗示例见 `docs/NOTION_SYNC.md`。
+  运行实例及真实 Notion 数据未在本次开发验证中修改。
+
 ## [v1.2.0-preview-2] — 2026-09-26
 
 ### 新增 (Added)

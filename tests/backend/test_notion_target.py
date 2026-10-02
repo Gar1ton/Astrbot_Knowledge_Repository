@@ -4,6 +4,7 @@ Notion 部分经 tool_caller fake 驱动（接口对换，不 mock 宿主对象�
 防重复建页（幂等序列）、渐进降级（Name+DocID 最小集）、大文件 callout、
 正文块按 content_hash 重写、QA NoteID 防重、两表建库对账。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -103,15 +104,18 @@ class RoutedToolCaller:
 
     _DEFAULTS: dict[str, Any] = field(
         default_factory=lambda: {
-            "notion_query_database": {"results": [], "has_more": False},
+            "notion_query_data_source": {"results": [], "has_more": False},
+            "notion_retrieve_data_source": {"properties": {}},
             "notion_retrieve_block_children": {"results": [], "has_more": False},
-            "notion_create_database_item": {"id": "page-new"},
+            "notion_create_data_source_item": {"id": "page-new"},
             "notion_create_database": {"id": "db-new"},
         }
     )
 
     async def __call__(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         self.calls.append((tool_name, arguments))
+        if tool_name == "notion_retrieve_database" and tool_name not in self.handlers:
+            return {"data_sources": [{"id": "source-" + arguments["database_id"]}]}
         handler = self.handlers.get(tool_name)
         if callable(handler):
             return handler(arguments)
@@ -174,14 +178,12 @@ def _doc(doc_id: str, size: int = 1000) -> SourceDocument:
 
 
 @pytest.mark.asyncio
-async def test_upsert_first_push_creates_then_appends(
+async def test_upsert_first_push_creates_empty_body(
     notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
 ) -> None:
     await store.add_document(_doc("d1"))
     await store.replace_chunks("d1", [DocumentChunk("c1", "d1", 0, "Chunk text 1", "h1")])
-    caller = RoutedToolCaller(
-        handlers={"notion_create_database_item": {"id": "page-1"}}
-    )
+    caller = RoutedToolCaller(handlers={"notion_create_data_source_item": {"id": "page-1"}})
     target = _target(caller, store, notion_config)
 
     result = await target.upsert_document(
@@ -193,28 +195,22 @@ async def test_upsert_first_push_creates_then_appends(
     assert not result.degraded
     # 幂等序列：先 DocID 反查（miss）→ create → append，两步分离（server 不支持 children）
     assert caller.tools_called() == [
-        "notion_query_database",
-        "notion_create_database_item",
-        "notion_append_block_children",
+        "notion_retrieve_database",
+        "notion_query_data_source",
+        "notion_create_data_source_item",
     ]
-    query_args = caller.args_of("notion_query_database")
+    query_args = caller.args_of("notion_query_data_source")
     assert query_args["filter"] == {
         "property": "DocID",
         "rich_text": {"equals": "d1"},
     }
-    props = caller.args_of("notion_create_database_item")["properties"]
+    props = caller.args_of("notion_create_data_source_item")["properties"]
     assert props["Name"]["title"][0]["text"]["content"] == "doc_d1.pdf"
     assert props["DocID"]["rich_text"][0]["text"]["content"] == "d1"
     assert {t["name"] for t in props["Tags"]["multi_select"]} == {"academic", "ai"}
     assert {c["name"] for c in props["Collections"]["multi_select"]} == {"根", "子"}
     assert props["Collection Path"]["select"]["name"] == "根 / 子"
-    blocks = caller.args_of("notion_append_block_children")["children"]
-    assert blocks[0]["type"] == "toggle"
-    toggle = blocks[0]["toggle"]
-    assert "Chunks Preview" in toggle["rich_text"][0]["text"]["content"]
-    assert toggle["children"][0]["paragraph"]["rich_text"][0]["text"]["content"] == (
-        "[Chunk #0] Chunk text 1"
-    )
+    assert "notion_append_block_children" not in caller.tools_called()
 
 
 @pytest.mark.asyncio
@@ -248,7 +244,7 @@ async def test_upsert_map_miss_but_remote_hit_updates_not_creates(
     """防重复建页回归：账本 miss 但远端已有同 DocID 页面时必须走 update。"""
     caller = RoutedToolCaller(
         handlers={
-            "notion_query_database": {
+            "notion_query_data_source": {
                 "results": [{"id": "page-remote"}],
                 "has_more": False,
             }
@@ -262,7 +258,7 @@ async def test_upsert_map_miss_but_remote_hit_updates_not_creates(
 
     assert result.page_id == "page-remote"
     assert result.action == ACTION_UPDATED
-    assert "notion_create_database_item" not in caller.tools_called()
+    assert "notion_create_data_source_item" not in caller.tools_called()
 
 
 @pytest.mark.asyncio
@@ -284,7 +280,7 @@ async def test_upsert_stale_prior_page_falls_back_to_reverse_query(
                 NotionMCPError("404 page not found"),  # 账本 page 已被手删
                 {},  # 反查命中后的 update 成功
             ],
-            "notion_query_database": {
+            "notion_query_data_source": {
                 "results": [{"id": "page-found"}],
                 "has_more": False,
             },
@@ -308,7 +304,7 @@ async def test_upsert_create_degrades_to_minimal_with_docid(
 
     caller = RoutedToolCaller(
         handlers={
-            "notion_create_database_item": [
+            "notion_create_data_source_item": [
                 NotionMCPError("validation_error: property Tags not found"),
                 {"id": "page-degraded"},
             ]
@@ -323,12 +319,12 @@ async def test_upsert_create_degrades_to_minimal_with_docid(
     assert result.page_id == "page-degraded"
     assert result.degraded is True
     # 降级最小集必须保留 DocID（幂等键），否则重复页面问题复发
-    minimal = caller.args_of("notion_create_database_item", 1)["properties"]
+    minimal = caller.args_of("notion_create_data_source_item", 1)["properties"]
     assert set(minimal) == {"Name", "DocID"}
 
 
 @pytest.mark.asyncio
-async def test_upsert_content_change_rewrites_blocks(
+async def test_upsert_content_change_preserves_user_blocks(
     notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
 ) -> None:
     doc = _doc("d1")
@@ -356,33 +352,22 @@ async def test_upsert_content_change_rewrites_blocks(
 
     assert result.action == ACTION_UPDATED
     tools = caller.tools_called()
-    # 重写序列：update 属性 → 列旧块 → 逐删 → 追加新块
-    assert tools == [
-        "notion_update_page_properties",
-        "notion_retrieve_block_children",
-        "notion_delete_block",
-        "notion_delete_block",
-        "notion_append_block_children",
-    ]
+    assert tools == ["notion_update_page_properties"]
 
 
 @pytest.mark.asyncio
-async def test_push_large_file_prefix_and_callout(
+async def test_push_large_file_is_metadata_only(
     notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
 ) -> None:
     payload_size = int(5.1 * 1024 * 1024)
     doc = _doc("d2", size=payload_size)
-    caller = RoutedToolCaller(
-        handlers={"notion_create_database_item": {"id": "page-large"}}
-    )
+    caller = RoutedToolCaller(handlers={"notion_create_data_source_item": {"id": "page-large"}})
     target = _target(caller, store, notion_config)
 
     remote_ref = await target.push(doc, b"x" * payload_size)
 
-    assert remote_ref == "skipped:page-large"
-    blocks = caller.args_of("notion_append_block_children")["children"]
-    assert blocks[0]["type"] == "callout"
-    assert "已跳过文件二进制镜像" in blocks[0]["callout"]["rich_text"][0]["text"]["content"]
+    assert remote_ref == "page-large"
+    assert "notion_append_block_children" not in caller.tools_called()
 
 
 @pytest.mark.asyncio
@@ -428,7 +413,7 @@ async def test_archive_document_cleans_known_and_duplicate_docid_pages(
 ) -> None:
     caller = RoutedToolCaller(
         handlers={
-            "notion_query_database": {
+            "notion_query_data_source": {
                 "results": [
                     {"id": "known-page"},
                     {"id": "duplicate-page"},
@@ -443,17 +428,13 @@ async def test_archive_document_cleans_known_and_duplicate_docid_pages(
     archived = await target.archive_document("doc-1", "known-page")
 
     assert archived == 2
-    query = caller.args_of("notion_query_database")
-    assert query["database_id"] == "db-articles"
+    query = caller.args_of("notion_query_data_source")
+    assert query["data_source_id"] == "source-db-articles"
     assert query["filter"] == {
         "property": "DocID",
         "rich_text": {"equals": "doc-1"},
     }
-    deleted_ids = [
-        args["block_id"]
-        for name, args in caller.calls
-        if name == "notion_delete_block"
-    ]
+    deleted_ids = [args["block_id"] for name, args in caller.calls if name == "notion_delete_block"]
     assert deleted_ids == ["known-page", "duplicate-page"]
 
 
@@ -464,9 +445,7 @@ async def test_archive_document_cleans_known_and_duplicate_docid_pages(
 async def test_qa_entry_created_with_citations_and_body(
     notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
 ) -> None:
-    caller = RoutedToolCaller(
-        handlers={"notion_create_database_item": {"id": "qa-page-1"}}
-    )
+    caller = RoutedToolCaller(handlers={"notion_create_data_source_item": {"id": "qa-page-1"}})
     target = _target(caller, store, notion_config)
 
     result = await target.create_qa_entry(
@@ -480,8 +459,8 @@ async def test_qa_entry_created_with_citations_and_body(
 
     assert result.page_id == "qa-page-1"
     assert result.action == ACTION_CREATED
-    create_args = caller.args_of("notion_create_database_item")
-    assert create_args["database_id"] == "db-qa"
+    create_args = caller.args_of("notion_create_data_source_item")
+    assert create_args["data_source_id"] == "source-db-qa"
     props = create_args["properties"]
     assert props["Question"]["title"][0]["text"]["content"].startswith("RAG")
     assert props["NoteID"]["rich_text"][0]["text"]["content"] == "outbox:ob1"
@@ -498,7 +477,7 @@ async def test_qa_entry_retry_reuses_page_and_rewrites_body(
     # NoteID 已存在（上轮建页成功但正文没写成）→ 复用该页、清块重写正文，不重复建行。
     caller = RoutedToolCaller(
         handlers={
-            "notion_query_database": {
+            "notion_query_data_source": {
                 "results": [{"id": "qa-existing"}],
                 "has_more": False,
             },
@@ -520,7 +499,7 @@ async def test_qa_entry_retry_reuses_page_and_rewrites_body(
     assert result.page_id == "qa-existing"
     assert result.content_synced is True
     # 不重复建行；复用页面走 clear→append 幂等重写正文
-    assert "notion_create_database_item" not in caller.tools_called()
+    assert "notion_create_data_source_item" not in caller.tools_called()
     assert "notion_append_block_children" in caller.tools_called()
     assert caller.args_of("notion_append_block_children")["block_id"] == "qa-existing"
 
@@ -534,7 +513,7 @@ async def test_qa_entry_body_append_failure_reports_not_synced(
     # 建页成功但正文追加失败 → content_synced=False（上层据此保留 outbox 正文）。
     caller = RoutedToolCaller(
         handlers={
-            "notion_create_database_item": {"id": "qa-1"},
+            "notion_create_data_source_item": {"id": "qa-1"},
             "notion_append_block_children": NotionMCPError("append timeout"),
         }
     )
@@ -561,7 +540,7 @@ async def test_qa_entry_relation_failure_degrades(
 
     caller = RoutedToolCaller(
         handlers={
-            "notion_create_database_item": [
+            "notion_create_data_source_item": [
                 NotionMCPError("Citations is not a property"),
                 {"id": "qa-degraded"},
             ]
@@ -580,13 +559,11 @@ async def test_qa_entry_relation_failure_degrades(
     )
 
     assert result.degraded is True
-    retry_props = caller.args_of("notion_create_database_item", 1)["properties"]
+    retry_props = caller.args_of("notion_create_data_source_item", 1)["properties"]
     assert "Citations" not in retry_props
     # 降级时已解析引用（DocID）补进正文尾部，不随 relation 一起丢失
     body_blocks = caller.args_of("notion_append_block_children")["children"]
-    body_text = "".join(
-        b["paragraph"]["rich_text"][0]["text"]["content"] for b in body_blocks
-    )
+    body_text = "".join(b["paragraph"]["rich_text"][0]["text"]["content"] for b in body_blocks)
     assert "doc-a" in body_text
 
 
@@ -598,9 +575,7 @@ async def test_initialize_creates_both_databases_with_relation(
     store: InMemorySourceDocumentStore,
 ) -> None:
     config = NotionSyncConfig(enabled=True, parent_page_id="parent-page")
-    caller = RoutedToolCaller(
-        handlers={"notion_create_database": [{"id": "db-a"}, {"id": "db-q"}]}
-    )
+    caller = RoutedToolCaller(handlers={"notion_create_database": [{"id": "db-a"}, {"id": "db-q"}]})
     target = _target(caller, store, config)
 
     result = await target.initialize_databases()
@@ -609,10 +584,12 @@ async def test_initialize_creates_both_databases_with_relation(
     assert result["database_id"] == "db-a"
     assert result["qa_database_id"] == "db-q"
     assert result["created"] is True
-    articles_props = caller.args_of("notion_create_database", 0)["properties"]
+    articles_props = caller.args_of("notion_create_database", 0)["initial_data_source"][
+        "properties"
+    ]
     assert set(articles_props) == set(schema.articles_db_properties())
-    qa_props = caller.args_of("notion_create_database", 1)["properties"]
-    assert qa_props["Citations"]["relation"]["database_id"] == "db-a"
+    qa_props = caller.args_of("notion_create_database", 1)["initial_data_source"]["properties"]
+    assert qa_props["Citations"]["relation"]["data_source_id"] == "source-db-a"
     # 配置随建库回填，后续 push 直接可用
     assert target.config.database_id == "db-a"
     assert target.config.qa_database_id == "db-q"
@@ -622,13 +599,11 @@ async def test_initialize_creates_both_databases_with_relation(
 async def test_initialize_reconciles_missing_columns_on_existing_db(
     store: InMemorySourceDocumentStore,
 ) -> None:
-    config = NotionSyncConfig(
-        enabled=True, database_id="db-a", parent_page_id="parent-page"
-    )
+    config = NotionSyncConfig(enabled=True, database_id="db-a", parent_page_id="parent-page")
     caller = RoutedToolCaller(
         handlers={
-            "notion_retrieve_database": {
-                "id": "db-a",
+            "notion_retrieve_data_source": {
+                "id": "source-db-a",
                 # 旧库只有历史四列 → 需补齐新列
                 "properties": {"Name": {}, "Collection": {}, "Tags": {}, "DocID": {}},
             },
@@ -640,7 +615,7 @@ async def test_initialize_reconciles_missing_columns_on_existing_db(
     result = await target.initialize_databases()
 
     assert result["status"] == "success"
-    added = caller.args_of("notion_update_database")["properties"]
+    added = caller.args_of("notion_update_data_source")["properties"]
     assert "Collections" in added and "Lifecycle" in added
     assert "Name" not in added  # 已存在的列不动（幂等）
 
@@ -736,9 +711,7 @@ def _retrieve_with_options() -> dict[str, Any]:
 async def test_prune_collection_options_removes_stale(
     notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
 ) -> None:
-    caller = RoutedToolCaller(
-        handlers={"notion_retrieve_database": _retrieve_with_options()}
-    )
+    caller = RoutedToolCaller(handlers={"notion_retrieve_data_source": _retrieve_with_options()})
     target = _target(caller, store, notion_config)
 
     pruned = await target.prune_collection_options(
@@ -747,11 +720,11 @@ async def test_prune_collection_options_removes_stale(
 
     assert pruned == {"collections": 1, "collection_path": 1}
     # 两次 update_database，各只保留活跃选项（带 id）→ Notion 据此删除被省略的失效项。
-    assert caller.tools_called().count("notion_update_database") == 2
-    coll = caller.args_of("notion_update_database", 0)["properties"]["Collections"]
+    assert caller.tools_called().count("notion_update_data_source") == 2
+    coll = caller.args_of("notion_update_data_source", 0)["properties"]["Collections"]
     assert [o["name"] for o in coll["multi_select"]["options"]] == ["keep"]
     assert coll["multi_select"]["options"][0]["id"] == "o1"
-    path = caller.args_of("notion_update_database", 1)["properties"]["Collection Path"]
+    path = caller.args_of("notion_update_data_source", 1)["properties"]["Collection Path"]
     assert [o["name"] for o in path["select"]["options"]] == ["keep"]
 
 
@@ -759,9 +732,7 @@ async def test_prune_collection_options_removes_stale(
 async def test_prune_collection_options_noop_when_all_live(
     notion_config: NotionSyncConfig, store: InMemorySourceDocumentStore
 ) -> None:
-    caller = RoutedToolCaller(
-        handlers={"notion_retrieve_database": _retrieve_with_options()}
-    )
+    caller = RoutedToolCaller(handlers={"notion_retrieve_data_source": _retrieve_with_options()})
     target = _target(caller, store, notion_config)
 
     pruned = await target.prune_collection_options(
@@ -770,7 +741,7 @@ async def test_prune_collection_options_noop_when_all_live(
     )
 
     assert pruned == {"collections": 0, "collection_path": 0}
-    assert "notion_update_database" not in caller.tools_called()
+    assert "notion_update_data_source" not in caller.tools_called()
 
 
 @pytest.mark.asyncio
@@ -779,8 +750,8 @@ async def test_prune_collection_options_swallows_update_error(
 ) -> None:
     caller = RoutedToolCaller(
         handlers={
-            "notion_retrieve_database": _retrieve_with_options(),
-            "notion_update_database": NotionMCPError("boom"),
+            "notion_retrieve_data_source": _retrieve_with_options(),
+            "notion_update_data_source": NotionMCPError("boom"),
         }
     )
     target = _target(caller, store, notion_config)

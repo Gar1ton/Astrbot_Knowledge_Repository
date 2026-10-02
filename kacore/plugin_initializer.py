@@ -659,8 +659,8 @@ class PluginInitializer:
                 self._periodic_zotero_sync(zotero_cfg.auto_sync_interval_sec)
             )
 
-        # 6.2) Notion 周期增量推送：启用且间隔>0 时注册（间隔每轮重读，吸收前端改值）。
-        if notion_cfg.enabled and notion_cfg.auto_sync_interval_sec > 0:
+        # 常驻轻量检测；开关每轮重读，禁用时不读库、不推送。
+        if self.source_store is not None:
             self._notion_sync_task = asyncio.create_task(self._periodic_notion_sync())
 
         # 6.3) Milvus 索引自动重建：常驻调度器（开关每轮重读，故不在这里按配置决定是否创建）。
@@ -937,23 +937,33 @@ class PluginInitializer:
             logger.error(f"Error in background periodic backup: {e}")
 
     async def _periodic_notion_sync(self) -> None:
-        """Notion 周期增量推送：每轮 sleep 当前配置间隔（重读以吸收前端改值），
-        再经 `api.sync_notion_push` 触发一次后台推送——与手动按钮共用同一进度任务，
-        使周期推送也在左下角进度条可视；异常吞掉记日志不影响循环。"""
-        logger.info("Notion periodic push scheduled.")
-        try:
-            while True:
-                interval = self._config.get_notion_sync_config().auto_sync_interval_sec
-                if interval <= 0:
-                    logger.info("Notion 周期推送间隔置 0，任务退出。")
-                    return
-                await asyncio.sleep(interval)
-                try:
-                    await self.api.sync_notion_push(force=False)
-                except Exception as exc:
-                    logger.error("Notion periodic push failed: %s", exc)
-        except asyncio.CancelledError:
-            logger.info("Notion periodic push task cancelled.")
+        """10 秒合并本地变更 + 周期补偿，共用手动推送进度任务。"""
+        from kacore.notion_auto_sync import NotionAutoSync
+
+        assert self.source_store is not None
+        await NotionAutoSync(
+            self.source_store, self._config.get_notion_sync_config, self._auto_notion_push
+        ).run()
+
+    async def _auto_notion_push(self) -> bool | None:
+        """本地维护/既有推送忙时等待，不把新变更误认为已消费。"""
+        if self.api is None:
+            return None
+        if self.api._processing_lock.locked():
+            return None
+        task = self.api._notion_sync_task
+        if task is not None and not task.done():
+            return None
+        zotero = self.api.get_active_zotero_sync_job()
+        if zotero is not None and zotero.get("status") == "running":
+            return None
+        await self.api.sync_notion_push(force=False)
+        task = self.api._notion_sync_task
+        if task is None:
+            return False
+        await task
+        job = self.api._notion_sync_job
+        return job is not None and job.status == "success"
 
     async def _periodic_zotero_sync(self, interval_sec: int) -> None:
         """Zotero 自动同步：启动即增量拉取一次，之后每 interval_sec 再增量拉取。"""
@@ -1047,6 +1057,11 @@ class PluginInitializer:
             except (asyncio.CancelledError, Exception):
                 pass
             self._notion_sync_task = None
+
+        if self.api is not None and self.api._notion_sync_task is not None:
+            self.api._notion_sync_task.cancel()
+            await asyncio.gather(self.api._notion_sync_task, return_exceptions=True)
+            self.api._notion_sync_task = None
 
         if self._auto_reindex_task is not None:
             self._auto_reindex_task.cancel()

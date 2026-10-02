@@ -374,6 +374,21 @@ class SourceDocumentStore(ABC):
     # ── Notion 推送账本与暂存箱 ───────────────────────────────────
 
     @abstractmethod
+    async def get_notion_local_revision(self) -> str:
+        """读取已提交文档/集合/归属变化的版本；Notion 账本写入不得改变该版本。"""
+        ...
+
+    @abstractmethod
+    async def get_notion_scan_cursor(self, scope: str) -> str:
+        """读取指定 database/data source 的成功笔记检查水位；尚未扫描返回空串。"""
+        ...
+
+    @abstractmethod
+    async def set_notion_scan_cursor(self, scope: str, cursor: str) -> None:
+        """仅在完整扫描成功后持久化 ISO 时间水位，失败时调用方保持原水位。"""
+        ...
+
+    @abstractmethod
     async def get_notion_entity(
         self, entity_type: str, entity_key: str
     ) -> NotionEntityRecord | None:

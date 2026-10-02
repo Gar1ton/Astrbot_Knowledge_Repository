@@ -132,6 +132,9 @@ function useProgressJobs(): DockJob[] {
       }
       const notionDone = notion.docs_processed ?? 0;
       const prunedBits = notion.tags_pruned ? ` · ${notion.tags_pruned} tags` : "";
+      const notesBits = ` · ${notion.notes_marked ?? 0}/${notion.notes_scanned ?? 0} notes`;
+      const requestBits = ` · ${notion.request_count ?? 0} requests`;
+      const costBits = ` · ${(notion.elapsed_seconds ?? 0).toFixed(1)}s · ${notion.model_tokens ?? 0} tokens`;
       next.push({
         key: `notion_sync:${notion.job_id}`,
         kind: "notion_sync",
@@ -139,7 +142,7 @@ function useProgressJobs(): DockJob[] {
         label: t("progress_dock_notion"),
         sub: notion.stage_label || notion.stage || "",
         pct: pctOf(notion.progress_percent),
-        detail: `${notionDone}/${notion.docs_total ?? 0} docs · +${notion.docs_created ?? 0} ~${notion.docs_updated ?? 0} · ${notion.docs_archived ?? 0} arch${prunedBits}`,
+        detail: `${notionDone}/${notion.docs_total ?? 0} docs · +${notion.docs_created ?? 0} ~${notion.docs_updated ?? 0} · ${notion.docs_archived ?? 0} arch${prunedBits}${notesBits}${requestBits}${costBits}`,
         status: notion.status,
         active: notion.status === "running",
         paused: false,

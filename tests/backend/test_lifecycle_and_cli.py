@@ -743,3 +743,61 @@ async def test_ka_r2_force_pull_confirmation_and_auto_restart(
         mock_restart.assert_awaited_once()
 
     await plugin.terminate()
+
+
+async def test_notion_auto_push_waits_for_local_processing_and_inflight_push(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from kacore.utils.processing_lock import ProcessingLock
+
+    initializer = PluginInitializer(object(), {}, tmp_path)
+    lock = ProcessingLock()
+    push = AsyncMock()
+    initializer.api = SimpleNamespace(
+        _processing_lock=lock,
+        _notion_sync_task=None,
+        get_active_zotero_sync_job=lambda: None,
+        sync_notion_push=push,
+    )
+    async with lock:
+        assert await initializer._auto_notion_push() is None
+    task = asyncio.create_task(asyncio.Event().wait())
+    initializer.api._notion_sync_task = task
+    try:
+        assert await initializer._auto_notion_push() is None
+        push.assert_not_awaited()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_notion_teardown_cancels_scheduler_and_pending_push_before_store_close(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    initializer = PluginInitializer(object(), {"vector_db": {"backend": "astr"}}, tmp_path)
+    await initializer.initialize()
+    scheduler = initializer._notion_sync_task
+    assert scheduler is not None
+    ended = asyncio.Event()
+    started = asyncio.Event()
+
+    async def work() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            ended.set()
+
+    push = asyncio.create_task(work())
+    initializer.api._notion_sync_task = push
+    await started.wait()
+    await initializer.teardown()
+    assert scheduler.done() and push.done()
+    assert ended.is_set()
+    assert initializer._notion_sync_task is None

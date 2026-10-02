@@ -3,6 +3,7 @@
 重点回归历史缺陷：旧适配层用无前缀工具名 + 离线 stub 假 uuid 导致真实环境
 静默空转——本套用例断言工具名带 notion_ 前缀、未连接必须显式抛错。
 """
+
 from __future__ import annotations
 
 import json
@@ -38,7 +39,9 @@ class FakeToolCaller:
 
 def _adapter(caller: FakeToolCaller, **kwargs: Any) -> NotionMCPAdapter:
     kwargs.setdefault("rate_limit_rps", 1000)  # 单测默认不受频控拖慢
-    return NotionMCPAdapter(None, "notion", tool_caller=caller, **kwargs)
+    adapter = NotionMCPAdapter(None, "notion", tool_caller=caller, **kwargs)
+    adapter._data_sources["db-1"] = "ds-1"
+    return adapter
 
 
 @dataclass
@@ -85,9 +88,9 @@ async def test_all_calls_use_prefixed_names_and_json_format() -> None:
     expected_tools = [
         "notion_create_database",
         "notion_retrieve_database",
-        "notion_update_database",
-        "notion_query_database",
-        "notion_create_database_item",
+        "notion_update_data_source",
+        "notion_query_data_source",
+        "notion_create_data_source_item",
         "notion_update_page_properties",
         "notion_append_block_children",
         "notion_retrieve_block_children",
@@ -103,14 +106,14 @@ async def test_create_database_payload_shape() -> None:
     caller = FakeToolCaller(responses=[{"id": "db-9"}])
     adapter = _adapter(caller)
 
-    database_id = await adapter.create_database(
-        "parent-9", "Knowledge", {"Name": {"title": {}}}
-    )
+    database_id = await adapter.create_database("parent-9", "Knowledge", {"Name": {"title": {}}})
 
     assert database_id == "db-9"
     _, args = caller.calls[0]
     assert args["parent"] == {"type": "page_id", "page_id": "parent-9"}
     assert args["title"][0]["text"]["content"] == "Knowledge"
+    assert args["initial_data_source"]["properties"] == {"Name": {"title": {}}}
+    assert "properties" not in args
 
 
 @pytest.mark.asyncio
@@ -157,9 +160,10 @@ async def test_query_database_page_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     adapter = _adapter(caller)
 
-    results = await adapter.query_database("db-1")
+    with pytest.raises(NotionMCPError, match="分页上限"):
+        await adapter.query_database("db-1")
 
-    assert len(results) == 3  # 页数上限截断，防无界循环
+    # 达到上限显式失败，不返回不完整结果。
     assert len(caller.calls) == 3
 
 
@@ -275,9 +279,7 @@ async def test_real_path_uses_call_tool_with_reconnect_and_timedelta() -> None:
             captured["tool_name"] = tool_name
             captured["arguments"] = arguments
             captured["timeout"] = read_timeout_seconds
-            return _FakeCallToolResult(
-                content=[_TextContent(json.dumps({"id": "page-real"}))]
-            )
+            return _FakeCallToolResult(content=[_TextContent(json.dumps({"id": "page-real"}))])
 
     class Manager:
         mcp_client_dict = {"notion": Client()}
@@ -286,13 +288,12 @@ async def test_real_path_uses_call_tool_with_reconnect_and_timedelta() -> None:
         def get_llm_tool_manager(self) -> Manager:
             return Manager()
 
-    adapter = NotionMCPAdapter(
-        Context(), "notion", read_timeout_sec=17, rate_limit_rps=1000
-    )
+    adapter = NotionMCPAdapter(Context(), "notion", read_timeout_sec=17, rate_limit_rps=1000)
+    adapter._data_sources["db-1"] = "ds-1"
     page_id = await adapter.create_database_item("db-1", {"Name": {"title": []}})
 
     assert page_id == "page-real"
-    assert captured["tool_name"] == "notion_create_database_item"
+    assert captured["tool_name"] == "notion_create_data_source_item"
     assert captured["arguments"]["format"] == "json"
     assert captured["timeout"] == timedelta(seconds=17)  # 必须是 timedelta，不是 int
 
@@ -343,3 +344,58 @@ async def test_throttle_enforces_min_interval() -> None:
     elapsed = time.monotonic() - t0
 
     assert elapsed >= 0.19  # 3 次调用至少 2 个间隔（容忍计时抖动）
+
+
+@pytest.mark.asyncio
+async def test_data_source_resolution_is_cached_and_config_changes_invalidate_it() -> None:
+    caller = FakeToolCaller(
+        responses=[
+            {"data_sources": [{"id": "ds-a"}]},
+            {"data_sources": [{"id": "ds-a"}, {"id": "ds-b"}]},
+        ]
+    )
+    adapter = NotionMCPAdapter(None, tool_caller=caller, rate_limit_rps=0)
+    assert await adapter.resolve_data_source("db") == "ds-a"
+    assert await adapter.resolve_data_source("db") == "ds-a"
+    assert len(caller.calls) == 1
+    adapter.configure_data_sources({"db": "ds-b"})
+    assert await adapter.resolve_data_source("db") == "ds-b"
+    assert len(caller.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sources,configured", [([], ""), (["a", "b"], ""), (["a"], "b")])
+async def test_data_source_resolution_rejects_ambiguity_or_wrong_container(
+    sources: list[str],
+    configured: str,
+) -> None:
+    caller = FakeToolCaller(responses=[{"data_sources": [{"id": s} for s in sources]}])
+    adapter = NotionMCPAdapter(None, tool_caller=caller, rate_limit_rps=0)
+    adapter.configure_data_sources({"db": configured})
+    with pytest.raises(NotionMCPError):
+        await adapter.resolve_data_source("db")
+
+
+@pytest.mark.asyncio
+async def test_structured_content_preferred_over_summary_text() -> None:
+    result = _FakeCallToolResult([_TextContent("summary")])
+    result.structuredContent = {"results": [{"id": "p1"}], "has_more": False}
+    caller = FakeToolCaller(responses=[result])
+    adapter = _adapter(caller)
+    assert await adapter.query_database("db-1") == [{"id": "p1"}]
+    assert caller.calls[0][1]["data_source_id"] == "ds-1"
+    assert caller.calls[0][1]["response_mode"] == "full"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"results": [], "has_more": True},
+        {"results": ["bad"], "has_more": False},
+        {"has_more": False},
+    ],
+)
+async def test_malformed_pagination_cannot_return_partial_success(response: dict[str, Any]) -> None:
+    with pytest.raises(NotionMCPError):
+        await _adapter(FakeToolCaller(responses=[response])).query_database("db-1")

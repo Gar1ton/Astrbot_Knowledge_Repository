@@ -14,6 +14,10 @@ class ProcessingLock:
         self._owner: asyncio.Task[Any] | None = None
         self._depth = 0
 
+    def locked(self) -> bool:
+        """维护/导入仍在执行；后台同步用它等待本地事务处理完毕。"""
+        return self._lock.locked()
+
     async def __aenter__(self) -> ProcessingLock:
         task = asyncio.current_task()
         if self._owner is not task or task is None:

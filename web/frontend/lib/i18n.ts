@@ -880,7 +880,9 @@ const zh = {
   notion_opt_preserve: "保留 detached（默认）",
   notion_opt_strict: "Strict 清理（移入回收站）",
   notion_field_interval: "周期自动推送（秒）",
-  notion_field_interval_hint: "0 表示关闭定时推送；>0 时每隔该秒数自动增量推送一次（改动后重启插件生效）",
+  notion_field_auto: "自动同步本地变更",
+  notion_field_auto_hint: "连续变更合并 10 秒推送。同步保留文章正文，并按正文内容标记“已做笔记”；不检查评论，也不改变清理规则。",
+  notion_field_interval_hint: "默认 300 秒进行周期补偿与笔记检查；0 只关闭周期补偿。关闭上方开关可停止全部自动同步，修改即时生效。",
   notion_field_init: "初始化与推送",
   notion_field_init_hint: "首次使用先初始化两库（需在插件配置填父页面 ID），之后可手动增量推送",
   notion_btn_init: "初始化数据库",
@@ -1795,8 +1797,10 @@ const en: Record<keyof typeof zh, string> = {
   notion_opt_preserve: "Preserve detached (default)",
   notion_opt_strict: "Strict cleanup (move to trash)",
   notion_field_interval: "Automatic push interval (seconds)",
+  notion_field_auto: "Automatically sync local changes",
+  notion_field_auto_hint: "Coalesce changes for 10 seconds. Article bodies are preserved and content marks the notes checkbox; comments and cleanup rules are unchanged.",
   notion_field_interval_hint:
-    "0 disables scheduled pushes; any value above 0 performs an incremental push on that interval (restart the plugin to apply)",
+    "Default: 300 seconds for catch-up and note checks. 0 disables only periodic catch-up. Turn off automatic sync to stop all automatic pushes. Changes apply immediately.",
   notion_field_init: "Initialisation and push",
   notion_field_init_hint:
     "Initialise both databases on first use (the parent page ID must be set in the plugin config), then push incrementally by hand",

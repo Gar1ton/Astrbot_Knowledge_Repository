@@ -76,6 +76,7 @@ CONFIG_POLICIES: dict[str, dict[str, str]] = {
     },
     "notion_sync": {
         "enabled": "restart",
+        "auto_sync_enabled": "none",
         "auto_sync_interval_sec": "none",
         "sync_mode": "none",
     },

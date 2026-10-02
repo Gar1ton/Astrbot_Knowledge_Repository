@@ -181,7 +181,8 @@ function SyncTab() {
   const [notionEnabled, setNotionEnabled] = useState(false);
   const [notionReady, setNotionReady] = useState(false);
   const [notionSyncMode, setNotionSyncMode] = useState("preserve");
-  const [notionInterval, setNotionInterval] = useState("0");
+  const [notionAutoSync, setNotionAutoSync] = useState(true);
+  const [notionInterval, setNotionInterval] = useState("300");
   const [notionPushing, setNotionPushing] = useState(false);
   const [notionInitializing, setNotionInitializing] = useState(false);
 
@@ -201,7 +202,8 @@ function SyncTab() {
       setNotionEnabled(Boolean(ns.enabled ?? false));
       setNotionReady(Boolean(ns.database_id) && Boolean(ns.qa_database_id));
       setNotionSyncMode(String(ns.sync_mode ?? "preserve"));
-      setNotionInterval(String(ns.auto_sync_interval_sec ?? 0));
+      setNotionAutoSync(Boolean(ns.auto_sync_enabled ?? true));
+      setNotionInterval(String(ns.auto_sync_interval_sec ?? 300));
     }).catch(() => {});
   }, []);
 
@@ -695,6 +697,20 @@ function SyncTab() {
             <option value="preserve">{t("notion_opt_preserve")}</option>
             <option value="strict">{t("notion_opt_strict")}</option>
           </select>
+        </Field>
+
+        <Field
+          label={t("notion_field_auto")}
+          hint={t("notion_field_auto_hint")}
+        >
+          <Toggle
+            checked={notionAutoSync}
+            disabled={!notionEnabled || saving === "notion_sync.auto_sync_enabled"}
+            onChange={(v) => {
+              setNotionAutoSync(v);
+              save("notion_sync", "auto_sync_enabled", v);
+            }}
+          />
         </Field>
 
         <Field

@@ -482,3 +482,12 @@ def test_rerank_overrides_are_parsed() -> None:
     assert r.provider == "noop"
     assert r.model == "BAAI/bge-reranker-base"
     assert r.keep == 5
+
+
+def test_notion_auto_sync_defaults_and_explicit_legacy_zero() -> None:
+    default = Config({}).get_notion_sync_config()
+    assert default.auto_sync_enabled is True
+    assert default.auto_sync_interval_sec == 300
+    explicit = Config({"notion_sync": {"auto_sync_interval_sec": 0}}).get_notion_sync_config()
+    assert explicit.auto_sync_enabled is True
+    assert explicit.auto_sync_interval_sec == 0

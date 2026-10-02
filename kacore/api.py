@@ -3503,7 +3503,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             database_title=database_title,
         )
         if result.get("status") == "success":
-            for key in ("database_id", "qa_database_id", "parent_page_id", "database_title"):
+            for key in (
+                "database_id", "qa_database_id", "data_source_id", "qa_data_source_id",
+                "parent_page_id", "database_title",
+            ):
                 value = result.get(key)
                 if isinstance(value, str) and value:
                     self._persist_config_value("notion_sync", key, value)
@@ -3646,6 +3649,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             "database_id": notion_cfg.database_id,
             "qa_database_id": notion_cfg.qa_database_id,
             "auto_sync_interval_sec": notion_cfg.auto_sync_interval_sec,
+            "auto_sync_enabled": notion_cfg.auto_sync_enabled,
+            "data_source_id": notion_cfg.data_source_id,
+            "qa_data_source_id": notion_cfg.qa_data_source_id,
             "sync_mode": notion_cfg.sync_mode,
             "documents": counts,
             "outbox_pending": len(pending),

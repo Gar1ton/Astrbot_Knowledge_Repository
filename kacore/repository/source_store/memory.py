@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -50,6 +51,7 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._sync_records: dict[tuple[str, SyncTargetKind], SyncRecord] = {}
         self._notion_entities: dict[tuple[str, str], NotionEntityRecord] = {}
         self._notion_outbox: dict[str, NotionOutboxItem] = {}
+        self._notion_scan_cursors: dict[str, str] = {}
         self._lightrag_status: dict[str, dict[str, str]] = {}
         self._build_jobs: dict[str, dict] = {}
         self._codex_graph_tasks: dict[str, dict] = {}
@@ -70,6 +72,16 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._console_scope_states: dict[tuple[str, str], ConsoleScopeState] = {}
 
     # ── 集合（树形 + 多归属）────────────────────────────────────
+
+    async def get_notion_local_revision(self) -> str:
+        state = (self._documents, self._collections, self._doc_collections)
+        return hashlib.sha256(repr(state).encode()).hexdigest()
+
+    async def get_notion_scan_cursor(self, scope: str) -> str:
+        return self._notion_scan_cursors.get(scope, "")
+
+    async def set_notion_scan_cursor(self, scope: str, cursor: str) -> None:
+        self._notion_scan_cursors[scope] = cursor
 
     async def upsert_collection(self, collection: Collection) -> None:
         coll_key = collection.coll_key

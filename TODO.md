@@ -1,5 +1,34 @@
 # TODO
 
+## v1.2.0-preview-2 Notion MCP v2 与正文笔记标记 (completed)
+
+### User constraints / 约束
+
+- 用户已于 2026-10-02 批准计划；本轮仅修改仓库代码、测试和文档，不操作运行实例或真实 Notion 页面，不提交或推送。
+- 升级到 `@suekou/mcp-notion-server@2.0.2`，复用 Articles / QA 数据库与引用关系。
+- Articles 新页只写属性，不生成 Chunks Preview / 大文件提示；更新不删除正文，旧摘要原样保留。
+- 简单规则只检查正文，忽略空白段落和旧程序摘要；有用户内容时勾选“已做笔记”，不自动取消，不检查评论。
+- 笔记标记仅用于筛选，不参与 preserve / strict 的删除决策。
+
+### Technical implementation path
+
+- [x] **Phase 1 — MCP v2**：迁移 data source 工具、解析并持久化两个 data_source_id；完善完整分页与结构化结果校验。
+- [x] **Phase 2 — 正文保护**：移除 Articles 正文写入与清空路径，保留 QA 正文契约。
+- [x] **Phase 3 — 笔记标记**：添加 checkbox schema、增量远端编辑扫描与持久检查水位；失败不推进水位、不清除已有勾选。
+- [x] **Phase 4 — 自动同步**：本地文档/集合变更合并 10 秒触发，5 分钟补偿；复用后台进度任务并完整停止后台任务。修改组合根的理由：装配和关闭自动同步任务必须跟随插件生命周期。
+- [x] **Phase 5 — 验证与文档**：验证 MCP v2、正文保护、笔记规则、扫描失败/重试/分页、调度关闭；记录请求次数与耗时，提供升级和筛选视图指南。
+
+### Verification
+
+- 相关后端 / SQLite / 调度 / 生命周期验证 312 passed（24 个 Milvus 用例未在本轮运行）；新增配置回填/默认值/消耗快照 3 passed；CLI / 配置策略测试 36 passed（Windows 测试环境使用 PYTHONUTF8=1）。全部仅使用 fake MCP 与测试数据库。
+- 改动文件 ruff 通过；domain mypy 7 个文件通过。全仓库 ruff 仅有原 tools/chunk_preview.py 三个 E402，未修改该工具。
+- 前端 TypeScript 与构建通过；ESLint 0 error、lib/api.ts 一处既有未使用变量 warning。out/ 已同步 359 个文件到 pages/，逐字节一致性检查通过。
+- 本轮不升级运行实例、不写真实 Notion；运行实例升级和真实页面联调按 docs/NOTION_SYNC.md 单独执行。
+
+### Follow-up / 既有大文件拆分登记
+
+- [ ] api.py 与 source_store/{base,memory,sqlite}.py 已超过 600 行；后续独立拆分同步状态仓储 / API mixin，保持公开契约。本轮新增检测/调度已放在独立小模块，避免继续向大文件堆业务。
+
 ## 2026-09-22 Milvus 锁定诊断与「确认后清除锁定」（completed）
 
 - 用户反馈：Milvus 因过去实例未关闭干净而无法启动，且数据流页「向量库」节点反复黄色

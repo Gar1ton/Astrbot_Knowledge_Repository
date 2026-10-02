@@ -3,6 +3,7 @@
 覆盖：首推全量、零变更 0 调用、改 tag 仅 1 update、集合改名联动子树文章、
 force 全推、outbox 补推与存根清空、citations 按需 upsert、孤儿清理、并发重入。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -16,7 +17,6 @@ from kacore.domain.models import (
     NOTION_ENTITY_DOCUMENT,
     NOTION_OUTBOX_PUSHED,
     NOTION_PUSH_ARCHIVED,
-    NOTION_PUSH_DEGRADED,
     NOTION_PUSH_FAILED,
     NOTION_PUSH_SYNCED,
     Collection,
@@ -50,15 +50,19 @@ class RoutedToolCaller:
         elif handler is not None and not isinstance(handler, list):
             value = handler
         else:
-            value = self._default(tool_name)
+            value = self._default(tool_name, arguments)
         if isinstance(value, Exception):
             raise value
         return value
 
-    def _default(self, tool_name: str) -> Any:
-        if tool_name in ("notion_query_database", "notion_retrieve_block_children"):
+    def _default(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        if tool_name == "notion_retrieve_database":
+            return {"data_sources": [{"id": "source-" + arguments["database_id"]}]}
+        if tool_name == "notion_retrieve_data_source":
+            return {"properties": {}}
+        if tool_name in ("notion_query_data_source", "notion_retrieve_block_children"):
             return {"results": [], "has_more": False}
-        if tool_name in ("notion_create_database_item", "notion_create_database"):
+        if tool_name in ("notion_create_data_source_item", "notion_create_database"):
             self._seq += 1
             return {"id": f"page-{self._seq}"}
         return {}
@@ -116,11 +120,11 @@ async def test_push_all_first_run_creates_all(store: InMemorySourceDocumentStore
     caller = RoutedToolCaller()
     pipeline = _pipeline(store, caller)
 
-    result = await pipeline.push_all()
+    result = await pipeline.push_all(scan_notes=False)
 
     assert result["status"] == "success"
     assert result["documents"]["created"] == 2
-    assert caller.count("notion_create_database_item") == 2
+    assert caller.count("notion_create_data_source_item") == 2
     # 账本回填 + sync_records 冗余
     rec = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
     assert rec is not None and rec.page_id
@@ -135,10 +139,10 @@ async def test_push_all_no_change_makes_zero_writes(
     await store.add_document(_doc("d1"))
     caller = RoutedToolCaller()
     pipeline = _pipeline(store, caller)
-    await pipeline.push_all()
+    await pipeline.push_all(scan_notes=False)
 
     caller.calls.clear()
-    result = await pipeline.push_all()
+    result = await pipeline.push_all(scan_notes=False)
 
     assert result["documents"]["skipped"] == 1
     # 指纹相等 → 完全跳过，零 MCP 调用
@@ -154,7 +158,7 @@ async def test_tag_change_updates_only_that_doc(
     await store.add_document(_doc("d2", tags=["ml"]))
     caller = RoutedToolCaller()
     pipeline = _pipeline(store, caller)
-    await pipeline.push_all()
+    await pipeline.push_all(scan_notes=False)
 
     # 只改 d1 的 tag
     d1 = await store.get_document("d1")
@@ -163,12 +167,12 @@ async def test_tag_change_updates_only_that_doc(
     await store.update_document(d1)
 
     caller.calls.clear()
-    result = await pipeline.push_all()
+    result = await pipeline.push_all(scan_notes=False)
 
     assert result["documents"]["updated"] == 1
     assert result["documents"]["skipped"] == 1
     assert caller.count("notion_update_page_properties") == 1
-    assert caller.count("notion_create_database_item") == 0
+    assert caller.count("notion_create_data_source_item") == 0
 
 
 @pytest.mark.asyncio
@@ -185,14 +189,14 @@ async def test_collection_rename_propagates_to_subtree_docs(
     await store.add_document(doc)
     caller = RoutedToolCaller()
     pipeline = _pipeline(store, caller)
-    await pipeline.push_all()
+    await pipeline.push_all(scan_notes=False)
 
     # 祖先「根」改名 → 子孙文章的 Collections/Path 指纹变化，应被重推
     root.name = "根新名"
     await store.upsert_collection(root)
 
     caller.calls.clear()
-    result = await pipeline.push_all()
+    result = await pipeline.push_all(scan_notes=False)
 
     assert result["documents"]["updated"] == 1
     update_props = next(
@@ -207,14 +211,14 @@ async def test_force_repushes_everything(store: InMemorySourceDocumentStore) -> 
     await store.add_document(_doc("d1"))
     caller = RoutedToolCaller()
     pipeline = _pipeline(store, caller)
-    await pipeline.push_all()
+    await pipeline.push_all(scan_notes=False)
 
     caller.calls.clear()
-    result = await pipeline.push_all(force=True)
+    result = await pipeline.push_all(scan_notes=False, force=True)
 
     assert result["documents"]["updated"] == 1  # force 忽略指纹全量重推
-    assert caller.count("notion_retrieve_block_children") == 1
-    assert caller.count("notion_append_block_children") == 1
+    assert caller.count("notion_retrieve_block_children") == 0
+    assert caller.count("notion_append_block_children") == 0
 
 
 @pytest.mark.asyncio
@@ -226,11 +230,11 @@ async def test_preserve_mode_still_pushes_detached_documents(
     await store.add_document(doc)
     caller = RoutedToolCaller()
 
-    result = await _pipeline(store, caller, "preserve").push_all()
+    result = await _pipeline(store, caller, "preserve").push_all(scan_notes=False)
 
     assert result["documents"]["created"] == 1
     assert result["documents"]["archived"] == 0
-    assert caller.count("notion_create_database_item") == 1
+    assert caller.count("notion_create_data_source_item") == 1
 
 
 @pytest.mark.asyncio
@@ -239,7 +243,7 @@ async def test_strict_archives_detached_duplicates_and_force_cannot_restore(
 ) -> None:
     await store.add_document(_doc("d1"))
     caller = RoutedToolCaller()
-    await _pipeline(store, caller).push_all()
+    await _pipeline(store, caller).push_all(scan_notes=False)
     prior = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
     assert prior is not None and prior.page_id
 
@@ -248,7 +252,7 @@ async def test_strict_archives_detached_duplicates_and_force_cannot_restore(
     doc.lifecycle_state = DocumentLifecycle.DETACHED
     await store.update_document(doc)
     caller.calls.clear()
-    caller.handlers["notion_query_database"] = {
+    caller.handlers["notion_query_data_source"] = {
         "results": [
             {"id": prior.page_id},
             {"id": "duplicate-page"},
@@ -257,12 +261,12 @@ async def test_strict_archives_detached_duplicates_and_force_cannot_restore(
         "has_more": False,
     }
 
-    result = await _pipeline(store, caller, "strict").push_all(force=True)
+    result = await _pipeline(store, caller, "strict").push_all(scan_notes=False, force=True)
 
     assert result["status"] == "success"
     assert result["documents"]["archived"] == 1
     assert caller.count("notion_delete_block") == 2
-    assert caller.count("notion_create_database_item") == 0
+    assert caller.count("notion_create_data_source_item") == 0
     assert caller.count("notion_update_page_properties") == 0
     record = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
     assert record is not None
@@ -274,10 +278,13 @@ async def test_strict_archives_detached_duplicates_and_force_cannot_restore(
     assert compat.remote_ref is None
 
     caller.calls.clear()
-    second = await _pipeline(store, caller, "strict").push_all(force=True)
+    second = await _pipeline(store, caller, "strict").push_all(scan_notes=False, force=True)
     assert second["documents"]["skipped"] == 1
     # strict 每轮额外探一次库做失效选项清理；除此之外无文档/QA 写入。
-    assert [name for name, _ in caller.calls] == ["notion_retrieve_database"]
+    assert [name for name, _ in caller.calls] == [
+        "notion_retrieve_database",
+        "notion_retrieve_data_source",
+    ]
 
 
 @pytest.mark.asyncio
@@ -286,7 +293,7 @@ async def test_strict_delete_failure_is_partial_and_retried_without_upsert(
 ) -> None:
     await store.add_document(_doc("d1"))
     caller = RoutedToolCaller()
-    await _pipeline(store, caller).push_all()
+    await _pipeline(store, caller).push_all(scan_notes=False)
     prior = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
     assert prior is not None and prior.page_id
     doc = await store.get_document("d1")
@@ -296,18 +303,18 @@ async def test_strict_delete_failure_is_partial_and_retried_without_upsert(
     caller.calls.clear()
     caller.handlers["notion_delete_block"] = [NotionMCPError("delete timeout")]
 
-    failed = await _pipeline(store, caller, "strict").push_all()
+    failed = await _pipeline(store, caller, "strict").push_all(scan_notes=False)
 
     assert failed["status"] == "partial_failure"
     assert failed["documents"]["failed"] == 1
-    assert caller.count("notion_create_database_item") == 0
+    assert caller.count("notion_create_data_source_item") == 0
     failed_record = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
     assert failed_record is not None
     assert failed_record.status == NOTION_PUSH_FAILED
     assert failed_record.page_id == prior.page_id
 
     caller.calls.clear()
-    recovered = await _pipeline(store, caller, "strict").push_all()
+    recovered = await _pipeline(store, caller, "strict").push_all(scan_notes=False)
     assert recovered["documents"]["archived"] == 1
     recovered_record = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
     assert recovered_record is not None
@@ -324,7 +331,7 @@ async def test_strict_archived_document_can_be_recreated_after_reactivation(
     await store.add_document(doc)
     caller = RoutedToolCaller()
     pipeline = _pipeline(store, caller, "strict")
-    first = await pipeline.push_all()
+    first = await pipeline.push_all(scan_notes=False)
     assert first["documents"]["archived"] == 1
 
     active = await store.get_document("d1")
@@ -332,7 +339,7 @@ async def test_strict_archived_document_can_be_recreated_after_reactivation(
     active.lifecycle_state = DocumentLifecycle.ACTIVE
     await store.update_document(active)
     caller.calls.clear()
-    second = await pipeline.push_all()
+    second = await pipeline.push_all(scan_notes=False)
 
     assert second["documents"]["created"] == 1
     record = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
@@ -358,16 +365,16 @@ async def test_runtime_sync_mode_provider_applies_on_next_push(
         config_provider=lambda: current["config"],
     )
 
-    assert (await pipeline.push_all())["documents"]["created"] == 1
+    assert (await pipeline.push_all(scan_notes=False))["documents"]["created"] == 1
     current["config"] = _config("strict")
     caller.calls.clear()
-    assert (await pipeline.push_all())["documents"]["archived"] == 1
+    assert (await pipeline.push_all(scan_notes=False))["documents"]["archived"] == 1
     assert caller.count("notion_delete_block") == 1
 
     current["config"] = _config("preserve")
     caller.calls.clear()
-    assert (await pipeline.push_all())["documents"]["created"] == 1
-    assert caller.count("notion_create_database_item") == 1
+    assert (await pipeline.push_all(scan_notes=False))["documents"]["created"] == 1
+    assert caller.count("notion_create_data_source_item") == 1
 
 
 @pytest.mark.asyncio
@@ -376,11 +383,11 @@ async def test_orphan_map_rows_cleaned_up(store: InMemorySourceDocumentStore) ->
     await store.add_document(_doc("d1"))
     caller = RoutedToolCaller()
     pipeline = _pipeline(store, caller)
-    await pipeline.push_all()
+    await pipeline.push_all(scan_notes=False)
     assert await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1") is not None
 
     await store.delete_document("d1")
-    await pipeline.push_all()
+    await pipeline.push_all(scan_notes=False)
 
     # 本地文档已删 → 账本行清理（不触碰远端）
     assert await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1") is None
@@ -431,8 +438,9 @@ async def test_push_qa_resolves_citations_to_page_ids(
     assert result["status"] == "success"
     assert result["unresolved_citations"] == ["ghost-doc"]  # 本地不存在 → 降级文本
     qa_create = next(
-        args for name, args in caller.calls if name == "notion_create_database_item"
-        and args["database_id"] == "db-qa"
+        args
+        for name, args in caller.calls
+        if name == "notion_create_data_source_item" and args["data_source_id"] == "source-db-qa"
     )
     assert len(qa_create["properties"]["Citations"]["relation"]) == 1
 
@@ -461,15 +469,14 @@ async def test_strict_qa_citation_cannot_restore_detached_article(
     article_creates = [
         args
         for name, args in caller.calls
-        if name == "notion_create_database_item"
-        and args["database_id"] == "db-articles"
+        if name == "notion_create_data_source_item"
+        and args["data_source_id"] == "source-db-articles"
     ]
     assert article_creates == []
     qa_create = next(
         args
         for name, args in caller.calls
-        if name == "notion_create_database_item"
-        and args["database_id"] == "db-qa"
+        if name == "notion_create_data_source_item" and args["data_source_id"] == "source-db-qa"
     )
     assert "Citations" not in qa_create["properties"]
 
@@ -485,7 +492,7 @@ async def test_push_all_retries_pending_outbox(
     caller = RoutedToolCaller()
     pipeline = _pipeline(store, caller)
 
-    result = await pipeline.push_all()
+    result = await pipeline.push_all(scan_notes=False)
 
     assert result["qa"]["pushed"] == 1
     stub = await store.get_notion_outbox("ob1")
@@ -505,11 +512,11 @@ async def test_qa_outbox_partial_then_recovers_without_losing_body(
     caller = RoutedToolCaller(
         handlers={
             # 第一轮 NoteID 反查 miss，第二轮命中上轮建好的 qa-1
-            "notion_query_database": [
+            "notion_query_data_source": [
                 {"results": [], "has_more": False},
                 {"results": [{"id": "qa-1"}], "has_more": False},
             ],
-            "notion_create_database_item": {"id": "qa-1"},
+            "notion_create_data_source_item": {"id": "qa-1"},
             # 第一轮追加正文失败，第二轮成功
             "notion_append_block_children": [NotionMCPError("append timeout"), {}],
             "notion_retrieve_block_children": {"results": [], "has_more": False},
@@ -533,46 +540,37 @@ async def test_qa_outbox_partial_then_recovers_without_losing_body(
     assert stub.status == NOTION_OUTBOX_PUSHED
     assert stub.content == ""
     # 未重复建行；第二轮正文写在 qa-1 上
-    assert caller.count("notion_create_database_item") == 1
+    assert caller.count("notion_create_data_source_item") == 1
     append_targets = [
-        args["block_id"] for name, args in caller.calls
-        if name == "notion_append_block_children"
+        args["block_id"] for name, args in caller.calls if name == "notion_append_block_children"
     ]
     assert append_targets[-1] == "qa-1"
 
 
 @pytest.mark.asyncio
-async def test_article_body_failure_not_marked_synced_then_retries(
+async def test_article_content_hash_changes_never_touch_body(
     store: InMemorySourceDocumentStore,
 ) -> None:
-    """P1 回归：文章正文写入失败 → 账本不推进 content_hash、状态 degraded（不跳过）；
-    下一轮重写正文成功后才标 synced。缺正文页不会被误固化为 synced。"""
-    await store.upsert_collection(Collection(name="default"))
     await store.add_document(_doc("d1"))
     caller = RoutedToolCaller(
         handlers={
-            "notion_create_database_item": {"id": "page-1"},
-            "notion_append_block_children": [NotionMCPError("append 5xx"), {}],
-            "notion_retrieve_block_children": {"results": [], "has_more": False},
+            "notion_append_block_children": NotionMCPError("must not write body"),
+            "notion_delete_block": NotionMCPError("must not delete body"),
         }
     )
     pipeline = _pipeline(store, caller)
-
-    # 第一轮：正文失败 → degraded，content_hash 未推进
-    r1 = await pipeline.push_all()
-    assert r1["documents"]["created"] == 1
+    await pipeline.push_all(scan_notes=False)
+    doc = await store.get_document("d1")
+    assert doc is not None
+    doc.content_hash = "changed-file"
+    await store.update_document(doc)
+    result = await pipeline.push_all(force=True, scan_notes=False)
+    assert result["documents"]["updated"] == 1
     rec = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
-    assert rec is not None
-    assert rec.status == NOTION_PUSH_DEGRADED
-    assert rec.content_hash == ""  # 未推进 → 下轮判定为待重写
-
-    # 第二轮：degraded 不跳过 → 重写正文成功 → synced
-    r2 = await pipeline.push_all()
-    assert r2["documents"]["updated"] == 1
-    rec = await store.get_notion_entity(NOTION_ENTITY_DOCUMENT, "d1")
-    assert rec is not None
-    assert rec.status == NOTION_PUSH_SYNCED
-    assert rec.content_hash == "hash_d1"
+    assert rec is not None and rec.status == NOTION_PUSH_SYNCED
+    assert rec.content_hash == "changed-file"
+    assert caller.count("notion_append_block_children") == 0
+    assert caller.count("notion_delete_block") == 0
 
 
 @pytest.mark.asyncio
@@ -585,7 +583,7 @@ async def test_push_all_reentrant_returns_already_running(
 
     # 持锁期间再次 push_all → 直接返回 already_running（防并发重入）
     async with pipeline._lock:
-        result = await pipeline.push_all()
+        result = await pipeline.push_all(scan_notes=False)
     assert result["status"] == "already_running"
 
 
@@ -602,7 +600,7 @@ async def test_push_all_disabled_returns_early(
     target = NotionSyncTarget(config, store, adapter=adapter)
     pipeline = NotionSyncPipeline(source_store=store, notion_target=target)
 
-    result = await pipeline.push_all()
+    result = await pipeline.push_all(scan_notes=False)
 
     assert result["status"] == "disabled"
     assert caller.calls == []
@@ -618,7 +616,7 @@ async def test_push_all_without_database_id_errors(
     target = NotionSyncTarget(config, store, adapter=adapter)
     pipeline = NotionSyncPipeline(source_store=store, notion_target=target)
 
-    result = await pipeline.push_all()
+    result = await pipeline.push_all(scan_notes=False)
 
     assert result["status"] == "error"
 
@@ -637,7 +635,7 @@ async def test_push_all_updates_progress_counters(
     pipeline = _pipeline(store, caller)
     job = NotionSyncJob()
 
-    result = await pipeline.push_all(progress=job)
+    result = await pipeline.push_all(scan_notes=False, progress=job)
 
     assert result["status"] == "success"
     assert job.docs_total == 2
@@ -654,7 +652,7 @@ async def test_strict_push_all_prunes_stale_options(
     await store.add_document(_doc("d1"))
     caller = RoutedToolCaller(
         handlers={
-            "notion_retrieve_database": {
+            "notion_retrieve_data_source": {
                 "properties": {
                     "Collections": {
                         "multi_select": {
@@ -679,11 +677,11 @@ async def test_strict_push_all_prunes_stale_options(
     pipeline = _pipeline(store, caller, sync_mode="strict")
     job = NotionSyncJob()
 
-    result = await pipeline.push_all(progress=job)
+    result = await pipeline.push_all(scan_notes=False, progress=job)
 
     assert result["pruned"] == {"collections": 1, "collection_path": 1}
     assert job.tags_pruned == 2
-    assert caller.count("notion_update_database") == 2
+    assert caller.count("notion_update_data_source") == 2
 
 
 @pytest.mark.asyncio
@@ -695,8 +693,8 @@ async def test_preserve_push_all_skips_pruning(
     caller = RoutedToolCaller()
     pipeline = _pipeline(store, caller, sync_mode="preserve")
 
-    result = await pipeline.push_all()
+    result = await pipeline.push_all(scan_notes=False)
 
     assert result["pruned"] == {"collections": 0, "collection_path": 0}
     # preserve 模式不读库对选项清理，零 retrieve_database 调用
-    assert caller.count("notion_retrieve_database") == 0
+    assert caller.count("notion_retrieve_data_source") == 0

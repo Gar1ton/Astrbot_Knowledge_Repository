@@ -7,12 +7,13 @@ Notion 两表（Articles 单库 + QA 库）。核心语义：
   远端回填 → update，仍无才 create + 追加正文块。杜绝历史「每次 push 都新建页面」。
 - 渐进降级：属性写入失败时剔除到 Name+DocID 最小集重试一次（DocID 必留，
   保后续幂等），返回 degraded 供上层记账。
-- 正文块只在 create 或 content_hash 变化时写（重写 = 列块 → 逐删 → 追加）。
+- Articles 只写属性，正文完全留给用户；QA 保持既有正文写入契约。
 - 频控由 adapter 统一执行，本层不 sleep。
 
 属性构造/指纹等纯函数在 notion_schema.py；增量 diff 与账本读写在
 pipelines/notion_sync_pipeline.py（本层不读账本，prior 由上层传入）。
 """
+
 from __future__ import annotations
 
 import logging
@@ -44,8 +45,8 @@ class NotionUpsertResult:
     - action ∈ {created, updated}：updated 含「复用远端同幂等键页面重写」
       （QA 重试或跨进程去重命中）。
     - degraded=True 表示属性经降级重试才写入成功（message 携带原因）。
-    - skipped_binary=True 表示大文件跳过了二进制镜像（仅元数据 + callout）。
-    - content_synced=False 表示正文块本轮尝试写入但失败——上层据此**不推进**
+    - skipped_binary 为通用 SyncTarget 结果保留；Articles 只写属性，因此始终 False。
+    - content_synced=False 表示 QA 正文块本轮尝试写入但失败——上层据此**不推进**
       账本 content_hash，使下一轮判定为「正文待重写」而非跳过（防缺正文页被
       误标 synced）。默认 True 覆盖「无需重写正文」的常态。
     """
@@ -75,6 +76,25 @@ class NotionSyncTarget(SyncTarget):
             context,
             server_name=config.mcp_server_name,
             rate_limit_rps=config.rate_limit_rps,
+        )
+        self._adapter.configure_data_sources(
+            {
+                config.database_id: config.data_source_id,
+                config.qa_database_id: config.qa_data_source_id,
+            }
+        )
+
+    @property
+    def request_count(self) -> int:
+        """累计 MCP 工具调用尝试数（含失败，不含宿主内部重连请求）。"""
+        return self._adapter.request_count
+
+    async def scan_notes(self) -> dict[str, int]:
+        """刷新正文笔记 checkbox；不参与任何删除决策。"""
+        from kacore.repository.sync_targets.notion_notes import NotionNotesScanner
+
+        return await NotionNotesScanner(self._source_store, self._adapter).scan(
+            self._config.database_id
         )
 
     @property
@@ -177,9 +197,7 @@ class NotionSyncTarget(SyncTarget):
         created_articles = False
         if articles_id:
             try:
-                await self._ensure_database_properties(
-                    articles_id, schema.articles_db_properties()
-                )
+                await self._ensure_database_properties(articles_id, schema.articles_db_properties())
             except NotionMCPError as e:
                 degraded = True
                 warnings.append(f"Articles 库缺列补齐失败：{e}")
@@ -193,13 +211,14 @@ class NotionSyncTarget(SyncTarget):
             )
             created_articles = True
 
-        # 2) QA 库（Citations relation 指向 Articles）
+        articles_source_id = await self._adapter.resolve_data_source(articles_id)
+        # 2) QA 库（Citations relation 指向 Articles 的 data source）
         qa_id = self._config.qa_database_id
         created_qa = False
         if qa_id:
             try:
                 await self._ensure_database_properties(
-                    qa_id, schema.qa_db_properties(articles_id)
+                    qa_id, schema.qa_db_properties(articles_source_id)
                 )
             except NotionMCPError as e:
                 degraded = True
@@ -212,7 +231,7 @@ class NotionSyncTarget(SyncTarget):
                 qa_id = await self._adapter.create_database(
                     parent_page_id=parent,
                     title=qa_title,
-                    properties=schema.qa_db_properties(articles_id),
+                    properties=schema.qa_db_properties(articles_source_id),
                 )
             except NotionMCPError as e:
                 # relation 配置被拒时退化为无 relation 建库（Citations 走正文文本）
@@ -229,6 +248,8 @@ class NotionSyncTarget(SyncTarget):
             self._config,
             database_id=articles_id,
             qa_database_id=qa_id,
+            data_source_id=articles_source_id,
+            qa_data_source_id=await self._adapter.resolve_data_source(qa_id),
             parent_page_id=parent or self._config.parent_page_id,
             database_title=title,
         )
@@ -236,6 +257,8 @@ class NotionSyncTarget(SyncTarget):
             "status": "success",
             "database_id": articles_id,
             "qa_database_id": qa_id,
+            "data_source_id": self._config.data_source_id,
+            "qa_data_source_id": self._config.qa_data_source_id,
             "parent_page_id": self._config.parent_page_id,
             "database_title": title,
             "created": created_articles or created_qa,
@@ -246,11 +269,9 @@ class NotionSyncTarget(SyncTarget):
             "message": "Notion databases ready.",
         }
 
-    async def _ensure_database_properties(
-        self, database_id: str, expected: dict[str, Any]
-    ) -> None:
+    async def _ensure_database_properties(self, database_id: str, expected: dict[str, Any]) -> None:
         """retrieve 对账：缺列则 update_database 补齐（已存在的列不动，幂等）。"""
-        data = await self._adapter.retrieve_database(database_id)
+        data = await self._adapter.retrieve_data_source(database_id)
         existing = data.get("properties")
         existing_names = set(existing.keys()) if isinstance(existing, dict) else set()
         missing = {k: v for k, v in expected.items() if k not in existing_names}
@@ -278,7 +299,7 @@ class NotionSyncTarget(SyncTarget):
         if not self._config.enabled or not self._config.database_id:
             return pruned
         try:
-            data = await self._adapter.retrieve_database(self._config.database_id)
+            data = await self._adapter.retrieve_data_source(self._config.database_id)
         except NotionMCPError as e:
             logger.warning("Strict 选项清理跳过（读库失败）：%s", e)
             return pruned
@@ -342,8 +363,8 @@ class NotionSyncTarget(SyncTarget):
         """把一篇文章幂等推送到 Articles 库。
 
         幂等序列：prior.page_id 直接 update（404/失败落 miss 分支）→ 按 DocID
-        反查回填 → 仍无才 create。正文块在 create、content_hash 变化或
-        force_body=True 时写入/重写。是否需要推送（指纹相等 skip）由上层判定。
+        反查回填 → 仍无才 create。所有路径只写属性；force_body 保留调用接口，
+        不触及文章正文。是否需要推送（指纹相等 skip）由上层判定。
         """
         if not self._config.enabled:
             raise ValueError("Notion sync is disabled in configuration.")
@@ -383,28 +404,11 @@ class NotionSyncTarget(SyncTarget):
                     self._config.database_id, properties, document
                 )
 
-        is_large = document.size_bytes > self._config.max_upload_bytes
-        rewrite_blocks = force_body or action == ACTION_CREATED or (
-            prior is not None and prior.content_hash != document.content_hash
-        )
-        content_synced = True
-        if rewrite_blocks:
-            try:
-                await self._write_document_body(
-                    page_id, document, is_large=is_large, is_new=action == ACTION_CREATED
-                )
-            except NotionMCPError as e:
-                degraded = True
-                content_synced = False  # 正文没写成 → 上层不推进 content_hash，下轮重试
-                message = message or f"正文块写入失败：{e}"
-                logger.warning("Notion 正文块写入失败（%s）：%s", document.doc_id, e)
-
         return NotionUpsertResult(
             page_id=page_id,
             action=action,
             degraded=degraded,
-            skipped_binary=is_large,
-            content_synced=content_synced,
+            content_synced=True,
             message=message,
         )
 
@@ -442,29 +446,6 @@ class NotionSyncTarget(SyncTarget):
                 "rich_text": [{"text": {"content": document.doc_id}}]
             },
         }
-
-    async def _write_document_body(
-        self,
-        page_id: str,
-        document: SourceDocument,
-        *,
-        is_large: bool,
-        is_new: bool,
-    ) -> None:
-        """写文章页正文：大文件 callout / 切片预览；非新建页先清旧块再追加。"""
-        if not is_new:
-            await self._clear_page_blocks(page_id)
-        if is_large:
-            children: list[dict[str, Any]] = [schema.large_file_callout_block()]
-        else:
-            try:
-                chunks = await self._source_store.list_chunks(document.doc_id)
-            except Exception as e:
-                logger.error("读取文档切片失败（%s）：%s", document.doc_id, e)
-                chunks = []
-            children = schema.chunk_preview_blocks(chunks)
-        if children:
-            await self._adapter.append_blocks(page_id, children)
 
     async def _clear_page_blocks(self, page_id: str) -> None:
         blocks = await self._adapter.list_block_children(page_id)

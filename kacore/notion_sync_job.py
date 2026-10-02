@@ -34,6 +34,7 @@ NOTION_STAGE_PREPARING = "preparing"
 NOTION_STAGE_PUSHING_DOCUMENTS = "pushing_documents"
 NOTION_STAGE_PUSHING_QA = "pushing_qa"
 NOTION_STAGE_PRUNING_TAGS = "pruning_tags"
+NOTION_STAGE_CHECKING_NOTES = "checking_notes"
 NOTION_STAGE_FINALIZING = "finalizing"
 
 NOTION_STAGE_LABELS = {
@@ -42,6 +43,7 @@ NOTION_STAGE_LABELS = {
     NOTION_STAGE_PUSHING_QA: "Pushing QA outbox",
     NOTION_STAGE_PRUNING_TAGS: "Pruning stale options",
     NOTION_STAGE_FINALIZING: "Finalizing",
+    NOTION_STAGE_CHECKING_NOTES: "Checking article notes",
 }
 
 # 无文档计数阶段的进度底值（pushing_documents 在底值之上叠加文档完成比）。
@@ -51,6 +53,7 @@ _STAGE_BASE_PCT = {
     NOTION_STAGE_PUSHING_QA: 88,
     NOTION_STAGE_PRUNING_TAGS: 94,
     NOTION_STAGE_FINALIZING: 98,
+    NOTION_STAGE_CHECKING_NOTES: 96,
 }
 # pushing_documents 阶段文档进度占据的百分比跨度（8% → 85%）。
 _DOCS_PCT_SPAN = 77
@@ -85,6 +88,10 @@ class NotionSyncJob:
     qa_pushed: int = 0
     qa_failed: int = 0
     tags_pruned: int = 0
+    request_count: int = 0
+    notes_scanned: int = 0
+    notes_marked: int = 0
+    notes_failed: int = 0
     started_at: float = field(default_factory=time.monotonic)
     started_at_iso: str = ""
     finished_at: float | None = None
@@ -150,6 +157,11 @@ class NotionSyncJob:
             "qa_pushed": self.qa_pushed,
             "qa_failed": self.qa_failed,
             "tags_pruned": self.tags_pruned,
+            "request_count": self.request_count,
+            "notes_scanned": self.notes_scanned,
+            "notes_marked": self.notes_marked,
+            "notes_failed": self.notes_failed,
+            "model_tokens": 0,
             "progress_percent": self.progress_percent(),
             "elapsed_seconds": round(elapsed, 2),
             "started_at": self.started_at_iso,

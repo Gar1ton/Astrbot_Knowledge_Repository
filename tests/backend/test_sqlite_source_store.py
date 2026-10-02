@@ -3,6 +3,7 @@
 使用 aiosqlite 在内存数据库（:memory:）中运行，通过 migration runner 跑迁移，
 并对 SQLiteSourceDocumentStore 执行与内存实现完全一致的契约校验。
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -729,3 +730,42 @@ async def test_corpus_stats_excludes_detached_documents(
         "pending_reindex_count": 1,
         "chunk_count": 2,
     }
+
+
+async def test_notion_revision_tracks_local_changes_but_not_scan_or_ledger(
+    sqlite_store: SQLiteSourceDocumentStore,
+) -> None:
+    from kacore.domain.models import NotionEntityRecord
+
+    baseline = await sqlite_store.get_notion_local_revision()
+    await sqlite_store.add_document(_doc("notion-revision"))
+    revision = await sqlite_store.get_notion_local_revision()
+    assert int(revision) > int(baseline)
+    await sqlite_store.set_notion_scan_cursor("notes:db:ds", "2026-10-02T00:00:00+00:00")
+    await sqlite_store.upsert_notion_entity(
+        NotionEntityRecord(
+            entity_type="document",
+            entity_key="notion-revision",
+            page_id="page",
+        )
+    )
+    assert await sqlite_store.get_notion_local_revision() == revision
+    assert await sqlite_store.get_notion_scan_cursor("notes:other:ds") == ""
+    assert await sqlite_store.get_notion_scan_cursor("notes:db:ds") == "2026-10-02T00:00:00+00:00"
+    # A fresh store over the same connection reads the persisted checkpoint.
+    reopened = SQLiteSourceDocumentStore(sqlite_store._db)
+    assert await reopened.get_notion_scan_cursor("notes:db:ds") == "2026-10-02T00:00:00+00:00"
+    await sqlite_store.set_document_collections("notion-revision", ["x"])
+    assert int(await sqlite_store.get_notion_local_revision()) > int(revision)
+
+
+async def test_notion_revision_waits_for_local_transaction_commit(
+    sqlite_store: SQLiteSourceDocumentStore,
+) -> None:
+    import asyncio
+
+    async with sqlite_store._write_lock:
+        task = asyncio.create_task(sqlite_store.get_notion_local_revision())
+        await asyncio.sleep(0)
+        assert not task.done()
+    assert await task == await sqlite_store.get_notion_local_revision()

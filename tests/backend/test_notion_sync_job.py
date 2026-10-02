@@ -76,3 +76,22 @@ def test_partial_status_roundtrips_through_to_dict() -> None:
     assert d["status"] == NOTION_SYNC_PARTIAL
     assert d["recent_error"] == "one doc failed to push"
     assert d["tags_pruned"] == 3
+
+
+def test_note_stage_and_cost_counters_are_exposed_without_progress_regression() -> None:
+    from kacore.notion_sync_job import NOTION_STAGE_CHECKING_NOTES, NOTION_STAGE_FINALIZING
+
+    job = NotionSyncJob()
+    job.set_stage(NOTION_STAGE_CHECKING_NOTES)
+    assert job.progress_percent() == 96
+    job.request_count = 5
+    job.notes_scanned = 3
+    job.notes_marked = 2
+    job.set_stage(NOTION_STAGE_FINALIZING)
+    snapshot = job.to_dict()
+    assert snapshot["progress_percent"] == 98
+    assert snapshot["request_count"] == 5
+    assert snapshot["notes_marked"] == 2
+    assert snapshot["notes_scanned"] == 3
+    assert snapshot["model_tokens"] == 0
+    assert snapshot["elapsed_seconds"] >= 0

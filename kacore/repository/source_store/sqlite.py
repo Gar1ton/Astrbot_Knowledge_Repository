@@ -1105,6 +1105,30 @@ class SQLiteSourceDocumentStore(SourceDocumentStore):
 
     # ── Notion 推送账本与暂存箱 ───────────────────────────────────
 
+    async def get_notion_local_revision(self) -> str:
+        # 与写事务共享连接；等待提交后再观察修订号。
+        async with self._write_lock:
+            async with self._db.execute(
+                "SELECT revision FROM notion_local_revision WHERE id = 1"
+            ) as cursor:
+                row = await cursor.fetchone()
+        return str(row[0]) if row else "0"
+
+    async def get_notion_scan_cursor(self, scope: str) -> str:
+        async with self._db.execute(
+            "SELECT cursor FROM notion_scan_state WHERE scope = ?", (scope,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return str(row[0]) if row else ""
+
+    @_locked_write
+    async def set_notion_scan_cursor(self, scope: str, cursor: str) -> None:
+        await self._db.execute(
+            "INSERT INTO notion_scan_state(scope, cursor) VALUES (?, ?) "
+            "ON CONFLICT(scope) DO UPDATE SET cursor = excluded.cursor", (scope, cursor)
+        )
+        await self._db.commit()
+
     async def get_notion_entity(
         self, entity_type: str, entity_key: str
     ) -> NotionEntityRecord | None:

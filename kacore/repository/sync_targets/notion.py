@@ -106,6 +106,13 @@ class NotionSyncTarget(SyncTarget):
         """当前生效配置（initialize_databases 后含回填的 database id）。"""
         return self._config
 
+    async def preflight(self, *, initialize: bool = False) -> None:
+        """批次开始前只读检查工具能力和目标，失败不进入逐文档循环。"""
+        await self._adapter.check_capabilities(initialize=initialize)
+        for database_id in (self._config.database_id, self._config.qa_database_id):
+            if database_id:
+                await self._adapter.resolve_data_source(database_id)
+
     # ── SyncTarget 契约 ─────────────────────────────────────────
 
     async def push(self, document: SourceDocument, payload: bytes) -> str:
@@ -187,6 +194,7 @@ class NotionSyncTarget(SyncTarget):
         if not self._config.enabled:
             return {"status": "error", "message": "Notion sync is disabled in configuration."}
 
+        await self.preflight(initialize=True)
         parent = parent_page_id or self._config.parent_page_id
         title = database_title or self._config.database_title
         warnings: list[str] = []

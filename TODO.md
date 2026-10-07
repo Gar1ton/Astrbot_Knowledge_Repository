@@ -1,5 +1,42 @@
 # TODO
 
+## v1.2.0-preview-3 版本递进与提交准备（completed）
+
+- [x] 将 metadata.yaml、main.py 与 README 版本统一为 v1.2.0-preview-3。
+- [x] 将当前 Unreleased 变更归入 preview-3，检查版本一致性与 diff 格式。
+- 验证：版本一致性、main.py AST 解析、git diff --check 与 pages/out 一致性通过。
+- 提交标题先由用户确认，Git 提交由用户手动执行。
+
+## 2026-10-07 Notion 修复收敛为最小改动（completed）
+
+- 用户要求不考虑旧库兼容/恢复，由用户自行重新配置。
+- [x] Phase 1：删除本轮新增的重置事务、仓储接口、重置 API/按钮、初始化续建与相关测试。
+- [x] Phase 2：仅保留 MCP 能力预检、响应准确分类、批次一次失败及失败账本展示。
+- [x] Phase 3：回归、前端构建同步，改写恢复说明并重新生成本地修复包。
+- 不自动迁移 ID，不改运行实例；保留原有初始化流程，新增检查只拒绝不兼容接口。
+- 验证：相关套件 289 passed；全量排除两项既有缺 torch 用例后 1210 passed / 2 skipped /
+  2 deselected。改动文件 ruff、domain mypy、前端 TypeScript/构建和产物一致性通过；
+  ESLint 仅 api.ts 一个既有 warning。source_store 相对 HEAD 无改动。
+- 下方“两库重建支持”段落记录上一轮历史，已由本轮收敛；本地 ZIP 已替换为精简版。
+
+## 2026-10-07 Notion 接口预检与两库重建支持（completed）
+
+- 用户批准实施五项修复；仅支持 MCP 2.0.2，不做旧版回退或自动 ID 迁移。
+- [x] Phase 1：检查工具能力，区分缺字段/无效字段/零源/单源/多源与归属错误。
+- [x] Phase 2：批次预检一次失败；同步状态合并 Notion 失败账本，设置页显示错误。
+- [x] Phase 3：人工删除旧 Articles/QA 后清理本地同步状态，重新初始化并保存新 ID。
+  修改 source_store/base 的理由：重置映射、同步记录、扫描水位与 outbox 必须有统一事务契约。
+- [x] Phase 4：回归测试、前端构建同步、恢复说明与 CHANGELOG。
+- 本轮不操作真实 Notion、宿主配置或 Git 远端；已清空正文的成功 QA 存根不能自动恢复。
+- 大文件约束：既有 API/仓储/Notion 管线/前端设置文件已超 600 行，后续独立拆分；新增重置事务与
+  同步状态聚合放入小模块，不扩大本轮为全仓重构。
+- 验证：相关后端首轮 368 passed；全量首轮 1221 passed / 2 skipped / 2 failed（均为既有
+  缺 torch）。补空白 QA 后排除两项既有用例全量 1223 passed / 2 skipped / 2 deselected；
+  追加后台错误可见性测试所在套件 17 passed。本轮新增 33 个回归用例。
+- 改动文件 ruff 全绿；全仓 ruff 仍仅 tools/chunk_preview.py 三处既有 E402；domain mypy
+  7 文件通过；前端 tsc/ESLint/构建通过（api.ts 一个既有 warning），生成同步 357 文件，
+  pages/out 字节一致。真实 Notion 写入仍需用户按恢复说明手动验证。
+
 ## v1.2.0-preview-2 Notion MCP v2 与正文笔记标记 (completed)
 
 ### User constraints / 约束

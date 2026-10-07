@@ -3,6 +3,7 @@ import React, { useEffect, useState } from "react";
 import { Modal } from "@/components/ds/Modal";
 import { Badge } from "@/components/ds/Badge";
 import { ThemeGallery } from "@/components/modals/ThemeGallery";
+import { NotionSyncStatus } from "@/components/panels/NotionSyncStatus";
 import { Button } from "@/components/ds/Button";
 import { Card, Field } from "@/components/ds/Card";
 import { Icon } from "@/components/ds/Icon";
@@ -293,7 +294,7 @@ function SyncTab() {
         setNotionReady(Boolean(res.database_id) && Boolean(res.qa_database_id));
         toast(t("toast_notion_init_done"), "ok");
       } else {
-        toast(t("toast_notion_init_need_parent"), "error");
+        toast(res.message || t("toast_init_failed"), "error");
       }
     } catch (e) {
       toast(e instanceof Error ? e.message : t("toast_init_failed"), "error");
@@ -753,6 +754,7 @@ function SyncTab() {
             </Button>
           </div>
         </Field>
+        <NotionSyncStatus />
       </Card>
     </>
   );

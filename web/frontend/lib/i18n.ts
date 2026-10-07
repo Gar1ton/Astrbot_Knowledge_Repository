@@ -886,6 +886,12 @@ const zh = {
   notion_field_init: "初始化与推送",
   notion_field_init_hint: "首次使用先初始化两库（需在插件配置填父页面 ID），之后可手动增量推送",
   notion_btn_init: "初始化数据库",
+  notion_ledger_status: "同步账本",
+  notion_documents_failed: "文章失败",
+  notion_qa_pending: "QA 待推",
+  notion_qa_failed: "QA 失败",
+  notion_target_ids: "查看容器与数据源 ID",
+
   cfg_saved_rebuild: "配置已保存，重启插件并重建索引后完全生效",
   cfg_saved_restart: "配置已保存，重启插件后生效",
   cfg_saved: "配置已保存",
@@ -1805,6 +1811,12 @@ const en: Record<keyof typeof zh, string> = {
   notion_field_init_hint:
     "Initialise both databases on first use (the parent page ID must be set in the plugin config), then push incrementally by hand",
   notion_btn_init: "Initialise databases",
+  notion_ledger_status: "Sync ledger",
+  notion_documents_failed: "Failed articles",
+  notion_qa_pending: "Pending QA",
+  notion_qa_failed: "Failed QA",
+  notion_target_ids: "View database and data source IDs",
+
   cfg_saved_rebuild: "Saved. Restart the plugin and rebuild the index for it to fully take effect.",
   cfg_saved_restart: "Saved. Restart the plugin for it to take effect.",
   cfg_saved: "Settings saved",

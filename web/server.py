@@ -758,6 +758,10 @@ async def handle_notion_init(request: web.Request) -> web.Response:
     return web.json_response(result, status=status)
 
 
+async def handle_notion_status(request: web.Request) -> web.Response:
+    return web.json_response(await _api(request).get_notion_push_status())
+
+
 async def handle_notion_push_note(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     if not isinstance(body, dict):
@@ -1814,6 +1818,7 @@ def build_app(
     app.router.add_post("/api/sync/{target}", handle_sync)
     app.router.add_post("/api/notion/init", handle_notion_init)
     app.router.add_post("/api/notion/push-note", handle_notion_push_note)
+    app.router.add_get("/api/sync/notion/status", handle_notion_status)
     app.router.add_get("/api/sync/status", handle_sync_status)
     app.router.add_get("/api/sync/notion/active", handle_notion_active)
     app.router.add_get("/api/zotero/config", handle_zotero_config)

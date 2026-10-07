@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from notion_tools import notion_tools
 
 from kacore.adapters.notion_mcp import NotionMCPAdapter, NotionMCPError
 from kacore.config import NotionSyncConfig
@@ -142,7 +143,9 @@ def _target(
     store: InMemorySourceDocumentStore,
     config: NotionSyncConfig,
 ) -> NotionSyncTarget:
-    adapter = NotionMCPAdapter(None, tool_caller=caller, rate_limit_rps=1000)
+    adapter = NotionMCPAdapter(
+        None, tool_caller=caller, tool_lister=notion_tools, rate_limit_rps=1000
+    )
     return NotionSyncTarget(config, store, adapter=adapter)
 
 

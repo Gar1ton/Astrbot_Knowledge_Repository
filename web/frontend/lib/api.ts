@@ -1446,7 +1446,7 @@ export async function cancelBuildJob(jobId: string, cleanup = true): Promise<Can
 export async function notionInit(
   parentPageId: string,
   databaseTitle: string
-): Promise<{ status: string; database_id?: string; qa_database_id?: string }> {
+): Promise<{ status: string; database_id?: string; qa_database_id?: string; message?: string }> {
   if (isMock()) {
     return { status: "success", database_id: "mock-articles", qa_database_id: "mock-qa" };
   }
@@ -1455,6 +1455,27 @@ export async function notionInit(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ parent_page_id: parentPageId, database_title: databaseTitle }),
   });
+}
+
+export interface NotionPushStatus {
+  status: string;
+  database_id: string;
+  qa_database_id: string;
+  data_source_id: string;
+  qa_data_source_id: string;
+  documents: Record<string, number>;
+  outbox_pending: number;
+  outbox_failed: number;
+  errors: { message: string; count: number }[];
+}
+
+export async function getNotionPushStatus(): Promise<NotionPushStatus> {
+  if (isMock()) return {
+    status: "ok", database_id: "mock-articles", qa_database_id: "mock-qa",
+    data_source_id: "mock-articles-source", qa_data_source_id: "mock-qa-source",
+    documents: { synced: 5, failed: 0 }, outbox_pending: 0, outbox_failed: 0, errors: [],
+  };
+  return apiFetch("/api/sync/notion/status");
 }
 
 export async function pushNotionNote(payload: {

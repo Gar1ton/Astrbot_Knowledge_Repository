@@ -2,8 +2,27 @@
 
 ## [Unreleased]
 
+## [v1.2.0-preview-3] — 2026-10-07
+
+### 修复 (Fixed)
+
+- **Notion 接口预检与准确报错**：批次开始和初始化先检查宿主 MCP 工具能力，缺少
+  Data Source 工具明确要求 `@suekou/mcp-notion-server@2.0.2`。容器响应缺少
+  `data_sources` 不再误报“不是单源库”，分别报告无效字段、零源、多源及错误归属。
+  统一目标错误只结束一轮任务，不反复请求/改写 106 篇未尝试文档的失败账本。
+- **Notion 失败可见**：`/api/sync/status` 合并真实实体账本，新增状态汇总路由与设置页
+  失败详情。涉及 `adapters/notion_mcp.py`、`pipelines/notion_sync_pipeline.py`、
+  `sync_targets/notion.py`、`api.py`、`notion_status.py`、`web/server.py`、前端状态组件与 `pages/`。
+- 按用户要求收敛为上述故障修复：移除本轮曾新增的重置仓储接口/事务、清理 API/按钮、
+  初始化续建和恢复测试；保留原有初始化流程。用户自行配置新版目标，不做旧接口回退、
+  自动 ID 迁移或旧内容恢复。不改运行实例与真实 Notion。
+- 验证：精简版全量 1210 passed / 2 skipped（排除两项既有缺 torch 用例）；改动文件
+  ruff、domain mypy、前端 TypeScript/构建、pages/out 一致性通过。
+
 ### 改进 (Changed)
 
+- **版本递进**：`metadata.yaml`、`main.py` 注册版本和 README badge 统一为
+  `v1.2.0-preview-3`；当前变更归入本版本，保留 preview-2 历史记录。
 - **Notion MCP v2 与正文笔记标记**：适配器迁移到 `@suekou/mcp-notion-server@2.0.2`
   / Notion Data Source API；解析并回填 Articles / QA 的 data source ID，多源歧义显式报错，
   QA relation 使用 Articles data source。Articles 新建、更新、原件变化与强制推送仅写属性，

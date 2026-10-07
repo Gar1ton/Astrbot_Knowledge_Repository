@@ -16,16 +16,19 @@
    这是启动字段示例；token 留在原有宿主配置中，不复制到 KA 配置或仓库。
 3. 重连该 MCP server，确认工具清单包含 `notion_query_data_source`、
    `notion_retrieve_data_source`、`notion_update_data_source`、`notion_create_data_source_item`。
-4. 加载新版 KA。保留现有 `notion_sync.database_id` 与 `qa_database_id`，在设置页执行
-   **初始化数据库**：已有库只补缺列，缺库才创建；不会清空 Articles 正文。
-   单源库自动解析并保存 `data_source_id` 和 `qa_data_source_id`；QA 新 relation 指向
-   Articles 的 data source。多个 data source 时必须先在 AstrBot 配置中明确目标 ID，
-   再重新加载插件；错误归属或歧义会显式报错。
-5. 检查 Articles 中新增了 **`已做笔记` checkbox**，再执行一次手动同步验证任务结果。
-   运行升级与这一步都会访问真实 Notion，开发测试只使用 fake MCP。
+4. 重新配置插件的 Articles / QA 目标：`database_id` / `qa_database_id` 填新版
+   **Database 容器 ID**，`data_source_id` / `qa_data_source_id` 填对应的 **Data Source ID**。
+   单源库可将源 ID 留空，由原有流程解析；多源库必须明确指定。
+5. 如果要由插件新建两库，清空四个目标 ID，填写已授权的 `parent_page_id`，重新加载插件，
+   再点击 WebUI「设置 → 同步 / 备份 → Notion 同步 → 初始化数据库」。
+   曾自动保存过目标 ID 时，还需移除插件数据目录 `runtime_config.json` 中这四个 ID 的
+   覆盖项，再重新加载；本轮不提供旧库迁移、映射清理或自动恢复功能。
+6. 先手动同步，检查任务错误及「同步账本」；确认正常后开启自动同步。
 
-原 Articles / QA database ID 和页面 ID 不变。旧 Notion API 创建的单源库可直接复用，
-既有 relation 使用 Notion API 的 data source 表示；初始化只补缺列，不重建引用页。
+本次只修复三点：工具能力预检、`data_sources` 响应的准确分类、真实失败账本展示。
+预检失败只结束一轮任务，不逐篇写入同一个错误，不覆盖未尝试文档的历史账本。
+`/api/sync/status` 合并 Notion 实体账本；`GET /api/sync/notion/status` 提供失败计数和合并原因。
+旧 QA 正文默认不会完整保存在本地，本次没有旧内容恢复流程。
 
 契约参考：[MCP v2.0.2 发布说明](https://github.com/suekou/mcp-notion-server/releases/tag/v2.0.2)、
 [MCP 工具文档](https://github.com/suekou/mcp-notion-server/blob/main/docs/tools.md)、

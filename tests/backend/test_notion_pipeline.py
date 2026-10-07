@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from notion_tools import notion_tools
 
 from kacore.adapters.notion_mcp import NotionMCPAdapter, NotionMCPError
 from kacore.config import NotionSyncConfig
@@ -86,7 +87,9 @@ def _pipeline(
     caller: RoutedToolCaller,
     sync_mode: str = "preserve",
 ) -> NotionSyncPipeline:
-    adapter = NotionMCPAdapter(None, tool_caller=caller, rate_limit_rps=1000)
+    adapter = NotionMCPAdapter(
+        None, tool_caller=caller, tool_lister=notion_tools, rate_limit_rps=1000
+    )
     target = NotionSyncTarget(_config(sync_mode), store, adapter=adapter)
     return NotionSyncPipeline(source_store=store, notion_target=target)
 
@@ -145,8 +148,10 @@ async def test_push_all_no_change_makes_zero_writes(
     result = await pipeline.push_all(scan_notes=False)
 
     assert result["documents"]["skipped"] == 1
-    # 指纹相等 → 完全跳过，零 MCP 调用
-    assert caller.calls == []
+    # 指纹相等 → 零写入；每批次重新读取两个容器做目标预检。
+    assert [name for name, _ in caller.calls] == [
+        "notion_retrieve_database", "notion_retrieve_database",
+    ]
 
 
 @pytest.mark.asyncio
@@ -280,9 +285,9 @@ async def test_strict_archives_detached_duplicates_and_force_cannot_restore(
     caller.calls.clear()
     second = await _pipeline(store, caller, "strict").push_all(scan_notes=False, force=True)
     assert second["documents"]["skipped"] == 1
-    # strict 每轮额外探一次库做失效选项清理；除此之外无文档/QA 写入。
+    # 两库预检后 strict 只读 schema 做清理；没有文档/QA 写入。
     assert [name for name, _ in caller.calls] == [
-        "notion_retrieve_database",
+        "notion_retrieve_database", "notion_retrieve_database",
         "notion_retrieve_data_source",
     ]
 
@@ -356,7 +361,9 @@ async def test_runtime_sync_mode_provider_applies_on_next_push(
     doc.lifecycle_state = DocumentLifecycle.DETACHED
     await store.add_document(doc)
     caller = RoutedToolCaller()
-    adapter = NotionMCPAdapter(None, tool_caller=caller, rate_limit_rps=1000)
+    adapter = NotionMCPAdapter(
+        None, tool_caller=caller, tool_lister=notion_tools, rate_limit_rps=1000
+    )
     target = NotionSyncTarget(_config("preserve"), store, adapter=adapter)
     current = {"config": _config("preserve")}
     pipeline = NotionSyncPipeline(
@@ -595,7 +602,9 @@ async def test_push_all_disabled_returns_early(
     store: InMemorySourceDocumentStore,
 ) -> None:
     caller = RoutedToolCaller()
-    adapter = NotionMCPAdapter(None, tool_caller=caller, rate_limit_rps=1000)
+    adapter = NotionMCPAdapter(
+        None, tool_caller=caller, tool_lister=notion_tools, rate_limit_rps=1000
+    )
     config = NotionSyncConfig(enabled=False, database_id="db-a", qa_database_id="db-q")
     target = NotionSyncTarget(config, store, adapter=adapter)
     pipeline = NotionSyncPipeline(source_store=store, notion_target=target)
@@ -611,7 +620,9 @@ async def test_push_all_without_database_id_errors(
     store: InMemorySourceDocumentStore,
 ) -> None:
     caller = RoutedToolCaller()
-    adapter = NotionMCPAdapter(None, tool_caller=caller, rate_limit_rps=1000)
+    adapter = NotionMCPAdapter(
+        None, tool_caller=caller, tool_lister=notion_tools, rate_limit_rps=1000
+    )
     config = NotionSyncConfig(enabled=True, database_id="")
     target = NotionSyncTarget(config, store, adapter=adapter)
     pipeline = NotionSyncPipeline(source_store=store, notion_target=target)

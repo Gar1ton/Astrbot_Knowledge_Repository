@@ -3627,6 +3627,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
 
     async def get_notion_push_status(self) -> dict:
         """汇总 Notion 推送账本状态（供 /ka notion status 与前端展示）。"""
+        from kacore.notion_status import failure_summary
+
         if self._config is None:
             return {"status": "error", "message": "配置未加载。"}
         notion_cfg = self._config.get_notion_sync_config()
@@ -3656,6 +3658,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             "documents": counts,
             "outbox_pending": len(pending),
             "outbox_failed": len(failed_qa),
+            "errors": await failure_summary(self._source_store),
         }
 
     async def get_effective_config(self) -> dict:
@@ -3895,22 +3898,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             return {"status": "error", "message": str(exc)}
 
     async def get_sync_status(self) -> list[dict]:
-        """列出各文档在各目标的同步状态（SyncRecord 视图）。
+        """按文档/目标列出真实状态；Notion 实体账本优先于冗余同步记录。"""
+        from kacore.notion_status import sync_status
 
-        Reserved（v0.3.0 起）：现返回空，接入后返回 doc_id/target/status/synced_at。
-        """
-        records = await self._source_store.list_sync_records()
-        return [
-            {
-                "doc_id": r.doc_id,
-                "target": r.target.value,
-                "remote_ref": r.remote_ref,
-                "status": r.status.value,
-                "synced_at": r.synced_at.isoformat() if r.synced_at else None,
-                "message": r.message,
-            }
-            for r in records
-        ]
+        return await sync_status(self._source_store)
 
     async def backup_now(self, force: bool = False, background: bool = False) -> dict:
         """创建 R2 v1 完整快照；background=True 时立即返回共享 job。"""

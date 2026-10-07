@@ -6,7 +6,7 @@
 
 **AstrBot 知识库原件管理、同步备份与 Research Agent 插件**
 
-[![version](https://img.shields.io/badge/版本-v1.2.0--preview--2-blueviolet)](metadata.yaml)
+[![version](https://img.shields.io/badge/版本-v1.2.0--preview--3-blueviolet)](metadata.yaml)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-plugin-6f42c1)](https://github.com/AstrBotDevs/AstrBot)
 
@@ -74,6 +74,9 @@ git clone https://github.com/Gar1ton/Astrbot_Knowledge_Repository astrbot_plugin
 > 不再生成 Chunks Preview；简单正文规则自动勾选“已做笔记”，可在 Notion 视图筛选。
 > 开启 Notion 后默认合并本地变更 10 秒自动推送、每 300 秒补查。宿主 MCP 配置不会自动修改。
 > 升级步骤、筛选视图和消耗说明见 [Notion 同步指南](docs/NOTION_SYNC.md)。
+
+接口不兼容会在同步批次开始前停止并明确报错。请自行配置新版容器与数据源 ID，
+本修复不迁移旧库或清理旧映射；配置步骤见 [Notion 同步指南](docs/NOTION_SYNC.md)。
 
 ### 可选依赖
 

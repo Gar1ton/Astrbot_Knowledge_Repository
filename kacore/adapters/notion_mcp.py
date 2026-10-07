@@ -31,6 +31,14 @@ _MAX_QUERY_PAGES = 200
 
 # 测试注入口签名：async (tool_name, arguments) -> CallToolResult | dict | list | str
 ToolCaller = Callable[[str, dict[str, Any]], Awaitable[Any]]
+ToolLister = Callable[[], Awaitable[list[str]]]
+
+NOTION_SYNC_TOOLS = frozenset({
+    "notion_retrieve_database", "notion_retrieve_data_source", "notion_query_data_source",
+    "notion_update_data_source", "notion_create_data_source_item",
+    "notion_update_page_properties", "notion_retrieve_block_children",
+    "notion_append_block_children", "notion_delete_block",
+})
 
 
 class NotionMCPError(RuntimeError):
@@ -80,12 +88,14 @@ class NotionMCPAdapter:
         server_name: str = "notion",
         *,
         tool_caller: ToolCaller | None = None,
+        tool_lister: ToolLister | None = None,
         read_timeout_sec: int = 30,
         rate_limit_rps: float = 3.0,
     ) -> None:
         self._context = context
         self._server_name = server_name
         self._tool_caller = tool_caller
+        self._tool_lister = tool_lister
         self._read_timeout_sec = read_timeout_sec
         self._min_interval = 1.0 / rate_limit_rps if rate_limit_rps > 0 else 0.0
         self._last_call_monotonic = 0.0
@@ -106,7 +116,8 @@ class NotionMCPAdapter:
                 await asyncio.sleep(wait)
             self._last_call_monotonic = time.monotonic()
 
-    async def _call_real(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+    def _get_client(self) -> Any:
+        """每次按服务名获取宿主客户端，跟随宿主重连/替换。"""
         get_manager = getattr(self._context, "get_llm_tool_manager", None)
         if not callable(get_manager):
             raise NotionMCPError(
@@ -125,6 +136,38 @@ class NotionMCPAdapter:
                 f"MCP server '{self._server_name}' 未配置或未连接："
                 "请在 AstrBot 面板确认该 MCP 服务已启用并连接成功。"
             )
+        return client
+
+    async def check_capabilities(self, *, initialize: bool = False) -> None:
+        """只检查工具清单，不调用写工具；失败不得当作兼容或缓存成功。"""
+        self._data_sources.clear()  # 每轮重新验证目标，避免沿用旧连接/旧容器结果。
+        try:
+            if self._tool_lister is not None:
+                names = await self._tool_lister()
+            else:
+                client = self._get_client()
+                response = await asyncio.wait_for(
+                    client.list_tools_and_save(), timeout=self._read_timeout_sec
+                )
+                names = [tool.name for tool in response.tools]
+            if not isinstance(names, list) or any(not isinstance(n, str) for n in names):
+                raise ValueError("工具清单形状异常")
+        except Exception as exc:
+            raise NotionMCPError(
+                f"无法检查 MCP server '{self._server_name}' 的工具能力：{exc}",
+                code="capability_check_failed",
+            ) from exc
+        required = NOTION_SYNC_TOOLS | ({"notion_create_database"} if initialize else set())
+        missing = sorted(required - set(names))
+        if missing:
+            raise NotionMCPError(
+                f"MCP server '{self._server_name}' 接口不兼容，缺少工具：{', '.join(missing)}。"
+                "请使用 @suekou/mcp-notion-server@2.0.2 并重连服务；仅补填 ID 不能解决。",
+                code="mcp_incompatible",
+            )
+
+    async def _call_real(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        client = self._get_client()
         try:
             return await client.call_tool_with_reconnect(
                 tool_name,
@@ -268,17 +311,36 @@ class NotionMCPAdapter:
         if database_id in self._data_sources:
             return self._data_sources[database_id]
         data = await self.retrieve_database(database_id)
+        if "data_sources" not in data:
+            raise NotionMCPError(
+                "Notion database 响应缺少 data_sources，接口/响应不兼容。"
+                "请使用 @suekou/mcp-notion-server@2.0.2 并重连服务；仅补填 ID 不能解决。",
+                code="mcp_incompatible",
+            )
         sources = data.get("data_sources")
-        ids = [str(s["id"]) for s in sources or [] if isinstance(s, dict) and s.get("id")]
+        if not isinstance(sources, list) or any(
+            not isinstance(s, dict) or not isinstance(s.get("id"), str) or not s["id"].strip()
+            for s in sources
+        ):
+            raise NotionMCPError("Notion data_sources 字段形状异常。", code="invalid_response")
+        ids = [s["id"] for s in sources]
+        if not ids:
+            raise NotionMCPError("目标 database 没有数据源，请检查目标库。", code="no_data_source")
         configured = self._configured_sources.get(database_id, "")
         if configured:
             if configured not in ids:
-                raise NotionMCPError("配置的 data_source_id 不属于目标 database，请检查配置。")
+                raise NotionMCPError(
+                    "配置的 data_source_id 不属于目标 database，请检查配置。",
+                    code="data_source_mismatch",
+                )
             source_id = configured
         elif len(ids) == 1:
             source_id = ids[0]
         else:
-            raise NotionMCPError("目标 database 不是单源库，请明确配置 data_source_id。")
+            raise NotionMCPError(
+                "目标 database 有多个数据源，请明确配置 data_source_id。",
+                code="ambiguous_data_source",
+            )
         self._data_sources[database_id] = source_id
         return source_id
 

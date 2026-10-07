@@ -407,6 +407,44 @@ async def test_sync_status_endpoint_returns_200(tmp_path: Path) -> None:
         await client.close()
 
 
+async def test_sync_status_routes_show_notion_ledger_failures(tmp_path: Path) -> None:
+    from kacore.domain.models import NotionEntityRecord
+
+    api = await _make_api()
+    await api._source_store.upsert_notion_entity(NotionEntityRecord(
+        "document", "d1", status="failed", message="MCP 接口不兼容",
+    ))
+    client = TestClient(TestServer(build_app(
+        api=api, static_dir=tmp_path, upload_dir=tmp_path, auth_required=False,
+    )))
+    await client.start_server()
+    try:
+        records = await (await client.get("/api/sync/status")).json()
+        assert records[0]["status"] == "failed"
+        summary = await (await client.get("/api/sync/notion/status")).json()
+        assert summary["documents"]["failed"] == 1
+        assert summary["errors"] == [{"message": "MCP 接口不兼容", "count": 1}]
+    finally:
+        await client.close()
+
+
+async def test_notion_initialization_route_preserves_preflight_error(tmp_path: Path) -> None:
+    api = await _make_api()
+    api.initialize_notion_database = AsyncMock(return_value={
+        "status": "error", "error_code": "mcp_incompatible", "message": "请使用 MCP 2.0.2",
+    })
+    client = TestClient(TestServer(build_app(
+        api=api, static_dir=tmp_path, upload_dir=tmp_path, auth_required=False,
+    )))
+    await client.start_server()
+    try:
+        body = await (await client.post("/api/notion/init", json={})).json()
+        assert body["error_code"] == "mcp_incompatible"
+        assert body["message"] == "请使用 MCP 2.0.2"
+    finally:
+        await client.close()
+
+
 async def test_zotero_probe_endpoint_returns_connection_and_read(tmp_path: Path) -> None:
     client = await _client(tmp_path)
     try:

@@ -385,6 +385,30 @@ async def test_list_quota_empty_when_no_targets() -> None:
     assert await api.list_quota() == []
 
 
+async def test_notion_failed_ledger_is_visible_without_sync_records_and_takes_precedence() -> None:
+    from kacore.config import Config
+    from kacore.domain.models import NotionEntityRecord
+
+    store = InMemorySourceDocumentStore()
+    for i in range(106):
+        await store.upsert_notion_entity(NotionEntityRecord(
+            "document", str(i), status="failed", message="MCP 接口不兼容",
+        ))
+    api = KnowledgeRepositoryApi(
+        source_store=store, kb_reader=InMemoryKnowledgeBaseReader({}), config=Config({}),
+    )
+    assert len(await api.get_sync_status()) == 106
+    await store.upsert_sync_record(SyncRecord("0", SyncTargetKind.NOTION, status=SyncStatus.SYNCED))
+    await store.upsert_sync_record(SyncRecord("0", SyncTargetKind.R2, status=SyncStatus.SYNCED))
+    rows = await api.get_sync_status()
+    assert len(rows) == 107
+    notion = next(row for row in rows if row["doc_id"] == "0" and row["target"] == "notion")
+    assert notion["status"] == "failed"
+    summary = await api.get_notion_push_status()
+    assert summary["documents"]["failed"] == 106
+    assert summary["errors"] == [{"message": "MCP 接口不兼容", "count": 106}]
+
+
 async def test_sync_all_fans_out_to_each_target() -> None:
     class StubPipeline:
         calls = []

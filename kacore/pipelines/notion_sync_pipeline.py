@@ -17,6 +17,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from kacore.adapters.notion_mcp import NotionMCPError
 from kacore.config import NOTION_SYNC_STRICT
 from kacore.domain.models import (
     NOTION_ENTITY_DOCUMENT,
@@ -82,7 +83,10 @@ class NotionSyncPipeline:
     async def initialize_databases(
         self, parent_page_id: str | None = None, database_title: str | None = None
     ) -> dict[str, Any]:
-        return await self._target.initialize_databases(parent_page_id, database_title)
+        try:
+            return await self._target.initialize_databases(parent_page_id, database_title)
+        except NotionMCPError as exc:
+            return {"status": "error", "message": str(exc), "error_code": exc.code}
 
     # ── 全量增量推送 ────────────────────────────────────────────
 
@@ -113,6 +117,18 @@ class NotionSyncPipeline:
             paths = schema.build_collection_paths(collections)
             docs = await self._store.list_documents()
             strict = self._config.sync_mode == NOTION_SYNC_STRICT
+            if progress is not None:
+                progress.docs_total = len(docs)
+            try:
+                await self._target.preflight()
+            except NotionMCPError as exc:
+                if progress is not None:
+                    progress.request_count = self._target.request_count - requests_before
+                return {
+                    "status": "error", "message": str(exc),
+                    "error_code": exc.code or "preflight_failed",
+                    "request_count": self._target.request_count - requests_before,
+                }
             if progress is not None:
                 progress.sync_mode = self._config.sync_mode
                 progress.force = force

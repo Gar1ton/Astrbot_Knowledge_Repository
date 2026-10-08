@@ -14,6 +14,11 @@
 
 ### 改进 (Changed)
 
+- **TODO 状态收口（2026-10-08）**：依据已有实现和验证记录，将切片质量、Codex QA 保存、
+  v1.0.7 Notion 进度条标为 completed；旧清洗工作包与 v1.0.3 发布计划标为 superseded，
+  发布路径契约按 v1.0.4 完成记录勾选。LightRAG 保留部署验收 pending，并登记缺失的
+  探针说明；Embedding 与其他未验收/暂缓项继续保留。仅修改 TODO.md 与 CHANGELOG.md，
+  git diff --check 通过，未重新运行功能测试或执行远端操作。
 - 清理无调用的旧 Notion 正文预览/大文件提示生成器及 `adapters/astrbot_kb.py`；
   修正 KB reader 说明，保留旧摘要识别、QA 正文及现有事务/迁移接口。
 - 新增协议/缓存及已有数据库/索引接线回归用例，更新收敛计划与交接文档。

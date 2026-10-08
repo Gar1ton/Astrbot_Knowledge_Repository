@@ -1,5 +1,13 @@
 # TODO
 
+## 2026-10-08 TODO 状态核对与历史收口（completed）
+
+- [x] 对照当前实现、回归用例、提交历史和已有验证记录，核对进行中及未勾选事项。
+- [x] 修正切片质量、Codex QA 保存、Notion 进度条的漏更新状态；收口被替代的历史计划。
+- [x] 核验文档差异及剩余待办，追加 CHANGELOG。
+- 本轮只更新治理文档；历史测试结果不作为本轮重新运行结果，未验收事项继续保留。
+- 验证：git diff --check 通过；核对未勾选事项及历史覆盖关系，未改代码或重新运行功能测试。
+
 ## 2026-10-07 OpenAI 文本 embedding 与旧库兼容优化（🚧 in progress）
 
 - 用户已批准收敛计划：只实施文本协议、缓存、连接探针与旧库兼容保护；不新增图片功能。
@@ -228,12 +236,12 @@
   （两个既有缺 torch 用例，与本次无关）。前端改动是源码级修改，未跑 `npm run build`/
   `sync_frontend.py`，也未同步到 `pages/`。
 
-## 2026-09-12 切片质量修复（in_progress）
+## 2026-09-12 切片质量修复（completed）
 
 - 用户批准仅修改切片及其直接清洗前置逻辑；不改召回、模型适配、接口或真实库。
-- [ ] Phase A：页边出版噪声与重复短页眉清理，恢复跨页/伪空行续句，准确识别单行结构边界。
-- [ ] Phase B：token 目标改为软目标，只在硬预算超限时拆段；统一句界、平衡短尾并记录真实段落边界。
-- [ ] Phase C：补行为回归，生成 Hui 独立新版预览并核对偏移/正文保留，运行相关测试与静态检查。
+- [x] Phase A：页边出版噪声与重复短页眉清理，恢复跨页/伪空行续句，准确识别单行结构边界。
+- [x] Phase B：token 目标改为软目标，只在硬预算超限时拆段；统一句界、平衡短尾并记录真实段落边界。
+- [x] Phase C：补行为回归，生成 Hui 独立新版预览并核对偏移/正文保留，运行相关测试与静态检查。
 - 既有超 600 行 chunking 文件只接线与修正元数据；新边界算法放入独立模块，旧文件拆分沿用既有计划。
 - [x] Phase D：跨版式兼容——用 Massumi (2018) 99 Theses 书籍样本验证发现 `### **T30**` 这类"标题符号+粗体锚点同行"格式会被 `_split_spans_at_inline_anchors` 切断，导致标题符号悬空、正文块丢失 `section_heading` 标签，个别情况下产生纯噪声空 chunk。技术理由：`_INLINE_ANCHOR_RE` 只按粗体锚点本身定位切分点，没考虑同一行前面可能还挂着装饰性 `#` 标题符号。
   修复：`_split_spans_at_inline_anchors` 回溯检查锚点所在行、若行首到锚点之间只有 `#{1,6}\s*` 就把切分点前移；`_THESIS_RE`/`_SUBSECTION_RE` 放宽为允许可选的同一前缀，保证重新接回的标题仍被 `_classify_block`/`_chunk_anchor` 识别为 `section_heading`。三处正则常量仅 `chunking.py` 内部使用，改动范围封闭。
@@ -370,11 +378,11 @@
    `test_api.py`、`test_auto_reindex.py`、`test_build_hardening.py`、`test_zotero_sync.py`、
    `test_vector_store.py`），无需先创建再核对基线。
 
-### 本轮继续执行（用户已批准至完成）
+### 当时的执行计划（superseded by 2026-09-12 execution）
 
-- [ ] 🚧 核验并修复基础模块：覆盖映射、缓存取消、租约与发布事务、原文复用条件。
-- [ ] 🚧 接通清洗/切片、证据会话、生产迁移及恢复路径；未接线工作包保持未完成。
-- [ ] 全部自动化验证与交接；真实语料和 20% 目标由用户实测。
+- 原计划（superseded）：核验并修复基础模块：覆盖映射、缓存取消、租约与发布事务、原文复用条件。
+- 原计划（superseded）：接通清洗/切片、证据会话、生产迁移及恢复路径；未接线工作包保持未完成。
+- 原计划（superseded）：全部自动化验证与交接；真实语料和 20% 目标由用户实测。
 - 本轮隔离验证：缓存原语 10 passed；迁移基础 64 passed（沙箱内 aiosqlite 卡住，获准后在沙箱外运行临时库测试）。
 
 ### Technical implementation path
@@ -394,7 +402,7 @@
   这套基础设施从未接入任何生产写入口；用户核实后判断整个方向对实际需求过度设计，
   已随 W6 一并整体删除（`domain/corpus.py`、`migrations/025`、`repository/corpus_build/`
   全部移除），不再是当前代码的一部分。
-- [ ] **W2 清洗与切片（🚧 部分完成，纯转换函数已交付，未接入生产管线）**：新增四个独立、
+- **W2 清洗与切片（superseded；以下为当时的部分完成记录）**：新增四个独立、
   已测试、**均未接入 `markdown_extractor.py`/`chunking.py`/`ingest_manager.py` 现有生产调用
   路径**的纯转换模块（改动现有 `_repair_wrapped_text`/`_classify_block` 会立即改变新摄入
   文档的 processing fingerprint 语义，需等 W6 的代次网关接线才能安全生效，故本轮刻意不碰
@@ -448,7 +456,7 @@
        本轮（见下方「本次会话」条目）已补上 `test_markdown_extractor.py`（2 例，验证真实
        PyMuPDF4LLM 输出下脚注确实被分离、普通编号列表不被误判），但真实语料脚注准确率仍
        待用户用自己的 PDF 验证，不构成「已验证生产可用」的结论。
-- [ ] **W3 用量与证据会话（🚧 用量计账修复已接入生产；证据会话仅交付缓存原语，未接线）**：
+- **W3 用量与证据会话（superseded；以下为当时的部分完成记录）**：
   - **用量计账修复（已接入生产代码，非独立新增模块）**：`kacore/domain/llm_generation.py`
     的 `GenerationResult.prompt_tokens/completion_tokens` 由 `int=0` 改为 `int|None=None`，
     区分「provider 未报告（未知）」与「provider 报告为 0（已知为零）」；
@@ -484,8 +492,7 @@
     `EvidenceSession` 已交付就当作同一件事已经做完。
   - 全量 `pytest` 1001→1018 passed（新增 17 例：用量修复 7 例 + 缓存原语 10 例），
     `ruff`/`mypy` 全绿。
-- [ ] **W4 检索与上下文（🚧 部分完成：排除下推已接入生产接口，覆盖选择器新增未接线，
-  相邻上下文/脚注扩展与结构锚点处理未做）**：
+- **W4 检索与上下文（superseded；以下为当时的部分完成记录）**：
   - **向量库排除下推（已接入生产接口，向后兼容）**：`kacore/repository/vector_store/base.py`
     的 `VectorStore.search()` 新增仅关键字参数 `exclude_chunk_ids: frozenset[str]|None`，
     契约明确要求在候选截断（top_k）之前排除。`memory.py`/`milvus_lite.py` 两个实现同步
@@ -510,8 +517,7 @@
     后端（AstrBot `kb_reader` fallback、SQLite 词法/锚点路径）上的暴露——这两条路径
     目前仍不支持排除下推，本轮未处理，留给 W5 编排整合时一并解决或明确记录降级行为。
   - 全量 `pytest` 1021→1032 passed（新增 11 例），`ruff`/`mypy` 全绿。
-- [ ] **W5 两模式编排（🚧 部分完成：`verified` 语义修正已接入生产；多层动作/后端
-  trace/证据会话接线未做）**：
+- **W5 两模式编排（superseded；以下为当时的部分完成记录）**：
   - **修正 `enhanced_recall_orchestrator.py` 的 `verified` 语义**（已接入生产代码，
     与本计划文档「代码核查」表中明确指出的契约差异一一对应）：原逻辑「首轮自检不充分
     → 跑一轮纠偏检索+重合成 → 无论重合成是否给出新判定，一律硬编码 `verified=True`」，
@@ -619,7 +625,7 @@
     的既有修复不受本轮影响，原样保留。
   - **待用户决定、尚未实现**：怎么触发这个方法（聊天指令/独立脚本/其它），本轮尚未
     敲定，留待下一步。
-- [ ] **W7 集成与交接**：Phase 6 的入口接线、回归、用户验收准备。
+- **W7 集成与交接（superseded）**：当时计划的 Phase 6 入口接线、回归、用户验收准备；当前状态见 2026-09-12 执行记录。
 
 ### Known limitations（本轮有意不解决，不假装已解决）
 
@@ -1332,7 +1338,7 @@ creators 恒空 → Harvard 降级为 `Anon., n.d.`。用户这批独立附件�
 - `ruff check main.py tests/backend/test_main_shell_command_annotations.py` → All checks passed。
 - `mypy` → Success: no issues found in 3 source files。
 
-## 未发布：Codex 对话问答保存至指定 Notion QA 库 (🚧)
+## Codex 对话问答保存至指定 Notion QA 库 (completed；已纳入 v1.0.8)
 
 ### Technical implementation path
 
@@ -1385,7 +1391,7 @@ creators 恒空 → Harvard 降级为 `Anon., n.d.`。用户这批独立附件�
 - `python -m pytest -q` → 681 passed、1 个既有 reranker idle-unload 计时抖动失败；失败用例单独复跑 → 1 passed。
 - `python tools/build_published_tree.py --source WORKTREE --output dist/codex-skill-preview` → 494 files。
 
-## v1.0.7：Notion 进度条 · Strict 标签清理 · 修复 CI 前端校验 (🚧)
+## v1.0.7：Notion 进度条 · Strict 标签清理 · 修复 CI 前端校验 (completed)
 
 ### User constraints / 约束
 
@@ -1559,7 +1565,9 @@ creators 恒空 → Harvard 降级为 `Anon., n.d.`。用户这批独立附件�
 - `python tools/sync_frontend.py` 同步 359 文件，`--check` 一致；旧路径残留扫描、持久化标识
   核对与 `git diff --check` 均通过。
 
-## v1.0.3 发布生成器路径修复 (in progress)
+## v1.0.3 发布生成器路径修复 (superseded by v1.0.4)
+
+- 路径修复与布局测试已由 v1.0.4 完成；v1.0.3 专用发布步骤保留为历史，不作为当前发布任务。
 
 ### User constraints / 约束
 
@@ -1568,15 +1576,15 @@ creators 恒空 → Harvard 降级为 `Anon., n.d.`。用户这批独立附件�
 
 ### Technical implementation path
 
-- [ ] **Part A - 发布路径契约**：修正 `tools/build_published_tree.py` 在顶层包改名后残留的
-  `web/server.py`、`web/frontend/`、`core/main.py` 路径，并用测试锁定当前发布布局。
-- [ ] **Part B - 发布生成与校验**：从最终 developer commit 生成 v1.0.3 发布树和 ZIP，创建本地
+- [x] **Part A - 发布路径契约**：由 v1.0.4 修正 `tools/build_published_tree.py` 的路径常量为
+  `web/server.py`、`web/frontend/`、`kacore/main.py`，并用布局契约测试锁定。
+- **Part B - 发布生成与校验（superseded）**：原计划从最终 developer commit 生成 v1.0.3 发布树和 ZIP，创建本地
   `publish/v1.0.3` 提交并通过 published tree 校验。
-- [ ] **Part C - 远端发布**：获用户单独批准后 push developer 与 publish 分支，并创建到 main 的 PR。
+- **Part C - 远端发布（superseded）**：原计划获用户单独批准后 push developer 与 publish 分支，并创建到 main 的 PR；不声明已执行。
 
 ### Verification
 
-- 待执行：发布生成器定向测试、全量 pytest、ruff/mypy、发布树/ZIP 校验。
+- 路径修复验证见 v1.0.6 目录重命名条目与 CHANGELOG v1.0.4（77 项定向、610 passed / 1 skipped 全量及静态/发布布局检查）；不声明 v1.0.3 发布树或远端发布已完成。
 
 ## v1.0.3 内迭代：审查问题修复（运行数据、品牌残留、测试依赖检测） (completed)
 
@@ -3881,7 +3889,7 @@ creators 恒空 → Harvard 降级为 `Anon., n.d.`。用户这批独立附件�
 - `cd web/frontend && npm run lint && npm run build` → `0 errors, 8 existing warnings / 12 static pages generated`
 - `python tools/sync_frontend.py --check` → `pages/ 已与 web/frontend/out 一致`
 
-## v0.16.0 Official LightRAG Core replacement (in progress)
+## v0.16.0 Official LightRAG Core replacement (pending deployment verification)
 
 ### User constraints / 约束
 
@@ -3897,7 +3905,8 @@ creators 恒空 → Harvard 降级为 `Anon., n.d.`。用户这批独立附件�
 - [x] **Phase 4 — 可视化**：解析官方 `export_data()` CSV 为真实 nodes/edges；导出失败返回明确错误。
 - [x] **Phase 5 — 文档生命周期**：删除/移动固定调用 `adelete_by_doc_id`；独立 `lightrag_index_status` 跟踪 pending/indexed/error。
 - [x] **Frontend**：LightRAG 文案、成本确认、job 进度、answer/context、删除/移动影响提示、设置区。
-- [ ] **Deployment verification**：在 AstrBot 真实 LLM/Embedding 环境执行 `docs/LIGHTRAG_DEPLOYMENT_PROBE.md`，确认 `delete_stable=true`。
+- [ ] **Deployment verification**：在 AstrBot 真实 LLM/Embedding 环境通过 `POST /api/graph/probe`（`confirmed=true`）验收插入、查询、导出和删除，确认 `delete_stable=true`。
+- [ ] **Deployment guide**：恢复或重写部署探针操作说明；旧引用 `docs/LIGHTRAG_DEPLOYMENT_PROBE.md` 已不存在。
 - [x] **Static frontend export**：使用临时 Node.js 20 完成 Next.js build，并执行 `python tools/sync_frontend.py --force` 同步 `pages/`。
 
 ### Verification

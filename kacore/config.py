@@ -364,8 +364,10 @@ class ZoteroSyncConfig:
           仅 clean.md/pages.json 在插件内）/ zotmoov（PDF 留 ZotMoov 移动后的目录：
           `attachments:` 相对路径拼 zotmoov_root，绝对路径失效时按文件名索引兜底）。
           linked 模式须配 linked_root、zotmoov 模式须配 zotmoov_root，均经探针校验。
-        - sync_mode: strict_mirror（强制覆盖 + collection 增删 + Milvus rebuild + 禁用 LRAG）
-          / conservative（默认；删本地 doc 但 collection 只增不减 + 轻量 LRAG 重建）
+        - sync_mode: strict_mirror（强制覆盖 + 删除的文档硬删除 + collection 增删
+          + Milvus rebuild + 禁用 LRAG）
+          / conservative（默认；删除的文档标 detached 保留数据、仅移除 Milvus 索引，
+          collection 只增不减 + 轻量 LRAG 重建）
           / archive（只增不删，最不触发 rebuild）。
     cloud_api_key 仅经环境变量注入；本轮不走云端拉取。
     """

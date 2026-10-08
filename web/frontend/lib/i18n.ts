@@ -640,7 +640,7 @@ const zh = {
   flow_help_zotero_server_key: "请在 Zotero 官网创建个人库 API key，并授予 library/files 读取权限；明文只在保存请求中出现，后端加密存储。",
   flow_help_zotero_linked_storage: "linked 模式需要插件能访问原始 PDF 位置；移动 Zotero storage 或网络盘离线会导致附件清洗失败。",
   flow_help_zotero_zotmoov: "ZotMoov 插件把附件移出 Zotero storage 后，在此指定该目录（本插件进程可见的路径）。相对路径按此目录拼接；数据库里的宿主机绝对路径失效时按文件名在目录内递归匹配，重名无法定位的文件会跳过并计入同步错误。",
-  flow_help_zotero_sync_mode: "控制 Zotero 删除文档时的处理策略。\n• strict_mirror：强制覆盖；删除的文档标为 detached（保留 LightRAG 图索引，移除向量索引）并触发 Milvus 重建。\n• conservative（默认）：覆盖同步；删除的文档硬删除，集合只增不减，LightRAG 轻量标记待重建。\n• archive：只增不删；删除的文档保留并继续被向量检索召回，最少触发重建。",
+  flow_help_zotero_sync_mode: "控制 Zotero 删除文档时的处理策略。\n• strict_mirror：强制覆盖；删除的文档硬删除（文档记录、向量索引、LightRAG 全清）并触发 Milvus 重建。\n• conservative（默认）：覆盖同步；删除的文档标为 detached（保留数据与 LightRAG 图索引，仅移除向量索引），集合只增不减，LightRAG 轻量标记待重建。\n• archive：只增不删；删除的文档保留并继续被向量检索召回，最少触发重建。",
   // 依赖管理面板
   flow_deps_title: "依赖管理",
   flow_deps_desc: "Milvus Lite 是默认向量库的必装依赖；其余扩展按需安装。一键安装后需重启插件才会加载。",
@@ -1561,7 +1561,7 @@ const en: Record<keyof typeof zh, string> = {
   flow_help_zotero_server_key: "Create a personal-library API key on zotero.org with library/files read access. Plaintext is only sent when saving; the backend stores it encrypted.",
   flow_help_zotero_linked_storage: "Linked mode requires the plugin to access original PDF paths; moved storage or offline network drives will make attachment cleaning fail.",
   flow_help_zotero_zotmoov: "Point this at the folder where the ZotMoov plugin moved your attachments (a path visible to this plugin's process). Relative paths are joined onto it; when absolute host paths from the database do not exist, files are matched recursively by filename, and ambiguous duplicates are skipped and reported as sync errors.",
-  flow_help_zotero_sync_mode: "Controls how documents removed from Zotero are handled.\n• strict_mirror: Force override; removed docs become detached (graph kept, vectors removed) and trigger Milvus rebuild.\n• conservative (default): Normal sync; removed docs are hard-deleted; collections grow-only.\n• archive: Append-only; removed docs are preserved and remain searchable.",
+  flow_help_zotero_sync_mode: "Controls how documents removed from Zotero are handled.\n• strict_mirror: Force override; removed docs are hard-deleted (record, vectors and graph all cleared) and trigger Milvus rebuild.\n• conservative (default): Normal sync; removed docs become detached (data and graph kept, vectors removed); collections grow-only.\n• archive: Append-only; removed docs are preserved and remain searchable.",
   // Dependency panel
   flow_deps_title: "Dependency management",
   flow_deps_desc: "Milvus Lite is required for the default vector store; other extensions are optional. Restart the plugin after one-click install.",

@@ -1,5 +1,30 @@
 # CHANGELOG
 
+## [v1.2.0-preview-6] — 2026-10-08
+
+### ⚠️ 破坏性变更 (Breaking)
+
+- **Zotero `sync_mode`：`strict_mirror` 与 `conservative` 对已删文档的处理对调**。
+  此前名称与行为相反（严格镜像只标 detached，保守同步反而硬删除）。现为：
+  | 模式 | Zotero 已删文档的处理 |
+  | --- | --- |
+  | `strict_mirror` | 硬删除（文档记录、Milvus、LightRAG 全清），并触发 Milvus rebuild |
+  | `conservative`（默认） | 标 `detached`（保留文档记录/制品包/LightRAG，仅移除 Milvus 索引） |
+  | `archive` | 不变（只增不删） |
+  **升级影响**：原 `strict_mirror` 用户由软删除变为硬删除；原 `conservative`（默认）用户
+  由硬删除变为软删除，此后 Zotero 删除的文档会留在库里为 detached，需手动清理或切到
+  `strict_mirror`。旧版遗留的 detached 文档在 `strict_mirror` 下下一次同步会被硬删；
+  已被旧默认模式硬删的文档不会恢复。Notion 的 strict 清理依赖 detached 状态，
+  conservative 现在会产生 detached 文档，故其清理范围随之变化。
+- 改动：`kacore/pipelines/zotero_sync_pipeline.py` 的 `_apply_removals` 交换两分支，
+  `needs_milvus_rebuild` 触发条件由 `detached_document_ids` 改为 `removed_document_ids`；
+  模块 docstring，`config.py` / `domain/models.py` / `api.py` / `migrations/012_document_lifecycle.sql`
+  注释，前端 `i18n.ts` 的 `flow_help_zotero_sync_mode` 说明同步对调，重新构建并同步 `pages/`。
+  strict 仍禁用 LightRAG 标记（未改）。
+- 测试：`tests/backend/test_zotero_sync.py` 重写 strict/conservative 删除用例并新增
+  旧 detached 在 strict 下被清理的迁移用例。全量 1289 passed / 2 skipped / 3 failed（沿用既有三项）。
+- 版本：`metadata.yaml` / `main.py` / `README.md` 递进为 v1.2.0-preview-6。
+
 ## [v1.2.0-preview-5] — 2026-10-08
 
 ### 修复 (Fixed)

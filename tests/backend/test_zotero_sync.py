@@ -1,7 +1,7 @@
 """Zotero 单向 Pull 集成测试：合成 zotero.sqlite → reader → pipeline（三种 sync_mode）。
 
 构造最小 Zotero schema 子集 + storage/<key>/paper.pdf，验证：
-镜像表、制品包生成、incremental 跳过、conservative 硬删除、strict 脱管(detached)、archive 只增不删、
+镜像表、制品包生成、incremental 跳过、conservative 脱管(detached)、strict 硬删除、archive 只增不删、
 linked 存储模式（原件留外部）、zotmoov 存储模式（ZotMoov 目录解析 + 文件名索引兜底）。
 """
 from __future__ import annotations
@@ -373,40 +373,84 @@ async def test_pull_derives_unified_tree_and_membership(tmp_path: Path) -> None:
     assert [d.doc_id for d in listed] == [DOC_ID]
 
 
-async def test_pull_conservative_deletes_removed(tmp_path: Path) -> None:
-    data_dir = tmp_path / "Zotero"
-    data_dir.mkdir()
-    _build_zotero_db(data_dir)
-    store, pipeline, _, removed = _pipeline(tmp_path, data_dir, "conservative")
-    await pipeline.pull()
-    assert await store.get_document(DOC_ID) is not None
-
-    # 模拟 Zotero 删除附件：重建无附件的 DB
-    (data_dir / "zotero.sqlite").unlink()
-    _build_zotero_db(data_dir, with_attachment=False)
-    result = await pipeline.pull()
-    assert result.removed_document_ids == [DOC_ID]
-    assert await store.get_document(DOC_ID) is None
-    assert removed == [DOC_ID]
-
-
-# ── pipeline: strict (detached) ──────────────────────────────────
-
-
-async def test_pull_strict_detaches_removed_and_reattaches(tmp_path: Path) -> None:
+async def test_pull_strict_hard_deletes_removed(tmp_path: Path) -> None:
     data_dir = tmp_path / "Zotero"
     data_dir.mkdir()
     _build_zotero_db(data_dir)
     store, pipeline, _, removed = _pipeline(tmp_path, data_dir, "strict_mirror")
+    cleaned: list[str] = []
+
+    async def lightrag_cleanup(doc_id: str, collection: str) -> None:
+        cleaned.append(doc_id)
+
+    pipeline._lightrag_cleanup = lightrag_cleanup
     result1 = await pipeline.pull()
     assert result1.needs_milvus_rebuild is True
+    assert await store.get_document(DOC_ID) is not None
 
-    # Zotero 删除附件 → strict 应脱管（detached），不删除文档、不动 LRAG
+    # 模拟 Zotero 删除附件：重建无附件的 DB → strict 硬删除（文档记录 + Milvus + LRAG）
+    (data_dir / "zotero.sqlite").unlink()
+    _build_zotero_db(data_dir, with_attachment=False)
+    result2 = await pipeline.pull()
+    assert result2.removed_document_ids == [DOC_ID]
+    assert result2.detached_document_ids == []
+    assert result2.needs_milvus_rebuild is True
+    assert await store.get_document(DOC_ID) is None
+    assert removed == [DOC_ID]
+    assert cleaned == [DOC_ID]
+
+
+async def test_pull_strict_cleans_legacy_detached(tmp_path: Path) -> None:
+    """旧版 strict 遗留的 detached 文档，在新 strict 下 Zotero 侧仍缺失时被一并硬删。"""
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    _build_zotero_db(data_dir)
+    store, pipeline, _, _ = _pipeline(tmp_path, data_dir, "conservative")
+    await pipeline.pull()
+    (data_dir / "zotero.sqlite").unlink()
+    _build_zotero_db(data_dir, with_attachment=False)
+    await pipeline.pull()
+    doc = await store.get_document(DOC_ID)
+    assert doc is not None and doc.lifecycle_state is DocumentLifecycle.DETACHED
+
+    pipeline._config = Config({
+        "zotero_sync": {
+            "enabled": True,
+            "zotero_data_dir": str(data_dir),
+            "sync_mode": "strict_mirror",
+        }
+    })
+    result = await pipeline.pull()
+    assert result.removed_document_ids == [DOC_ID]
+    assert await store.get_document(DOC_ID) is None
+
+
+# ── pipeline: conservative (detached) ────────────────────────────
+
+
+async def test_pull_conservative_detaches_removed_and_reattaches(tmp_path: Path) -> None:
+    data_dir = tmp_path / "Zotero"
+    data_dir.mkdir()
+    _build_zotero_db(data_dir)
+    store, pipeline, _, removed = _pipeline(tmp_path, data_dir, "conservative")
+    cleaned: list[str] = []
+
+    async def lightrag_cleanup(doc_id: str, collection: str) -> None:
+        cleaned.append(doc_id)
+
+    pipeline._lightrag_cleanup = lightrag_cleanup
+    result1 = await pipeline.pull()
+    assert result1.needs_milvus_rebuild is False
+
+    # Zotero 删除附件 → conservative 脱管（detached），不删文档、不动 LRAG，仅移除 Milvus
     (data_dir / "zotero.sqlite").unlink()
     _build_zotero_db(data_dir, with_attachment=False)
     result2 = await pipeline.pull()
     assert result2.detached_document_ids == [DOC_ID]
+    assert result2.removed_document_ids == []
+    assert result2.needs_milvus_rebuild is False
     assert DOC_ID in removed  # Milvus 移除
+    assert cleaned == []  # LRAG 保留
     doc = await store.get_document(DOC_ID)
     assert doc is not None and doc.lifecycle_state is DocumentLifecycle.DETACHED
 

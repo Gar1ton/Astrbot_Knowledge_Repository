@@ -5467,7 +5467,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
 
     @serialized_processing
     async def _remove_document_index(self, doc_id: str) -> None:
-        """从 Milvus 移除某文档的全部 chunk（strict 脱管 / conservative 删除时调用）。"""
+        """从 Milvus 移除某文档的全部 chunk（conservative 脱管 / strict 删除时调用）。"""
         if not self._vector_store:
             return
         try:
@@ -5479,7 +5479,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             logger.warning("Zotero remove index failed for %s: %s", doc_id, exc)
 
     async def _lightrag_cleanup(self, doc_id: str, collection: str) -> None:
-        """删除某文档在 LightRAG workspace 的贡献（conservative 硬删除时调用）。"""
+        """删除某文档在 LightRAG workspace 的贡献（strict 硬删除时调用）。"""
         if self._lightrag_registry is None:
             return
         try:

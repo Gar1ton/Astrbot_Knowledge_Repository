@@ -1,5 +1,17 @@
 # TODO
 
+## v1.2.0-preview-6 Zotero sync_mode 删除语义对调（completed，Breaking）
+
+- 现象：`strict_mirror` 对已删文档只标 detached，`conservative` 反而硬删除，与名称相反。
+- 目标：对调二者；`archive` 不变。strict 仍禁用 LRAG 标记（不属本次范围）。
+- [x] Phase 1：先改测试（conservative→detached+reattach；strict→硬删；旧 detached 在 strict 下被清理）。
+- [x] Phase 2：`zotero_sync_pipeline.py` 的 `_apply_removals` 与 `needs_milvus_rebuild` 条件、
+  docstring；`config.py` / `models.py` / `api.py` / `012_document_lifecycle.sql` 注释对调。
+- [x] Phase 3：`i18n.ts` 帮助文案对调；`npm run build` + `sync_frontend.py` 同步 pages。
+- [x] Phase 4：版本递进到 preview-6（metadata/main）、CHANGELOG 标注 Breaking；全量测试与 ruff/mypy。
+
+- 验证：全量 1289 passed / 2 skipped / 3 failed（沿用既有三项）；mypy 通过；ruff 无新增。
+
 ## v1.2.0-preview-5 Zotero 回收站集合同步清理（completed）
 
 - 现象：Zotero 7 删除（进回收站）的集合在重新同步后仍留在插件集合树。

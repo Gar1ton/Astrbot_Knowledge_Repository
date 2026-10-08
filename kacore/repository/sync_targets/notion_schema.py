@@ -17,7 +17,7 @@ import hashlib
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from kacore.domain.models import Collection, DocumentChunk, SourceDocument
+    from kacore.domain.models import Collection, SourceDocument
 
 # ── 属性名常量（schema 与页面载荷共用，降级逻辑按名剔除）─────────
 
@@ -288,48 +288,6 @@ def text_to_paragraph_blocks(
     return blocks
 
 
-def chunk_preview_blocks(chunks: list[DocumentChunk]) -> list[dict[str, Any]]:
-    """文章页正文：可折叠 toggle + 前 3 个切片子段落（每块截断 1000 字符）。"""
-    children: list[dict[str, Any]] = []
-    for chunk in chunks[:3]:
-        text = chunk.text
-        if len(text) > 1000:
-            text = text[:1000] + "..."
-        children.append(paragraph_block(f"[Chunk #{chunk.ordinal}] {text}"))
-
-    toggle: dict[str, Any] = {
-        "rich_text": [
-            {"type": "text", "text": {"content": "本地切片摘要 (Chunks Preview)"}}
-        ]
-    }
-    if children:
-        toggle["children"] = children
-    return [{"object": "block", "type": "toggle", "toggle": toggle}]
-
-
-def large_file_callout_block() -> dict[str, Any]:
-    """>5MiB 大文件的提示块（不做二进制镜像）。"""
-    return {
-        "object": "block",
-        "type": "callout",
-        "callout": {
-            "rich_text": [
-                {
-                    "type": "text",
-                    "text": {
-                        "content": (
-                            "⚠️ [Notion 免费版限制] 该文件大小超过 5MiB，"
-                            "已跳过文件二进制镜像。您可以去本地原件中查看。"
-                        )
-                    },
-                }
-            ],
-            "icon": {"emoji": "⚠️"},
-            "color": "yellow_background",
-        },
-    }
-
-
 __all__ = [
     "PROP_NAME",
     "PROP_DOC_ID",
@@ -360,7 +318,5 @@ __all__ = [
     "qa_db_properties",
     "qa_page_properties",
     "text_to_paragraph_blocks",
-    "chunk_preview_blocks",
-    "large_file_callout_block",
     "paragraph_block",
 ]

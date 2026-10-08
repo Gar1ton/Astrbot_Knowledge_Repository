@@ -8,10 +8,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
 from kacore.repository.embedding.base import EmbeddingProvider
+from kacore.repository.embedding.validation import (
+    EmbeddingValidationError,
+    parse_openai_vectors,
+)
 
 logger = logging.getLogger("ExternalEmbeddingProvider")
 
@@ -28,8 +33,16 @@ class _NonRetryableEmbeddingError(RuntimeError):
     """请求本身有问题（4xx/契约不符），重试无意义，直接失败。"""
 
 
+class _RetryableEmbeddingError(RuntimeError):
+    """仅承载本地构造的 HTTP 状态诊断，可在有限重试后安全展示。"""
+
+
 class ExternalEmbeddingProvider(EmbeddingProvider):
-    """基于云端大模型 API（如 OpenAI, 阿里 DashScope）的 Embedding 适配器。"""
+    """OpenAI 文本 embedding 适配；首个有效批次锁定维度，漂移时拒绝返回向量。
+
+    多模态模型可通过其文本入口使用；本接口不把图片编码字符串视作图片输入。
+    请求端点归一化不改变配置、缓存 namespace 或索引身份。
+    """
 
     def __init__(
         self,
@@ -37,13 +50,11 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
         model_name: str = "text-embedding-3-large",
     ) -> None:
         self._api_key = os.environ.get(ENV_EMBEDDING_API_KEY) or ""
-        self._base_url = base_url
         self._model_name = model_name
 
-        # 剥离可能多余的 /embeddings 或 /v1 路径
-        self._base_url = self._base_url.rstrip("/")
-        
-        # 维度识别（动态更新覆盖）
+        self._endpoint = self._embedding_endpoint(base_url)
+        self._observed_dimension: int | None = None
+        # 映射只供探针前展示；真实维度由首个有效批次确认。
         self._dimension_mapping = {
             "text-embedding-3-small": 1536,
             "text-embedding-3-large": 3072,
@@ -59,6 +70,25 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
         }
         self._dimension = self._dimension_mapping.get(self._model_name, 1536)
 
+    @staticmethod
+    def _embedding_endpoint(base_url: str) -> str:
+        """保留版本/代理前缀；完整端点不重复追加，查询参数留在路径之后。"""
+        try:
+            parts = urlsplit(base_url)
+        except ValueError:
+            raise ValueError("Embedding Base URL 无效") from None
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            raise ValueError("Embedding Base URL 必须是 HTTP(S) 地址")
+        path = parts.path.rstrip("/")
+        if not path.endswith("/embeddings"):
+            path += "/embeddings"
+        return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+
+    @property
+    def dimension_verified(self) -> bool:
+        """缓存读取前是否已有实测维度；模型映射只是启动前的估计。"""
+        return self._observed_dimension is not None
+
     async def embed_query(self, text: str) -> list[float]:
         res = await self.embed_documents([text])
         return res[0] if res else []
@@ -67,68 +97,74 @@ class ExternalEmbeddingProvider(EmbeddingProvider):
         if not texts:
             return []
 
-        url = f"{self._base_url}/embeddings"
+        payload = {
+            "input": texts,
+            "model": self._model_name,
+            "encoding_format": "float",
+        }
+
+        # 保留既有 text-embedding-3 维度请求行为，不改变已建索引的向量空间。
+        if "text-embedding-3" in self._model_name:
+            payload["dimensions"] = self._dimension
+        return await self._request_vectors(payload, len(texts))
+
+    async def _request_vectors(self, payload: dict, count: int) -> list[list[float]]:
+        """统一网络超时与有界重试；响应契约错误不重试。"""
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
-            "input": texts,
-            "model": self._model_name,
-        }
-
-        # 阿里 DashScope 或其他兼容接口的特殊微调支持可以在此注入
-        # 针对 text-embedding-3 系列，OpenAI 支持维度压缩
-        if "text-embedding-3" in self._model_name:
-            payload["dimensions"] = self._dimension
-
         attempts = _MAX_RETRIES + 1
-        last_exc: Exception | None = None
+        last_error = "请求失败"
         for attempt in range(1, attempts + 1):
             try:
                 async with aiohttp.ClientSession(timeout=_REQUEST_TIMEOUT) as session:
-                    async with session.post(url, headers=headers, json=payload) as resp:
+                    async with session.post(self._endpoint, headers=headers, json=payload) as resp:
                         if resp.status != 200:
                             logger.error(f"Embedding API failed with status {resp.status}")
                             msg = f"Embedding API 响应异常，HTTP {resp.status}"
                             # 4xx 是请求本身的问题，重试无意义；5xx/网络错误才重试。
                             if resp.status < 500:
                                 raise _NonRetryableEmbeddingError(msg)
-                            raise RuntimeError(msg)
+                            raise _RetryableEmbeddingError(msg)
 
-                        data = await resp.json()
-
-                        # 按照 standard OpenAI 契约解析
-                        embeddings_data = data.get("data", [])
-                        # 确保按 input 数组顺序排列 (使用 index 属性)
-                        embeddings_data.sort(key=lambda x: x.get("index", 0))
-
-                        result = [item.get("embedding") for item in embeddings_data]
-                        if not result:
+                        try:
+                            data = await resp.json()
+                        except (ValueError, aiohttp.ContentTypeError):
                             raise _NonRetryableEmbeddingError(
-                                f"Embedding API 未能返回有效向量：{data}"
-                            )
-
-                        # 动态覆写真实维度
-                        if result and result[0]:
-                            self._dimension = len(result[0])
-
-                        return result
+                                "Embedding API 未返回有效 JSON"
+                            ) from None
+                        return self._validate_response(data, count)
             except _NonRetryableEmbeddingError as e:
                 logger.error("External embedding request failed: %s", e)
-                raise RuntimeError(f"Embedding 接口通信错误: {e}") from e
+                raise RuntimeError(f"Embedding 接口通信错误: {e}") from None
             except Exception as e:
-                last_exc = e
+                # 网络异常可能带出含凭据 URL，日志和异常均只保留错误类别。
+                last_error = str(e) if isinstance(e, _RetryableEmbeddingError) else type(e).__name__
                 logger.warning(
-                    "External embedding attempt %d/%d failed: %s: %s",
+                    "External embedding attempt %d/%d failed: %s",
                     attempt,
                     attempts,
                     type(e).__name__,
-                    e,
                 )
                 if attempt < attempts:
                     await asyncio.sleep(_RETRY_BACKOFF_SECONDS * attempt)
-        raise RuntimeError(f"Embedding 接口通信错误: {last_exc}") from last_exc
+        raise RuntimeError(f"Embedding 接口通信错误: {last_error}") from None
+
+    def _validate_response(self, data: object, count: int) -> list[list[float]]:
+        """完整批次通过后才更新维度；一次坏响应不能改变 provider 的已确认身份。"""
+        try:
+            result = parse_openai_vectors(data, count)
+        except EmbeddingValidationError as exc:
+            raise _NonRetryableEmbeddingError(str(exc)) from None
+        dimension = len(result[0])
+        if self._observed_dimension is not None and dimension != self._observed_dimension:
+            raise _NonRetryableEmbeddingError(
+                f"Embedding 维度漂移：已锁定 {self._observed_dimension}，实际为 {dimension}；"
+                "检查模型配置并重启插件，沿现有索引兼容检查决定是否重建"
+            )
+        self._observed_dimension = self._dimension = dimension
+        return result
 
     def get_dimension(self) -> int:
         return self._dimension

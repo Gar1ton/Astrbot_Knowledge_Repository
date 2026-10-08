@@ -1,7 +1,7 @@
 """AstrBot 默认知识库读取的生产仓储实现。
 
 复用 AstrBot 自带的 KB（FAISS+FTS5+RRF）只读检索，
-不重造向量计算，通过 adapters/astrbot_kb.py 做翻译。
+不重造向量计算；在本适配器内将宿主检索结果翻译为 domain 分块。
 """
 from __future__ import annotations
 

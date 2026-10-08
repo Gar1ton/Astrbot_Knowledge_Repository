@@ -3887,11 +3887,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         """临时创建一个 ExternalEmbeddingProvider 并发送测试请求，验证云端 API 可连通性。"""
         from kacore.repository.embedding.external import ExternalEmbeddingProvider
 
-        provider = ExternalEmbeddingProvider(
-            base_url=base_url,
-            model_name=model_name,
-        )
+        if not isinstance(base_url, str) or not isinstance(model_name, str) or not model_name.strip():
+            return {"status": "error", "message": "Embedding 测试需要有效的地址和模型名"}
         try:
+            provider = ExternalEmbeddingProvider(base_url=base_url, model_name=model_name)
             vec = await provider.embed_query("ping")
             return {"status": "ok", "dimension": len(vec), "model": model_name}
         except Exception as exc:

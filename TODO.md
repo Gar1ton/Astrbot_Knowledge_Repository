@@ -1,5 +1,26 @@
 # TODO
 
+## 2026-10-07 OpenAI 文本 embedding 与旧库兼容优化（🚧 in progress）
+
+- 用户已批准收敛计划：只实施文本协议、缓存、连接探针与旧库兼容保护；不新增图片功能。
+- [ ] Phase 1：统一 base URL / 完整端点拼接；严格校验响应、顺序和实测维度，错误脱敏。
+- [ ] Phase 2：修复缓存冷启动维度与损坏记录，保持历史 namespace / fingerprint / SQLite schema。
+- [ ] Phase 3：连接探针共用生产适配；清理确认无调用的 Notion 预览和 AstrBot chunk 翻译。
+- [ ] Phase 4：协议、缓存、已有数据库/索引回归与本地 distributor 文本实测；更新交付文档与 CHANGELOG。
+- 不更改 clean.md、chunk ID、CHUNK_SCHEMA、文字处理版本，不自动删库或重建兼容索引。
+- 验证环境：已通过现有 Windows Docker CLI 接通 tooling/dev，镜像构建成功，但容器创建失败：
+  Docker Desktop 缺少 WSL distro mount socket（ubuntu-24-04.sock）。git diff --check 通过；
+  pytest/ruff/mypy 与修改后总机实测尚未执行。等待恢复 WSL 集成或明确授权宿主 .venv 验证，
+  代码已修改的项目仍不勾完成。
+
+## PDF / VL 图片补充机制研究（pending，未实施）
+
+- [ ] 研究位图、矢量图表、扫描页检测与裁剪/整页渲染；独立占位关联正文，不改文字偏移。
+- [ ] 研究图片表/旁路仓储、稳定 ID、修订、相对路径、去重、删除与备份恢复；增量迁移须兼容旧库。
+- [ ] 研究 VL 描述转文本 embedding 与原生图片 embedding 的协议、成本与增量兼容策略。
+- [ ] 存储/处理机制确定后，再设计文章级“补 VL 数据”按钮、任务取消续跑和检索开关。
+- 本轮不加图片表、图片制品、占位写入、按钮、后台任务或图片检索接口。
+
 ## v1.2.0-preview-3 版本递进与提交准备（completed）
 
 - [x] 将 metadata.yaml、main.py 与 README 版本统一为 v1.2.0-preview-3。

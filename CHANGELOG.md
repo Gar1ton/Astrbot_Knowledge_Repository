@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### 修复 (Fixed)
+
+- **OpenAI 文本 embedding 与旧缓存兼容**：`repository/embedding/external.py` 支持 API base
+  与完整 `/embeddings` 端点，保留代理前缀；请求浮点响应，严格检查数量/index/有限数值，
+  首个有效批次锁定维度，后续漂移拒绝返回。错误不包含请求、完整响应或网络异常中的凭据。
+- **缓存冷启动与损坏记录**：`repository/embedding/cached.py` 在 external 实测维度就绪后
+  读缓存，损坏记录按 miss，整批校验后事务写入；维度/身份变化不混入旧命中。新增共用
+  `validation.py`，保留缓存表结构、历史 namespace/hash 和既有索引指纹。
+- **连接探针**：`api.py` 继续共用生产适配，非法地址/模型与响应返回结构化错误。
+
+### 改进 (Changed)
+
+- 清理无调用的旧 Notion 正文预览/大文件提示生成器及 `adapters/astrbot_kb.py`；
+  修正 KB reader 说明，保留旧摘要识别、QA 正文及现有事务/迁移接口。
+- 新增协议/缓存及已有数据库/索引接线回归用例，更新收敛计划与交接文档。
+  PDF 图片摄入、图片表/制品、VL 任务/按钮/检索仅登记研究 TODO，本轮不实现。
+- **验收待完成**：git diff --check 通过；tooling/dev 镜像构建成功，但 Docker Desktop
+  缺少 WSL 挂载 socket，容器创建失败。pytest/ruff/mypy 和修改后真实服务联调尚未运行，
+  TODO 实施项不勾完成；等待环境恢复或用户授权宿主验证。不操作运行知识库与 Git 远端。
+
 ## [v1.2.0-preview-3] — 2026-10-07
 
 ### 修复 (Fixed)

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -12,12 +13,13 @@ import os
 import aiosqlite
 
 from kacore.repository.embedding.base import EmbeddingProvider
+from kacore.repository.embedding.validation import validate_vectors
 
 logger = logging.getLogger("CachedEmbeddingProvider")
 
 
 class CachedEmbeddingProvider(EmbeddingProvider):
-    """具有本地 SQLite 缓存机制 of Embedding 计算装饰器。"""
+    """保留历史 key/schema 的 SQLite 缓存；实测维度就绪后读取，整批校验后写入。"""
 
     def __init__(
         self,
@@ -29,6 +31,7 @@ class CachedEmbeddingProvider(EmbeddingProvider):
         self._db_path = db_path
         self._namespace = namespace
         self._initialized = False
+        self._batch_lock = asyncio.Lock()
 
     async def _lazy_init_db(self) -> None:
         """异步延迟初始化缓存数据库及表。"""
@@ -50,7 +53,7 @@ class CachedEmbeddingProvider(EmbeddingProvider):
                 """
             )
             await db.commit()
-            
+
         self._initialized = True
         logger.info(f"Initialized SQLite embedding cache at {self._db_path}")
 
@@ -89,72 +92,85 @@ class CachedEmbeddingProvider(EmbeddingProvider):
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
+        # 串行化同一装饰器的初始化/批次合并，避免冷启动和身份更新交叉写入。
+        async with self._batch_lock:
+            await self._ensure_dimension(texts[0])
+            await self._lazy_init_db()
+            return await self._embed_cached(texts)
 
-        await self._lazy_init_db()
-        
-        namespace = self._current_namespace()
-        hashes = [self._hash(namespace, t) for t in texts]
-        results: list[list[float] | None] = [None] * len(texts)
-        missing_indices: list[int] = []
-        missing_texts: list[str] = []
+    async def _ensure_dimension(self, probe_text: str) -> None:
+        """external 的映射维度未经验证；astr 未声明维度时也先走真实探针。"""
+        verified = getattr(self._inner, "dimension_verified", True)
+        try:
+            dimension = self._inner.get_dimension()
+        except RuntimeError:
+            dimension = 0
+        if not verified or dimension <= 0:
+            vector = await self._inner.embed_query(probe_text)
+            validate_vectors([vector], 1, self._inner.get_dimension())
 
-        # 1. 批量查询缓存
+    async def _read_cache(self, hashes: list[str], dimension: int) -> dict[str, list[float]]:
+        """损坏/过期记录按 miss 处理，不让单条坏缓存阻断整批。"""
+        hits: dict[str, list[float]] = {}
         async with aiosqlite.connect(self._db_path) as db:
-            placeholders = ",".join("?" for _ in hashes)
-            sql = (
-                f"SELECT content_hash, vector FROM embedding_cache "
-                f"WHERE content_hash IN ({placeholders})"
-            )
-            async with db.execute(sql, hashes) as cursor:
-                cache_hits = {}
-                async for row in cursor:
-                    cache_hits[row[0]] = json.loads(row[1])
-
-        expected_dim = self._inner.get_dimension()
-
-        # 2. 分拣命中与缺失
-        for i, h in enumerate(hashes):
-            cached = cache_hits.get(h)
-            if cached is not None and len(cached) == expected_dim:
-                results[i] = cached
-            else:
-                missing_indices.append(i)
-                missing_texts.append(texts[i])
-
-        # 3. 对缺失片段批量调用真实底层计算，并回填入缓存
-        if missing_texts:
-            logger.info(f"Embedding cache miss. Calculating {len(missing_texts)} new texts...")
-            calculated = await self._inner.embed_documents(missing_texts)
-            if len(calculated) != len(missing_texts):
-                raise ValueError(
-                    f"Embedding batch mismatch: expected {len(missing_texts)} vectors, "
-                    f"got {len(calculated)}."
+            # 保持旧表结构；分批读取兼容 SQLite 的参数数量上限。
+            for start in range(0, len(hashes), 900):
+                batch = hashes[start:start + 900]
+                placeholders = ",".join("?" for _ in batch)
+                sql = (
+                    "SELECT content_hash, vector FROM embedding_cache "
+                    f"WHERE content_hash IN ({placeholders})"
                 )
-            for vector in calculated:
-                if len(vector) != expected_dim:
-                    raise ValueError(
-                        f"Embedding dimension mismatch: expected {expected_dim}, "
-                        f"got {len(vector)}."
-                    )
-            
-            async with aiosqlite.connect(self._db_path) as db:
-                for idx, text_idx in enumerate(missing_indices):
-                    vector = calculated[idx]
-                    results[text_idx] = vector
-                    
-                    # 异步写入缓存（幂等 upsert）
-                    sql_upsert = (
-                        "INSERT OR REPLACE INTO embedding_cache "
-                        "(content_hash, vector) VALUES (?, ?)"
-                    )
-                    await db.execute(
-                        sql_upsert,
-                        (hashes[text_idx], json.dumps(vector))
-                    )
-                await db.commit()
+                async with db.execute(sql, batch) as cursor:
+                    async for key, encoded in cursor:
+                        try:
+                            vector = json.loads(encoded)
+                            hits[key] = validate_vectors([vector], 1, dimension)[0]
+                        except (TypeError, ValueError):
+                            continue
+        return hits
 
-        # 4. 返回完整归并结果
-        return [r for r in results if r is not None]
+    async def _embed_cached(self, texts: list[str]) -> list[list[float]]:
+        namespace = self._current_namespace()
+        dimension = self._inner.get_dimension()
+        hashes = [self._hash(namespace, text) for text in texts]
+        hits = await self._read_cache(hashes, dimension)
+        missing = [index for index, key in enumerate(hashes) if key not in hits]
+        if not missing:
+            return [hits[key] for key in hashes]
+
+        logger.info("Embedding cache miss: %d texts", len(missing))
+        calculated = await self._inner.embed_documents([texts[index] for index in missing])
+        current_dim = self._inner.get_dimension()
+        calculated = validate_vectors(calculated, len(missing), current_dim)
+        current_namespace = self._current_namespace()
+        if current_dim != dimension or current_namespace != namespace:
+            # 本地模型可能在第一次 encode 后修正估计；旧命中不能混入新身份的批次。
+            if hits:
+                calculated = await self._inner.embed_documents(texts)
+                missing = list(range(len(texts)))
+                current_dim = self._inner.get_dimension()
+                calculated = validate_vectors(calculated, len(texts), current_dim)
+            hashes = [self._hash(self._current_namespace(), text) for text in texts]
+            hits = {}
+
+        resolved = {hashes[index]: vector for index, vector in zip(missing, calculated)}
+        # 按位置合并，重复文本也保持数量；整个批次通过后才持久化。
+        fresh = dict(zip(missing, calculated))
+        result = [fresh[index] if index in fresh else hits[key]
+                  for index, key in enumerate(hashes)]
+        validate_vectors(result, len(texts), current_dim)
+        await self._write_cache(resolved)
+        return result
+
+    async def _write_cache(self, vectors: dict[str, list[float]]) -> None:
+        """单事务回填，网络/校验失败时不修改任何缓存记录。"""
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.executemany(
+                "INSERT OR REPLACE INTO embedding_cache (content_hash, vector) VALUES (?, ?)",
+                [(key, json.dumps(vector, allow_nan=False)) for key, vector in vectors.items()],
+            )
+            await db.commit()
 
     def unload(self) -> None:
         """透传卸载给被包装的 provider。

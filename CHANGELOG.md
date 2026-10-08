@@ -1,8 +1,16 @@
 # CHANGELOG
 
-## [Unreleased]
+## [v1.2.0-preview-5] — 2026-10-08
 
 ### 修复 (Fixed)
+
+- **Zotero 回收站集合未被清理**：Web API 仍返回 `data.deleted` 的集合，本地库有
+  `deletedCollections` 表，二者此前都被当作存在的集合镜入，导致 pipeline 的陈旧集合清理
+  永远不触发。`kacore/adapters/zotero/web_api.py` 的 `_collections` 与
+  `sqlite_reader.py` 的 `read_snapshot` 现剔除被删集合及其全部子孙（子集合可能不带删除
+  标记），并从 `collection_items` 去掉指向它们的归属对；本地读取先用 `sqlite_master`
+  判断表是否存在，兼容 Zotero 7 之前的库。新增 `tests/backend/test_zotero_deleted_collections.py`
+  3 项回归。全量 1288 passed / 2 skipped / 3 failed（沿用既有三项失败）。
 
 - **Milvus 依赖重导入后遗留服务**：新增 `repository/vector_store/milvus_service.py`，
   开库时保留实际服务管理器，先取得其服务 URI 再构造 RPC 客户端；`milvus_lite.py`

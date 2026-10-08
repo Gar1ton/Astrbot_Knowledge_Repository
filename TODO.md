@@ -1,5 +1,20 @@
 # TODO
 
+## v1.2.0-preview-5 Zotero 回收站集合同步清理（completed）
+
+- 现象：Zotero 7 删除（进回收站）的集合在重新同步后仍留在插件集合树。
+- [x] Phase 1：`web_api.py` 的 `_collections` 跳过 `data.deleted` 集合并迭代剔除子孙；
+  `sqlite_reader.py` 读取 `deletedCollections`（先查 `sqlite_master`，兼容 Zotero 7 之前）。
+  共用 `excluded_collection_keys` 放在 sqlite_reader，web_api 已依赖该模块。
+- [x] Phase 2：同步从两个 reader 的 `collection_items` 剔除指向已删集合的归属对，
+  否则多归属 `document_collections` 仍会悬空指向已删集合。
+- [x] Phase 3：新增 `tests/backend/test_zotero_deleted_collections.py`（3 项，修复前 2 项失败）。
+- 全量 1288 passed / 2 skipped / 3 failed（沿用既有三项：两项缺 torch 的 embedding 用例与
+  `bad19`）；ruff、mypy 通过。不改 pipeline：既有「不在快照里的 zotero 集合」清理逻辑
+  在下次 pull 时自然移除陈旧集合。
+- 待确认（非本次结论）：云端 107 个 PDF 附件仅入库 106 篇，差额应在
+  `ZoteroSyncResult.errors` 中查看。
+
 ## 2026-10-08 重装后 Milvus 持锁与 Notion 404 诊断（completed）
 
 - 用户授权检查 Windows runtime，发现的问题统一修 developer；仅只读检查运行库与日志。

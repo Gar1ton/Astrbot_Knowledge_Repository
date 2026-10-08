@@ -3887,7 +3887,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         """临时创建一个 ExternalEmbeddingProvider 并发送测试请求，验证云端 API 可连通性。"""
         from kacore.repository.embedding.external import ExternalEmbeddingProvider
 
-        if not isinstance(base_url, str) or not isinstance(model_name, str) or not model_name.strip():
+        if (
+            not isinstance(base_url, str)
+            or not isinstance(model_name, str)
+            or not model_name.strip()
+        ):
             return {"status": "error", "message": "Embedding 测试需要有效的地址和模型名"}
         try:
             provider = ExternalEmbeddingProvider(base_url=base_url, model_name=model_name)
@@ -4341,7 +4345,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
 
     async def cancel_build_tasks(self) -> None:
-        """取消所有进行中的构建任务并等待其完成（teardown 时调用）。"""
+        """取消图谱与 Milvus 构建并等待收尾；调用方先停止创建任务的调度器。"""
+        if self._milvus_build_task is not None:
+            self._milvus_build_task.cancel()
+            await asyncio.gather(self._milvus_build_task, return_exceptions=True)
+            self._milvus_build_task = None
         for job_id, task in list(self._build_tasks.items()):
             if not task.done():
                 task.cancel()

@@ -46,6 +46,7 @@ def _make_api():
     api._graph_build_jobs = {}
     api._build_pause_events = {}
     api._build_tasks = {}
+    api._milvus_build_task = None
     api._lightrag_registry = MagicMock()
     api._lightrag_registry.enabled = True
     api._lightrag_registry.probe_llm_ready = AsyncMock(return_value=None)
@@ -158,7 +159,7 @@ async def test_cancelled_build_job_sets_status_interrupted() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_build_tasks_clears_handles() -> None:
-    """cancel_build_tasks() cancels all running tasks and clears _build_tasks."""
+    """取消图谱与 Milvus 构建，清空各自的任务句柄。"""
     api = _make_api()
 
     # Create a real long-running task and inject it
@@ -167,11 +168,15 @@ async def test_cancel_build_tasks_clears_handles() -> None:
 
     task = asyncio.create_task(_long())
     api._build_tasks["fake-job"] = task
+    milvus_task = asyncio.create_task(_long())
+    api._milvus_build_task = milvus_task
 
     await api.cancel_build_tasks()
 
     assert len(api._build_tasks) == 0
     assert task.cancelled()
+    assert api._milvus_build_task is None
+    assert milvus_task.cancelled()
 
 
 # ─── Preflight readiness probe (v1.0.11) ──────────────────────

@@ -343,6 +343,7 @@ class PluginInitializer:
             self._milvus_db_path = milvus_path
             self._vector_store_init_error = None
             is_new_index = not milvus_path.exists()
+            milvus = None
             try:
                 milvus = MilvusLiteVectorStore(
                     db_path=str(milvus_path),
@@ -395,6 +396,11 @@ class PluginInitializer:
                 )
                 self._config.add_diagnostic(f"Milvus unavailable: {exc}")
                 self._vector_store_init_error = str(exc)
+                if milvus is not None:
+                    try:
+                        await milvus.close()
+                    except Exception:
+                        logger.exception("Failed to close partially initialized Milvus store")
                 self.vector_store = None
         elif (
             vdb_cfg.backend == "milvus"
@@ -1029,8 +1035,6 @@ class PluginInitializer:
     async def teardown(self) -> None:
         teardown_started = time.monotonic()
         logger.info("PluginInitializer.teardown() 开始释放子系统")
-        if self.api is not None:
-            await self.api.cancel_build_tasks()
 
         if self._backup_task is not None:
             self._backup_task.cancel()
@@ -1084,6 +1088,10 @@ class PluginInitializer:
             except Exception as e:
                 logger.warning(f"Web 控制台关闭异常：{e}")
             self._web_runner = None
+
+        # 先停止调度器和 HTTP 请求，避免取消后又产生构建；再收走独立 Milvus 任务。
+        if self.api is not None:
+            await self.api.cancel_build_tasks()
 
         if self.lightrag_registry is not None:
             try:

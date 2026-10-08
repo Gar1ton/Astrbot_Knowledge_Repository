@@ -1,5 +1,28 @@
 # TODO
 
+## v1.2.0-preview-4 Milvus 热重载资源释放（completed）
+
+- 用户已批准实施；仅在本地 developer 分支修改源码、测试和治理文档，版本升至 preview-4。
+- 全部测试使用临时目录/数据库；不操作 runtime 库、配置、进程或 Git 远端，不执行提交。
+- [x] Phase 1：补资源关闭、初始化失败和构建中卸载回归，复现生命周期缺口。
+- [x] Phase 2：刷盘 → 关闭客户端 → 按本库路径释放 Lite 服务；协调关闭、初始化与线程取消。
+- [x] Phase 3：组合根清理初始化失败实例，停止调度和 Milvus 构建后再释放数据库。
+  修改组合根与关闭契约的理由：资源所有权、失败清理和反序释放必须跟随插件生命周期。
+- [x] Phase 4：真实临时库跨进程重开与数据保留验证、相关/全量回归和静态检查，
+  统一 metadata/main/README 为 v1.2.0-preview-4，更新 CHANGELOG。
+- 既有 api.py、plugin_initializer.py 和生命周期测试已超过 600 行；后续独立拆分 API/装配
+  生命周期职责，本轮只做必要修复，新增回归集中在独立测试模块。
+- 验证：修复前新增 8 项测试均失败；最终新增 14 项生命周期回归全绿，生命周期/构建清理
+  定向 35 passed，Milvus/API/检索相关回归 185 passed；独立临时库连续开关 20 次通过。
+- 最终全量 1276 passed / 2 skipped / 3 deselected；仅排除两项既有缺 torch 用例和
+  `test_bad_batch_does_not_lock_dimension_or_retry[bad19]`（未修改实现/测试，单独运行同样失败）。
+  未排除的上一轮全量为 1274 passed / 2 skipped / 3 failed，随后新增两项本轮回归。
+- 本轮文件 ruff、domain mypy（7 文件）、版本一致性与 git diff --check 通过；全仓 ruff
+  仍有既有 7 项问题（两份 embedding 测试 4 项，tools/chunk_preview.py 3 项 E402）。
+- 本机 .venv 测试在沙箱外执行（沙箱会阻断 asyncio 线程完成唤醒）；初次混合回归出现
+  PyArrow 原生崩溃，在 mock 窗口外预加载 SDK/原生依赖后，相关与最终全量均正常退出。
+  所有真实库验证使用测试临时目录，未操作 runtime 或外部服务。
+
 ## 2026-10-08 TODO 状态核对与历史收口（completed）
 
 - [x] 对照当前实现、回归用例、提交历史和已有验证记录，核对进行中及未勾选事项。

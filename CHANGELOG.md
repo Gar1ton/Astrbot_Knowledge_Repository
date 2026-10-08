@@ -2,8 +2,25 @@
 
 ## [Unreleased]
 
+## [v1.2.0-preview-4] — 2026-10-08
+
 ### 修复 (Fixed)
 
+- **Milvus 热重载与重新安装占库**：`repository/vector_store/milvus_lite.py` 关闭时先等待
+  在途线程，再刷盘、关闭 RPC 客户端，并按本库路径释放 Lite 服务与文件锁；清理不再依赖
+  AstrBot 宿主进程退出。重复关闭共用清理任务，调用者取消也等待清理完成，旧实例禁止重新开库。
+- **Milvus 失败装配与后台任务收尾**：`plugin_initializer.py` 清理普通初始化异常留下的
+  实例，保留 schema 不匹配时的手动重建能力；先停止调度和 Web 请求，再取消构建并释放数据库。
+  `api.py::cancel_build_tasks()` 补齐独立 Milvus 构建任务；SDK 构造连接失败也释放已启动服务。
+  `vector_store/base.py` 补充关闭契约，不改接口签名、数据库 schema 或数据格式。
+- 新增 `tests/backend/test_milvus_lifecycle.py` 14 项回归，并扩充 `test_build_hardening.py`。
+  真实临时库验证热重载、新组合根重新装配、schema 不匹配关闭后复用、其他库不受影响，
+  以及父进程保持存活时另一进程能重开同库并读回向量与文本。未修改 runtime 库、配置或进程。
+- 验证：生命周期/构建清理定向 35 passed，Milvus/API/检索相关 185 passed，独立临时库
+  连续开关 20 次通过；最终全量 1276 passed / 2 skipped / 3 deselected（两项既有缺 torch
+  及下述 embedding 测试桩失败）。测试 SDK 在 mock 窗口外预加载后，真实 Milvus 与全量
+  均正常退出；本轮文件 ruff、domain mypy、版本一致性及 git diff --check 通过。
+  全仓 ruff 仍有既有 7 项问题，未扩大本轮范围修复。
 - **OpenAI 文本 embedding 与旧缓存兼容**：`repository/embedding/external.py` 支持 API base
   与完整 `/embeddings` 端点，保留代理前缀；请求浮点响应，严格检查数量/index/有限数值，
   首个有效批次锁定维度，后续漂移拒绝返回。错误不包含请求、完整响应或网络异常中的凭据。
@@ -14,6 +31,8 @@
 
 ### 改进 (Changed)
 
+- **版本递进**：`metadata.yaml`、`main.py` 注册版本和 README badge 统一为
+  `v1.2.0-preview-4`；本轮改动仅留在本地 developer 分支，未提交、推送或发布。
 - **TODO 状态收口（2026-10-08）**：依据已有实现和验证记录，将切片质量、Codex QA 保存、
   v1.0.7 Notion 进度条标为 completed；旧清洗工作包与 v1.0.3 发布计划标为 superseded，
   发布路径契约按 v1.0.4 完成记录勾选。LightRAG 保留部署验收 pending，并登记缺失的
@@ -23,9 +42,11 @@
   修正 KB reader 说明，保留旧摘要识别、QA 正文及现有事务/迁移接口。
 - 新增协议/缓存及已有数据库/索引接线回归用例，更新收敛计划与交接文档。
   PDF 图片摄入、图片表/制品、VL 任务/按钮/检索仅登记研究 TODO，本轮不实现。
-- **验收待完成**：git diff --check 通过；tooling/dev 镜像构建成功，但 Docker Desktop
-  缺少 WSL 挂载 socket，容器创建失败。pytest/ruff/mypy 和修改后真实服务联调尚未运行，
-  TODO 实施项不勾完成；等待环境恢复或用户授权宿主验证。不操作运行知识库与 Git 远端。
+- **Embedding 验收限制**：上轮 tooling/dev 镜像构建成功，但 Docker Desktop 缺少 WSL
+  挂载 socket，容器创建失败。本轮本机全量回归发现既有
+  `test_bad_batch_does_not_lock_dimension_or_retry[bad19]` 失败（HTTP 测试桩在 post 阶段抛
+  ValueError，却按响应 JSON 解码失败预期不重试）；涉及实现与测试均相对 HEAD 无改动，
+  单独运行同样失败。真实外部服务联调仍未执行，原 Embedding TODO 保留待验收。
 
 ## [v1.2.0-preview-3] — 2026-10-07
 

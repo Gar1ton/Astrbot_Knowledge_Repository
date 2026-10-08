@@ -109,9 +109,22 @@ class NotionSyncTarget(SyncTarget):
     async def preflight(self, *, initialize: bool = False) -> None:
         """批次开始前只读检查工具能力和目标，失败不进入逐文档循环。"""
         await self._adapter.check_capabilities(initialize=initialize)
-        for database_id in (self._config.database_id, self._config.qa_database_id):
+        for field, role in (("database_id", "Articles"), ("qa_database_id", "QA")):
+            database_id = getattr(self._config, field)
             if database_id:
-                await self._adapter.resolve_data_source(database_id)
+                try:
+                    await self._adapter.resolve_data_source(database_id)
+                except NotionMCPError as exc:
+                    if not exc.is_not_found:
+                        raise
+                    raise NotionMCPError(
+                        f"Notion {role} 库不可访问（notion_sync.{field}={database_id}）。"
+                        "请核对数据库容器 ID，并确认该库已向当前 MCP 使用的集成授权；"
+                        "404 不能区分 ID 失效与缺少访问权限。"
+                        f"原始错误：{exc}",
+                        code=exc.code,
+                        status=exc.status,
+                    ) from exc
 
     # ── SyncTarget 契约 ─────────────────────────────────────────
 

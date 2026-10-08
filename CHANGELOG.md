@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### 修复 (Fixed)
+
+- **Milvus 依赖重导入后遗留服务**：新增 `repository/vector_store/milvus_service.py`，
+  开库时保留实际服务管理器，先取得其服务 URI 再构造 RPC 客户端；`milvus_lite.py`
+  开库、清空重建与关闭共用该所有者。AstrBot 重装依赖替换模块后，也能释放原先的服务
+  与文件锁，构造客户端失败仍保留释放入口，不改变库格式或关闭时删除集合。
+- **Milvus 启动原因与恢复提示**：仅在本开库线程捕获 SDK 记录后吞掉的启动异常，保留
+  DataDirLockedError 等底层原因。`capabilities.py` 提示当前宿主也可能持有旧锁，需完整
+  退出 AstrBot；`plugin_initializer.py` 的旧清锁端口拒绝删除 LOCK，保留既有路由。
+  `FlowPageContent.tsx` / `i18n.ts` 将清锁按钮改为只读恢复说明，重新构建同步 pages。
+- **Notion 404 目标定位**：`sync_targets/notion.py` 预检明确 Articles/QA、配置字段与
+  当前数据库 ID，保留错误 code/status 和停止批次语义；提示核对容器 ID 与集成授权。
+  不自动清空 ID、重建远端库或改运行配置；404 的实际访问问题仍需核对 ID/授权。
+- 验证：新增 `test_milvus_service.py` 7 项回归及 Notion 404 两项回归，定向 81 passed；
+  全量 1285 passed / 2 skipped / 3 deselected（沿用 preview-4 记录的三项既有失败排除）。
+  实际 Windows Python + 已安装 SDK 在独立临时库中替换整个 Lite 模块树后，关闭、
+  重开和读回原向量/文本通过。改动文件 ruff、domain mypy、前端 ESLint/TypeScript/
+  build 与 pages 一致性通过。仅修改 developer，版本仍为 preview-4；runtime 库、
+  配置及运行进程未修改，未提交或推送。
+
 ## [v1.2.0-preview-4] — 2026-10-08
 
 ### 修复 (Fixed)

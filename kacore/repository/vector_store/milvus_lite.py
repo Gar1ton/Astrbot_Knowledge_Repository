@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from kacore.repository.vector_store.base import VectorStore
+from kacore.repository.vector_store.milvus_service import MilvusLiteService
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -60,7 +61,7 @@ class MilvusLiteVectorStore(VectorStore):
         self._db_path = db_path
         self._dim = dim
         self._client = None
-        self._open_attempted = False
+        self._service = MilvusLiteService(db_path)
         self._doc_to_col: dict[str, str] = {}
         self._collection_name = "kb_chunks"
         self._initialized = False
@@ -112,16 +113,14 @@ class MilvusLiteVectorStore(VectorStore):
         if self._initialized:
             return
 
-        from pymilvus import DataType, MilvusClient
+        from pymilvus import DataType
 
         # 确保父目录存在
         db_dir = os.path.dirname(os.path.abspath(self._db_path))
         os.makedirs(db_dir, exist_ok=True)
 
         self._relocate_legacy_store()
-        # SDK 可能先拉起 Lite 服务，再因 RPC 连接失败而未返回客户端。
-        self._open_attempted = True
-        self._client = MilvusClient(self._db_path)
+        self._client = self._service.open_client()
 
         # 如果集合不存在，则创建符合 VARCHAR 主键的 Collection Schema
         if not self._client.has_collection(self._collection_name):
@@ -331,10 +330,7 @@ class MilvusLiteVectorStore(VectorStore):
 
     def _clear_sync(self) -> None:
         if self._client is None:
-            from pymilvus import MilvusClient
-
-            self._open_attempted = True
-            self._client = MilvusClient(self._db_path)
+            self._client = self._service.open_client()
         if self._client.has_collection(self._collection_name):
             self._client.drop_collection(self._collection_name)
         self._client.close()
@@ -367,8 +363,6 @@ class MilvusLiteVectorStore(VectorStore):
 
     def _close_sync(self) -> None:
         client = self._client
-        if client is None and not self._open_attempted:
-            return
         try:
             if client is not None and self._initialized:
                 client.flush(self._collection_name)
@@ -378,14 +372,11 @@ class MilvusLiteVectorStore(VectorStore):
                     client.close()
             finally:
                 try:
-                    # client.close 只断开 RPC；服务持有 LOCK，必须按本库路径单独释放。
-                    from milvus_lite.server_manager import server_manager_instance
-
-                    server_manager_instance.release_server(self._db_path)
+                    # client.close 只断开 RPC；通过开库时保留的所有者释放服务与 LOCK。
+                    self._service.release()
                 finally:
                     self._client = None
                     self._initialized = False
-                    self._open_attempted = False
 
 
 __all__ = ["MilvusLiteVectorStore", "MilvusSchemaMismatchError"]

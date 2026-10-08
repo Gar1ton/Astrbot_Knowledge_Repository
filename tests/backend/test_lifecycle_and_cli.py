@@ -473,10 +473,10 @@ async def test_clear_stale_milvus_lock_rejects_when_vector_store_ready(
     assert "无需清除" in result["message"]
 
 
-async def test_clear_stale_milvus_lock_removes_only_lock_file(
+async def test_clear_stale_milvus_lock_refuses_to_delete_os_lock_file(
     temp_dir: Path, mock_context: object, raw_config: dict[str, Any]
 ) -> None:
-    """成功路径：只删 LOCK 标记文件本身，同目录下的真实数据必须原封不动。"""
+    """空 LOCK 仍可能被当前宿主持有；不能靠删除文件绕过 OS 锁。"""
     config = {**raw_config, "vector_db": {"backend": "milvus"}, "graph": {"enabled": False}}
     initializer = PluginInitializer(mock_context, config, temp_dir)
     initializer.vector_store = None
@@ -494,11 +494,11 @@ async def test_clear_stale_milvus_lock_removes_only_lock_file(
 
     result = await initializer.clear_stale_milvus_lock()
 
-    assert result["status"] == "ok"
-    assert not (db_dir / "LOCK").exists()
+    assert result["status"] == "error"
+    assert "完整退出 AstrBot" in result["message"]
+    assert (db_dir / "LOCK").exists()
     assert (collections_dir / "kb_chunks.marker").read_text() == "real data, do not touch"
-    # 清除成功后应重置，避免陈旧错误继续挡下一次的正常装配判断。
-    assert initializer._vector_store_init_error is None
+    assert initializer._vector_store_init_error is not None
 
 
 async def test_initializer_marks_recreated_empty_milvus_incompatible_when_docs_exist(

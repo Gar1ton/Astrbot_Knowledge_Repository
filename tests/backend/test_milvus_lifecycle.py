@@ -42,6 +42,7 @@ def opened_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         SimpleNamespace(server_manager_instance=manager),
     )
     store = MilvusLiteVectorStore(str(tmp_path / "vectors.db"), dim=4)
+    store._service._manager = manager
     store._client = client
     store._initialized = True
     return store, client, manager, events

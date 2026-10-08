@@ -1,5 +1,27 @@
 # TODO
 
+## 2026-10-08 重装后 Milvus 持锁与 Notion 404 诊断（completed）
+
+- 用户授权检查 Windows runtime，发现的问题统一修 developer；仅只读检查运行库与日志。
+- [x] Phase 1：保留实际启动 Lite 服务的管理器引用，覆盖依赖模块替换后关闭和失败构造。
+- [x] Phase 2：保留 SDK 吞掉的底层启动异常，明确完整退出宿主的恢复提示；禁止以删除
+  LOCK 文件替代释放 OS 锁，前端原清锁按钮改为恢复说明。组合根仅调整既有清锁回调
+  的错误语义，不改其他装配接口；构建后同步 pages，不手改产物。
+- [x] Phase 3：Notion 目标预检 404 标注 Articles/QA 与配置字段，保留错误分类和批次停止。
+- [x] Phase 4：临时库模块替换、数据保留和相关回归/静态检查，追加 CHANGELOG。
+- 不删除或修改 runtime 数据、配置，不重启运行实例，不提交或推送。保留 preview-4 版本号。
+- 既有组合根及生命周期测试超过 600 行；本轮只做必要修复，新增服务开库诊断拆到独立模块。
+- Windows runtime 日志确认 DataDirLockedError；只读 RestartManager 查询确认持锁者为
+  当前 AstrBot 宿主 Python。框架依赖优先加载会替换纯 Python 依赖模块，旧服务管理器
+  仍被 atexit 引用；关闭时重新导入单例无法保证释放实际持锁者。
+- 新增 7 项服务所有者/启动诊断回归和 2 项 Notion 404 目标回归；定向 81 passed。
+  全量 1285 passed / 2 skipped / 3 deselected（沿用上轮三项既有失败排除）。
+- 使用实际 Windows Python 与 runtime 中已安装 SDK，在独立临时目录替换整个
+  milvus_lite 模块树，验证关闭后重开成功、原向量和文本可读；临时目录已自动清理。
+- 本轮文件 ruff、domain mypy（7 文件）、前端 ESLint/TypeScript/build、pages 逐字节与
+  结构一致性通过；测试及构建在沙箱外执行，未修改运行实例。既存旧服务需完整退出
+  AstrBot 才能清理；Notion QA 404 的 ID/授权需用户核对，不自动覆盖配置或新建库。
+
 ## v1.2.0-preview-4 Milvus 热重载资源释放（completed）
 
 - 用户已批准实施；仅在本地 developer 分支修改源码、测试和治理文档，版本升至 preview-4。

@@ -220,7 +220,8 @@ def test_milvus_lock_error_hint_matches_datadirlockederror() -> None:
     )
     hint = milvus_lock_error_hint(text)
     assert hint is not None
-    assert "第二个" in hint
+    assert "当前 AstrBot" in hint
+    assert "完整退出 AstrBot" in hint
     assert "不要直接删除锁文件" in hint
 
 

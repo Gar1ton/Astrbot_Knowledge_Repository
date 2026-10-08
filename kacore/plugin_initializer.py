@@ -997,13 +997,10 @@ class PluginInitializer:
                     logger.error("Failed to mark document %s for reindex: %s", doc.doc_id, exc)
 
     async def clear_stale_milvus_lock(self) -> dict[str, Any]:
-        """删除 Milvus 数据目录里残留的 0 字节 LOCK 标记文件。
+        """保留既有端口，但拒绝删除 LOCK；OS 锁必须由持有服务释放。
 
-        仅在已探测到「Milvus 数据目录被其他进程占用」时才允许调用（见
-        `capabilities.milvus_lock_error_hint`）；只删这一个标记文件，绝不碰
-        collections/ 等真实数据。是否真的没有第二个进程在用，由用户在前端确认——
-        这一步做不到自动验证，误删的后果由既有的「可重建投影索引」契约兜底
-        （最坏情况是索引被写坏，需要重新全量构建，不会丢失 SQLite 里的原始文档）。
+        空文件不代表锁已失效，删除文件可能绕过仍在工作的服务的互斥保护。
+        旧实例已丢失释放入口时，应完整退出宿主进程，不做文件层面的恢复。
         """
         from kacore.capabilities import milvus_lock_error_hint
 
@@ -1018,18 +1015,10 @@ class PluginInitializer:
         if self._milvus_db_path is None:
             return {"status": "error", "message": "尚未确定 Milvus 数据目录路径，无法清除。"}
 
-        lock_path = self._milvus_db_path / "LOCK"
-        try:
-            lock_path.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.error("清除 Milvus LOCK 文件失败：%s", exc)
-            return {"status": "error", "message": f"清除失败：{exc}"}
-
-        logger.warning(
-            "已手动清除 Milvus LOCK 文件：%s（用户已在前端确认没有残留进程）", lock_path
-        )
-        self._vector_store_init_error = None
-        return {"status": "ok", "message": "锁定标记已清除，请重启插件以重新装配 Milvus。"}
+        return {
+            "status": "error",
+            "message": milvus_lock_error_hint(self._vector_store_init_error),
+        }
 
     # ── 关闭：与构造顺序相反释放 ────────────────────────────────
     async def teardown(self) -> None:

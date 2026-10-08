@@ -503,8 +503,9 @@ const zh = {
   flow_milvus_rebuild_running: "重建中",
   flow_milvus_rebuild_done: "已重建 {docs} 个文档 / {chunks} 个分块",
   flow_milvus_rebuild_failed: "Milvus 索引重建失败",
-  flow_milvus_lock_detected: "检测到 Milvus 数据目录被其他进程占用",
-  flow_milvus_clear_lock: "清除锁定",
+  flow_milvus_lock_detected: "Milvus 数据目录仍被服务占用",
+  flow_milvus_clear_lock: "恢复说明",
+  flow_milvus_lock_help: "请完整退出 AstrBot 后重新启动，释放当前宿主可能残留的旧 Milvus 服务。仅重启或重装插件可能无效，请勿删除 LOCK 文件或数据目录。",
   flow_milvus_clear_lock_running: "清除中…",
   flow_milvus_clear_lock_confirm:
     "清除前请先在任务管理器/进程列表中确认没有第二个 AstrBot 或本插件进程在运行。\n" +
@@ -1423,8 +1424,9 @@ const en: Record<keyof typeof zh, string> = {
   flow_milvus_rebuild_running: "Rebuilding",
   flow_milvus_rebuild_done: "Rebuilt {docs} docs / {chunks} chunks",
   flow_milvus_rebuild_failed: "Milvus index rebuild failed",
-  flow_milvus_lock_detected: "Milvus data directory is held by another process",
-  flow_milvus_clear_lock: "Clear lock",
+  flow_milvus_lock_detected: "Milvus data directory is still in use",
+  flow_milvus_clear_lock: "Recovery help",
+  flow_milvus_lock_help: "Fully exit AstrBot and start it again to release any old Milvus service in the host process. Reloading or reinstalling the plugin may not release it. Keep the LOCK file and data directory intact.",
   flow_milvus_clear_lock_running: "Clearing…",
   flow_milvus_clear_lock_confirm:
     "Before clearing, check Task Manager / process list to confirm there is no second AstrBot " +

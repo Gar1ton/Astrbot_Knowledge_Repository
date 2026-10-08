@@ -3,7 +3,7 @@
 3:I[7121,[],""]
 4:I[4581,[],""]
 5:I[8616,[],"ClientSegmentRoot"]
-6:I[6950,["674","static/chunks/674-45a064d2237589cf.js","870","static/chunks/app/(console)/layout-b658c59851fcdb93.js"],"default"]
+6:I[6950,["674","static/chunks/674-45a064d2237589cf.js","870","static/chunks/app/(console)/layout-25f6157d8ae8f2d2.js"],"default"]
 9:I[484,[],"OutletBoundary"]
 a:"$Sreact.suspense"
 d:I[484,[],"ViewportBoundary"]

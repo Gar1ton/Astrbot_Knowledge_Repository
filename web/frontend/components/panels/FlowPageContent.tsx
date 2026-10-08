@@ -9,7 +9,6 @@ import { useToast } from "@/components/ui/Toast";
 import { useI18n } from "@/lib/i18n";
 import {
   ApiError,
-  clearMilvusLock,
   getCapabilities,
   getEffectiveConfig,
   getZoteroConfig,
@@ -41,7 +40,6 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
   const [savingId, setSavingId] = useState<string | null>(null);
   const [installingKey, setInstallingKey] = useState<string | null>(null);
   const [rebuildingIndex, setRebuildingIndex] = useState(false);
-  const [clearingMilvusLock, setClearingMilvusLock] = useState(false);
   const [banner, setBanner] = useState<Banner>(null);
   const [restartPendingIds, setRestartPendingIds] = useState<Set<string>>(new Set());
   const [restarting, setRestarting] = useState(false);
@@ -255,23 +253,9 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
     poll();
   }, [refreshFlow, t, toast]);
 
-  const handleClearMilvusLock = useCallback(async () => {
-    if (!window.confirm(t("flow_milvus_clear_lock_confirm"))) return;
-    setClearingMilvusLock(true);
-    try {
-      const result = await clearMilvusLock();
-      if (result.status === "ok") {
-        toast(t("flow_milvus_clear_lock_done"), "ok");
-        await handleRestartPlugin();
-      } else {
-        toast(`${t("flow_milvus_clear_lock_failed")}: ${result.message}`, "error");
-      }
-    } catch (err: unknown) {
-      toast(`${t("flow_milvus_clear_lock_failed")}: ${err instanceof Error ? err.message : String(err)}`, "error");
-    } finally {
-      if (mountedRef.current) setClearingMilvusLock(false);
-    }
-  }, [handleRestartPlugin, t, toast]);
+  const handleMilvusLockHelp = useCallback(() => {
+    toast(t("flow_milvus_lock_help"), "info");
+  }, [t, toast]);
 
   const handleManualRefresh = useCallback(() => {
     return refreshFlow({ recheck: true, includeZotero: true, notify: true });
@@ -348,8 +332,7 @@ export function FlowPageContent({ onClose }: { onClose?: () => void } = {}) {
           onRefresh={handleManualRefresh}
           onInstall={handleInstall}
           onRebuildIndex={handleRebuildIndex}
-          onClearMilvusLock={handleClearMilvusLock}
-          clearingMilvusLock={clearingMilvusLock}
+          onClearMilvusLock={handleMilvusLockHelp}
           onClose={onClose}
         />
       )}

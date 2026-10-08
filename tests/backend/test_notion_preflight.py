@@ -127,6 +127,25 @@ async def test_initialization_preflight_stops_before_creation() -> None:
     caller.assert_not_awaited()
 
 
+@pytest.mark.parametrize("field, role", [("database_id", "Articles"), ("qa_database_id", "QA")])
+async def test_database_404_identifies_target_without_writes(field: str, role: str) -> None:
+    original = NotionMCPError("Could not find database", code="object_not_found", status=404)
+    adapter = NotionMCPAdapter(None, tool_lister=notion_tools)
+    adapter.resolve_data_source = AsyncMock(side_effect=original)
+    adapter.create_database = AsyncMock()
+    config = NotionSyncConfig(enabled=True, parent_page_id="parent", **{field: "missing-id"})
+    target = NotionSyncTarget(config, InMemorySourceDocumentStore(), adapter=adapter)
+    with pytest.raises(NotionMCPError) as error:
+        await target.initialize_databases()
+    assert error.value.code == "object_not_found" and error.value.status == 404
+    assert error.value.__cause__ is original
+    assert f"Notion {role}" in str(error.value)
+    assert f"notion_sync.{field}=missing-id" in str(error.value)
+    assert "授权" in str(error.value)
+    adapter.create_database.assert_not_awaited()
+    assert getattr(target.config, field) == "missing-id"
+
+
 async def test_background_job_exposes_one_preflight_error_without_document_failures() -> None:
     store = InMemorySourceDocumentStore()
     for i in range(106):

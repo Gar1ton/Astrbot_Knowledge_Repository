@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from kacore.capabilities import (
     dependency_statuses,
     detect_capabilities,
+    milvus_lock_error_hint,
     milvus_runtime_status,
     resolve_install_spec,
     resolve_install_specs,
@@ -45,6 +46,7 @@ class CapabilitiesApiMixin:
     _config: Config | None
     _source_store: SourceDocumentStore
     _vector_store: VectorStore | None
+    _vector_store_init_error: str | None
     _embedding_provider: EmbeddingProvider | None
     _index_compatibility: IndexCompatibilityStore | None
     _embedding_fingerprint: str | None
@@ -172,6 +174,17 @@ class CapabilitiesApiMixin:
             )
 
         if self._vector_store is None:
+            if self._vector_store_init_error:
+                lock_hint = milvus_lock_error_hint(self._vector_store_init_error)
+                if lock_hint:
+                    return (
+                        f"Milvus 依赖已就绪，但向量库在启动时装配失败："
+                        f"{self._vector_store_init_error}。{lock_hint}"
+                    )
+                return (
+                    f"Milvus 依赖已就绪，但向量库在启动时装配失败："
+                    f"{self._vector_store_init_error}。修复后重启插件。"
+                )
             return (
                 "Milvus 依赖已就绪，但向量库在启动时装配失败："
                 "请在终端日志中查看 Milvus 初始化报错，修复后重启插件。"
@@ -193,8 +206,12 @@ class CapabilitiesApiMixin:
             and self._index_compatibility.is_milvus_compatible(self._embedding_fingerprint)
         )
         reason = ""
+        lock_hint: str | None = None
         if self._vector_store is None:
-            reason = "Milvus vector store is not initialized."
+            reason = self._vector_store_init_error or "Milvus vector store is not initialized."
+            lock_hint = milvus_lock_error_hint(self._vector_store_init_error or "")
+            if lock_hint:
+                reason = f"{reason}\n{lock_hint}"
         elif self._embedding_provider is None:
             reason = "Embedding provider is not initialized."
         elif self._index_compatibility is None or not self._embedding_fingerprint:
@@ -237,6 +254,7 @@ class CapabilitiesApiMixin:
             "document_count": document_count,
             "chunk_count": chunk_count,
             "reason": reason,
+            "lock_detected": bool(lock_hint),
             "building": building,
             "build_stage": build_stage,
             "build_progress_percent": build_progress_percent,

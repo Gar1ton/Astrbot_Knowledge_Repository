@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -17,13 +18,33 @@ from kacore.config import EmbeddingConfig
 logger = logging.getLogger("IndexCompatibilityStore")
 
 
-def embedding_fingerprint(config: EmbeddingConfig, dimension: int) -> str:
-    payload = {
-        "provider": config.provider,
-        "model": config.model,
-        "base_url": config.base_url,
-        "dimension": dimension,
-    }
+def embedding_fingerprint(
+    config: EmbeddingConfig, dimension: int, identity: Mapping[str, str] | None = None
+) -> str:
+    """索引兼容指纹：任一成分变化，旧索引即被判不兼容并走既有重建流程。
+
+    local/external：载荷与历史版本逐字节一致（既有索引不因升级被误判为不兼容）。
+    astr：`embedding.model` / `base_url` 被忽略（真正的模型由 AstrBot 决定），改用运行时身份
+    `identity`（来自 `EmbeddingProvider.identity`：provider ID / adapter 类型 / 模型）+ 实测维度。
+    身份里的模型名只有 provider 自己报告时才非空；不报告时换模型而 ID/类型/维度不变无法察觉。
+    全部为非机密信息，不含 API Key。
+    """
+    if config.uses_astrbot:
+        ident = identity or {}
+        payload: dict[str, Any] = {
+            "provider": "astr",
+            "astrbot_provider_id": ident.get("astrbot_provider_id") or config.astrbot_provider_id,
+            "adapter_type": ident.get("adapter_type", ""),
+            "model": ident.get("model", ""),
+            "dimension": dimension,
+        }
+    else:
+        payload = {
+            "provider": config.provider,
+            "model": config.model,
+            "base_url": config.base_url,
+            "dimension": dimension,
+        }
     raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 

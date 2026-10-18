@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from kacore.adapters.zotero.sqlite_reader import ZoteroSnapshot
+from kacore.adapters.zotero.sqlite_reader import ZoteroSnapshot, excluded_collection_keys
 from kacore.domain.models import (
     DocumentOrigin,
     ZoteroAttachment,
@@ -168,17 +168,36 @@ class ZoteroWebApiReader:
         snapshot.collections = self._collections(collections_payload)
         snapshot.items = self._items(items_payload)
         snapshot.attachments = self._attachments(items_payload)
-        snapshot.collection_items = self._collection_items(items_payload)
+        excluded = self._excluded_collection_keys(collections_payload)
+        snapshot.collection_items = [
+            (ck, ik) for ck, ik in self._collection_items(items_payload) if ck not in excluded
+        ]
         snapshot.item_tags = self._item_tags(items_payload)
         snapshot.relations = self._relations(items_payload)
         return snapshot
 
-    def _collections(self, payload: list[dict[str, Any]]) -> list[ZoteroCollection]:
-        result = []
+    @staticmethod
+    def _excluded_collection_keys(payload: list[dict[str, Any]]) -> set[str]:
+        """回收站集合（data.deleted）及其子孙的 key；Web API 仍会返回这些集合。"""
+        parent_by_key: dict[str, str] = {}
+        deleted: set[str] = set()
         for entry in payload:
             data = _data(entry)
             key = str(data.get("key") or entry.get("key") or "")
             if not key:
+                continue
+            parent_by_key[key] = str(data.get("parentCollection") or "")
+            if data.get("deleted"):
+                deleted.add(key)
+        return excluded_collection_keys(parent_by_key, deleted)
+
+    def _collections(self, payload: list[dict[str, Any]]) -> list[ZoteroCollection]:
+        excluded = self._excluded_collection_keys(payload)
+        result = []
+        for entry in payload:
+            data = _data(entry)
+            key = str(data.get("key") or entry.get("key") or "")
+            if not key or key in excluded:
                 continue
             result.append(
                 ZoteroCollection(

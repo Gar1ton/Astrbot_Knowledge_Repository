@@ -10,9 +10,15 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from kacore.managers.chunk_boundaries import sentence_boundaries, structural_ranges
+from kacore.managers.generic_headings import (
+    detect_chapter_or_part_heading,
+    detect_generic_heading,
+    detect_section_sign_heading,
+)
+
 CHUNK_SCHEMA = "clean_md_structural_v3"
 
-_SENTENCE_ENDERS = "。？！.?!"
 _SECTION_LABEL_RE = re.compile(
     r"^(?:#+\s*)?(?:\*\*)?(T\d{1,3}[A-Za-z]?|\d+(?:\.\d+){0,4})(?:\.)?(?:\*\*)?"
 )
@@ -21,7 +27,7 @@ _INLINE_ANCHOR_RE = re.compile(
     r"Speculative strategy\s+[a-z]\.)\*\*)",
     re.IGNORECASE,
 )
-_THESIS_RE = re.compile(r"^\*\*(T\d{1,3}[A-Za-z]?)\*\*", re.IGNORECASE)
+_THESIS_RE = re.compile(r"^(?:#{1,6}\s*)?\*\*(T\d{1,3}[A-Za-z]?)\*\*", re.IGNORECASE)
 _NUMBERED_MD_RE = re.compile(
     r"^(?P<prefix>#+\s*)?(?P<strong>\*\*)?(?P<label>\d+(?:\.\d+){0,4})(?:\.)?(?(strong)\*\*)"
     r"(?:\s+|$)(?P<title>.*)$"
@@ -42,7 +48,7 @@ _APPENDIX_SUBSECTION_RE = re.compile(
     r"(?:\s+|$)(?P<title>.*)$"
 )
 _SUBSECTION_RE = re.compile(
-    r"^\*\*(?P<label>Scholium(?:\s+[a-z])?\.|Lemma(?:\s+[a-z])?\.|"
+    r"^(?:#{1,6}\s*)?\*\*(?P<label>Scholium(?:\s+[a-z])?\.|Lemma(?:\s+[a-z])?\.|"
     r"Speculative strategy\s+[a-z]\.)\*\*",
     re.IGNORECASE,
 )
@@ -54,10 +60,7 @@ _ANCHOR_LABEL_RE = re.compile(
     re.I,
 )
 _REFERENCES_RE = re.compile(r"^(?:#+\s*)?(?:\*\*)?references(?:\*\*)?$", re.I)
-_ABBREVIATION_TAIL_RE = re.compile(
-    r"(?:\bet al|fig|figure|eq|e\.g|i\.e|no|vol|pp|dr|mr|mrs|ms|prof|vs)\.$",
-    re.I,
-)
+
 
 
 @dataclass(frozen=True)
@@ -260,26 +263,10 @@ def section_for_position(sections: list[SectionSpan], pos: int) -> SectionSpan |
 
 
 def _paragraph_spans(md: str) -> list[tuple[int, int]]:
-    if not md.strip():
-        return []
-    spans: list[tuple[int, int]] = []
-    pos = 0
-    for match in re.finditer(r"\n[ \t]*\n[ \t\n]*", md):
-        if match.start() > pos:
-            spans.append((pos, match.start()))
-        pos = match.end()
-    if pos < len(md):
-        spans.append((pos, len(md)))
-    if len(spans) <= 1 and "\n" in md:
-        spans = []
-        pos = 0
-        for match in re.finditer(r"\n+", md):
-            if match.start() > pos:
-                spans.append((pos, match.start()))
-            pos = match.end()
-        if pos < len(md):
-            spans.append((pos, len(md)))
-    return spans
+    return structural_ranges(md)
+
+
+_HEADING_MARKER_ONLY_RE = re.compile(r"^#{1,6}[ \t]*$")
 
 
 def _split_spans_at_inline_anchors(
@@ -287,11 +274,14 @@ def _split_spans_at_inline_anchors(
 ) -> list[tuple[int, int]]:
     split: list[tuple[int, int]] = []
     for start, end in spans:
-        cuts = [
-            start + match.start()
-            for match in _INLINE_ANCHOR_RE.finditer(md[start:end])
-            if start + match.start() > start
-        ]
+        cuts: list[int] = []
+        for match in _INLINE_ANCHOR_RE.finditer(md[start:end]):
+            cut = start + match.start()
+            line_start = max(md.rfind("\n", start, cut) + 1, start)
+            if _HEADING_MARKER_ONLY_RE.match(md[line_start:cut]):
+                cut = line_start
+            if cut > start:
+                cuts.append(cut)
         pos = start
         for cut in cuts:
             if cut > pos:
@@ -326,6 +316,15 @@ def _classify_block(start: int, end: int, text: str) -> TextBlock:
     if numbered is not None:
         label, title = numbered
         level = label.count(".") + 1
+        return TextBlock(start, end, "section_heading", text, label, title, level)
+
+    generic = None
+    if "\n" not in stripped:
+        generic = detect_chapter_or_part_heading(stripped) or detect_section_sign_heading(stripped)
+        if generic is None and re.match(r"^(?:#{1,6}\s|\*\*.+\*\*$)", stripped):
+            generic = detect_generic_heading(stripped)
+    if generic is not None:
+        label, title, level = generic
         return TextBlock(start, end, "section_heading", text, label, title, level)
 
     subsection = _SUBSECTION_RE.match(stripped)
@@ -521,36 +520,7 @@ def _citation_aware_sentence_spans(
 
 
 def _sentence_boundaries(md: str, start: int, end: int) -> list[int]:
-    boundaries: list[int] = []
-    depth = 0
-    for idx in range(start, end):
-        char = md[idx]
-        if char == "(":
-            depth += 1
-        elif char == ")" and depth > 0:
-            depth -= 1
-        if char not in _SENTENCE_ENDERS:
-            continue
-        if char == "." and _should_skip_period(md, start, end, idx, depth):
-            continue
-        boundaries.append(idx + 1)
-    return boundaries
-
-
-def _should_skip_period(md: str, start: int, end: int, idx: int, depth: int) -> bool:
-    prev_char = md[idx - 1] if idx > start else ""
-    next_char = md[idx + 1] if idx + 1 < end else ""
-    if prev_char.isdigit() and next_char.isdigit():
-        return True
-    lookbehind = md[max(start, idx - 24) : idx + 1].lower()
-    if _ABBREVIATION_TAIL_RE.search(lookbehind):
-        return True
-    next_nonspace = _next_nonspace(md, idx + 1, end)
-    if next_nonspace in {",", ";", ":"}:
-        return True
-    if depth > 0 and next_nonspace not in {")", "]", "}"}:
-        return True
-    return False
+    return sentence_boundaries(md, start, end)
 
 
 def _word_spans(md: str, start: int, end: int, target_max: int) -> list[tuple[int, int]]:
@@ -746,6 +716,15 @@ def _chunk_anchor(text: str) -> str:
         match = regex.match(stripped)
         if match:
             return _normalize_anchor_label(match.group(1))
+    generic = None
+    if "\n" not in stripped:
+        generic = detect_chapter_or_part_heading(stripped) or detect_section_sign_heading(stripped)
+        if generic is None and re.match(r"^(?:#{1,6}\s|\*\*.+\*\*$)", stripped):
+            generic = detect_generic_heading(stripped)
+    if generic is not None:
+        label, title, level = generic
+        return label
+
     subsection = _SUBSECTION_RE.match(stripped)
     if subsection:
         return _normalize_subsection_label(subsection.group("label"))
@@ -803,13 +782,6 @@ def _looks_like_equation(stripped: str) -> bool:
     if len(stripped) > 120:
         return False
     return bool(re.search(r"[=∑Σ√≤≥±×÷]", stripped))
-
-
-def _next_nonspace(md: str, start: int, end: int) -> str:
-    cursor = start
-    while cursor < end and md[cursor].isspace():
-        cursor += 1
-    return md[cursor] if cursor < end else ""
 
 
 __all__ = [

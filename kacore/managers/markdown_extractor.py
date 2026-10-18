@@ -17,6 +17,17 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from kacore.domain.footnotes import FootnoteBlock
+from kacore.managers.artifact_cleaning import clean_page_structure
+from kacore.managers.footnote_linking import link_footnotes
+from kacore.managers.marginal_noise import (
+    access_stamp_indices,
+    is_running_heading,
+    publication_footer_indices,
+    remove_inline_access_stamps,
+)
+from kacore.managers.structural_protection import protected_line_mask
+
 # 与 requirements.txt 的 `pymupdf4llm>=0.0.17,<0.1.0` 对齐的内置参考版本。
 # 不 vendor 源码（规避 AGPL 分发义务），仅记录所依赖的精确版本号。
 PYMUPDF4LLM_PINNED_VERSION = "0.0.27"
@@ -32,7 +43,7 @@ _BLANK_PARAGRAPH_RE = re.compile(r"\n[ \t]*\n+")
 _FALSE_PARAGRAPH_BREAK_RE = re.compile(
     r"(?P<left>[^\s。？！.!?:;])\n\n(?P<right>(?:[\"'“‘(\[])?[a-z])"
 )
-_CONTINUATION_START_RE = re.compile(r"^(?:[\"'“‘(\[])?[a-z]")
+_CONTINUATION_START_RE = re.compile(r"^(?:[\"'“‘(\[])?[^\W_]", re.UNICODE)
 
 
 @dataclass
@@ -57,6 +68,8 @@ class MarkdownArtifact:
     pdf_metadata: dict[str, Any] = field(default_factory=dict)
     converter: str = CONVERTER_NAME
     converter_version: str = PYMUPDF4LLM_PINNED_VERSION
+    raw_pages: list[str] = field(default_factory=list)
+    footnotes: list[FootnoteBlock] = field(default_factory=list)
 
 
 def installed_pymupdf4llm_version() -> str:
@@ -94,7 +107,7 @@ def _detect_repeated_marginal_headers(page_texts: list[str]) -> set[str]:
             if not raw or _PAGE_NUMBER_RE.match(raw):
                 continue
             normalized = _normalize_marginal_line(raw)
-            if len(normalized) < 8:
+            if len(normalized) < 3:
                 continue
             counts.setdefault(normalized, set()).add(page_idx)
 
@@ -104,18 +117,66 @@ def _detect_repeated_marginal_headers(page_texts: list[str]) -> set[str]:
     return {line for line, pages in counts.items() if len(pages) >= min_pages}
 
 
-def _remove_marginal_noise(text: str, repeated_headers: set[str]) -> str:
+def _remove_marginal_noise(
+    text: str, repeated_headers: set[str], *, preserve_offsets: bool = False,
+) -> str:
     lines = text.split("\n")
     marginal_indices = _marginal_line_indices(lines)
+    protected = protected_line_mask(text)
+    nonempty = [idx for idx, line in enumerate(lines) if line.strip()]
+    edges = set(nonempty[:1] + nonempty[-1:])
+    publication = publication_footer_indices(lines, marginal_indices)
+    access_stamps = access_stamp_indices(lines)
     cleaned: list[str] = []
     for idx, line in enumerate(lines):
         stripped = line.strip()
+        running = (
+            _normalize_marginal_line(stripped) in repeated_headers
+            and is_running_heading(line, idx, edges)
+        )
+        if protected[idx] and not running:
+            cleaned.append(line)
+            continue
+        if running or idx in publication or idx in access_stamps:
+            cleaned.append(" " * len(line) if preserve_offsets else "")
+            continue
         if idx in marginal_indices and _PAGE_NUMBER_RE.match(stripped):
+            cleaned.append(" " * len(line) if preserve_offsets else "")
             continue
-        if idx in marginal_indices and _normalize_marginal_line(stripped) in repeated_headers:
+        if (idx in marginal_indices
+                and not re.match(r"^(?:#{1,6}\s|§\s*\d|(?:Chapter|Part)\s+)", stripped, re.I)
+                and _normalize_marginal_line(stripped) in repeated_headers):
+            cleaned.append(" " * len(line) if preserve_offsets else "")
             continue
-        cleaned.append(line)
-    return "\n".join(cleaned)
+        cleaned.append(remove_inline_access_stamps(line, preserve_offsets=preserve_offsets))
+
+    # 水印可能插进同一句的两个视觉行之间。若前文无终止标点且后文仍像正文续行，把水印及
+    # 周围空行占据的换行符替换为空格：既消除假段落边界，preserve_offsets 模式下又不改变
+    # 任一后续字符的位置。真正位于两个完整段落之间的水印不会触发此桥接。
+    separators = ["\n"] * max(0, len(lines) - 1)
+    effective_access = sorted(idx for idx in access_stamps if not protected[idx])
+    groups: list[tuple[int, int]] = []
+    for idx in effective_access:
+        if groups and idx == groups[-1][1] + 1:
+            groups[-1] = (groups[-1][0], idx)
+        else:
+            groups.append((idx, idx))
+    for start, end in groups:
+        left = next((i for i in range(start - 1, -1, -1) if lines[i].strip()), None)
+        right = next((i for i in range(end + 1, len(lines)) if lines[i].strip()), None)
+        if left is None or right is None or protected[left] or protected[right]:
+            continue
+        if (
+            lines[left].rstrip()[-1:] not in "。？！.!?:;"
+            and _CONTINUATION_START_RE.match(lines[right].lstrip())
+        ):
+            for separator_idx in range(left, right):
+                separators[separator_idx] = " "
+
+    return "".join(
+        line + (separators[idx] if idx < len(separators) else "")
+        for idx, line in enumerate(cleaned)
+    )
 
 
 def _repair_wrapped_text(text: str) -> str:
@@ -167,6 +228,8 @@ def _page_joiner(left: str, right: str) -> str:
         and right
         and left[-1] not in "。？！.!?:;"
         and _CONTINUATION_START_RE.match(right)
+        and not protected_line_mask(left)[-1]
+        and not protected_line_mask(right)[0]
     ):
         return " "
     return _PAGE_JOINER
@@ -230,18 +293,31 @@ def extract_pdf_markdown(pdf_path: str) -> MarkdownArtifact:
         page_no = int(meta.get("page", idx + 1)) if isinstance(meta, dict) else idx + 1
         raw_text = page.get("text", "") if isinstance(page, dict) else ""
         page_numbers.append(page_no)
-        raw_page_texts.append(raw_text)
+        raw_page_texts.append(_normalize_newlines(raw_text))
 
-    clean_markdown, spans = join_cleaned_markdown_pages(
-        post_clean_markdown_pages(raw_page_texts),
-        page_numbers,
-    )
+    cleaned_pages: list[str] = []
+    footnotes: list[FootnoteBlock] = []
+    repeated = _detect_repeated_marginal_headers(raw_page_texts)
+    for page_no, raw in zip(page_numbers, raw_page_texts):
+        masked = _remove_marginal_noise(raw, repeated, preserve_offsets=True)
+        body, notes = clean_page_structure(masked, page=page_no)
+        cleaned_pages.append(body)
+        footnotes.extend(notes)
+    repeated = _detect_repeated_marginal_headers(cleaned_pages)
+    cleaned_pages = [_remove_marginal_noise(text, repeated) for text in cleaned_pages]
+    footnotes = [
+        note for page_no, body in zip(page_numbers, cleaned_pages)
+        for note in link_footnotes(body, [n for n in footnotes if n.page == page_no])
+    ]
+    clean_markdown, spans = join_cleaned_markdown_pages(cleaned_pages, page_numbers)
     return MarkdownArtifact(
         clean_markdown=clean_markdown,
         page_spans=spans,
         pdf_metadata=pdf_metadata,
         converter=CONVERTER_NAME,
         converter_version=installed_pymupdf4llm_version(),
+        raw_pages=raw_page_texts,
+        footnotes=footnotes,
     )
 
 

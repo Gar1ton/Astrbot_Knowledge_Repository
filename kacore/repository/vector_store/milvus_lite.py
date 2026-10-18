@@ -1,4 +1,4 @@
-"""基于 Milvus Lite (内嵌式单文件) 的向量数据库实现。"""
+"""repository 层 Milvus Lite 向量投影，拥有本库连接与内嵌服务的生命周期。"""
 from __future__ import annotations
 
 import asyncio
@@ -7,16 +7,39 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kacore.repository.vector_store.base import VectorStore
+from kacore.repository.vector_store.milvus_service import MilvusLiteService
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from kacore.domain.models import DocumentChunk
 
 logger = logging.getLogger("MilvusLiteVectorStore")
 
 _FILTER_KEY_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+async def _wait_for_completion(task: asyncio.Task[Any]) -> Any:
+    """取消调用者时仍等待线程/清理任务完成，再传播取消，防止数据库操作逃逸。"""
+    cancelled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+        except Exception:
+            if cancelled:
+                raise asyncio.CancelledError from None
+            raise
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 def _quote_filter_value(value: object) -> str:
@@ -38,10 +61,14 @@ class MilvusLiteVectorStore(VectorStore):
         self._db_path = db_path
         self._dim = dim
         self._client = None
+        self._service = MilvusLiteService(db_path)
         self._doc_to_col: dict[str, str] = {}
         self._collection_name = "kb_chunks"
         self._initialized = False
         self._created_collection = False
+        self._closed = False
+        self._pending_calls: set[asyncio.Task[Any]] = set()
+        self._close_task: asyncio.Task[None] | None = None
         # 懒初始化会在首次检索/写入时触发（开库 + load 秒级），加锁防并发重复初始化。
         self._init_lock = asyncio.Lock()
 
@@ -81,17 +108,19 @@ class MilvusLiteVectorStore(VectorStore):
         )
 
     def _init_client(self) -> None:
+        if self._closed:
+            raise RuntimeError("Milvus vector store is closed")
         if self._initialized:
             return
 
-        from pymilvus import DataType, MilvusClient
+        from pymilvus import DataType
 
         # 确保父目录存在
         db_dir = os.path.dirname(os.path.abspath(self._db_path))
         os.makedirs(db_dir, exist_ok=True)
 
         self._relocate_legacy_store()
-        self._client = MilvusClient(self._db_path)
+        self._client = self._service.open_client()
 
         # 如果集合不存在，则创建符合 VARCHAR 主键的 Collection Schema
         if not self._client.has_collection(self._collection_name):
@@ -136,11 +165,22 @@ class MilvusLiteVectorStore(VectorStore):
 
     async def _ensure_client(self) -> None:
         """异步侧的懒初始化入口：to_thread + 锁，避免开库/load 阻塞事件循环或并发重入。"""
+        if self._closed:
+            raise RuntimeError("Milvus vector store is closed")
         if self._initialized:
             return
         async with self._init_lock:
             if not self._initialized:
-                await asyncio.to_thread(self._init_client)
+                await self._run_sync(self._init_client)
+
+    async def _run_sync(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """记录阻塞操作，关闭时拒绝新操作，并等已提交的线程结束。"""
+        if self._closed:
+            raise RuntimeError("Milvus vector store is closed")
+        task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        self._pending_calls.add(task)
+        task.add_done_callback(self._pending_calls.discard)
+        return await _wait_for_completion(task)
 
     def _existing_dimension(self) -> int | None:
         description = self._client.describe_collection(self._collection_name)
@@ -183,19 +223,19 @@ class MilvusLiteVectorStore(VectorStore):
 
         logger.info("Milvus upsert: %d chunks", len(chunks))
         try:
-            await asyncio.to_thread(
+            await self._run_sync(
                 self._client.upsert, collection_name=self._collection_name, data=data
             )
         except Exception as e:
             logger.warning(f"Milvus client.upsert failed ({e}), falling back to delete & insert...")
             chunk_ids = [c.chunk_id for c in chunks]
             try:
-                await asyncio.to_thread(
+                await self._run_sync(
                     self._client.delete, collection_name=self._collection_name, ids=chunk_ids
                 )
             except Exception as del_exc:
                 logger.debug("Milvus pre-insert delete failed (best-effort): %s", del_exc)
-            await asyncio.to_thread(
+            await self._run_sync(
                 self._client.insert, collection_name=self._collection_name, data=data
             )
 
@@ -204,18 +244,28 @@ class MilvusLiteVectorStore(VectorStore):
             return
         await self._ensure_client()
         try:
-            await asyncio.to_thread(
+            await self._run_sync(
                 self._client.delete, collection_name=self._collection_name, ids=chunk_ids
             )
         except Exception as e:
             logger.error(f"Failed to delete chunks: {e}")
             raise RuntimeError(f"Failed to delete chunks: {e}") from e
 
+    async def retain_document_chunks(self, doc_id: str, chunk_ids: frozenset[str]) -> None:
+        await self._ensure_client()
+        expression = f"doc_id == '{_quote_filter_value(doc_id)}'"
+        if chunk_ids:
+            ids = ", ".join(f"'{_quote_filter_value(cid)}'" for cid in sorted(chunk_ids))
+            expression += f" and id not in [{ids}]"
+        await self._run_sync(
+            self._client.delete, collection_name=self._collection_name, filter=expression,
+        )
+
     async def delete_collection(self, collection: str) -> None:
         await self._ensure_client()
         try:
             # 根据 collection_tag 属性删除匹配的向量数据
-            await asyncio.to_thread(
+            await self._run_sync(
                 self._client.delete,
                 collection_name=self._collection_name,
                 filter=f"collection_tag == '{_quote_filter_value(collection)}'",
@@ -234,8 +284,11 @@ class MilvusLiteVectorStore(VectorStore):
         query_vector: list[float],
         top_k: int,
         filter_metadata: dict | None = None,
+        *,
+        exclude_chunk_ids: frozenset[str] | None = None,
+        allowed_doc_ids: frozenset[str] | None = None,
     ) -> list[tuple[str, float]]:
-        if top_k <= 0:
+        if top_k <= 0 or allowed_doc_ids == frozenset():
             return []
 
         self._validate_vector(query_vector)
@@ -247,9 +300,17 @@ class MilvusLiteVectorStore(VectorStore):
                 if not _FILTER_KEY_RE.fullmatch(k):
                     raise ValueError(f"Invalid metadata filter key: {k!r}")
                 filter_expr += f" and {k} == '{_quote_filter_value(v)}'"
+        if allowed_doc_ids is not None:
+            docs = ", ".join(f"'{_quote_filter_value(d)}'" for d in sorted(allowed_doc_ids))
+            filter_expr += f" and doc_id in [{docs}]"
+        if exclude_chunk_ids:
+            # 用 Milvus 原生 `not in` 表达式在候选截断前下推排除，不做事后过滤
+            # （W0 隔离探针已验证 pymilvus 2.6.x + milvus-lite 3.x 对动态字段同样生效）。
+            excluded = ", ".join(f"'{_quote_filter_value(cid)}'" for cid in exclude_chunk_ids)
+            filter_expr += f" and id not in [{excluded}]"
 
         try:
-            results = await asyncio.to_thread(
+            results = await self._run_sync(
                 self._client.search,
                 collection_name=self._collection_name,
                 data=[query_vector],
@@ -269,9 +330,7 @@ class MilvusLiteVectorStore(VectorStore):
 
     def _clear_sync(self) -> None:
         if self._client is None:
-            from pymilvus import MilvusClient
-
-            self._client = MilvusClient(self._db_path)
+            self._client = self._service.open_client()
         if self._client.has_collection(self._collection_name):
             self._client.drop_collection(self._collection_name)
         self._client.close()
@@ -284,19 +343,40 @@ class MilvusLiteVectorStore(VectorStore):
         try:
             # 与懒初始化共用同一把锁：drop + 重建期间不允许并发触发 _ensure_client。
             async with self._init_lock:
-                await asyncio.to_thread(self._clear_sync)
+                await self._run_sync(self._clear_sync)
         except Exception as e:
             logger.error(f"Failed to clear vector store: {e}")
             raise RuntimeError(f"Failed to clear vector store: {e}") from e
 
     async def close(self) -> None:
-        if self._client:
+        """停止新操作，等待在途线程，刷盘并释放本库 Lite 服务；重复调用共用清理任务。"""
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._close())
+        await _wait_for_completion(self._close_task)
+
+    async def _close(self) -> None:
+        async with self._init_lock:
+            if self._pending_calls:
+                await asyncio.gather(*self._pending_calls, return_exceptions=True)
+            await asyncio.to_thread(self._close_sync)
+
+    def _close_sync(self) -> None:
+        client = self._client
+        try:
+            if client is not None and self._initialized:
+                client.flush(self._collection_name)
+        finally:
             try:
-                await asyncio.to_thread(self._client.close)
-            except Exception as e:
-                logger.error(f"Failed to close Milvus client: {e}")
-            self._client = None
-            self._initialized = False
+                if client is not None:
+                    client.close()
+            finally:
+                try:
+                    # client.close 只断开 RPC；通过开库时保留的所有者释放服务与 LOCK。
+                    self._service.release()
+                finally:
+                    self._client = None
+                    self._initialized = False
 
 
 __all__ = ["MilvusLiteVectorStore", "MilvusSchemaMismatchError"]

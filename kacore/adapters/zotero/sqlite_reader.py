@@ -72,6 +72,24 @@ def _extract_year(date_value: str) -> str:
     return m.group(0) if m else ""
 
 
+def excluded_collection_keys(
+    parent_by_key: dict[str, str], deleted_keys: set[str]
+) -> set[str]:
+    """被删集合及其全部子孙的 key。
+
+    Zotero 把集合移入回收站时，子集合不一定带删除标记，因此需沿 parent 关系迭代剔除。
+    """
+    excluded = set(deleted_keys)
+    changed = True
+    while changed:
+        changed = False
+        for key, parent in parent_by_key.items():
+            if key not in excluded and parent in excluded:
+                excluded.add(key)
+                changed = True
+    return excluded
+
+
 class ZoteroSqliteReader:
     """只读读取 zotero.sqlite，产出 domain 镜像快照。"""
 
@@ -95,8 +113,15 @@ class ZoteroSqliteReader:
             lib_id = library.library_id
             item_key_by_id = self._read_item_keys(conn, lib_id)
             snapshot = ZoteroSnapshot(library=library)
-            snapshot.collections = self._read_collections(conn, lib_id)
-            snapshot.collection_items = self._read_collection_items(conn, lib_id, item_key_by_id)
+            excluded = self._deleted_collection_keys(conn, lib_id)
+            snapshot.collections = [
+                c for c in self._read_collections(conn, lib_id) if c.collection_key not in excluded
+            ]
+            snapshot.collection_items = [
+                (ck, ik)
+                for ck, ik in self._read_collection_items(conn, lib_id, item_key_by_id)
+                if ck not in excluded
+            ]
             snapshot.items = self._read_items(conn, lib_id)
             snapshot.attachments = self._read_attachments(conn, lib_id, item_key_by_id)
             snapshot.item_tags = self._read_item_tags(conn, lib_id, item_key_by_id)
@@ -148,6 +173,32 @@ class ZoteroSqliteReader:
                 )
             )
         return result
+
+    def _deleted_collection_keys(self, conn: sqlite3.Connection, lib_id: str) -> set[str]:
+        """回收站中的集合 key（含子孙）。deletedCollections 为 Zotero 7 新增，旧库无此表。"""
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'deletedCollections'"
+        ).fetchone()
+        if has_table is None:
+            return set()
+        deleted = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT c.key FROM collections c "
+                "JOIN deletedCollections d ON d.collectionID = c.collectionID "
+                "WHERE c.libraryID = ?",
+                (int(lib_id),),
+            )
+        }
+        if not deleted:
+            return set()
+        rows = conn.execute(
+            "SELECT c.key, p.key FROM collections c "
+            "JOIN collections p ON p.collectionID = c.parentCollectionID "
+            "WHERE c.libraryID = ?",
+            (int(lib_id),),
+        ).fetchall()
+        return excluded_collection_keys({str(k): str(p) for k, p in rows}, deleted)
 
     def _read_collection_items(
         self, conn: sqlite3.Connection, lib_id: str, item_key_by_id: dict[int, str]

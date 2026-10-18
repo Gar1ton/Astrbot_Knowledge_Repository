@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import re
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -84,6 +85,8 @@ class PluginInitializer:
         self._backup_task: asyncio.Task[Any] | None = None
         self._zotero_sync_task: asyncio.Task[Any] | None = None
         self._notion_sync_task: asyncio.Task[Any] | None = None
+        self._auto_reindex_task: asyncio.Task[Any] | None = None
+        self.auto_reindex_scheduler: Any | None = None
         # 超时后仍在后台跑的维度探针（模型下载不可中断，只能让它跑完再补记结果）。
         self._pending_probe_task: asyncio.Task[Any] | None = None
         self.zotero_sync_pipeline: Any | None = None
@@ -97,6 +100,10 @@ class PluginInitializer:
         self.api: KnowledgeRepositoryApi | None = None
         self.lightrag_registry: Any | None = None
         self.vector_store: VectorStore | None = None
+        # 最近一次 Milvus 装配失败的具体异常文本；vector_store 装配成功时清空。
+        # 供 capabilities 面板展示具体原因（而非套话），以及「清除残留锁」的前置守卫。
+        self._vector_store_init_error: str | None = None
+        self._milvus_db_path: Path | None = None
         self.embedding_provider: EmbeddingProvider | None = None
         self.embedding_dimension: int | None = None
         self.embedding_fingerprint: str | None = None
@@ -261,19 +268,19 @@ class PluginInitializer:
             )
 
         if (vdb_cfg.backend == "milvus" or graph_cfg.enabled) and embedding_runtime_available:
+            from kacore.repository.embedding.astrbot import AstrBotEmbeddingError
             from kacore.repository.embedding.factory import EmbeddingProviderFactory
 
             logger.info(
-                "开始 Embedding 维度探针：provider=%s model=%s 超时上限 %ss",
-                embedding_cfg.provider,
-                embedding_cfg.model,
+                "开始 Embedding 维度探针：%s 超时上限 %ss",
+                self._config.describe_embedding(),
                 embedding_cfg.load_timeout_seconds or "不限",
             )
 
             probe_started = time.monotonic()
             try:
                 self.embedding_provider = EmbeddingProviderFactory.create_provider(
-                    self._config, db_dir=str(self._data_dir)
+                    self._config, db_dir=str(self._data_dir), context=self._context
                 )
                 probe = await self._probe_embedding_dimension(
                     self.embedding_provider, embedding_cfg
@@ -281,14 +288,18 @@ class PluginInitializer:
                 if not probe:
                     raise RuntimeError("Embedding dimension probe returned an empty vector")
                 self.embedding_dimension = len(probe)
+                # 身份现读（探针后实测维度才确定）；测试替身可能没有该属性，故用 getattr。
+                embedding_identity = dict(getattr(self.embedding_provider, "identity", None) or {})
                 self.embedding_fingerprint = embedding_fingerprint(
-                    embedding_cfg, self.embedding_dimension
+                    embedding_cfg, self.embedding_dimension, embedding_identity
                 )
                 self._config.set_embedding_dimension(self.embedding_dimension)
+                self._config.set_embedding_identity(
+                    embedding_identity if embedding_cfg.uses_astrbot else None
+                )
                 logger.info(
-                    "Embedding 维度探针完成：provider=%s model=%s dim=%d 耗时 %.1fs",
-                    embedding_cfg.provider,
-                    embedding_cfg.model,
+                    "Embedding 维度探针完成：%s dim=%d 耗时 %.1fs",
+                    self._config.describe_embedding(),
                     self.embedding_dimension,
                     time.monotonic() - probe_started,
                 )
@@ -300,7 +311,7 @@ class PluginInitializer:
                 )
                 self._config.add_diagnostic(str(exc))
                 self.embedding_provider = None
-            except NotImplementedError as exc:
+            except (NotImplementedError, AstrBotEmbeddingError) as exc:
                 logger.warning(
                     "Embedding provider 初始化失败，图谱/向量检索功能已禁用：%s", exc
                 )
@@ -329,7 +340,10 @@ class PluginInitializer:
             )
 
             milvus_path = self._data_dir / vdb_cfg.db_filename
+            self._milvus_db_path = milvus_path
+            self._vector_store_init_error = None
             is_new_index = not milvus_path.exists()
+            milvus = None
             try:
                 milvus = MilvusLiteVectorStore(
                     db_path=str(milvus_path),
@@ -381,6 +395,12 @@ class PluginInitializer:
                     "Milvus initialization failed; AstrBot fallback remains active: %s", exc
                 )
                 self._config.add_diagnostic(f"Milvus unavailable: {exc}")
+                self._vector_store_init_error = str(exc)
+                if milvus is not None:
+                    try:
+                        await milvus.close()
+                    except Exception:
+                        logger.exception("Failed to close partially initialized Milvus store")
                 self.vector_store = None
         elif (
             vdb_cfg.backend == "milvus"
@@ -452,7 +472,7 @@ class PluginInitializer:
                     embedding_provider=self.embedding_provider,
                     embedding_dim=self.embedding_dimension,
                     max_token_size=embedding_cfg.max_token_size,
-                    embedding_model=embedding_cfg.model,
+                    embedding_model=self._lightrag_embedding_model_name(embedding_cfg),
                 )
                 incompatible_lightrag = [
                     collection
@@ -470,7 +490,7 @@ class PluginInitializer:
         elif graph_cfg.enabled and self.embedding_provider is None:
             logger.warning(
                 "graph.enabled=true 但 embedding provider 不可用，LightRAG Core 已跳过。"
-                " 请在配置中将 embedding.provider 改为 'local' 或 'external'。"
+                " 请检查 embedding 配置（provider 可选 'local' / 'external' / 'astr'）。"
             )
 
         # 4.7) 构造统一检索编排器 (RetrievalOrchestrator)
@@ -581,6 +601,8 @@ class PluginInitializer:
             llm_adapter=llm_adapter,
             managed_documents_dir=self._data_dir / "library",
             vector_store=self.vector_store,
+            vector_store_init_error=self._vector_store_init_error,
+            clear_milvus_lock_callback=self.clear_stale_milvus_lock,
             embedding_provider=self.embedding_provider,
             retrieval_orchestrator=self.retrieval_orchestrator,
             deep_thinking_orchestrator=self.deep_thinking_orchestrator,
@@ -643,9 +665,28 @@ class PluginInitializer:
                 self._periodic_zotero_sync(zotero_cfg.auto_sync_interval_sec)
             )
 
-        # 6.2) Notion 周期增量推送：启用且间隔>0 时注册（间隔每轮重读，吸收前端改值）。
-        if notion_cfg.enabled and notion_cfg.auto_sync_interval_sec > 0:
+        # 常驻轻量检测；开关每轮重读，禁用时不读库、不推送。
+        if self.source_store is not None:
             self._notion_sync_task = asyncio.create_task(self._periodic_notion_sync())
+
+        # 6.3) Milvus 索引自动重建：常驻调度器（开关每轮重读，故不在这里按配置决定是否创建）。
+        # 启动即打一次信号做「补跑」——此时 4.6 段的 _mark_all_documents_needs_reindex() 已跑完，
+        # 待重建队列是终态，调度器自己查队列决定跑不跑。
+        if vdb_cfg.backend == "milvus":
+            from kacore.auto_reindex import AutoReindexScheduler
+
+            # 升级后旧分块逻辑处理的文档一次性入队（Zotero 拉取结束也会再扫一次，见 api）。
+            await self.api.mark_stale_processing_documents_needs_reindex()
+            self.auto_reindex_scheduler = AutoReindexScheduler(
+                pending_count=self.api.get_pending_reindex_count,
+                run_rebuild=self.api.run_milvus_rebuild_to_completion,
+                config_provider=self._config.get_vector_db_config,
+                is_ready=lambda: self.vector_store is not None
+                and self.embedding_provider is not None,
+            )
+            self.api.attach_auto_reindex_scheduler(self.auto_reindex_scheduler)
+            self._auto_reindex_task = asyncio.create_task(self.auto_reindex_scheduler.run())
+            self.auto_reindex_scheduler.notify()
 
         # 6.5) 启动摘要——记录各关键组件激活状态，方便终端页快速诊断。
         logger.info(
@@ -710,11 +751,29 @@ class PluginInitializer:
                 "本次启动已跳过向量检索与知识图谱（AstrBot/SQLite 基础召回仍可用）；"
                 "下载完成后请再次点击「重启插件」。"
             )
+        if getattr(embedding_cfg, "uses_astrbot", False):
+            label = self._config.describe_embedding()
+            raise _EmbeddingProbeTimeout(
+                f"AstrBot Embedding 探测超时（{timeout_seconds:g}s，{label}）："
+                "API Key、Base URL 与超时由 AstrBot 管理，请在 AstrBot「模型提供商」中检查该 "
+                "Embedding Provider 的配置与网络后重启插件。"
+                "本次启动已跳过向量检索与知识图谱（AstrBot/SQLite 基础召回仍可用）。"
+            )
         raise _EmbeddingProbeTimeout(
             f"Embedding 接口探测超时（{timeout_seconds:g}s，model={embedding_cfg.model}）："
             "请检查 base_url、网络与 KR_EMBEDDING_API_KEY 后重启插件。"
             "本次启动已跳过向量检索与知识图谱（AstrBot/SQLite 基础召回仍可用）。"
         )
+
+    def _lightrag_embedding_model_name(self, embedding_cfg: Any) -> str:
+        """LightRAG EmbeddingFunc 的 model_name。
+
+        local/external 保持 `embedding.model`。astr 下该配置被忽略（默认值是本地模型名，会误导），
+        改用 AstrBot provider 身份；只保留文件名安全字符，因为部分 LightRAG 存储会拿它拼标识。
+        """
+        if not getattr(embedding_cfg, "uses_astrbot", False):
+            return embedding_cfg.model
+        return re.sub(r"[^A-Za-z0-9_.-]", "_", self._config.describe_embedding())
 
     def _on_late_embedding_probe(self, task: asyncio.Task[Any]) -> None:
         """超时后仍在后台跑的探针有了结果时补记一条日志/诊断。
@@ -884,23 +943,33 @@ class PluginInitializer:
             logger.error(f"Error in background periodic backup: {e}")
 
     async def _periodic_notion_sync(self) -> None:
-        """Notion 周期增量推送：每轮 sleep 当前配置间隔（重读以吸收前端改值），
-        再经 `api.sync_notion_push` 触发一次后台推送——与手动按钮共用同一进度任务，
-        使周期推送也在左下角进度条可视；异常吞掉记日志不影响循环。"""
-        logger.info("Notion periodic push scheduled.")
-        try:
-            while True:
-                interval = self._config.get_notion_sync_config().auto_sync_interval_sec
-                if interval <= 0:
-                    logger.info("Notion 周期推送间隔置 0，任务退出。")
-                    return
-                await asyncio.sleep(interval)
-                try:
-                    await self.api.sync_notion_push(force=False)
-                except Exception as exc:
-                    logger.error("Notion periodic push failed: %s", exc)
-        except asyncio.CancelledError:
-            logger.info("Notion periodic push task cancelled.")
+        """10 秒合并本地变更 + 周期补偿，共用手动推送进度任务。"""
+        from kacore.notion_auto_sync import NotionAutoSync
+
+        assert self.source_store is not None
+        await NotionAutoSync(
+            self.source_store, self._config.get_notion_sync_config, self._auto_notion_push
+        ).run()
+
+    async def _auto_notion_push(self) -> bool | None:
+        """本地维护/既有推送忙时等待，不把新变更误认为已消费。"""
+        if self.api is None:
+            return None
+        if self.api._processing_lock.locked():
+            return None
+        task = self.api._notion_sync_task
+        if task is not None and not task.done():
+            return None
+        zotero = self.api.get_active_zotero_sync_job()
+        if zotero is not None and zotero.get("status") == "running":
+            return None
+        await self.api.sync_notion_push(force=False)
+        task = self.api._notion_sync_task
+        if task is None:
+            return False
+        await task
+        job = self.api._notion_sync_job
+        return job is not None and job.status == "success"
 
     async def _periodic_zotero_sync(self, interval_sec: int) -> None:
         """Zotero 自动同步：启动即增量拉取一次，之后每 interval_sec 再增量拉取。"""
@@ -927,12 +996,34 @@ class PluginInitializer:
                 except Exception as exc:
                     logger.error("Failed to mark document %s for reindex: %s", doc.doc_id, exc)
 
+    async def clear_stale_milvus_lock(self) -> dict[str, Any]:
+        """保留既有端口，但拒绝删除 LOCK；OS 锁必须由持有服务释放。
+
+        空文件不代表锁已失效，删除文件可能绕过仍在工作的服务的互斥保护。
+        旧实例已丢失释放入口时，应完整退出宿主进程，不做文件层面的恢复。
+        """
+        from kacore.capabilities import milvus_lock_error_hint
+
+        if self._config is None or self._config.get_vector_db_config().backend != "milvus":
+            return {"status": "error", "message": "当前向量库后端不是 milvus，无需清除锁定。"}
+        if self.vector_store is not None:
+            return {"status": "error", "message": "Milvus 已正常装配，无需清除锁定。"}
+        if not self._vector_store_init_error or not milvus_lock_error_hint(
+            self._vector_store_init_error
+        ):
+            return {"status": "error", "message": "未检测到 Milvus 数据目录锁定问题，拒绝清除。"}
+        if self._milvus_db_path is None:
+            return {"status": "error", "message": "尚未确定 Milvus 数据目录路径，无法清除。"}
+
+        return {
+            "status": "error",
+            "message": milvus_lock_error_hint(self._vector_store_init_error),
+        }
+
     # ── 关闭：与构造顺序相反释放 ────────────────────────────────
     async def teardown(self) -> None:
         teardown_started = time.monotonic()
         logger.info("PluginInitializer.teardown() 开始释放子系统")
-        if self.api is not None:
-            await self.api.cancel_build_tasks()
 
         if self._backup_task is not None:
             self._backup_task.cancel()
@@ -960,6 +1051,20 @@ class PluginInitializer:
                 pass
             self._notion_sync_task = None
 
+        if self.api is not None and self.api._notion_sync_task is not None:
+            self.api._notion_sync_task.cancel()
+            await asyncio.gather(self.api._notion_sync_task, return_exceptions=True)
+            self.api._notion_sync_task = None
+
+        if self._auto_reindex_task is not None:
+            self._auto_reindex_task.cancel()
+            try:
+                await self._auto_reindex_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._auto_reindex_task = None
+            self.auto_reindex_scheduler = None
+
         # 后台探针：取消任务本身（不等待）。底层模型下载线程无法中断，会继续跑完写入
         # HuggingFace 缓存——这正是我们要的：下次 initialize 直接命中缓存。
         if self._pending_probe_task is not None:
@@ -972,6 +1077,10 @@ class PluginInitializer:
             except Exception as e:
                 logger.warning(f"Web 控制台关闭异常：{e}")
             self._web_runner = None
+
+        # 先停止调度器和 HTTP 请求，避免取消后又产生构建；再收走独立 Milvus 任务。
+        if self.api is not None:
+            await self.api.cancel_build_tasks()
 
         if self.lightrag_registry is not None:
             try:

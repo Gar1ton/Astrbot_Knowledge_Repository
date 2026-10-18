@@ -1,5 +1,22 @@
 # TODO
 
+## v1.2.0 正式发布（🚧 in progress）
+
+- 用户已审核 README 并批准发布；远端仅限推送 developer、推送 `publish/v1.2.0` 与创建
+  PR（`Release: v1.2.0`），合并 PR 与 tag 另行确认。
+- [x] Phase 1：按 v1.1.2 – v1.2.0 实际功能重写 `README.md`（六档检索、升级须知、Zotero /
+  Notion / 自动重建章节、Notion 指南改链 developer 分支）。
+- [x] Phase 2：版本统一为 v1.2.0（`metadata.yaml` 简介「五档」→「六档」、`main.py`），
+  CHANGELOG 追加 `[v1.2.0]` 发布条目。
+- [x] Phase 3：全量 pytest、ruff、mypy、前端构建与 `pages/` 一致性检查，提交 developer。
+  验证：1289 passed / 2 skipped / 3 failed（沿用既有三项：两项缺 torch、`bad19` 测试桩）；
+  ruff 7 项均为既有问题（`test_embedding_database_compatibility.py` / `test_external_embedding_contract.py` /
+  `tools/chunk_preview.py`）；mypy、`git diff --check`、`npm run build` 与 `sync_frontend.py --check` 通过。
+- [ ] Phase 4：从冻结 SHA 生成发布树，基于 `origin/main` 建 `publish/v1.2.0` 并提交。
+- [ ] Phase 5：推送 developer 与发布分支，创建 PR 到 main。
+- 待决：`conservative` 模式下 Zotero 陈旧集合在代码中总会清理，与 `config.py` 注释及
+  WebUI 帮助文案「集合只增不减」不一致；README 按代码行为描述，文案/代码修正未纳入本轮。
+
 ## v1.2.0-preview-6 Zotero sync_mode 删除语义对调（completed，Breaking）
 
 - 现象：`strict_mirror` 对已删文档只标 detached，`conservative` 反而硬删除，与名称相反。

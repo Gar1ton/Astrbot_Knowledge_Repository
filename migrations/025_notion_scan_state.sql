@@ -50,4 +50,3 @@ AFTER DELETE ON document_collections
 BEGIN
     UPDATE notion_local_revision SET revision = revision + 1 WHERE id = 1;
 END;
-

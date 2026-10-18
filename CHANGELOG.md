@@ -1,5 +1,40 @@
 # CHANGELOG
 
+## [v1.2.0] — 2026-10-18
+
+### 发布 (Release)
+
+- **正式版 v1.2.0**：汇总 v1.1.2 – v1.2.0-preview-6 的全部变更，上一个 main 正式版为 v1.1.1。
+  主线为清洗与证据升级（水印去除、脚注保留、新切片边界、证据会话）、Notion MCP v2 与
+  自动同步/笔记标记、`embedding.provider=astr` 与外部 embedding 加固、Milvus 生命周期修复、
+  Milvus 索引自动重建、文件名书目解析与 i18n 补齐。各条目详见下方 preview 版本记录。
+- **破坏性变更提醒**：Zotero `sync_mode` 的 `strict_mirror` / `conservative` 删除语义对调
+  （见 v1.2.0-preview-6）；Notion 需宿主 MCP 升级到 `@suekou/mcp-notion-server@2.0.2`
+  （见 v1.2.0-preview-2/3）。
+
+### 文档 (Docs)
+
+- **README 按 v1.2.0 实际功能重写**：新增「v1.2.0 有什么新变化」与「从 v1.1.x 升级须知」；
+  检索模式由「五档」改为「六档」（补入 `fulltext`）；新增 Zotero 同步（访问/存放/同步模式）、
+  Notion 同步、向量索引自动维护章节；补齐 `/ka notion` 指令、机密环境变量、Embedding 三种来源、
+  Codex Skill `index-status` / `index-rebuild` / `read --whole`、`/terminal` 页与 Milvus / Notion 常见问题；
+  版本演进表延伸到 v1.2.0。`docs/NOTION_SYNC.md` 不在发布白名单内，README 改为链接 developer 分支。
+- Zotero 集合描述按代码行为（陈旧集合在所有模式下都清理）书写；`config.py` 注释与 WebUI 帮助文案
+  「conservative 集合只增不减」的不一致登记在 `TODO.md`，本轮不改。
+
+### 改进 (Changed)
+
+- **版本统一**：`metadata.yaml`、`main.py` 注册版本与 README badge 统一为 `v1.2.0`；
+  `metadata.yaml` 简介「五档检索问答」改为「六档检索问答」。
+- 去掉 `migrations/025_notion_scan_state.sql` 末尾多余空行（发布树 `git diff --cached --check`
+  报错）；迁移按文件名记录、不校验内容，已执行过 025 的库不受影响。
+
+### 验证
+
+- 全量 1289 passed / 2 skipped / 3 failed（沿用既有三项：两项缺 torch、`bad19` 测试桩）；
+  `ruff check .` 7 项均为既有问题，不涉及本轮文件；mypy、`git diff --check`、前端构建与
+  `pages/` 一致性检查通过。
+
 ## [v1.2.0-preview-6] — 2026-10-08
 
 ### ⚠️ 破坏性变更 (Breaking)

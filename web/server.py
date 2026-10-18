@@ -467,6 +467,26 @@ async def handle_delete_document(request: web.Request) -> web.Response:
     return web.json_response({"ok": ok}, status=200 if ok else 404)
 
 
+async def handle_reprocess_cleaning(request: web.Request) -> web.Response:
+    """手动维护入口；默认只预览，复用已有鉴权与错误处理。"""
+    body = await request.json()
+    if not isinstance(body, dict):
+        return web.json_response({"error": "body must be an object"}, status=400)
+    dry_run = body.get("dry_run", True)
+    if not isinstance(dry_run, bool):
+        return web.json_response({"error": "dry_run must be a boolean"}, status=400)
+    return web.json_response(await _api(request).reprocess_documents_with_stale_cleaning(
+        dry_run=dry_run,
+    ))
+
+
+async def handle_document_footnotes(request: web.Request) -> web.Response:
+    notes = await _api(request).get_document_footnotes(request.match_info["doc_id"])
+    if notes is None:
+        return web.json_response({"error": "document not found"}, status=404)
+    return web.json_response(notes)
+
+
 async def handle_reextract_document(request: web.Request) -> web.Response:
     doc_id = request.match_info["doc_id"]
     _mw_logger.info("Re-extract document: doc_id=%s", doc_id)
@@ -738,6 +758,10 @@ async def handle_notion_init(request: web.Request) -> web.Response:
     return web.json_response(result, status=status)
 
 
+async def handle_notion_status(request: web.Request) -> web.Response:
+    return web.json_response(await _api(request).get_notion_push_status())
+
+
 async def handle_notion_push_note(request: web.Request) -> web.Response:
     body = await request.json() if request.can_read_body else {}
     if not isinstance(body, dict):
@@ -794,6 +818,16 @@ async def handle_plugin_restart(request: web.Request) -> web.Response:
         return web.json_response(result)
     except Exception as exc:  # noqa: BLE001
         _mw_logger.error("Plugin restart failed to schedule: %s", exc, exc_info=True)
+        return web.json_response({"status": "error", "message": str(exc)}, status=503)
+
+
+async def handle_clear_milvus_lock(request: web.Request) -> web.Response:
+    _mw_logger.info("Milvus lock clear requested")
+    try:
+        result = await _api(request).clear_milvus_lock()
+        return web.json_response(result)
+    except Exception as exc:  # noqa: BLE001
+        _mw_logger.error("Milvus lock clear failed: %s", exc, exc_info=True)
         return web.json_response({"status": "error", "message": str(exc)}, status=503)
 
 
@@ -1441,7 +1475,7 @@ async def handle_ask(request: web.Request) -> web.Response:
     if not question:
         return web.json_response({"error": "question required"}, status=400)
     collection = body.get("collection") or None
-    top_k = _parse_int(body.get("top_k"), "top_k", 5, 1, 20)
+    top_k = _parse_int(body.get("top_k"), "top_k", 6, 1, 20)
     conversation_id = body.get("conversation_id") or None
     persona_enabled = bool(body.get("persona_enabled") or False)
     retrieval_mode = body.get("retrieval_mode") or "default"
@@ -1754,6 +1788,8 @@ def build_app(
     app.router.add_patch("/api/documents/{doc_id}", handle_classify_document)
     app.router.add_patch("/api/documents/{doc_id}/meta", handle_document_meta_patch)
     app.router.add_delete("/api/documents/{doc_id}", handle_delete_document)
+    app.router.add_post("/api/documents/reprocess-cleaning", handle_reprocess_cleaning)
+    app.router.add_get("/api/documents/{doc_id}/footnotes", handle_document_footnotes)
     app.router.add_post("/api/documents/{doc_id}/reextract", handle_reextract_document)
     app.router.add_get("/api/documents/{doc_id}/content", handle_document_content)
     app.router.add_get("/api/documents/{doc_id}/content/page", handle_document_content_page)
@@ -1772,6 +1808,7 @@ def build_app(
     app.router.add_get("/api/config/effective", handle_effective_config)
     app.router.add_post("/api/config/update", handle_update_config)
     app.router.add_post("/api/plugin/restart", handle_plugin_restart)
+    app.router.add_post("/api/milvus/clear-lock", handle_clear_milvus_lock)
     app.router.add_post("/api/config/test-embedding", handle_test_embedding)
     app.router.add_post("/api/documents/rebuild-index", handle_rebuild_index_pending)
     app.router.add_get("/api/documents/rebuild-index/active", handle_milvus_build_active)
@@ -1781,6 +1818,7 @@ def build_app(
     app.router.add_post("/api/sync/{target}", handle_sync)
     app.router.add_post("/api/notion/init", handle_notion_init)
     app.router.add_post("/api/notion/push-note", handle_notion_push_note)
+    app.router.add_get("/api/sync/notion/status", handle_notion_status)
     app.router.add_get("/api/sync/status", handle_sync_status)
     app.router.add_get("/api/sync/notion/active", handle_notion_active)
     app.router.add_get("/api/zotero/config", handle_zotero_config)

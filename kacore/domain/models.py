@@ -61,9 +61,9 @@ class DocumentOrigin(str, Enum):
 class DocumentLifecycle(str, Enum):
     """文档生命态。
 
-    ACTIVE 为正常参与检索的文档；DETACHED 为 strict_mirror 同步模式下被脱管的文档——
-    其制品/Milvus 索引已移除但 **LRAG workspace 保留**，切回 conservative/archive 模式重扫后
-    可恢复为 ACTIVE。检索默认过滤 DETACHED。
+    ACTIVE 为正常参与检索的文档；DETACHED 为 conservative 同步模式下被脱管的文档——
+    其 Milvus 索引已移除但文档记录/制品包与 **LRAG workspace 保留**，Zotero 侧恢复该文档后
+    重扫可恢复为 ACTIVE；切到 strict_mirror 后重扫会将其硬删除。检索默认过滤 DETACHED。
     """
 
     ACTIVE = "active"

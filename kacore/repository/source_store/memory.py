@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -50,6 +51,7 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._sync_records: dict[tuple[str, SyncTargetKind], SyncRecord] = {}
         self._notion_entities: dict[tuple[str, str], NotionEntityRecord] = {}
         self._notion_outbox: dict[str, NotionOutboxItem] = {}
+        self._notion_scan_cursors: dict[str, str] = {}
         self._lightrag_status: dict[str, dict[str, str]] = {}
         self._build_jobs: dict[str, dict] = {}
         self._codex_graph_tasks: dict[str, dict] = {}
@@ -70,6 +72,16 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         self._console_scope_states: dict[tuple[str, str], ConsoleScopeState] = {}
 
     # ── 集合（树形 + 多归属）────────────────────────────────────
+
+    async def get_notion_local_revision(self) -> str:
+        state = (self._documents, self._collections, self._doc_collections)
+        return hashlib.sha256(repr(state).encode()).hexdigest()
+
+    async def get_notion_scan_cursor(self, scope: str) -> str:
+        return self._notion_scan_cursors.get(scope, "")
+
+    async def set_notion_scan_cursor(self, scope: str, cursor: str) -> None:
+        self._notion_scan_cursors[scope] = cursor
 
     async def upsert_collection(self, collection: Collection) -> None:
         coll_key = collection.coll_key
@@ -237,6 +249,24 @@ class InMemorySourceDocumentStore(SourceDocumentStore):
         return True
 
     # ── 分块 ────────────────────────────────────────────────────
+
+    async def commit_document_processing(
+        self, document: SourceDocument, chunks: list[DocumentChunk], pages: list[PageChunk],
+    ) -> None:
+        if document.doc_id not in self._documents:
+            raise FileNotFoundError(document.doc_id)
+        updated = copy.deepcopy(self._documents[document.doc_id])
+        updated.converter = document.converter
+        updated.converter_version = document.converter_version
+        updated.needs_reindex = True
+        for key in ("chunk_schema", "processing_version"):
+            if key in document.local_meta:
+                updated.local_meta[key] = document.local_meta[key]
+        updated.local_meta.pop("processing_pending", None)
+        new_chunks, new_pages = copy.deepcopy(chunks), copy.deepcopy(pages)
+        self._documents[document.doc_id] = updated
+        self._chunks[document.doc_id] = new_chunks
+        self._page_chunks[document.doc_id] = new_pages
 
     async def replace_chunks(self, doc_id: str, chunks: list[DocumentChunk]) -> None:
         self._chunks[doc_id] = [copy.deepcopy(c) for c in chunks]

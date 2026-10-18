@@ -6,7 +6,8 @@
 机密约定：密钥/密码优先从环境变量读取，原始 dict 仅作回退，且密钥不应提交进仓库。
     - R2 Secret Access Key：env `KR_R2_SECRET_ACCESS_KEY`
     - Web 控制台密码：env `KR_WEB_PASSWORD`
-    - Embedding API Key：env `KR_EMBEDDING_API_KEY`
+    - Embedding API Key：env `KR_EMBEDDING_API_KEY`（仅 provider=external；provider=astr 时
+      密钥、Base URL、模型名均由 AstrBot 自己的 provider 配置管理，本插件不保存任何副本）
     - LightRAG 专用 LLM API Key：env `KR_LIGHTRAG_LLM_API_KEY`
     Notion 不在此持有 token——同步经 AstrBot 已配置的 notion MCP server，token 由 MCP 侧管理。
 """
@@ -63,6 +64,18 @@ def _clamp_load_timeout(value: Any) -> int:
     return max(_LOAD_TIMEOUT_MIN_SECONDS, min(_LOAD_TIMEOUT_MAX_SECONDS, seconds))
 
 
+# 自动重建防抖窗口下限：低于此值时，Zotero 批量同步会每来一篇就重跑一次全量重建。
+MIN_AUTO_REBUILD_DELAY_SECONDS: int = 5
+
+
+def _int_or_default(value: Any, default: int) -> int:
+    """把配置值转成 int；None/空串/非数字一律回退默认值（不抛错）。"""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 # ── 各子系统专属 typed config ────────────────────────────────────
 
 
@@ -116,17 +129,20 @@ NOTION_SYNC_STRICT = "strict"
 class NotionSyncConfig:
     """Notion 单向镜像配置。经 mcp_server_name 指向的 MCP server 调用，本侧不持 token。
 
-    max_upload_mib 固定为 Notion API 限制（5 MiB），不暴露给用户配置。
-    rate_limit_rps 固定为平台限速（3 req/s），不暴露给用户配置（改高会触发 429）。
+    max_upload_mib 保留旧配置/诊断接口；Articles 不上传正文或二进制文件。
+    rate_limit_rps 保留保守的客户端频控（3 req/s），不暴露给用户配置。
     """
 
     enabled: bool = False
     mcp_server_name: str = "notion"
     database_id: str = ""
     qa_database_id: str = ""
+    data_source_id: str = ""
+    qa_data_source_id: str = ""
     parent_page_id: str = ""
     database_title: str = "Knowledge Arch"
-    auto_sync_interval_sec: int = 0
+    auto_sync_enabled: bool = True
+    auto_sync_interval_sec: int = 300
     sync_mode: str = NOTION_SYNC_PRESERVE
     max_upload_mib: int = 5
     rate_limit_rps: int = _NOTION_RATE_LIMIT_RPS
@@ -186,20 +202,35 @@ class GraphConfig:
 
 @dataclass
 class VectorDbConfig:
-    """向量数据库与检索后端配置。"""
+    """向量数据库与检索后端配置。
+
+    `auto_index_enabled` 与 `auto_rebuild_enabled` 是**正交**的两件事：前者管「上传/同步的
+    瞬间是否同步写 Milvus」，后者管「已排进 `needs_reindex` 队列的文档是否由后台自动排空」。
+    前者失败或被兼容门跳过时，后者是兜底网。
+    """
 
     backend: str = "milvus"
     db_filename: str = "vector_store.db"
     auto_index_enabled: bool = True
+    auto_rebuild_enabled: bool = True
+    # 防抖静默期：Zotero 批量同步会连打上百次信号，静默这么久没有新信号才真正开跑。
+    auto_rebuild_delay_seconds: int = 30
 
 
 @dataclass
 class EmbeddingConfig:
     """Shared embedding configuration for Milvus and LightRAG."""
 
+    # local | external | astr。astr = 复用 AstrBot 已配置的 EmbeddingProvider（经 Context 取得）。
     provider: str = "local"
+    # 仅 local/external 使用；provider=astr 时模型名由 AstrBot 管理，此字段被忽略。
     model: str = "intfloat/multilingual-e5-small"
+    # 仅 external 使用；provider=astr 时 Base URL 由 AstrBot 管理，此字段被忽略。
     base_url: str = "https://api.openai.com/v1"
+    # 仅 provider=astr 使用：AstrBot「模型提供商」里 Embedding Provider 的 ID。
+    # 空串 = 自动选择——仅当 AstrBot 中恰好有一个已启用的 Embedding Provider 时才成功，
+    # 多个时必须显式填写（绝不静默取列表第一个）。这里只存 ID，绝不存 API Key。
+    astrbot_provider_id: str = ""
     max_token_size: int = 512
     # 本地模型空闲卸载超时（秒），0 = 永不自动卸载；仅对 provider=local 生效
     local_idle_timeout_seconds: int = 420
@@ -212,6 +243,11 @@ class EmbeddingConfig:
     # provider 首次调用触发的模型下载/加载。超时不会中止后台下载线程（to_thread 不可取消），
     # 只放弃等待让启动流程走完——否则 HuggingFace 卡住会让 Web 控制台永远起不来。
     load_timeout_seconds: int = 180
+
+    @property
+    def uses_astrbot(self) -> bool:
+        """provider 是否为 astr。与工厂的 `.lower()` 同口径，避免各处大小写判断不一致。"""
+        return self.provider.strip().lower() == "astr"
 
 
 @dataclass
@@ -304,6 +340,8 @@ class EnhancedRecallConfig:
     corrective_enabled: bool = True  # 首轮自检不充分时的一轮纠正检索 + 重合成。
     max_corrective_queries: int = 3
     json_max_retries: int = 1
+    token_budget: int = 24000  # 纠偏前的消费安全阀，未知模型时为估计。
+    output_reserve: int = 4000  # 开始下一次合成前预留输出预算。
 
 
 # Zotero 同步模式常量（杜绝魔法字面量散落）。
@@ -326,8 +364,10 @@ class ZoteroSyncConfig:
           仅 clean.md/pages.json 在插件内）/ zotmoov（PDF 留 ZotMoov 移动后的目录：
           `attachments:` 相对路径拼 zotmoov_root，绝对路径失效时按文件名索引兜底）。
           linked 模式须配 linked_root、zotmoov 模式须配 zotmoov_root，均经探针校验。
-        - sync_mode: strict_mirror（强制覆盖 + collection 增删 + Milvus rebuild + 禁用 LRAG）
-          / conservative（默认；删本地 doc 但 collection 只增不减 + 轻量 LRAG 重建）
+        - sync_mode: strict_mirror（强制覆盖 + 删除的文档硬删除 + collection 增删
+          + Milvus rebuild + 禁用 LRAG）
+          / conservative（默认；删除的文档标 detached 保留数据、仅移除 Milvus 索引，
+          collection 只增不减 + 轻量 LRAG 重建）
           / archive（只增不删，最不触发 rebuild）。
     cloud_api_key 仅经环境变量注入；本轮不走云端拉取。
     """
@@ -355,6 +395,9 @@ class Config:
     raw: dict[str, Any] = field(default_factory=dict)
     runtime_diagnostics: list[str] = field(default_factory=list)
     runtime_embedding_dimension: int | None = None
+    # provider=astr 时组合根解析出的非机密运行时身份（provider ID / adapter 类型 / 模型），
+    # 仅供「有效配置」展示：自动选择时用户配置里 ID 为空，实际用了哪个只有运行期才知道。
+    runtime_embedding_identity: dict[str, str] | None = None
 
     def apply_override(self, override: dict[str, Any]) -> None:
         """合并运行时覆盖配置。用于自动建库后回填 database_id。"""
@@ -374,6 +417,25 @@ class Config:
 
     def set_embedding_dimension(self, dimension: int) -> None:
         self.runtime_embedding_dimension = dimension
+
+    def set_embedding_identity(self, identity: dict[str, str] | None) -> None:
+        self.runtime_embedding_identity = dict(identity) if identity else None
+
+    def describe_embedding(self) -> str:
+        """人类可读的 embedding 标识（日志 / `/ka status` 共用），不含任何机密。
+
+        local/external 保持历史格式 `provider:model`。astr 模式下 `embedding.model` 被忽略
+        （默认值是本地模型名，展示出来会误导），改显示 AstrBot provider ID；ID 留空走
+        自动选择时，解析成功前显示 `<auto>`，解析后显示实际选中的 ID。
+        """
+        embedding = self.get_embedding_config()
+        if not embedding.uses_astrbot:
+            return f"{embedding.provider}:{embedding.model}"
+        identity = self.runtime_embedding_identity or {}
+        provider_id = identity.get("astrbot_provider_id") or embedding.astrbot_provider_id
+        label = f"astr:{provider_id or '<auto>'}"
+        model = identity.get("model")
+        return f"{label}:{model}" if model else label
 
     def to_public_dict(self) -> dict[str, Any]:
         """返回前端可展示的有效配置；敏感字段脱敏。"""
@@ -416,6 +478,9 @@ class Config:
                 "mcp_server_name": notion.mcp_server_name,
                 "database_id": notion.database_id,
                 "qa_database_id": notion.qa_database_id,
+                "data_source_id": notion.data_source_id,
+                "qa_data_source_id": notion.qa_data_source_id,
+                "auto_sync_enabled": notion.auto_sync_enabled,
                 "parent_page_id": notion.parent_page_id,
                 "database_title": notion.database_title,
                 "auto_sync_interval_sec": notion.auto_sync_interval_sec,
@@ -444,16 +509,21 @@ class Config:
                 "backend": vector_db.backend,
                 "db_filename": vector_db.db_filename,
                 "auto_index_enabled": vector_db.auto_index_enabled,
+                "auto_rebuild_enabled": vector_db.auto_rebuild_enabled,
+                "auto_rebuild_delay_seconds": vector_db.auto_rebuild_delay_seconds,
             },
             "embedding": {
                 "provider": embedding.provider,
                 "model": embedding.model,
                 "base_url": embedding.base_url,
+                "astrbot_provider_id": embedding.astrbot_provider_id,
                 "max_token_size": embedding.max_token_size,
                 "load_timeout_seconds": embedding.load_timeout_seconds,
                 "device": embedding.device,
                 "actual_dimension": self.runtime_embedding_dimension,
                 "api_key": _mask(_secret("", ENV_EMBEDDING_API_KEY)),
+                # 仅 astr 模式有值：实际解析到的 AstrBot provider（含自动选择的结果）。
+                "runtime_identity": dict(self.runtime_embedding_identity or {}) or None,
             },
             "rerank": {
                 "provider": rerank.provider,
@@ -544,11 +614,9 @@ class Config:
                 "embedding section."
             )
         embedding = self.get_embedding_config()
-        if embedding.provider == "astr":
-            diagnostics.append(
-                "embedding.provider=astr is not implemented; choose local or external."
-            )
-        elif embedding.provider == "local" and not _module_available("sentence_transformers"):
+        # provider=astr 没有可静态诊断的项：AstrBot 里有哪些 provider 只有运行期才知道，
+        # 解析失败（不存在 / 类型错 / 多个未指定）由组合根在装配时追加带 ID 的诊断。
+        if embedding.provider == "local" and not _module_available("sentence_transformers"):
             diagnostics.append(
                 "Local embedding requires optional dependencies from "
                 "requirements-additional.txt."
@@ -612,6 +680,9 @@ class Config:
             mcp_server_name=s.get("mcp_server_name", NotionSyncConfig.mcp_server_name),
             database_id=s.get("database_id", NotionSyncConfig.database_id),
             qa_database_id=s.get("qa_database_id", NotionSyncConfig.qa_database_id),
+            data_source_id=s.get("data_source_id", NotionSyncConfig.data_source_id),
+            qa_data_source_id=s.get("qa_data_source_id", NotionSyncConfig.qa_data_source_id),
+            auto_sync_enabled=bool(s.get("auto_sync_enabled", NotionSyncConfig.auto_sync_enabled)),
             parent_page_id=s.get("parent_page_id", NotionSyncConfig.parent_page_id),
             database_title=s.get("database_title", NotionSyncConfig.database_title),
             auto_sync_interval_sec=int(
@@ -704,6 +775,8 @@ class Config:
         s = _section(self.raw, "vector_db")
         raw_auto = s.get("auto_index_enabled", VectorDbConfig.auto_index_enabled)
         auto_index = bool(raw_auto) if not isinstance(raw_auto, bool) else raw_auto
+        raw_rebuild = s.get("auto_rebuild_enabled", VectorDbConfig.auto_rebuild_enabled)
+        auto_rebuild = bool(raw_rebuild) if not isinstance(raw_rebuild, bool) else raw_rebuild
         backend = str(s.get("backend", VectorDbConfig.backend))
         if backend == "astrbot":
             backend = "astr"
@@ -713,6 +786,15 @@ class Config:
             backend=backend,
             db_filename=s.get("db_filename", VectorDbConfig.db_filename),
             auto_index_enabled=auto_index,
+            auto_rebuild_enabled=auto_rebuild,
+            # 下限 5 秒：防抖窗口过短会让 Zotero 批量同步每来一篇就重跑一次重建。
+            auto_rebuild_delay_seconds=max(
+                MIN_AUTO_REBUILD_DELAY_SECONDS,
+                _int_or_default(
+                    s.get("auto_rebuild_delay_seconds"),
+                    VectorDbConfig.auto_rebuild_delay_seconds,
+                ),
+            ),
         )
 
     def get_embedding_config(self) -> EmbeddingConfig:
@@ -738,6 +820,8 @@ class Config:
                     legacy_vector.get("base_url", EmbeddingConfig.base_url),
                 )
             ),
+            # 新字段，无旧版键可回退；`or ""` 防止 None 被 str() 成 "None"。
+            astrbot_provider_id=str(current.get("astrbot_provider_id") or "").strip(),
             max_token_size=int(
                 current.get(
                     "max_token_size",
@@ -913,11 +997,17 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
     "vector_db": {
         "backend": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "auto_index_enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
+        # 自动重建调度器每轮循环重读这两个键，改完即生效，故 consequence 为 NONE：
+        # 若标 RESTART，用户想关掉自动重建还得重启插件，与「省心」的诉求相悖。
+        "auto_rebuild_enabled": ConfigKeyPolicy(True, True),
+        "auto_rebuild_delay_seconds": ConfigKeyPolicy(True, True),
     },
     "embedding": {
         "provider": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "model": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         "base_url": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
+        # 换 AstrBot provider = 换向量空间（模型/维度都可能变），与 model 同为 REBUILD。
+        "astrbot_provider_id": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_REBUILD),
         # 只影响「等多久」，不影响向量本身，故为 RESTART 而非 REBUILD。
         "load_timeout_seconds": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         # 只影响本地模型跑在 CPU 还是 GPU，向量数值本身不变，故为 RESTART 而非 REBUILD
@@ -960,6 +1050,9 @@ CONFIG_KEY_POLICY: dict[str, dict[str, ConfigKeyPolicy]] = {
         "enabled": ConfigKeyPolicy(True, True, consequence=CONSEQUENCE_RESTART),
         "database_id": ConfigKeyPolicy(False, True),
         "qa_database_id": ConfigKeyPolicy(False, True),
+        "data_source_id": ConfigKeyPolicy(False, True),
+        "qa_data_source_id": ConfigKeyPolicy(False, True),
+        "auto_sync_enabled": ConfigKeyPolicy(True, True),
         "parent_page_id": ConfigKeyPolicy(False, True),
         "database_title": ConfigKeyPolicy(False, True),
         "auto_sync_interval_sec": ConfigKeyPolicy(True, True),

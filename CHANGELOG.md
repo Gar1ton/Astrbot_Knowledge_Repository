@@ -1,5 +1,469 @@
 # CHANGELOG
 
+## [v1.2.0] — 2026-10-18
+
+### 发布 (Release)
+
+- **正式版 v1.2.0**：汇总 v1.1.2 – v1.2.0-preview-6 的全部变更，上一个 main 正式版为 v1.1.1。
+  主线为清洗与证据升级（水印去除、脚注保留、新切片边界、证据会话）、Notion MCP v2 与
+  自动同步/笔记标记、`embedding.provider=astr` 与外部 embedding 加固、Milvus 生命周期修复、
+  Milvus 索引自动重建、文件名书目解析与 i18n 补齐。各条目详见下方 preview 版本记录。
+- **破坏性变更提醒**：Zotero `sync_mode` 的 `strict_mirror` / `conservative` 删除语义对调
+  （见 v1.2.0-preview-6）；Notion 需宿主 MCP 升级到 `@suekou/mcp-notion-server@2.0.2`
+  （见 v1.2.0-preview-2/3）。
+
+### 文档 (Docs)
+
+- **README 按 v1.2.0 实际功能重写**：新增「v1.2.0 有什么新变化」与「从 v1.1.x 升级须知」；
+  检索模式由「五档」改为「六档」（补入 `fulltext`）；新增 Zotero 同步（访问/存放/同步模式）、
+  Notion 同步、向量索引自动维护章节；补齐 `/ka notion` 指令、机密环境变量、Embedding 三种来源、
+  Codex Skill `index-status` / `index-rebuild` / `read --whole`、`/terminal` 页与 Milvus / Notion 常见问题；
+  版本演进表延伸到 v1.2.0。`docs/NOTION_SYNC.md` 不在发布白名单内，README 改为链接 developer 分支。
+- Zotero 集合描述按代码行为（陈旧集合在所有模式下都清理）书写；`config.py` 注释与 WebUI 帮助文案
+  「conservative 集合只增不减」的不一致登记在 `TODO.md`，本轮不改。
+
+### 改进 (Changed)
+
+- **版本统一**：`metadata.yaml`、`main.py` 注册版本与 README badge 统一为 `v1.2.0`；
+  `metadata.yaml` 简介「五档检索问答」改为「六档检索问答」。
+- 去掉 `migrations/025_notion_scan_state.sql` 末尾多余空行（发布树 `git diff --cached --check`
+  报错）；迁移按文件名记录、不校验内容，已执行过 025 的库不受影响。
+
+### 验证
+
+- 全量 1289 passed / 2 skipped / 3 failed（沿用既有三项：两项缺 torch、`bad19` 测试桩）；
+  `ruff check .` 7 项均为既有问题，不涉及本轮文件；mypy、`git diff --check`、前端构建与
+  `pages/` 一致性检查通过。
+
+## [v1.2.0-preview-6] — 2026-10-08
+
+### ⚠️ 破坏性变更 (Breaking)
+
+- **Zotero `sync_mode`：`strict_mirror` 与 `conservative` 对已删文档的处理对调**。
+  此前名称与行为相反（严格镜像只标 detached，保守同步反而硬删除）。现为：
+  | 模式 | Zotero 已删文档的处理 |
+  | --- | --- |
+  | `strict_mirror` | 硬删除（文档记录、Milvus、LightRAG 全清），并触发 Milvus rebuild |
+  | `conservative`（默认） | 标 `detached`（保留文档记录/制品包/LightRAG，仅移除 Milvus 索引） |
+  | `archive` | 不变（只增不删） |
+  **升级影响**：原 `strict_mirror` 用户由软删除变为硬删除；原 `conservative`（默认）用户
+  由硬删除变为软删除，此后 Zotero 删除的文档会留在库里为 detached，需手动清理或切到
+  `strict_mirror`。旧版遗留的 detached 文档在 `strict_mirror` 下下一次同步会被硬删；
+  已被旧默认模式硬删的文档不会恢复。Notion 的 strict 清理依赖 detached 状态，
+  conservative 现在会产生 detached 文档，故其清理范围随之变化。
+- 改动：`kacore/pipelines/zotero_sync_pipeline.py` 的 `_apply_removals` 交换两分支，
+  `needs_milvus_rebuild` 触发条件由 `detached_document_ids` 改为 `removed_document_ids`；
+  模块 docstring，`config.py` / `domain/models.py` / `api.py` / `migrations/012_document_lifecycle.sql`
+  注释，前端 `i18n.ts` 的 `flow_help_zotero_sync_mode` 说明同步对调，重新构建并同步 `pages/`。
+  strict 仍禁用 LightRAG 标记（未改）。
+- 测试：`tests/backend/test_zotero_sync.py` 重写 strict/conservative 删除用例并新增
+  旧 detached 在 strict 下被清理的迁移用例。全量 1289 passed / 2 skipped / 3 failed（沿用既有三项）。
+- 版本：`metadata.yaml` / `main.py` / `README.md` 递进为 v1.2.0-preview-6。
+
+## [v1.2.0-preview-5] — 2026-10-08
+
+### 修复 (Fixed)
+
+- **Zotero 回收站集合未被清理**：Web API 仍返回 `data.deleted` 的集合，本地库有
+  `deletedCollections` 表，二者此前都被当作存在的集合镜入，导致 pipeline 的陈旧集合清理
+  永远不触发。`kacore/adapters/zotero/web_api.py` 的 `_collections` 与
+  `sqlite_reader.py` 的 `read_snapshot` 现剔除被删集合及其全部子孙（子集合可能不带删除
+  标记），并从 `collection_items` 去掉指向它们的归属对；本地读取先用 `sqlite_master`
+  判断表是否存在，兼容 Zotero 7 之前的库。新增 `tests/backend/test_zotero_deleted_collections.py`
+  3 项回归。全量 1288 passed / 2 skipped / 3 failed（沿用既有三项失败）。
+
+- **Milvus 依赖重导入后遗留服务**：新增 `repository/vector_store/milvus_service.py`，
+  开库时保留实际服务管理器，先取得其服务 URI 再构造 RPC 客户端；`milvus_lite.py`
+  开库、清空重建与关闭共用该所有者。AstrBot 重装依赖替换模块后，也能释放原先的服务
+  与文件锁，构造客户端失败仍保留释放入口，不改变库格式或关闭时删除集合。
+- **Milvus 启动原因与恢复提示**：仅在本开库线程捕获 SDK 记录后吞掉的启动异常，保留
+  DataDirLockedError 等底层原因。`capabilities.py` 提示当前宿主也可能持有旧锁，需完整
+  退出 AstrBot；`plugin_initializer.py` 的旧清锁端口拒绝删除 LOCK，保留既有路由。
+  `FlowPageContent.tsx` / `i18n.ts` 将清锁按钮改为只读恢复说明，重新构建同步 pages。
+- **Notion 404 目标定位**：`sync_targets/notion.py` 预检明确 Articles/QA、配置字段与
+  当前数据库 ID，保留错误 code/status 和停止批次语义；提示核对容器 ID 与集成授权。
+  不自动清空 ID、重建远端库或改运行配置；404 的实际访问问题仍需核对 ID/授权。
+- 验证：新增 `test_milvus_service.py` 7 项回归及 Notion 404 两项回归，定向 81 passed；
+  全量 1285 passed / 2 skipped / 3 deselected（沿用 preview-4 记录的三项既有失败排除）。
+  实际 Windows Python + 已安装 SDK 在独立临时库中替换整个 Lite 模块树后，关闭、
+  重开和读回原向量/文本通过。改动文件 ruff、domain mypy、前端 ESLint/TypeScript/
+  build 与 pages 一致性通过。仅修改 developer，版本仍为 preview-4；runtime 库、
+  配置及运行进程未修改，未提交或推送。
+
+## [v1.2.0-preview-4] — 2026-10-08
+
+### 修复 (Fixed)
+
+- **Milvus 热重载与重新安装占库**：`repository/vector_store/milvus_lite.py` 关闭时先等待
+  在途线程，再刷盘、关闭 RPC 客户端，并按本库路径释放 Lite 服务与文件锁；清理不再依赖
+  AstrBot 宿主进程退出。重复关闭共用清理任务，调用者取消也等待清理完成，旧实例禁止重新开库。
+- **Milvus 失败装配与后台任务收尾**：`plugin_initializer.py` 清理普通初始化异常留下的
+  实例，保留 schema 不匹配时的手动重建能力；先停止调度和 Web 请求，再取消构建并释放数据库。
+  `api.py::cancel_build_tasks()` 补齐独立 Milvus 构建任务；SDK 构造连接失败也释放已启动服务。
+  `vector_store/base.py` 补充关闭契约，不改接口签名、数据库 schema 或数据格式。
+- 新增 `tests/backend/test_milvus_lifecycle.py` 14 项回归，并扩充 `test_build_hardening.py`。
+  真实临时库验证热重载、新组合根重新装配、schema 不匹配关闭后复用、其他库不受影响，
+  以及父进程保持存活时另一进程能重开同库并读回向量与文本。未修改 runtime 库、配置或进程。
+- 验证：生命周期/构建清理定向 35 passed，Milvus/API/检索相关 185 passed，独立临时库
+  连续开关 20 次通过；最终全量 1276 passed / 2 skipped / 3 deselected（两项既有缺 torch
+  及下述 embedding 测试桩失败）。测试 SDK 在 mock 窗口外预加载后，真实 Milvus 与全量
+  均正常退出；本轮文件 ruff、domain mypy、版本一致性及 git diff --check 通过。
+  全仓 ruff 仍有既有 7 项问题，未扩大本轮范围修复。
+- **OpenAI 文本 embedding 与旧缓存兼容**：`repository/embedding/external.py` 支持 API base
+  与完整 `/embeddings` 端点，保留代理前缀；请求浮点响应，严格检查数量/index/有限数值，
+  首个有效批次锁定维度，后续漂移拒绝返回。错误不包含请求、完整响应或网络异常中的凭据。
+- **缓存冷启动与损坏记录**：`repository/embedding/cached.py` 在 external 实测维度就绪后
+  读缓存，损坏记录按 miss，整批校验后事务写入；维度/身份变化不混入旧命中。新增共用
+  `validation.py`，保留缓存表结构、历史 namespace/hash 和既有索引指纹。
+- **连接探针**：`api.py` 继续共用生产适配，非法地址/模型与响应返回结构化错误。
+
+### 改进 (Changed)
+
+- **版本递进**：`metadata.yaml`、`main.py` 注册版本和 README badge 统一为
+  `v1.2.0-preview-4`；本轮改动仅留在本地 developer 分支，未提交、推送或发布。
+- **TODO 状态收口（2026-10-08）**：依据已有实现和验证记录，将切片质量、Codex QA 保存、
+  v1.0.7 Notion 进度条标为 completed；旧清洗工作包与 v1.0.3 发布计划标为 superseded，
+  发布路径契约按 v1.0.4 完成记录勾选。LightRAG 保留部署验收 pending，并登记缺失的
+  探针说明；Embedding 与其他未验收/暂缓项继续保留。仅修改 TODO.md 与 CHANGELOG.md，
+  git diff --check 通过，未重新运行功能测试或执行远端操作。
+- 清理无调用的旧 Notion 正文预览/大文件提示生成器及 `adapters/astrbot_kb.py`；
+  修正 KB reader 说明，保留旧摘要识别、QA 正文及现有事务/迁移接口。
+- 新增协议/缓存及已有数据库/索引接线回归用例，更新收敛计划与交接文档。
+  PDF 图片摄入、图片表/制品、VL 任务/按钮/检索仅登记研究 TODO，本轮不实现。
+- **Embedding 验收限制**：上轮 tooling/dev 镜像构建成功，但 Docker Desktop 缺少 WSL
+  挂载 socket，容器创建失败。本轮本机全量回归发现既有
+  `test_bad_batch_does_not_lock_dimension_or_retry[bad19]` 失败（HTTP 测试桩在 post 阶段抛
+  ValueError，却按响应 JSON 解码失败预期不重试）；涉及实现与测试均相对 HEAD 无改动，
+  单独运行同样失败。真实外部服务联调仍未执行，原 Embedding TODO 保留待验收。
+
+## [v1.2.0-preview-3] — 2026-10-07
+
+### 修复 (Fixed)
+
+- **Notion 接口预检与准确报错**：批次开始和初始化先检查宿主 MCP 工具能力，缺少
+  Data Source 工具明确要求 `@suekou/mcp-notion-server@2.0.2`。容器响应缺少
+  `data_sources` 不再误报“不是单源库”，分别报告无效字段、零源、多源及错误归属。
+  统一目标错误只结束一轮任务，不反复请求/改写 106 篇未尝试文档的失败账本。
+- **Notion 失败可见**：`/api/sync/status` 合并真实实体账本，新增状态汇总路由与设置页
+  失败详情。涉及 `adapters/notion_mcp.py`、`pipelines/notion_sync_pipeline.py`、
+  `sync_targets/notion.py`、`api.py`、`notion_status.py`、`web/server.py`、前端状态组件与 `pages/`。
+- 按用户要求收敛为上述故障修复：移除本轮曾新增的重置仓储接口/事务、清理 API/按钮、
+  初始化续建和恢复测试；保留原有初始化流程。用户自行配置新版目标，不做旧接口回退、
+  自动 ID 迁移或旧内容恢复。不改运行实例与真实 Notion。
+- 验证：精简版全量 1210 passed / 2 skipped（排除两项既有缺 torch 用例）；改动文件
+  ruff、domain mypy、前端 TypeScript/构建、pages/out 一致性通过。
+
+### 改进 (Changed)
+
+- **版本递进**：`metadata.yaml`、`main.py` 注册版本和 README badge 统一为
+  `v1.2.0-preview-3`；当前变更归入本版本，保留 preview-2 历史记录。
+- **Notion MCP v2 与正文笔记标记**：适配器迁移到 `@suekou/mcp-notion-server@2.0.2`
+  / Notion Data Source API；解析并回填 Articles / QA 的 data source ID，多源歧义显式报错，
+  QA relation 使用 Articles data source。Articles 新建、更新、原件变化与强制推送仅写属性，
+  不生成 Chunks Preview / 大文件提示，不清空旧正文；QA 正文契约保持原有方式。
+- **正文笔记筛选**：新增 `已做笔记` checkbox，固定规则经 MCP 分页读取正文；忽略空白、
+  分隔线与旧程序摘要/提示，只勾选、不清除、不检查评论。按远端编辑时间增量检查，
+  迁移 `025_notion_scan_state.sql` 保存扫描水位，失败不推进；笔记标记不参与 preserve / strict 清理。
+- **默认自动同步与消耗可见性**：本地已提交文档/集合变更合并 10 秒推送、默认 300 秒周期补偿；
+  `auto_sync_enabled` 热开关，间隔 0 只关周期，旧显式 0 保留。忙时等待、失败退避，卸载时关闭
+  调度与推送任务。任务及前端显示 MCP 调用尝试数、耗时、笔记统计与模型 token=0。
+  涉及 `kacore/adapters/notion_mcp.py`、`notion_auto_sync.py`、`notion_sync_job.py`、
+  `repository/sync_targets/notion*.py`、`repository/source_store/`、`pipelines/notion_sync_pipeline.py`、
+  `plugin_initializer.py`、`api.py`、配置策略/schema、前端设置/进度条与生成的 `pages/`。
+  升级宿主 MCP、初始化已有库、建立 Notion 筛选视图和消耗示例见 `docs/NOTION_SYNC.md`。
+  运行实例及真实 Notion 数据未在本次开发验证中修改。
+
+## [v1.2.0-preview-2] — 2026-09-26
+
+### 新增 (Added)
+
+- **`embedding.provider=astr`：复用 AstrBot 已配置的 EmbeddingProvider**。此前该取值被配置层拒绝、
+  工厂抛 `NotImplementedError`；现在经 `Context.get_provider_by_id` /
+  `get_all_embedding_providers` 取得 AstrBot 的 Embedding Provider，只通过其公开抽象
+  （`get_embedding` / `get_embeddings` / `get_dim`）取向量，API Key / Base URL / 模型 / 维度均由
+  AstrBot 管理，本插件不保存副本，也不碰 `provider.client` 或任何服务商 API。
+  - 新增 `kacore/repository/embedding/astrbot.py`（适配器）与 `astrbot_resolver.py`（解析、身份读取、
+    脱敏错误）。解析规则：给了 `embedding.astrbot_provider_id` 就按 ID 取并要求是 AstrBot
+    EmbeddingProvider 实例（聊天/重排/语音一律拒绝）；未给则仅当存活的 Embedding Provider 恰好一个时
+    自动选用，0 个/多个报带修复建议的诊断，绝不静默取第一个；自动选择时用 `get_provider_by_id` 身份
+    比对剔除 AstrBot `terminate_provider` 遗留在列表里的陈旧实例。
+  - 返回值检查：向量须为非空有限数值列表、批量数量与输入一致、各向量维度一致、与 provider 声明维度
+    （`get_dim()>0`）及此前观测维度一致；`get_dim()==0`（OpenAI 源未配维度）视为未声明，由首个实测向量
+    锁定。不截断/填充/转换；空输入不发请求。错误含 provider ID、类型、模型（provider 报告时）、阶段与
+    修复建议，凭据形态被脱敏且原始异常链被切断。
+  - 生命周期：不调用 `terminate()`、不关闭其 client、不改其配置，`unload()` 空操作；每次调用按 ID
+    重新解析以跟随 AstrBot 热重载，adapter 类型/模型/声明维度漂移时拒绝写入。
+  - 缓存与指纹：`EmbeddingProvider` 基类新增非机密 `identity` 契约（默认空）；`CachedEmbeddingProvider`
+    把 `identity`（provider ID / adapter 类型 / 模型 / 实测维度）并入 namespace，`embedding_fingerprint`
+    对 astr 改用该身份（忽略无意义的 `embedding.model`/`base_url`）。local/external 的 namespace 与
+    指纹逐字节不变（用改动前的实测值冻结在回归测试里），既有索引不会被误判为不兼容。
+  - 配置：`EmbeddingConfig.astrbot_provider_id`；`_conf_schema.json` 增加 `astr` 选项与该字段；
+    `CONFIG_KEY_POLICY` 登记为 API 可写 + 可持久化 + `rebuild`；`update_config_value` 接受 `astr` 并
+    校验/规范化 ID；有效配置展示 ID 与运行期解析出的身份；`Config.describe_embedding()` 统一日志与
+    `/ka status` 的展示；能力面板把 astr 列为受支持来源。
+  - 组合根：`EmbeddingProviderFactory.create_provider(..., context=)`，`PluginInitializer` 传入
+    `self._context`；解析/探测失败沿用既有降级（向量与图谱不可用，其余功能照常启动）并追加带 ID 的
+    诊断；astr 专属的探针超时提示不再让用户去查 `KR_EMBEDDING_API_KEY`。
+  - 涉及 `kacore/config.py`、`kacore/api.py`、`kacore/capabilities.py`、`kacore/index_compatibility.py`、
+    `kacore/plugin_initializer.py`、`kacore/repository/embedding/{base,cached,factory}.py`、
+    `_conf_schema.json`、`.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py`
+    （配置策略快照同步）；新增测试 75 项（`tests/backend/test_astrbot_embedding*.py`、
+    `tests/mocks/astrbot_fakes.py`），并更新两处旧的「astr 不支持」断言。
+  - 已知限制：AstrBot 的 OpenAI/Gemini 类 provider 的 `get_model()` 为空，此时只改模型名而 ID/类型/维度
+    不变无法自动察觉；本插件不对 AstrBot provider 分批（一次 `embed_documents` 会把一篇文档的全部
+    chunk 交给 `get_embeddings`，批量上限由该 provider 决定）；Web 控制台前端尚未增加 astr 的输入项
+    （`pages/` 未重新生成）。
+
+### 修复 (Fixed)
+
+- **Milvus 装配失败时只显示套话，数据流面板「向量库」节点反复黄色却看不出原因**：
+  `plugin_initializer.py` 里 Milvus 通用装配异常（如数据目录被其他进程占用的
+  `DataDirLockedError`）此前只写进终端日志，`capabilities` 面板固定显示
+  「向量库在启动时装配失败，请在终端日志中查看」，前端已有的「展示原因 + 重建」卡片
+  （`FlowNode.tsx` 的 `needsMilvusRebuild` 区块）因此始终收不到有用内容。现在
+  `PluginInitializer` 记录具体异常文本（`_vector_store_init_error`），经 `KnowledgeRepositoryApi`
+  透传给 `api_capabilities.py::_milvus_runtime_health()`/`vector_store_unavailable_reason()`，
+  节点卡片直接显示真实原因。
+  - 新增 `kacore/capabilities.py::milvus_lock_error_hint()`：识别「数据目录被占用」类异常文本，
+    给出可执行提示（确认无第二个 AstrBot/插件进程、不要直接删除锁文件），与 `log_capture.py`
+    的日志诊断共用同一份文案（此前两处各写一份）。
+  - **新增「确认后清除 Milvus 锁定」按钮**：仅当探测到「数据目录被占用」时，向量库节点显示
+    「清除锁定」按钮；前端弹出风险确认对话框，确认后调用新接口
+    `POST /api/milvus/clear-lock` → `KnowledgeRepositoryApi.clear_milvus_lock()` →
+    `PluginInitializer.clear_stale_milvus_lock()`，只删除数据目录里 0 字节的 `LOCK`
+    标记文件本身（绝不碰 `collections/` 等真实数据），成功后复用既有软重启流程。
+    是否真的没有其他进程在用由用户自行确认，插件不做自动判断；此前
+    `TODO.md`/`docs` 记录的「不自动破锁」原则不变——这里加的是更清楚的人工确认入口，
+    不是自动破锁。
+  - 涉及 `kacore/plugin_initializer.py`、`kacore/api.py`、`kacore/api_capabilities.py`、
+    `kacore/capabilities.py`、`kacore/log_capture.py`、`web/server.py`；前端
+    `web/frontend/lib/{api.ts,i18n.ts}`、`web/frontend/components/flow/{FlowNode,FlowDiagram}.tsx`、
+    `web/frontend/components/panels/FlowPageContent.tsx`；新增/扩充测试见
+    `tests/backend/{test_capabilities,test_lifecycle_and_cli,test_api,test_web_server}.py`。
+- **PDF 数据库访问水印污染正文与切片**：把 JSTOR 类
+  `This content downloaded from … UTC` / `All use subject to …` 清洗收口到
+  `marginal_noise`，覆盖完整行、至多三行折行，以及 PyMuPDF4LLM 先把整页合并后嵌入正文行的
+  情况；匹配不限视觉页脚，但使用完整访问戳边界避免误删普通讨论，代码块/公式保持原样。
+  水印夹在续句中时同时桥接前后文本，避免删除后留下假段落边界。处理版本升为
+  `cleaning-v3`；按用户决定以空持久库重新导入，不新增旧制品迁移方案。
+- **enhanced/deep 回答冗长、难读且引用重复**：enhanced 不再复用 deep 的穷尽式报告模板，改为
+  中等篇幅、答案先行、按问题自适应 2–5 个维度；enhanced/deep 共用术语首次解释、单段单意、
+  不以来源/页码清单开场、按最小完整论点组放置引用的可读性规则。
+- **聊天回答把 Markdown 标记和参考文献打印成纯文本**：从 `ChatPanel` 抽出不执行原始 HTML 的
+  `AnswerMarkdown`，支持标题、段落、有序/无序列表、粗体、行内代码、代码块和分隔线；独立粗体
+  “参考文献”按小节标题展示，条目按列表展示，并保留既有 Harvard 与 `[n]` 点击来源映射。
+- **参考文献重复打印文件名中的作者、年份与 `.pdf`**：`citation_rendering` 在统一的
+  source → `CitationRef` 映射点复用文件名书目解析器，把
+  `Anon. (n.d.) Hui (2021) - Art and Cosmotechnics.pdf.` 规范化为
+  `Hui (2021) Art and Cosmotechnics.`。解析出的作者/年份只补结构化字段空缺，绝不覆盖 Zotero
+  或用户填写的权威值；正文短引、source 旁车和末尾 reference list 使用同一个规范化结果。
+
+- **升级后旧 chunk 不会自动重切/重建索引**：v1.2.0-preview 重写了分块逻辑但未升 `CHUNK_SCHEMA`
+  （保持 `clean_md_structural_v3`），`IngestManager.chunk_needs_rebuild` 只比对 schema/ID 前缀/offset，
+  旧库全部被判为最新；且启动只在 embedding 指纹或 Milvus collection 变化时才把文档推进 `needs_reindex`
+  队列，升级插件后自动重建调度器查到空队列直接收工。修复：`chunk_needs_rebuild` 增加
+  `local_meta.processing_version != PROCESSING_VERSION` 判据（只读 local_meta，不读 chunk）；
+  `rebuild_document_chunks_from_artifact` 重切后写回 `processing_version`；新增
+  `api.mark_stale_processing_documents_needs_reindex()`：单次 `list_documents()`、仅比对
+  local_meta，把处理版本过期的文档标记待重建并唤醒自动重建调度器。触发点两处：
+  `plugin_initializer` 在调度器起跑前；`api._run_zotero_pull` 拉取结束后（增量同步整篇跳过
+  Zotero 侧未变更的文档，不补扫旧库永远不会被带上来；结果写入 `_last_zotero_sync.stale_marked`）。
+  重建完成后版本落盘，之后再扫为空，因此是一次性迁移。涉及 `kacore/api.py`、
+  `kacore/managers/ingest_manager.py`、`kacore/plugin_initializer.py`；新增回归 4 项。
+
+## [v1.2.0-preview] — 2026-09-12
+
+### 新增 (Added)
+
+- **清洗与证据来源**：`artifact_cleaning` / `artifact_provenance` / `footnote_linking` 保留逐页
+  原始抽取与脚注，全文阅读补入脚注，新增受鉴权保护的脚注读取入口。`chunking` /
+  `chunk_token_limits` 接入通用章节和 estimated token 边界；新 chunk ID 包含修订，避免旧引用串文。
+- **增强/深度证据会话**：`evidence_session` / `evidence_selection` / `evidence_views` /
+  `evidence_actions` 复用请求内检索、embedding 和重排结果，按方面覆盖选择，受预算约束地读取
+  同修订相邻正文与脚注。视图单独记录来源，不覆写 canonical chunk；普通与外部 agent 排序路径不启用新会话。
+- **维护与评测入口**：`api.reprocess_documents_with_stale_cleaning` / `web/server.py` /
+  `tools/reprocess_cleaning.py` 提供默认只预览的手动重处理；处理版本与 needs_reindex 决定跳过或重试。
+  `tools/export_evidence_comparison.py` 从保存的 Ask JSON 导出不含正文的评测 JSONL。
+
+### 修复 (Fixed)
+
+- **旧库重处理一致性**：`IngestManager` 在更新派生制品前持久标记 processing_pending 与
+  needs_reindex；`SourceDocumentStore.commit_document_processing` 及 SQLite/memory 实现
+  一次提交正文块、页映射与处理元数据，异常回滚。重启后重切/索引先恢复未完成处理，
+  原件缺失保持待恢复；全文/脚注纯读入口拒绝待恢复制品，防止定位混用。
+- **维护与索引互斥**：`processing_lock` / `api` / `IngestManager` 共用同 Task 可重入锁，
+  手动处理与自动/手动向量重建串行；取消等待者不解锁其他任务，文件线程退出后才释放锁。维护结果增加
+  pending_reindex，不向不兼容索引直接写入，不把抽取错误误报为非 PDF 跳过。
+- **预发布版本**：`metadata.yaml`、`main.py`、README 统一为 v1.2.0-preview；升级指南同步
+  恢复流程和进程内互斥边界，不新增 SQL schema 或持久迁移队列。
+
+- `LLMAdapter` / `LMStudioLLMAdapter` / `usage_ledger` / `llm_json` 区分 actual、estimated、unknown，
+  保留 JSON 重试与 provider fallback 消费；补齐独立 endpoint 的 `generate_result()`，避免两模式配置
+  独立 endpoint 后因接口缺失降级。未知 usage 不冒充零消费。
+- `enhanced_recall_orchestrator` 缺失/无效自检不再虚报 verified；纠偏失败恢复原答案、证据与视图。
+  `deep_thinking_orchestrator` 接通共享候选和既有 SEA 来源关系，保留 VERIFY 路径。
+- `IngestManager` 重切保存脚注及空正文页面，重新抽取下放线程；更新 chunks 时同步页映射，
+  API 重抽取通知索引调度。`markdown_extractor` 清理页边噪声时保护代码和公式数值。
+- `VectorStore` / memory / Milvus 支持候选排除与文档范围下推；新修订向量成功写入后清理同文档旧向量。
+  Milvus 关闭前显式 flush，修复测试中未落盘状态延迟到 atexit 时触发的 PyArrow 退出段错误。
+
+### 验证
+
+- 全量 1037 passed / 2 skipped / 2 deselected（两项既有用例缺 torch），62.06s；最后补充
+  文件线程取消保护后，摄入/API/恢复回归 151 passed，4.93s。新增 `test_processing_recovery.py`
+  10 项覆盖 SQLite 页写入失败回滚、重开恢复、原件缺失、取消与维护/自动索引互斥。
+  `ruff check .`、`python -m mypy`、`git diff --check` 通过，版本声明一致。
+  未操作真实库或运行真实语料/收费模型效果评测。
+
+### 说明
+
+- 采用用户后续确认的手动逐篇重处理方案，不恢复已取消的持久代次/租约/队列基础设施。
+- 原始 PDF 未改；真实脚注识别质量、导入提速及 enhanced 总 token ≤旧版 120% 仍待用户实测。
+
+
+## [v1.1.3] — 2026-09-04
+
+### 修复 (Fixed)
+
+- **Harvard 引用大量降级为 `Anon., n.d.`**：只读核对用户本机 Zotero 库确认根因——Zotero
+  独立附件（无 parent item，实测样本库中占 77%）同步时，`zotero_sync_pipeline.py` 的
+  `item_key = att.parent_item_key or att.attachment_key` 用附件自己的 key 顶替
+  `zotero_item_key`；但 `zotero_items` 镜像表（`sqlite_reader.py:_read_items` /
+  `web_api.py:_items`）显式排除 `itemType == 'attachment'`，这个回退 key 永远查不到镜像行，
+  `get_zotero_item_meta()` 恒返回 `None` → creators 恒空 → Harvard 渲染层降级为
+  `Anon., n.d.`。Zotero 对独立附件本身在 schema 上就没有 creators 字段，但用户这批附件的
+  文件名本身是书目信息（如 `Peng, Hou, Zhou and Shang (2026) - Title.pdf`），可确定性提取
+  而非编造：107/118 样本能干净匹配。
+  新增 `kacore/domain/filename_biblio.py`（zero-dependency 纯函数，风格对齐
+  `domain/citation.py`）：`parse_filename_biblio()` 识别 `Author(s) (Year) - Title` /
+  `Author(s) - Year - Title` 两种格式，处理字面 `n.d.`、年份区间取首年、`et al.` 截断、
+  Zotero 去重数字前缀；不确信就返回 `None`，绝不猜。
+  `kacore/managers/ingest_manager.py` 新增 `resolve_filename_biblio_hint()`（本地上传与
+  Zotero 同步共用）；`process_attachment()` 新增 `biblio_hint` 参数叠加进 `local_meta`；
+  `ingest()`（本地上传）与 `zotero_sync_pipeline.py:_sync_documents()`（Zotero 同步）两个
+  调用方分别用各自的文件名跑解析器、传入 hint，解析成功时用干净标题替换原始文件名标题——
+  这条修复因此**不是 Zotero 专属补丁**，本地上传文件名符合此格式时同样受益。
+  `kacore/api.py:_document_biblio_meta()` 的 Zotero 分支在 `creators`/`year` 为空时回退读
+  `doc.local_meta`（即上述 hint）；**Zotero 权威数据永远优先，hint 只补空**，两者都缺失才
+  真正降级。
+  新增 `tests/backend/test_filename_biblio.py`（16 例）；`test_ingest_manager.py` /
+  `test_zotero_sync.py` / `test_api.py` 补齐端到端回归，覆盖独立附件解析回归与「有权威数据
+  时绝不被文件名覆盖」两条防护用例。
+- **i18n 泄漏收口：英文用户不再看到中文界面**。项目一直维护着 `lib/i18n.ts` 的 zh/en 双份
+  文案，但有 11 个文件绕过它直接硬编码中文字符串，其中 `SettingModal.tsx` 是**整个模块**
+  没有任何 `lang` 分支——同步/备份页与配置迁移页的卡片标题、字段名、提示文案、下拉选项与
+  全部 toast 共 111 处，切到英文后原样显示中文。本轮迁移 **116 处**，新增 201 个 key
+  （zh/en 各 201），`i18n.ts` 键数 650 → 851。涉及 `components/modals/SettingModal.tsx`、
+  `components/modals/AstrBotModal.tsx`、`components/ui/PerfPanel.tsx`、
+  `components/panels/PdfViewer.tsx`、`components/flow/ZoteroQuickConfig.tsx`、
+  `components/panels/DocumentsPanel.tsx`、`components/panels/FilePanel.tsx`、
+  `components/progress/ProgressDock.tsx`、`components/rail/Rail.tsx`、
+  `app/(console)/layout.tsx`。
+  另有 44 处经核查**不属于泄漏**因而未迁：`components/flow/model.ts` 的 21 处已有
+  `BACKEND_LABEL_ZH`/`BACKEND_LABEL_EN` 双字典按 `lang` 选择，是合法的「值 → 标签」映射；
+  `lib/api.ts` 的 18 处是 `?mock` 模式下的演示假数据（假论文标题、假 chunk 正文），
+  翻译无意义。剩下 4 处是**技术限制**而非疏漏：`app/layout.tsx` 的两条是 Next.js 服务端
+  静态 `metadata` 导出、`lib/api.ts` 的两条在 `Error` 子类构造器内，两者都拿不到 i18n hook。
+- **`t` 的 props 类型比真实签名窄**。`components/flow/` 下内联重复了 9 次
+  `t: (k: I18nKey) => string`，而 `makeT()` 的真实签名是带插值参数的
+  `(key, vars?) => string`——这份手写副本导致带插值的调用在这些组件里无法通过类型检查。
+  按 `CONVENTIONS.md` §1「重复 3 次即提取」，提为 `lib/i18n.ts` 导出的 `TFunc` 并放宽到
+  真实签名（`DirPickerDialog.tsx`、`QuickConfigPanel.tsx`、`FlowNode.tsx`、`FlowDiagram.tsx`）。
+
+### 技术债登记 (Debt)
+
+- 按 `CONVENTIONS.md` §4 在 `TODO.md` 登记前端超 600 行红线且此前未登记的文件：
+  `ChatPanel.tsx` 1404、`FilePanel.tsx` 1375、`SettingModal.tsx` 1105、
+  `QuickConfigPanel.tsx` 719、`DocumentsPanel.tsx` 641，并各自写明拆分方向。
+  **本轮只登记不执行**。（`lib/api.ts` / `lib/i18n.ts` / `styles/tokens.css` 已于 v1.0.x
+  登记为暂缓，不重复计入。）
+- 前端另三项优化（`ds/Modal.tsx` 无障碍基线、`PdfViewer.tsx` 页面窗口化、前端 README 重写）
+  经核实确有必要并已在 `TODO.md` 写明方案，但**按用户决定本轮不执行**，留待后续迭代。
+- **MinerU2.5 结构化抽取计划挂起**，调研结论存入 `TODO.md` 备查：接缝在
+  `chunking.py::parse_markdown_blocks()`（MinerU 的 `content_list.json` 显式声明结构，
+  与现有 `TextBlock.kind` 词汇表几乎一一对应，故是「换结构来源、不换分块算法」）；
+  收益为表格转结构化 Markdown、公式转 LaTeX、双栏阅读顺序、矢量图 bbox、扫描件原生 OCR；
+  代价是比 PyMuPDF4LLM 慢约 600 倍（实测 1.2s/623 页 vs 估算 700–1000s/623 页），必须默认关。
+
+## [v1.1.2] — 2026-08-04
+
+### 新增功能 (Added)
+
+- **Milvus 索引自动重建**。新文件进来之后不必再手动点「重建索引」。
+  需要先说清此前的真实状况：自动索引**本来就有**，但它整个被兼容门挡着——
+  `kacore/api.py` 的 `register_document()` 只在 `auto_index_enabled and
+  _milvus_index_is_compatible()` 同时为真时才即时写入 Milvus，`_index_document()`
+  （Zotero 同步回调）是同一道门；两者失败或被跳过时都只把文档标成 `needs_reindex`。
+  而兼容态一旦坏掉——`plugin_initializer.py` 的 collection 被重建、embedding fingerprint
+  变化、schema mismatch，或 `api.py` 的删集合失败、换 embedding——**只有跑完一次重建才会
+  翻回来**。于是兼容态坏掉之后，其后进来的每一个新文件都只是排进队列，而全项目**没有任何
+  东西会主动排空这个队列**，只有 WebUI 的 `POST /api/documents/rebuild-index` 那个按钮。
+  这才是「每次都要手动重建」的真正来源，本轮补的是那个「自己按按钮的人」。
+- 新增 `kacore/auto_reindex.py` 的 `AutoReindexScheduler`：**事件驱动 + 防抖 + 启动补跑**。
+  文档被标记待重建时打信号，静默 `auto_rebuild_delay_seconds`（默认 30s）没有新变动才真正
+  开跑——Zotero 批量同步会为每篇文档打一次信号，防抖把连击合并成一次重建而不是上百次。
+  插件启动时补打一次信号，因此重启即会把积压队列排空。索引不兼容时
+  `rebuild_index_pending` 本就内部转全量，故**增量与全量都自动**。
+- 调度器**不含任何索引逻辑**，只调用新增的 `api.run_milvus_rebuild_to_completion()`，后者复用
+  既有的全局单飞 `start_milvus_rebuild()`。因此自动重建与手动点按钮走同一个 job、同一条
+  进度条、同一套 runtime events，WebUI 侧零改动即生效；手动重建正在跑时自动重建会直接搭上
+  同一个 job，不会并发起第二次。
+- 新增配置 `vector_db.auto_rebuild_enabled`（默认 `true`）与
+  `vector_db.auto_rebuild_delay_seconds`（默认 30，下限夹到 5）。二者的 `CONFIG_KEY_POLICY`
+  **consequence 是 `none` 而非 `restart`**：调度循环每轮重读配置，改完即生效，不必重启插件。
+  `kacore/capabilities.py` 的 `vector_store.detail` 随之暴露这两个字段，WebUI 数据流页的
+  快速配置面板新增「自动重建索引」开关与「自动重建防抖（秒）」高级项（i18n zh+en 双份）。
+  把开关**从关切到开**时 `update_config_value()` 会立刻唤醒调度器——否则积压队列要一直等到
+  下一份新文档进来才被排空，开关看上去就像没生效。
+- **codex skill 可以代按「重建索引」按钮**（调用代码，非 computer use）。
+  `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 新增两个子命令：
+  `index-status`（只读：待重建数、当前重建任务、兼容性、自动重建是否已开）与 `index-rebuild`
+  （默认只出 preview，`--apply` 才 `POST /api/documents/rebuild-index`，即 WebUI 那个按钮打的
+  同一个端点；可选 `--wait` 轮询到终态再汇报）。沿用既有的 `--apply` 变更门禁写法，与
+  `config-set` / `restart` 一致。`--wait` 超时只是**停止观察**，重建仍在跑，返回体里的
+  `note` 明说这一点——否则模型会把「不再等」误报成「已取消」。
+  服务端本就是全局单飞，重复触发只会拿到同一个 job。
+  相应放开了 `SKILL.md` 原先的不变量「Never start a normal index rebuild」：现在是「不得自作
+  主张重建」，用户要求 + preview 确认后允许；`references/settings.md` 新增第 4 节写清判读顺序
+  （`pending_reindex_count` 为 0 就直说不用建、有 `active_job` 就报进度别重复触发、
+  `auto_rebuild_enabled` 为真时优先等一个防抖窗口而不是立刻手动重建）。
+
+### 修复 (Fixed)
+
+- **失败不再无限重试**。`AutoReindexScheduler` 按指数退避（60s 起、翻倍、封顶 1 小时）重试，
+  并在连续 6 次「零进展」后 **park**——只等新信号，不再定时重试。一篇永远清洗失败的坏 PDF
+  会让待重建队列永远非空，没有 park 就是每小时一次的全量重建风暴。判定用的是「有无进展」
+  而非只看 status：`partial_failure` 里只要有文档成功入库就算在推进，值得下一轮继续清剩余。
+- **重建自身造出的信号不会解除 park**。重建会把失败文档重新标成 `needs_reindex`，那也会经
+  `_mark_document_needs_reindex()` 打信号；若它能重置失败计数，park 永远不会发生。
+
+### 变更 (Changed)
+
+- `kacore/api.py`：`_mark_document_needs_reindex()` 成为自动重建的**唯一信号收口**（上传自动
+  索引失败、Zotero 遇不兼容、集合移动、reextract、删集合失败全部经它）；`_invalidate_embedding_indexes()`
+  直接改 `doc.needs_reindex` 绕过了前者，故单独补一次信号。新增 `attach_auto_reindex_scheduler()`
+  薄注入（对齐既有 `attach_zotero_pipeline`）与 `_notify_auto_reindex()`（打信号失败只记日志，
+  不得影响主流程）。
+- `kacore/plugin_initializer.py`：在 6.3 段装配调度器并 `create_task`，`teardown()` 按既有
+  三段式释放；`config.py` 新增 `MIN_AUTO_REBUILD_DELAY_SECONDS` 与 `_int_or_default()`。
+- 同步 `.agents/skills/operate-knowledge-arch/scripts/knowledge_arch_client.py` 的
+  `CONFIG_POLICIES` 快照（该文件注释明写要与 `kacore.config.CONFIG_KEY_POLICY` 保持同步）。
+
+### 维护 (Maintenance)
+
+- 新增 `docs/GIT_WORKFLOW.md` 的人工发布 instruction，记录 developer → publish → main
+  的白名单生成、认证、推送、PR 与版本 tag 流程，并保留 v1.1.1 本轮发布准备记录。
+- 新增 `tests/backend/test_auto_reindex.py`（11 例，纯内存假件驱动，注入极小退避参数避免把
+  用例拖成分钟级）：防抖合并连击、开关关闭不跑、非 milvus 后端不跑、空队列不跑、未就绪退避
+  而非空转、失败后自行重试、有进展不进退避、**连续零进展进 park**、park 后 notify 唤醒并
+  重置、重建期内信号不解除 park。`test_api.py` 补信号收口与单飞复用，`test_config.py`
+  补新键默认值/下限夹取/policy。
+- `test_knowledge_arch_skill_client.py` 补 6 例覆盖新子命令。其中
+  `test_client_exposes_only_agent_evidence_and_guarded_graph_builds` 原先断言**客户端源码里
+  不得出现 `/api/documents/rebuild-index`**——它和 `SKILL.md` 的不变量、`config_options()` 的
+  `rebuild_command_available: False` 是同一条禁令的三个落点，本轮一并改为「端点可达但受
+  `--apply` 门禁保护」（新测试断言 preview 分支位于 POST 之前，未确认时够不到写操作）。
+
 ## [v1.1.1] — 2026-08-03
 
 ### 新增功能 (Added)

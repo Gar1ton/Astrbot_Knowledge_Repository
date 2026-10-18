@@ -10,13 +10,14 @@
       即得其子树全部文章），Collection Path select 为 primary 集合完整路径（分组用）。
     - QA 库：agent/Ask 推送的问答记录（append-only），Citations relation 链回 Articles。
 """
+
 from __future__ import annotations
 
 import hashlib
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from kacore.domain.models import Collection, DocumentChunk, SourceDocument
+    from kacore.domain.models import Collection, SourceDocument
 
 # ── 属性名常量（schema 与页面载荷共用，降级逻辑按名剔除）─────────
 
@@ -42,6 +43,7 @@ PROP_CREATED = "Created"
 _OPTION_MAX_LEN = 100
 _RICH_TEXT_LIMIT = 2000
 BLOCK_TEXT_LIMIT = 1800
+PROP_HAS_NOTES = "已做笔记"
 MAX_BODY_BLOCKS = 30
 PATH_SEPARATOR = " / "
 
@@ -150,6 +152,7 @@ def articles_db_properties() -> dict[str, Any]:
         PROP_CONTENT_HASH: {"rich_text": {}},
         PROP_SIZE_BYTES: {"number": {}},
         PROP_UPDATED: {"date": {}},
+        PROP_HAS_NOTES: {"checkbox": {}},
     }
 
 
@@ -212,8 +215,8 @@ def document_metadata_hash(
 # ── QA DB ───────────────────────────────────────────────────────
 
 
-def qa_db_properties(articles_database_id: str = "") -> dict[str, Any]:
-    """QA 库标准列 schema；articles_database_id 非空时带 Citations relation。"""
+def qa_db_properties(articles_data_source_id: str = "") -> dict[str, Any]:
+    """QA 库标准列 schema；Articles data source 非空时带 Citations relation。"""
     properties: dict[str, Any] = {
         PROP_QUESTION: {"title": {}},
         PROP_NOTE_ID: {"rich_text": {}},
@@ -221,10 +224,10 @@ def qa_db_properties(articles_database_id: str = "") -> dict[str, Any]:
         PROP_SOURCE: {"select": {}},
         PROP_CREATED: {"date": {}},
     }
-    if articles_database_id:
+    if articles_data_source_id:
         properties[PROP_CITATIONS] = {
             "relation": {
-                "database_id": articles_database_id,
+                "data_source_id": articles_data_source_id,
                 "single_property": {},
             }
         }
@@ -285,51 +288,10 @@ def text_to_paragraph_blocks(
     return blocks
 
 
-def chunk_preview_blocks(chunks: list[DocumentChunk]) -> list[dict[str, Any]]:
-    """文章页正文：可折叠 toggle + 前 3 个切片子段落（每块截断 1000 字符）。"""
-    children: list[dict[str, Any]] = []
-    for chunk in chunks[:3]:
-        text = chunk.text
-        if len(text) > 1000:
-            text = text[:1000] + "..."
-        children.append(paragraph_block(f"[Chunk #{chunk.ordinal}] {text}"))
-
-    toggle: dict[str, Any] = {
-        "rich_text": [
-            {"type": "text", "text": {"content": "本地切片摘要 (Chunks Preview)"}}
-        ]
-    }
-    if children:
-        toggle["children"] = children
-    return [{"object": "block", "type": "toggle", "toggle": toggle}]
-
-
-def large_file_callout_block() -> dict[str, Any]:
-    """>5MiB 大文件的提示块（不做二进制镜像）。"""
-    return {
-        "object": "block",
-        "type": "callout",
-        "callout": {
-            "rich_text": [
-                {
-                    "type": "text",
-                    "text": {
-                        "content": (
-                            "⚠️ [Notion 免费版限制] 该文件大小超过 5MiB，"
-                            "已跳过文件二进制镜像。您可以去本地原件中查看。"
-                        )
-                    },
-                }
-            ],
-            "icon": {"emoji": "⚠️"},
-            "color": "yellow_background",
-        },
-    }
-
-
 __all__ = [
     "PROP_NAME",
     "PROP_DOC_ID",
+    "PROP_HAS_NOTES",
     "PROP_TAGS",
     "PROP_COLLECTIONS",
     "PROP_COLLECTION_PATH",
@@ -356,7 +318,5 @@ __all__ = [
     "qa_db_properties",
     "qa_page_properties",
     "text_to_paragraph_blocks",
-    "chunk_preview_blocks",
-    "large_file_callout_block",
     "paragraph_block",
 ]

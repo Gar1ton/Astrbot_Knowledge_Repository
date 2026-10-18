@@ -45,6 +45,7 @@ from kacore.domain.models import (
     NOTION_PUSH_SYNCED,
     Collection,
     ConsoleScopeState,
+    DocumentLifecycle,
     DocumentOrigin,
     ScopedNote,
     SourceDocument,
@@ -88,7 +89,9 @@ from kacore.retrieval_modes import (
     VALID_RETRIEVAL_MODES,
     normalize_retrieval_mode,
 )
+from kacore.utils.processing_lock import ProcessingLock, serialized_processing
 from kacore.utils.text_chunks import clip_at_sentence
+from kacore.utils.usage_ledger import current_usage, usage_request
 from kacore.zotero_sync_job import (
     ZOTERO_SYNC_ERROR,
     ZOTERO_SYNC_PARTIAL,
@@ -447,7 +450,7 @@ def _assert_doc_writable(doc: SourceDocument) -> None:
         )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from kacore.adapters.llm import LLMAdapter
     from kacore.ask_progress import ProgressStore
@@ -676,6 +679,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         llm_adapter: LLMAdapter | None = None,
         managed_documents_dir: Path | None = None,
         vector_store: VectorStore | None = None,
+        vector_store_init_error: str | None = None,
+        clear_milvus_lock_callback: Callable[[], Awaitable[dict[str, Any]]] | None = None,
         embedding_provider: EmbeddingProvider | None = None,
         retrieval_orchestrator: RetrievalOrchestrator | None = None,
         deep_thinking_orchestrator: DeepThinkingOrchestrator | None = None,
@@ -691,9 +696,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         r2_backup_manager: Any | None = None,
         runtime_event_sink: RuntimeEventSink | None = None,
     ) -> None:
+        self._processing_lock = (
+            getattr(ingest_manager, "_processing_lock", None) or ProcessingLock()
+        )
         self._source_store = source_store
         self._kb_reader = kb_reader
         self._vector_store = vector_store
+        self._vector_store_init_error = vector_store_init_error
+        # 「清除残留 Milvus 锁」回调（组合根注入 PluginInitializer.clear_stale_milvus_lock；
+        # 为空表示当前环境不支持程序化清除）。
+        self._clear_milvus_lock_callback = clear_milvus_lock_callback
         self._embedding_provider = embedding_provider
         self._retrieval_orchestrator = retrieval_orchestrator
         self._deep_thinking_orchestrator = deep_thinking_orchestrator
@@ -743,10 +755,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         self._ingest_job: IngestJob | None = None
         # Zotero 换号采用两阶段确认；待确认明文 token 只在内存保留十分钟。
         self._pending_zotero_account_change: dict[str, Any] | None = None
+        # Milvus 自动重建调度器（组合根在 api 构造后注入；为空表示当轮不自动重建）。
+        self._auto_reindex: Any | None = None
 
     def attach_zotero_pipeline(self, pipeline: Any) -> None:
         """组合根注入 ZoteroSyncPipeline（其回调引用本 api 的索引/LRAG 助手）。"""
         self._zotero_pipeline = pipeline
+
+    def attach_auto_reindex_scheduler(self, scheduler: Any) -> None:
+        """组合根注入 AutoReindexScheduler（本 api 只负责在标记待重建时给它打信号）。"""
+        self._auto_reindex = scheduler
 
     def attach_notion_sync_pipeline(self, pipeline: Any) -> None:
         """组合根注入 NotionSyncPipeline（Notion 单向增量推送编排）。"""
@@ -848,6 +866,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             )
         )
 
+    @serialized_processing
     async def delete_collection(self, name: str) -> bool:
         """删除集合。非空集合的文档将迁入 _uncategorized 系统集合。返回 False 表示 name 不存在。
 
@@ -1048,22 +1067,45 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         """取单个文档；不存在返回 None。"""
         return await self._source_store.get_document(doc_id)
 
+    @serialized_processing
     async def list_document_chunks(self, doc_id: str) -> list[DocumentChunk]:
         """列出单个文档的本地文本分块，供管理端展示摘要统计。"""
         chunks = await self._source_store.list_chunks(doc_id)
         return await self._ensure_document_chunks_current(doc_id, chunks)
 
+    @serialized_processing
     async def get_document_markdown_content(self, doc_id: str) -> str | None:
         """读取文档制品包中的 clean.md；文档不存在返回 None。"""
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             return None
+        if doc.local_meta.get("processing_pending"):
+            raise RuntimeError(f"Document processing recovery required: {doc_id}")
         rel_path = doc.markdown_rel_path or "clean.md"
         artifact_path = self._resolve_document_artifact_path(doc, rel_path)
         if artifact_path is None:
             raise FileNotFoundError(f"Markdown artifact not found for {doc_id}: {rel_path}")
         return await asyncio.to_thread(artifact_path.read_text, encoding="utf-8")
 
+    @serialized_processing
+    async def get_document_footnotes(self, doc_id: str) -> list[dict[str, Any]] | None:
+        """显式读取所有脚注（含无正文页面）；不触发重建，找不到文档返回 None。"""
+        from dataclasses import asdict
+
+        from kacore.managers.artifact_provenance import load_provenance
+
+        doc = await self._source_store.get_document(doc_id)
+        if doc is None:
+            return None
+        if doc.local_meta.get("processing_pending"):
+            raise RuntimeError(f"Document processing recovery required: {doc_id}")
+        path = self._resolve_document_artifact_path(doc, doc.markdown_rel_path or "clean.md")
+        if path is None:
+            return []
+        _, notes = await asyncio.to_thread(load_provenance, path.parent)
+        return [asdict(note) for note in notes]
+
+    @serialized_processing
     async def _load_fulltext_document(self, doc_id: str) -> tuple[SourceDocument, str]:
         """读出文档实体与整篇 clean.md；任一环节缺失统一转成可分类的领域异常。
 
@@ -1074,12 +1116,21 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             raise FullTextDocumentUnavailableError(doc_id, "document_not_found")
+        if doc.local_meta.get("processing_pending"):
+            raise FullTextDocumentUnavailableError(doc_id, "processing_pending")
         try:
             content = await self.get_document_markdown_content(doc_id)
         except FileNotFoundError as exc:
             raise FullTextDocumentUnavailableError(doc_id, "artifact_missing") from exc
         if content is None:
             raise FullTextDocumentUnavailableError(doc_id, "document_not_found")
+        artifact_path = self._resolve_document_artifact_path(
+            doc, doc.markdown_rel_path or "clean.md"
+        )
+        if artifact_path is not None:
+            from kacore.managers.artifact_provenance import fulltext_with_notes
+
+            content = await asyncio.to_thread(fulltext_with_notes, content, artifact_path.parent)
         return doc, content
 
     def _require_fulltext_confirmation(
@@ -1105,6 +1156,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             estimated_tokens=_est_context_tokens(content[:requested_chars]),
         )
 
+    @serialized_processing
     async def get_document_markdown_page(
         self,
         doc_id: str,
@@ -1362,14 +1414,25 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
 
         Zotero 走 `zotero_items` 镜像表，本地文档走 `local_meta`——`update_document_meta` 的写入
         白名单与 `get_zotero_item_meta` 的返回字段同名，二者可直接互换（`web/server.py` 的
-        `_document_dict` 早已按此假设把两者都塞进同一个 `zotero_meta` 键）。缺失返回空 dict，
-        由 Harvard 渲染层降级为 `Anon.` / `n.d.`，而不是在这里编造。
+        `_document_dict` 早已按此假设把两者都塞进同一个 `zotero_meta` 键）。
+
+        Zotero 文档的 `creators`/`year` 为空时，回退读 `doc.local_meta`——那是同步管线用
+        `kacore.managers.ingest_manager.resolve_filename_biblio_hint()` 从文件名（如
+        `Author (Year) - Title.pdf`）确定性提取的猜测（典型来源：无 parent item 的独立附件，
+        Zotero 本身在 schema 上就没有 creators 字段）。Zotero 权威数据永远优先，hint 只补空；
+        两者都缺失才真正返回空 dict，由 Harvard 渲染层降级为 `Anon.` / `n.d.`——不是在这里编造。
         """
         if doc is None:
             return {}
         if doc.origin is DocumentOrigin.ZOTERO:
             meta = await self.get_zotero_item_meta(doc.library_id, doc.zotero_item_key)
-            return dict(meta) if meta else {}
+            merged = dict(meta) if meta else {}
+            hint = doc.local_meta or {}
+            if not merged.get("creators") and hint.get("creators"):
+                merged["creators"] = hint["creators"]
+            if not merged.get("year") and hint.get("year"):
+                merged["year"] = hint["year"]
+            return merged
         return dict(doc.local_meta or {})
 
     async def _build_document_source_entry(
@@ -1450,6 +1513,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
     async def get_lightrag_index_status(self, doc_id: str) -> dict[str, str] | None:
         return await self._source_store.get_lightrag_index_status(doc_id)
 
+    @serialized_processing
     async def register_document(
         self,
         *,
@@ -1680,6 +1744,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         await self._source_store.update_document(doc)
         return doc
 
+    @serialized_processing
     async def delete_document(self, doc_id: str) -> bool:
         """删除文档、图谱贡献、远端镜像和插件托管原件。
 
@@ -1729,6 +1794,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             self._unlink_managed_document(doc.file_path, doc.doc_id)
         return deleted
 
+    @serialized_processing
     async def reextract_document(self, doc_id: str) -> dict:
         """从制品包中已存储的原件重新提取 Markdown，覆写 clean.md/pages.json，并重新分块。
 
@@ -1737,7 +1803,89 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         """
         if self._ingest_manager is None:
             raise RuntimeError("IngestManager not configured")
-        return await self._ingest_manager.reextract_document(doc_id)
+        result = await self._ingest_manager.reextract_document(doc_id)
+        await self._mark_document_needs_reindex(doc_id)
+        return result
+
+    @serialized_processing
+    async def reprocess_documents_with_stale_cleaning(
+        self, *, dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """手动重抽取旧 PDF 并索引；版本按文档元数据比较，失败索引下次继续。
+
+        dry_run 只列待处理 PDF，不读 chunks、不触发隐式重切。逐篇更新当前数据，
+        不提供全库原子发布或断点任务；原始 PDF 保留，失败记录不阻止后续文档。
+        """
+        if self._ingest_manager is None:
+            raise RuntimeError("IngestManager not configured")
+
+        docs = await self._source_store.list_documents()
+        if dry_run:
+            from kacore.managers.artifact_provenance import PROCESSING_VERSION
+
+            return {"dry_run": True, "document_ids": [
+                d.doc_id for d in docs
+                if (d.content_type == "application/pdf" or d.file_path.lower().endswith(".pdf"))
+                and (d.local_meta.get("processing_version") != PROCESSING_VERSION
+                     or d.needs_reindex or d.local_meta.get("processing_pending"))
+            ]}
+        reprocessed: list[str] = []
+        skipped_already_new: list[str] = []
+        skipped_not_pdf: list[str] = []
+        failed: list[dict[str, str]] = []
+        pending_reindex: list[str] = []
+
+        for doc in docs:
+            from kacore.managers.artifact_provenance import PROCESSING_VERSION
+
+            current = (doc.local_meta.get("processing_version") == PROCESSING_VERSION
+                       and not doc.local_meta.get("processing_pending"))
+            if current and not doc.needs_reindex:
+                skipped_already_new.append(doc.doc_id)
+                continue
+            if doc.content_type != "application/pdf" and not doc.file_path.lower().endswith(".pdf"):
+                skipped_not_pdf.append(doc.doc_id)
+                continue
+            try:
+                if not current:
+                    await self.reextract_document(doc.doc_id)
+            except Exception as exc:
+                logger.error("Reprocess failed for %s: %s", doc.doc_id, exc, exc_info=True)
+                failed.append({"doc_id": doc.doc_id, "error": str(exc)})
+                continue
+
+            if (doc.lifecycle_state == DocumentLifecycle.ACTIVE
+                    and self._vector_store is not None and self._embedding_provider is not None
+                    and (self._config is None or self._milvus_index_is_compatible())):
+                try:
+                    await self._index_document_chunks_with_retry(
+                        doc.doc_id, doc.collection, context="one-time cleaning reprocess"
+                    )
+                    await self._clear_document_needs_reindex(doc.doc_id)
+                except Exception as exc:
+                    logger.error(
+                        "Re-index failed for %s after reprocessing: %s",
+                        doc.doc_id, exc, exc_info=True,
+                    )
+                    failed.append({"doc_id": doc.doc_id, "error": f"reindex failed: {exc}"})
+                    continue
+            latest = await self._source_store.get_document(doc.doc_id)
+            if latest is not None and latest.needs_reindex:
+                pending_reindex.append(doc.doc_id)
+            reprocessed.append(doc.doc_id)
+            logger.info(
+                "Reprocessed %s with new cleaning rules (%d/%d done)",
+                doc.doc_id, len(reprocessed), len(docs),
+            )
+
+        return {
+            "total_documents": len(docs),
+            "reprocessed": reprocessed,
+            "pending_reindex": pending_reindex,
+            "skipped_already_new": skipped_already_new,
+            "skipped_not_pdf": skipped_not_pdf,
+            "failed": failed,
+        }
 
     # ── AstrBot 知识库（调用 / 检索）────────────────────────────
 
@@ -1839,10 +1987,16 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             "full_text_used": False,
         }
 
+    @serialized_processing
     async def get_chunk_context(
         self, doc_id: str, chunk_id: str, window: int = 2
     ) -> dict:
-        """返回指定 chunk 及其前后 window 个相邻 chunk（按 ordinal 排序）。"""
+        """返回指定 chunk 及其前后 window 个相邻 chunk（按 ordinal 排序）。
+
+        与 `list_document_chunks()` 保持一致：读到旧 schema 的 chunk 时自动重切一次并
+        持久化（`chunk_needs_rebuild` 判据 + `replace_chunks` 落盘），此后同一文档的
+        chunks 已是新 schema，后续调用不会重复重切。
+        """
         all_chunks = await self._ensure_document_chunks_current(doc_id)
         all_chunks.sort(key=lambda c: c.ordinal)
         matched_idx = next(
@@ -1864,6 +2018,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             "matched_chunk_id": chunk_id,
         }
 
+    @serialized_processing
     async def rebuild_vector_store(self, job: MilvusBuildJob | None = None) -> dict[str, Any]:
         """清除并从 SQLite 事实源全量 rebuild 本地向量数据库。
 
@@ -1959,6 +2114,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             await self._clear_document_needs_reindex(doc.doc_id)
         return {"rebuilt_chunks": total_chunks, "failed_docs": 0, "errors": []}
 
+    @serialized_processing
     async def rebuild_index_pending(self, job: MilvusBuildJob | None = None) -> dict[str, Any]:
         """仅对 needs_reindex=True 的文档进行增量索引重建，完成后清除标记。
 
@@ -2059,6 +2215,35 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         docs = await self._source_store.list_pending_reindex_documents()
         return len(docs)
 
+    async def mark_stale_processing_documents_needs_reindex(self) -> int:
+        """把清洗/分块逻辑升级前处理的文档一次性推进 `needs_reindex` 队列并唤醒调度器。
+
+        触发点：插件启动、每次 Zotero 拉取结束（本地上传与 Zotero 同步是同一设计目的，
+        用户从任一入口「同步」都应把旧数据带上来）。轻量：只做一次 `list_documents()`、
+        只比对 local_meta 里的 `processing_version`，不读 chunk、不读制品。重建成功后
+        IngestManager 会写回当前版本，之后再扫都为空，因此是事实上的一次性迁移。
+        返回本次新标记的文档数。
+        """
+        from kacore.managers.artifact_provenance import PROCESSING_VERSION
+
+        marked = 0
+        for doc in await self._source_store.list_documents():
+            if doc.needs_reindex or doc.local_meta.get("processing_version") == PROCESSING_VERSION:
+                continue
+            doc.needs_reindex = True
+            try:
+                await self._source_store.update_document(doc)
+                marked += 1
+            except Exception as exc:  # noqa: BLE001 - 单文档失败不阻断整批扫描
+                logger.error("Failed to mark stale document %s for reindex: %s", doc.doc_id, exc)
+        if marked:
+            logger.info(
+                "检测到 %d 个文档由旧清洗/分块逻辑处理（processing_version != %s），已标记待重建。",
+                marked, PROCESSING_VERSION,
+            )
+            self._notify_auto_reindex()
+        return marked
+
     # ── Milvus 后台重建（进度条）─────────────────────────────────
 
     async def start_milvus_rebuild(self) -> dict[str, Any]:
@@ -2092,6 +2277,23 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         self._record_milvus_progress(job, force=True)
         self._milvus_build_task = asyncio.create_task(self._run_milvus_rebuild(job))
         return job.to_dict()
+
+    async def run_milvus_rebuild_to_completion(self) -> dict[str, Any]:
+        """启动（或复用）一次 Milvus 重建并等到它结束，返回终态快照。
+
+        供自动重建调度器使用：借 `start_milvus_rebuild` 的全局单飞语义，**手动重建正在跑时
+        直接搭上同一个 job**，不会并发起第二次；因此自动与手动共用同一条进度条与 runtime events。
+        重建任务自身已吞掉一切异常并写终态，这里只在拿不到任务时兜底。
+        """
+        await self.start_milvus_rebuild()
+        task = self._milvus_build_task
+        if task is not None:
+            # 用 `asyncio.wait` 而非 `await task`：重建任务被取消时不该把 CancelledError
+            # 灌给调度循环（终态已由 `_run_milvus_rebuild` 写回快照）；而调度器自身被取消时，
+            # `asyncio.wait` 仍会正常抛 CancelledError 向上传播。
+            await asyncio.wait({task})
+        job = self._milvus_build_job
+        return job.to_dict() if job is not None else {}
 
     def _record_milvus_progress(self, job: MilvusBuildJob, *, force: bool = False) -> None:
         snapshot = job.to_dict()
@@ -2372,11 +2574,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             "thinking_trace": None,
         }
 
+    @usage_request
     async def ask(
         self,
         question: str,
         collection: str | None = None,
-        top_k: int = 5,
+        top_k: int = 6,
         conversation_id: str | None = None,
         persona_enabled: bool = False,
         retrieval_mode: str = "default",
@@ -2926,6 +3129,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             # 历史回放自包含不丢提示（实时响应用结构化 answer_notice 字段）。
             # v1.1.0：由追加改为前置——校验未通过的告警必须在读正文之前就看到，读完整篇才
             # 发现「本回答未通过证据校验」为时已晚。三个渲染出口（Web/AstrBot/历史回放）同序。
+            ledger = current_usage.get()
+            if deep_outcome is not None and ledger is not None:
+                deep_outcome.evidence_trace["usage"] = ledger.summary()
+                if sources:
+                    sources[0]["request_trace"] = deep_outcome.evidence_trace
             stored_answer = f"{answer_notice}\n\n---\n\n{answer}" if answer_notice else answer
             try:
                 await self._source_store.add_chat_message(cid, "user", question)
@@ -3295,7 +3503,10 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             database_title=database_title,
         )
         if result.get("status") == "success":
-            for key in ("database_id", "qa_database_id", "parent_page_id", "database_title"):
+            for key in (
+                "database_id", "qa_database_id", "data_source_id", "qa_data_source_id",
+                "parent_page_id", "database_title",
+            ):
                 value = result.get(key)
                 if isinstance(value, str) and value:
                     self._persist_config_value("notion_sync", key, value)
@@ -3416,6 +3627,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
 
     async def get_notion_push_status(self) -> dict:
         """汇总 Notion 推送账本状态（供 /ka notion status 与前端展示）。"""
+        from kacore.notion_status import failure_summary
+
         if self._config is None:
             return {"status": "error", "message": "配置未加载。"}
         notion_cfg = self._config.get_notion_sync_config()
@@ -3438,10 +3651,14 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             "database_id": notion_cfg.database_id,
             "qa_database_id": notion_cfg.qa_database_id,
             "auto_sync_interval_sec": notion_cfg.auto_sync_interval_sec,
+            "auto_sync_enabled": notion_cfg.auto_sync_enabled,
+            "data_source_id": notion_cfg.data_source_id,
+            "qa_data_source_id": notion_cfg.qa_data_source_id,
             "sync_mode": notion_cfg.sync_mode,
             "documents": counts,
             "outbox_pending": len(pending),
             "outbox_failed": len(failed_qa),
+            "errors": await failure_summary(self._source_store),
         }
 
     async def get_effective_config(self) -> dict:
@@ -3458,7 +3675,6 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         """
         if self._config is None:
             return {}
-        emb = self._config.get_embedding_config()
         vdb = self._config.get_vector_db_config()
         rerank = self._config.get_rerank_config()
         deep = self._config.get_deep_thinking_config()
@@ -3469,7 +3685,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         web = self._config.get_web_console_config()
         return {
             "models": {
-                "embedding": f"{emb.provider}:{emb.model}",
+                "embedding": self._config.describe_embedding(),
                 "vector_db": vdb.backend,
                 "rerank": (
                     "noop" if rerank.provider == "noop" else f"{rerank.provider}:{rerank.model}"
@@ -3551,8 +3767,23 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
                 f"'{section}.{key}' 为结构性参数，修改后需手动重建索引。"
                 "请直接修改插件配置文件并重启插件，而非通过此接口写入。"
             )
-        if section == "embedding" and key == "provider" and value not in {"local", "external"}:
-            raise ValueError("embedding.provider must be 'local' or 'external'.")
+        if section == "embedding" and key == "provider" and value not in {
+            "local",
+            "external",
+            "astr",
+        }:
+            raise ValueError("embedding.provider must be 'local', 'external' or 'astr'.")
+        if section == "embedding" and key == "astrbot_provider_id":
+            # 与 Config.get_embedding_config 同口径（strip），否则「同值重存」会因首尾空白
+            # 被判为已变更，误触发全量索引失效。
+            if not isinstance(value, str):
+                raise ValueError("embedding.astrbot_provider_id must be a string.")
+            value = value.strip()
+            if len(value) > 200 or any(ord(ch) < 32 for ch in value):
+                raise ValueError(
+                    "embedding.astrbot_provider_id must be the AstrBot provider ID "
+                    "(a single line, at most 200 characters)."
+                )
         if section == "vector_db" and key == "backend" and value not in {"milvus", "astr"}:
             raise ValueError("vector_db.backend must be 'milvus' or 'astr'.")
         if section == "rerank" and key == "provider" and value not in {"cross_encoder", "noop"}:
@@ -3576,6 +3807,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             )
         if changed and section == "rerank":
             self._apply_rerank_runtime_config()
+        if changed and section == "vector_db" and key == "auto_rebuild_enabled" and value:
+            # 刚把自动重建打开：立刻唤醒调度器，否则积压队列要等到下一份新文档才被排空。
+            self._notify_auto_reindex()
 
         logger.info("update_config ok: %s.%s persisted", section, key)
         return {
@@ -3639,37 +3873,38 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         logger.info("plugin soft restart scheduled")
         return {"status": "restarting", "message": "插件正在重启，稍后将自动重连。"}
 
+    async def clear_milvus_lock(self) -> dict[str, Any]:
+        """清除 Milvus 数据目录残留的 LOCK 标记（仅在已探测到锁定问题时可用）。
+
+        委派给组合根注入的 `PluginInitializer.clear_stale_milvus_lock`，实际的前置守卫
+        （backend 是否 milvus、是否真的检测到锁定问题）都在那里做；这里只是薄委派。
+        """
+        if self._clear_milvus_lock_callback is None:
+            return {"status": "unsupported", "message": "当前环境不支持清除锁定，请手动处理。"}
+        return await self._clear_milvus_lock_callback()
+
     async def test_embedding_connection(self, base_url: str, model_name: str) -> dict:
         """临时创建一个 ExternalEmbeddingProvider 并发送测试请求，验证云端 API 可连通性。"""
         from kacore.repository.embedding.external import ExternalEmbeddingProvider
 
-        provider = ExternalEmbeddingProvider(
-            base_url=base_url,
-            model_name=model_name,
-        )
+        if (
+            not isinstance(base_url, str)
+            or not isinstance(model_name, str)
+            or not model_name.strip()
+        ):
+            return {"status": "error", "message": "Embedding 测试需要有效的地址和模型名"}
         try:
+            provider = ExternalEmbeddingProvider(base_url=base_url, model_name=model_name)
             vec = await provider.embed_query("ping")
             return {"status": "ok", "dimension": len(vec), "model": model_name}
         except Exception as exc:
             return {"status": "error", "message": str(exc)}
 
     async def get_sync_status(self) -> list[dict]:
-        """列出各文档在各目标的同步状态（SyncRecord 视图）。
+        """按文档/目标列出真实状态；Notion 实体账本优先于冗余同步记录。"""
+        from kacore.notion_status import sync_status
 
-        Reserved（v0.3.0 起）：现返回空，接入后返回 doc_id/target/status/synced_at。
-        """
-        records = await self._source_store.list_sync_records()
-        return [
-            {
-                "doc_id": r.doc_id,
-                "target": r.target.value,
-                "remote_ref": r.remote_ref,
-                "status": r.status.value,
-                "synced_at": r.synced_at.isoformat() if r.synced_at else None,
-                "message": r.message,
-            }
-            for r in records
-        ]
+        return await sync_status(self._source_store)
 
     async def backup_now(self, force: bool = False, background: bool = False) -> dict:
         """创建 R2 v1 完整快照；background=True 时立即返回共享 job。"""
@@ -4110,7 +4345,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         await self._source_store.upsert_build_job(self._build_job_db_snapshot(job))
 
     async def cancel_build_tasks(self) -> None:
-        """取消所有进行中的构建任务并等待其完成（teardown 时调用）。"""
+        """取消图谱与 Milvus 构建并等待收尾；调用方先停止创建任务的调度器。"""
+        if self._milvus_build_task is not None:
+            self._milvus_build_task.cancel()
+            await asyncio.gather(self._milvus_build_task, return_exceptions=True)
+            self._milvus_build_task = None
         for job_id, task in list(self._build_tasks.items()):
             if not task.done():
                 task.cancel()
@@ -4994,16 +5233,33 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             self._index_compatibility.remove_lightrag_collection(collection)
 
     async def _mark_document_needs_reindex(self, doc_id: str) -> None:
+        """把文档排进待重建队列，并给自动重建调度器打一次信号。
+
+        这是**全部**标记路径的唯一收口（上传自动索引失败、Zotero 同步遇不兼容、集合移动、
+        reextract、删集合失败……），因此信号只需在这里打一次。
+        """
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             return
         doc.needs_reindex = True
         await self._source_store.update_document(doc)
+        self._notify_auto_reindex()
+
+    def _notify_auto_reindex(self) -> None:
+        """通知自动重建调度器「队列里有活了」；未装配调度器时是空操作。"""
+        if self._auto_reindex is None:
+            return
+        try:
+            self._auto_reindex.notify()
+        except Exception as exc:  # noqa: BLE001 - 打信号失败不得影响主流程
+            logger.warning("自动重建信号发送失败：%s", exc)
 
     async def _clear_document_needs_reindex(self, doc_id: str) -> None:
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             return
+        if doc.local_meta.get("processing_pending"):
+            raise RuntimeError(f"Document processing recovery required: {doc_id}")
         if doc.needs_reindex:
             doc.needs_reindex = False
             await self._source_store.update_document(doc)
@@ -5096,6 +5352,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
 
         return failed_doc_ids, errors
 
+    @serialized_processing
     async def _ensure_document_chunks_current(
         self, doc_id: str, chunks: list[DocumentChunk] | None = None
     ) -> list[DocumentChunk]:
@@ -5103,6 +5360,11 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         doc = await self._source_store.get_document(doc_id)
         if doc is None:
             return chunks
+        if doc.local_meta.get("processing_pending"):
+            if self._ingest_manager is None:
+                raise RuntimeError(f"Document processing recovery required: {doc_id}")
+            await self._ingest_manager.reextract_document(doc_id)
+            return await self._source_store.list_chunks(doc_id)
         rebuilder = getattr(self._ingest_manager, "rebuild_document_chunks_from_artifact", None)
         needs_rebuild = getattr(self._ingest_manager, "chunk_needs_rebuild", None)
         if not (callable(rebuilder) and callable(needs_rebuild)):
@@ -5112,20 +5374,30 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
                 await rebuilder(doc.doc_id)
                 return await self._source_store.list_chunks(doc_id)
         except FileNotFoundError as exc:
+            latest = await self._source_store.get_document(doc_id)
+            if latest is not None and latest.local_meta.get("processing_pending"):
+                raise
             logger.warning("Legacy chunk rebuild skipped for %s: %s", doc_id, exc)
         return chunks
 
+    @serialized_processing
     async def _index_document_chunks_with_retry(
         self, doc_id: str, collection: str, *, context: str
     ) -> int:
         chunks = await self._ensure_document_chunks_current(doc_id)
         if not chunks:
+            if self._vector_store is not None:
+                await self._vector_store.retain_document_chunks(doc_id, frozenset())
             return 0
-        return await self._upsert_milvus_chunks_with_retry(
+        count = await self._upsert_milvus_chunks_with_retry(
             chunks,
             collection=collection,
             context=f"{context}: doc={doc_id}",
         )
+        await self._vector_store.retain_document_chunks(
+            doc_id, frozenset(c.chunk_id for c in chunks),
+        )
+        return count
 
     async def _upsert_milvus_chunks_with_retry(
         self, chunks: list[DocumentChunk], *, collection: str, context: str
@@ -5177,6 +5449,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
 
     # ── Zotero 同步副作用回调（供 ZoteroSyncPipeline 注入）──────────
 
+    @serialized_processing
     async def _index_document(self, doc_id: str, collection: str) -> None:
         """把某文档的 chunk 嵌入并写入 Milvus（与 register_document 自动索引同语义）。"""
         if not (self._config and self._milvus_index_is_compatible()):
@@ -5192,8 +5465,9 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             logger.error("Milvus indexing failed after retries for Zotero doc %s: %s", doc_id, exc)
             await self._mark_document_needs_reindex(doc_id)
 
+    @serialized_processing
     async def _remove_document_index(self, doc_id: str) -> None:
-        """从 Milvus 移除某文档的全部 chunk（strict 脱管 / conservative 删除时调用）。"""
+        """从 Milvus 移除某文档的全部 chunk（conservative 脱管 / strict 删除时调用）。"""
         if not self._vector_store:
             return
         try:
@@ -5205,7 +5479,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             logger.warning("Zotero remove index failed for %s: %s", doc_id, exc)
 
     async def _lightrag_cleanup(self, doc_id: str, collection: str) -> None:
-        """删除某文档在 LightRAG workspace 的贡献（conservative 硬删除时调用）。"""
+        """删除某文档在 LightRAG workspace 的贡献（strict 硬删除时调用）。"""
         if self._lightrag_registry is None:
             return
         try:
@@ -5706,6 +5980,12 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             payload["status"] = status
             if result.errors:
                 payload["message"] = result.errors[0]
+            # 增量同步会整篇跳过 Zotero 侧未变更的文档，旧分块逻辑处理过的库不会在这里被重切；
+            # 同步结束补一次轻量扫描，把它们推进待重建队列（一次性，写回版本后不再命中）。
+            try:
+                payload["stale_marked"] = await self.mark_stale_processing_documents_needs_reindex()
+            except Exception as exc:  # noqa: BLE001 - 扫描失败不应改变同步终态
+                logger.warning("Stale document scan after Zotero pull failed: %s", exc)
             if result.needs_milvus_rebuild:
                 try:
                     payload["milvus_rebuild"] = await self.rebuild_vector_store()
@@ -5778,6 +6058,7 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
         """返回上一次 Zotero Pull 的结果摘要（含 status；无则空）。"""
         return dict(self._last_zotero_sync)
 
+    @serialized_processing
     async def _sync_milvus_collection_move(self, doc_id: str, collection: str) -> None:
         if not self._config or self._config.get_vector_db_config().backend != "milvus":
             return
@@ -5808,6 +6089,8 @@ class KnowledgeRepositoryApi(CapabilitiesApiMixin, RuntimeModelsApiMixin):
             doc.needs_reindex = True
             await self._source_store.update_document(doc)
             await self._mark_lightrag_pending(doc.doc_id, doc.collection)
+        # 这里直接改 `doc.needs_reindex`（绕过 `_mark_document_needs_reindex`），故补一次信号。
+        self._notify_auto_reindex()
         if self._config:
             self._config.add_diagnostic(
                 "Embedding configuration changed; restart and rebuild Milvus/LightRAG indexes."

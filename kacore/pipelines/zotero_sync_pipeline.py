@@ -4,9 +4,10 @@
 向量/LightRAG 等重副作用经可选注入回调委派给组合根（与 api 解耦，便于单测只验 SQLite/磁盘/生命态）。
 
 sync_mode 语义（用户确认）：
-    strict_mirror —— 强制覆盖；Zotero 删除的文档→detached（保留 LRAG，移除 Milvus）；
+    strict_mirror —— 强制覆盖；Zotero 删除的文档→硬删除（文档记录 + Milvus + LRAG 全清）；
                      变化触发 Milvus rebuild；本轮 LRAG 构建禁用。
-    conservative（默认）—— 覆盖；Zotero 删除的文档→硬删除；collection 只增不减；LRAG 轻量重建。
+    conservative（默认）—— 覆盖；Zotero 删除的文档→detached（保留文档记录/制品包/LRAG，
+                     仅移除 Milvus）；collection 只增不减；LRAG 轻量重建。
     archive —— 只增不删；Zotero 删除的文档保留（Milvus 仍会召回）；最不触发 rebuild。
 
 storage_mode：managed_copy（复制原件进制品包）/ linked（原件留 Zotero，仅派生制品入插件）
@@ -47,7 +48,7 @@ from kacore.domain.models import (
     DocumentLifecycle,
     DocumentOrigin,
 )
-from kacore.managers.ingest_manager import make_document_id
+from kacore.managers.ingest_manager import make_document_id, resolve_filename_biblio_hint
 from kacore.zotero_sync_job import (
     ZOTERO_STAGE_APPLYING_REMOVALS,
     ZOTERO_STAGE_FINALIZING,
@@ -305,7 +306,7 @@ class ZoteroSyncPipeline:
             progress.detached_count = len(result.detached_document_ids)
 
         if cfg.sync_mode == ZOTERO_SYNC_STRICT and (
-            result.new_document_ids or result.changed_document_ids or result.detached_document_ids
+            result.new_document_ids or result.changed_document_ids or result.removed_document_ids
         ):
             result.needs_milvus_rebuild = True
 
@@ -467,7 +468,13 @@ class ZoteroSyncPipeline:
             collection = primary_coll.get(item_key) or DEFAULT_ZOTERO_COLLECTION
             await self._ensure_unfiled_home(lib, collection, coll_keys)
             tags = [t.tag for t in snapshot.item_tags.get(item_key, [])]
-            title = (item.title if item and item.title else att.filename) or document_id
+            # 独立附件（无 parent item）或有 parent item 但 Zotero 侧就是没填书目字段时，
+            # `att.filename` 若长得像「作者 (年份) - 标题」，可确定性提取一份猜测；Zotero 自带
+            # 的 item.title/creators 始终优先，这里只是给之后没有权威数据时留一个兜底 hint。
+            guessed_title, biblio_hint = resolve_filename_biblio_hint(att.filename)
+            title = (
+                item.title if item and item.title else (guessed_title or att.filename)
+            ) or document_id
 
             try:
                 await self._ingest.process_attachment(
@@ -486,6 +493,7 @@ class ZoteroSyncPipeline:
                     last_synced_at=datetime.now(timezone.utc),
                     # web 下载件落在缓存目录，link 会成悬空引用隐患，强制复制进制品包。
                     link_original=link_only and not via_web,
+                    biblio_hint=biblio_hint,
                 )
             except Exception as exc:  # 单文档失败不阻断整库。
                 result.errors.append(f"{document_id}: {exc}")
@@ -591,20 +599,20 @@ class ZoteroSyncPipeline:
             if doc.doc_id in current_ids:
                 continue
             if cfg.sync_mode == ZOTERO_SYNC_STRICT:
-                # 脱管：保留 LRAG workspace + 制品包，移除 Milvus，标 detached。
-                if doc.lifecycle_state != DocumentLifecycle.DETACHED:
-                    doc.lifecycle_state = DocumentLifecycle.DETACHED
-                    await self._store.update_document(doc)
-                    if self._remove_index is not None:
-                        await _safe(self._remove_index(doc.doc_id))
-                    result.detached_document_ids.append(doc.doc_id)
-            else:  # conservative：硬删除（含 Milvus + LRAG 清理）。
+                # 严格镜像：硬删除（含 Milvus + LRAG 清理；旧版遗留的 detached 也一并清掉）。
                 if self._remove_index is not None:
                     await _safe(self._remove_index(doc.doc_id))
                 if self._lightrag_cleanup is not None:
                     await _safe(self._lightrag_cleanup(doc.doc_id, doc.collection))
                 await self._store.delete_document(doc.doc_id)
                 result.removed_document_ids.append(doc.doc_id)
+            else:  # conservative：脱管，保留 LRAG workspace + 制品包，移除 Milvus，标 detached。
+                if doc.lifecycle_state != DocumentLifecycle.DETACHED:
+                    doc.lifecycle_state = DocumentLifecycle.DETACHED
+                    await self._store.update_document(doc)
+                    if self._remove_index is not None:
+                        await _safe(self._remove_index(doc.doc_id))
+                    result.detached_document_ids.append(doc.doc_id)
 
     def _current_document_ids(self, lib: str, snapshot: ZoteroSnapshot) -> set[str]:
         ids: set[str] = set()

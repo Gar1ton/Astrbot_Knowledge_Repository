@@ -165,6 +165,18 @@ class SourceDocumentStore(ABC):
     # ── 分块 ────────────────────────────────────────────────────
 
     @abstractmethod
+    async def commit_document_processing(
+        self, document: SourceDocument, chunks: list[DocumentChunk], pages: list[PageChunk],
+    ) -> None:
+        """原子替换正文块、页映射与处理元数据，标记 needs_reindex=True。
+
+        成功清除 processing_pending，更新 converter/version、chunk_schema/processing_version；
+        保留其他文档字段。异常或取消须回滚整个操作，保留先前持久化的待恢复标记。
+        文档不存在抛 FileNotFoundError。文件制品由调用方先发布，本接口不操作文件/向量。
+        """
+        ...
+
+    @abstractmethod
     async def replace_chunks(self, doc_id: str, chunks: list[DocumentChunk]) -> None:
         """以新分块整体替换某文档的旧分块。同步顺序：先删该 doc 旧 chunks → 再插入新 chunks。"""
         ...
@@ -360,6 +372,21 @@ class SourceDocumentStore(ABC):
         ...
 
     # ── Notion 推送账本与暂存箱 ───────────────────────────────────
+
+    @abstractmethod
+    async def get_notion_local_revision(self) -> str:
+        """读取已提交文档/集合/归属变化的版本；Notion 账本写入不得改变该版本。"""
+        ...
+
+    @abstractmethod
+    async def get_notion_scan_cursor(self, scope: str) -> str:
+        """读取指定 database/data source 的成功笔记检查水位；尚未扫描返回空串。"""
+        ...
+
+    @abstractmethod
+    async def set_notion_scan_cursor(self, scope: str, cursor: str) -> None:
+        """仅在完整扫描成功后持久化 ISO 时间水位，失败时调用方保持原水位。"""
+        ...
 
     @abstractmethod
     async def get_notion_entity(

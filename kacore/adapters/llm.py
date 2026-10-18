@@ -25,12 +25,43 @@ from kacore.domain.llm_generation import (
     STATUS_TIMEOUT,
     GenerationResult,
 )
+from kacore.managers.token_budget import default_tokenizer
+from kacore.utils.usage_ledger import current_usage, usage_stage
 
 logger = logging.getLogger("LLMAdapter")
 
 
+def _record_usage(
+    result: GenerationResult | None, system: str, prompt: str, provider_id: str,
+    started: float, status: str,
+) -> None:
+    """两种适配器共用真实尝试计账，不保存模型输入文本。"""
+    ledger = current_usage.get()
+    if ledger is None:
+        return
+    counter = default_tokenizer()
+    known = result is not None
+    actual = (known and result.prompt_tokens is not None
+              and result.completion_tokens is not None)
+    unknown_output = (known and result.reasoning_present
+                      and result.completion_tokens is None)
+    ledger.calls.append({
+        "call_id": f"{ledger.request_id}:{len(ledger.calls) + 1}",
+        "stage": usage_stage.get(), "attempt": len(ledger.calls) + 1,
+        "provider": provider_id, "model": result.model if known else "",
+        "input_tokens": (result.prompt_tokens if result.prompt_tokens is not None
+                         else counter.count(system + prompt)) if known else None,
+        "output_tokens": None if unknown_output else (result.completion_tokens
+                          if result.completion_tokens is not None
+                          else counter.count(result.text)) if known else None,
+        "measurement": ("unknown" if unknown_output or not known
+                        else "actual" if actual else "estimated"),
+        "status": status, "elapsed_ms": round((time.monotonic() - started) * 1000),
+    })
+
+
 class LMStudioLLMAdapter:
-    """OpenAI-compatible HTTP adapter，供 LightRAG 图谱构建专用。
+    """OpenAI-compatible HTTP adapter，供图谱构建及配置独立 endpoint 的研究问答使用。
 
     调用任意 OpenAI-compatible endpoint（LM Studio / Ollama / vLLM 等）。
     与主 LLMAdapter（AstrBot context）完全独立，图谱构建 LLM 与答案生成 LLM 互不影响。
@@ -56,13 +87,20 @@ class LMStudioLLMAdapter:
     async def generate(
         self, prompt: str, system_prompt: str = "", *, allow_mock: bool = True
     ) -> str:
+        result = await self.generate_result(prompt, system_prompt, allow_mock=allow_mock)
+        return result.text
+
+    async def generate_result(
+        self, prompt: str, system_prompt: str = "", *, allow_mock: bool = True
+    ) -> GenerationResult:
+        """独立 endpoint 的结构化生成；HTTP 重试逐次计账，失败消费为 unknown。"""
         try:
             import aiohttp
         except ImportError as exc:
             if not allow_mock:
                 raise RuntimeError("aiohttp is required for LMStudioLLMAdapter") from exc
             logger.error("aiohttp not available; LMStudioLLMAdapter cannot call LM Studio")
-            return ""
+            return GenerationResult(text="", status=STATUS_ERROR)
 
         messages: list[dict[str, str]] = []
         if system_prompt:
@@ -83,6 +121,7 @@ class LMStudioLLMAdapter:
 
         for attempt in range(1, attempts + 1):
             t0 = time.monotonic()
+            result = None
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
@@ -94,12 +133,29 @@ class LMStudioLLMAdapter:
                         resp.raise_for_status()
                         data = await resp.json()
                 elapsed = time.monotonic() - t0
-                return self._log_success(
+                text = self._log_success(
                     data,
                     elapsed=elapsed,
                     prompt_tokens_fallback=estimated_prompt_tokens,
                     attempt=attempt,
                 )
+                choice = (data.get("choices") or [{}])[0]
+                message = choice.get("message") or {}
+                usage = data.get("usage") or {}
+                reason = str(choice.get("finish_reason") or "")
+                reasoning = bool(message.get("reasoning_content"))
+                status = (STATUS_LENGTH if reason == "length" else
+                          STATUS_CONTENT_FILTER if reason == "content_filter" else
+                          STATUS_OK if text else
+                          STATUS_REASONING_ONLY if reasoning else STATUS_EMPTY)
+                result = GenerationResult(
+                    text=text, status=status, finish_reason=reason,
+                    prompt_tokens=LLMAdapter._as_int(usage.get("prompt_tokens")),
+                    completion_tokens=LLMAdapter._as_int(usage.get("completion_tokens")),
+                    reasoning_present=reasoning, provider_id="openai-compatible",
+                    model=str(data.get("model") or self._model),
+                )
+                return result
             except Exception as exc:
                 last_exc = exc
                 elapsed = time.monotonic() - t0
@@ -115,11 +171,14 @@ class LMStudioLLMAdapter:
                 )
                 if attempt < attempts:
                     await asyncio.sleep(self._retry_backoff_seconds * attempt)
+            finally:
+                _record_usage(result, system_prompt, prompt, "openai-compatible", t0,
+                              result.status if result else STATUS_ERROR)
 
         if not allow_mock:
             raise RuntimeError(f"LM Studio call to {url} failed: {last_exc}") from last_exc
         logger.error("LMStudioLLMAdapter.generate failed after retries: %s", last_exc)
-        return ""
+        return GenerationResult(text="", status=STATUS_ERROR)
 
     def _log_success(
         self,
@@ -326,24 +385,18 @@ class LLMAdapter:
 
         fallback_result = GenerationResult(text="", status=STATUS_EMPTY, provider_id=provider_id)
         if callable(llm_generate) and provider_id:
-            response = await llm_generate(
-                chat_provider_id=provider_id,
-                prompt=prompt,
-                system_prompt=system_prompt or None,
+            result = await self._measured_provider(
+                llm_generate, prompt, system_prompt, provider_id, chat_provider_id=provider_id,
             )
-            result = self._build_result(response, provider_id)
             if result.text:
                 return result
             if result.reasoning_present:
                 # reasoning-only：对同一 provider 带「直接给答案」的追加指令重试一次，
                 # 而不是立刻当作调用失败去滚 text_chat/legacy 兜底链。
                 retry_system = (system_prompt or "") + self._REASONING_RETRY_SUFFIX
-                response = await llm_generate(
-                    chat_provider_id=provider_id,
-                    prompt=prompt,
-                    system_prompt=retry_system,
+                result = await self._measured_provider(
+                    llm_generate, prompt, retry_system, provider_id, chat_provider_id=provider_id,
                 )
-                result = self._build_result(response, provider_id)
                 if result.text:
                     return result
                 logger.warning(
@@ -356,11 +409,9 @@ class LLMAdapter:
 
         text_chat = getattr(provider, "text_chat", None) if provider is not None else None
         if callable(text_chat):
-            response = await text_chat(
-                prompt=prompt,
-                system_prompt=system_prompt or None,
+            text_chat_result = await self._measured_provider(
+                text_chat, prompt, system_prompt, provider_id,
             )
-            text_chat_result = self._build_result(response, provider_id)
             if text_chat_result.text or text_chat_result.status != STATUS_EMPTY:
                 return text_chat_result
             # text_chat 也只给了个笼统的空响应：保留更有诊断价值的 fallback_result
@@ -412,9 +463,9 @@ class LLMAdapter:
     ) -> GenerationResult:
         call_llm = getattr(self._context, "call_llm", None)
         if callable(call_llm):
-            raw = await call_llm(prompt, system_prompt=system_prompt or None)
-            if raw:
-                return self._build_result(raw, "")
+            result = await self._measured_provider(call_llm, prompt, system_prompt, "")
+            if result.text:
+                return result
 
         provider = getattr(self._context, "llm_provider", None)
         result = await self._call_provider_chat(provider, prompt, system_prompt)
@@ -436,8 +487,26 @@ class LLMAdapter:
         chat_fn = getattr(provider, "chat", None) or getattr(provider, "generate", None)
         if not callable(chat_fn):
             return GenerationResult(text="", status=STATUS_EMPTY)
-        response = await chat_fn(prompt, system_prompt=system_prompt or None)
-        return self._build_result(response, self._provider_id(provider))
+        return await self._measured_provider(
+            chat_fn, prompt, system_prompt, self._provider_id(provider)
+        )
+
+    async def _measured_provider(
+        self, call: Any, prompt: str, system: str, provider_id: str, **kwargs: Any,
+    ) -> GenerationResult:
+        """每次实际调用（含内部 fallback）只记一次，异常消费保持 unknown。"""
+        ledger = current_usage.get()
+        started = time.monotonic()
+        result = None
+        status = "error"
+        try:
+            response = await call(prompt=prompt, system_prompt=system or None, **kwargs)
+            result = self._build_result(response, provider_id)
+            status = result.status
+            return result
+        finally:
+            if ledger is not None:
+                _record_usage(result, system, prompt, provider_id, started, status)
 
     def _extract_text(self, response: Any) -> str:
         """从 AstrBot LLMResponse（或裸字符串）里取最终答案文本。
@@ -488,43 +557,49 @@ class LLMAdapter:
         model = getattr(response, "model", None)
         return str(model).strip() if model else ""
 
-    def _extract_tokens(self, response: Any) -> tuple[int, int]:
-        """取 (prompt_tokens, completion_tokens)，best-effort、取不到则为 0。
+    def _extract_tokens(self, response: Any) -> tuple[int | None, int | None]:
+        """取 (prompt_tokens, completion_tokens)，best-effort；取不到时为 None（未知，非 0）。
 
         AstrBot 不同 provider 实现下 usage 字段名尚不稳定：优先尝试
         `raw_completion`（多数 provider 透传底层 OpenAI-compatible completion 对象）
         上的 `usage.prompt_tokens/completion_tokens`，退化到响应对象自身同名属性
         （与 LMStudioLLMAdapter._log_success 的 OpenAI-compatible 解析口径一致）。
+        None 表示确实没找到任何来源；provider 报告的 0 会如实返回 0，不会被后续
+        fallback 覆盖——「已知为零」与「未知」不能混同（见 GenerationResult 契约）。
         """
         if response is None or isinstance(response, str):
-            return 0, 0
+            return None, None
         raw_completion = getattr(response, "raw_completion", None)
         usage: Any = getattr(raw_completion, "usage", None) if raw_completion is not None else None
         if usage is None and isinstance(raw_completion, dict):
             usage = raw_completion.get("usage")
 
+        if usage is None:
+            usage = getattr(response, "usage", None)
+
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
         if isinstance(usage, dict):
             prompt_tokens = self._as_int(usage.get("prompt_tokens"))
             completion_tokens = self._as_int(usage.get("completion_tokens"))
         elif usage is not None:
             prompt_tokens = self._as_int(getattr(usage, "prompt_tokens", None))
             completion_tokens = self._as_int(getattr(usage, "completion_tokens", None))
-        else:
-            prompt_tokens = 0
-            completion_tokens = 0
 
-        if not prompt_tokens:
+        if prompt_tokens is None:
             prompt_tokens = self._as_int(getattr(response, "prompt_tokens", None))
-        if not completion_tokens:
+        if completion_tokens is None:
             completion_tokens = self._as_int(getattr(response, "completion_tokens", None))
         return prompt_tokens, completion_tokens
 
     @staticmethod
-    def _as_int(value: Any) -> int:
+    def _as_int(value: Any) -> int | None:
+        if value is None:
+            return None
         try:
-            return int(value) if value is not None else 0
+            return int(value)
         except (TypeError, ValueError):
-            return 0
+            return None
 
     def _build_result(
         self, response: Any, provider_id: str, *, status: str | None = None

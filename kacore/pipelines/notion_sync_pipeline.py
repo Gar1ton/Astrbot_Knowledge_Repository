@@ -7,14 +7,17 @@ outbox 补推、孤儿对账都在本层，NotionSyncTarget 只做无状态的�
 为什么不用标脏钩子：本地实体量级（文档 10²–10³、集合 10¹、QA 10²）在 push 时刻
 全量算指纹是毫秒级，避免侵入 CategoryManager / 集合树编辑 / notes CRUD 10+ 处写入口。
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from kacore.adapters.notion_mcp import NotionMCPError
 from kacore.config import NOTION_SYNC_STRICT
 from kacore.domain.models import (
     NOTION_ENTITY_DOCUMENT,
@@ -31,6 +34,7 @@ from kacore.domain.models import (
     SyncTargetKind,
 )
 from kacore.notion_sync_job import (
+    NOTION_STAGE_CHECKING_NOTES,
     NOTION_STAGE_FINALIZING,
     NOTION_STAGE_PRUNING_TAGS,
     NOTION_STAGE_PUSHING_DOCUMENTS,
@@ -79,12 +83,19 @@ class NotionSyncPipeline:
     async def initialize_databases(
         self, parent_page_id: str | None = None, database_title: str | None = None
     ) -> dict[str, Any]:
-        return await self._target.initialize_databases(parent_page_id, database_title)
+        try:
+            return await self._target.initialize_databases(parent_page_id, database_title)
+        except NotionMCPError as exc:
+            return {"status": "error", "message": str(exc), "error_code": exc.code}
 
     # ── 全量增量推送 ────────────────────────────────────────────
 
     async def push_all(
-        self, force: bool = False, *, progress: NotionSyncJob | None = None
+        self,
+        force: bool = False,
+        *,
+        progress: NotionSyncJob | None = None,
+        scan_notes: bool = True,
     ) -> dict[str, Any]:
         """把全部文章 + 待推 QA 增量推送到 Notion。
 
@@ -100,10 +111,24 @@ class NotionSyncPipeline:
             return {"status": "already_running", "message": "已有 Notion 推送任务在执行。"}
 
         async with self._lock:
+            started = time.monotonic()
+            requests_before = self._target.request_count
             collections = await self._store.list_collections()
             paths = schema.build_collection_paths(collections)
             docs = await self._store.list_documents()
             strict = self._config.sync_mode == NOTION_SYNC_STRICT
+            if progress is not None:
+                progress.docs_total = len(docs)
+            try:
+                await self._target.preflight()
+            except NotionMCPError as exc:
+                if progress is not None:
+                    progress.request_count = self._target.request_count - requests_before
+                return {
+                    "status": "error", "message": str(exc),
+                    "error_code": exc.code or "preflight_failed",
+                    "request_count": self._target.request_count - requests_before,
+                }
             if progress is not None:
                 progress.sync_mode = self._config.sync_mode
                 progress.force = force
@@ -135,9 +160,7 @@ class NotionSyncPipeline:
                     if strict_detached:
                         action = await self._archive_detached_document(doc)
                     else:
-                        action = await self._push_document(
-                            doc, collections, paths, force=force
-                        )
+                        action = await self._push_document(doc, collections, paths, force=force)
                     doc_stats[action] += 1
                     if progress is not None:
                         progress.record_document(action)
@@ -174,23 +197,47 @@ class NotionSyncPipeline:
                     warnings.append(f"Strict 选项清理失败：{e}")
                     logger.warning("Strict 选项清理失败：%s", e)
 
+            notes = {"scanned": 0, "marked": 0, "failed": 0}
+            if scan_notes:
+                if progress is not None:
+                    progress.set_stage(NOTION_STAGE_CHECKING_NOTES)
+                try:
+                    notes.update(await self._target.scan_notes())
+                except Exception as exc:  # noqa: BLE001 — 水位留待下次重试
+                    notes["failed"] = 1
+                    warnings.append(f"正文笔记检查失败：{exc}")
+            request_count = self._target.request_count - requests_before
+            elapsed_seconds = round(time.monotonic() - started, 2)
             if progress is not None:
+                progress.request_count = request_count
+                progress.notes_scanned = notes["scanned"]
+                progress.notes_marked = notes["marked"]
+                progress.notes_failed = notes["failed"]
                 progress.set_stage(NOTION_STAGE_FINALIZING)
 
             status = "success"
-            if doc_stats["failed"] or qa_stats["failed"]:
-                status = "partial_failure" if (
-                    doc_stats["created"]
-                    + doc_stats["updated"]
-                    + doc_stats["archived"]
-                    + qa_stats["pushed"]
-                ) or strict_archive_failed else "error"
+            if doc_stats["failed"] or qa_stats["failed"] or notes["failed"]:
+                status = (
+                    "partial_failure"
+                    if (
+                        doc_stats["created"]
+                        + doc_stats["updated"]
+                        + doc_stats["archived"]
+                        + qa_stats["pushed"]
+                    )
+                    or strict_archive_failed
+                    else "error"
+                )
             return {
                 "status": status,
                 "documents": doc_stats,
                 "qa": qa_stats,
                 "pruned": pruned,
                 "warnings": warnings,
+                "notes": notes,
+                "request_count": request_count,
+                "elapsed_seconds": elapsed_seconds,
+                "model_tokens": 0,
             }
 
     async def _push_document(

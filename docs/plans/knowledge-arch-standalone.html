@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Knowledge Arch Standalone Plan</title>
+<link rel="stylesheet" href="htmlplan.css">
+<script src="htmlplan.js" defer></script>
+<style data-mock-shared>
+  .ui { font: 13.5px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: #1c1b19; background: #fff; border: 1px solid #ddd8cc; border-radius: 10px; overflow: hidden; }
+  .ui .hd { padding: 9px 14px; border-bottom: 1px solid #eee9dd; font-weight: 650; display: flex; gap: 8px; align-items: baseline; } .ui .hd small { color: #8a8578; font-weight: 400; } .ui .hd .push { margin-left: auto; }
+  .ui .row { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; padding: 8px 14px; border-bottom: 1px solid #f3efe6; } .ui .row small { color: #8a8578; } .ui .row.on { background: #f6ede9; }
+  .ui .form { padding: 8px 14px 4px; background: #faf8f3; border-bottom: 1px solid #eee9dd; }
+  .ui .f { display: grid; grid-template-columns: 72px 1fr auto; gap: 8px; align-items: center; padding: 4px 0; color: #5f5a4f; } .ui .f code { font: 12px ui-monospace, Menlo, Consolas, monospace; color: #1c1b19; background: #fff; border: 1px solid #ddd8cc; border-radius: 6px; padding: 3px 7px; }
+  .ui .ft { display: flex; gap: 8px; align-items: center; padding: 10px 14px; border-top: 1px solid #eee9dd; background: #faf8f3; }
+  .ui .btn { font-weight: 600; font-size: 12.5px; padding: 6px 11px; border-radius: 7px; border: 1px solid #ddd8cc; background: #fff; white-space: nowrap; } .ui .btn.pri { background: #1c1b19; color: #fff; border-color: #1c1b19; } .ui .btn.sm { padding: 3px 8px; font-size: 12px; }
+  .ui .ok { color: #1f7a52; font-weight: 650; } .ui .bad { color: #b42318; font-weight: 650; } .ui .dim { color: #8a8578; } .ui .new { color: #1f7a52; font-size: 11px; font-weight: 700; border: 1px solid #b7dcc8; border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+  .ui .center { padding: 26px 18px; text-align: center; } .ui .center h3 { margin: 6px 0 4px; font-size: 17px; } .ui .center p { margin: 0 0 12px; color: #5f5a4f; }
+  .ui .bar { height: 6px; border-radius: 3px; background: #eee9dd; overflow: hidden; margin: 10px auto 0; width: 70%; } .ui .bar i { display: block; height: 100%; width: 45%; background: #1c1b19; }
+  .ui .steps { padding: 10px 16px; } .ui .steps div { padding: 3px 0; color: #5f5a4f; }
+  .ui .log { font: 11.5px ui-monospace, Menlo, Consolas, monospace; background: #1c1b19; color: #e9e4d8; padding: 8px 12px; margin: 0 14px 12px; border-radius: 6px; text-align: left; }
+  .ui .win { display: grid; grid-template-columns: 44px 1fr; min-height: 150px; } .ui .rail { background: #f3efe6; border-right: 1px solid #eee9dd; padding: 8px 0; text-align: center; color: #8a8578; } .ui .rail div { padding: 5px 0; } .ui .rail .on { color: #1c1b19; font-weight: 700; }
+  .ui .banner { margin: 10px 12px; padding: 8px 10px; border: 1px solid #f0c9a8; background: #fdf3ea; border-radius: 7px; color: #8a4510; }
+  .ui .side { background: #f3efe6; border-right: 1px solid #eee9dd; padding: 8px 0; } .ui .side div { padding: 6px 14px; color: #5f5a4f; } .ui .side .on { background: #fff; color: #1c1b19; font-weight: 650; }
+  .ui.prefs { display: grid; grid-template-columns: 110px 1fr; }
+</style>
+<body>
+
+<header>
+  <h1>Knowledge Arch 独立桌面版改造</h1>
+  <doc-changes new="40" changed="50" deleted="30"></doc-changes>
+  <details class="thread"><summary>Why · 7 requests</summary>
+    <doc-quote via="prompt" from="the user">将目前的/home/gar1ton/DEV-WORKSPACE/projects/Astrbot_KAPlugin改造为完全不依赖astrbot的https://github.com/Gar1ton/Knowledge-Arch</doc-quote>
+    <doc-quote via="prompt" from="the user">目前只需要出plan不需要任何执行</doc-quote>
+    <doc-quote via="prompt" from="the user">需要将现在对astrbot的依赖全部都移除，并兼容在自己身上</doc-quote>
+    <doc-quote via="prompt" from="the user">不需要参考之前https://github.com/Gar1ton/Knowledge-Arch的实现，新的KA需要完全与astrbot解耦</doc-quote>
+    <doc-quote via="prompt" from="the user">workflow与settings的整理：需要将很多目前只在astrbot配置里面可以调的项目全部都移植到客户端里，并完全重新整理一下setting的列表</doc-quote>
+    <doc-quote via="prompt" from="the user">客户端不用webui作为载体而是做一个类似于exe一样的应用程序，兼容mac，linux和windows</doc-quote>
+    <doc-quote via="prompt" from="the user">有些例如之前astrbot兼容中的设置，例如配置llm api key之类的功能，需要集成在dataflow中，加几个模块</doc-quote>
+  </details>
+</header>
+
+<main>
+<doc-plan>
+
+<!-- ═════ 1 · 桌面应用 ═════ -->
+<doc-claim>
+  <p>用户安装一个桌面应用即可使用 KA，不需要 AstrBot。</p>
+  <doc-machine name="app" caption="点一个状态，看那时窗口里的画面。">
+<script type="text/plain">
+machine app initial launching
+state launching   # 窗口显示启动画面。后端在启动。
+state welcome     # 首次启动。用户选择导入或空库。
+state importing   # 导入旧插件的数据和配置。
+state ready       # 主窗口可用。
+state crashed     # 后端退出。窗口给出日志和重启按钮。
+state stopped final  # 后端刷盘、释放锁，然后退出。
+
+| welcome   | launching | .       |
+| importing | ready     | crashed |
+| .         | stopped   | .       |
+
+launching -first->   welcome   : 首次启动
+launching -ok->      ready     : KA_READY
+launching -timeout-> crashed   : 60 s
+welcome   -import->  importing : 导入
+welcome   -fresh->   ready     : 空库
+importing -done->    ready     : 完成
+importing -fail->    welcome   : 回滚
+ready     -exit->    crashed   : 进程退出
+crashed   -retry->   launching : 重启服务
+ready     -quit->    stopped   : 退出
+</script>
+    <div data-state="launching"><doc-mock frame="none" w="400"><template>
+<div class="ui"><div class="center"><div class="dim">Knowledge Arch</div><h3>正在启动本地服务…</h3><p>127.0.0.1 · 端口由系统分配</p><div class="bar"><i></i></div></div></div></template></doc-mock></div>
+    <div data-state="welcome"><doc-mock frame="none" w="400"><template>
+<div class="ui"><div class="center"><h3>欢迎使用 Knowledge Arch</h3><p>数据目录 ~/Library/Application Support/Knowledge Arch</p>
+<span class="btn pri">导入 AstrBot 插件数据…</span> <span class="btn">从空库开始</span></div></div></template></doc-mock></div>
+    <div data-state="importing"><doc-mock frame="none" w="400"><template>
+<div class="ui"><div class="hd">导入旧数据 <small>复制，不移动原目录</small></div><div class="steps">
+<div><span class="ok">✓</span> 复制 SQLite、制品、Milvus、LightRAG 目录</div>
+<div><span class="ok">✓</span> 改写 412 个文件路径</div>
+<div><span class="ok">✓</span> 运行 25 个迁移</div>
+<div><span class="dim">…</span> 转换设置（3 项需要你确认）</div>
+<div><span class="dim">·</span> Embedding 来自 AstrBot：索引标记为重建</div></div></div></template></doc-mock></div>
+    <div data-state="ready"><doc-mock frame="none" w="400"><template>
+<div class="ui"><div class="win"><div class="rail"><div class="on">Ask</div><div>文档</div><div>数据流</div><div>图谱</div></div>
+<div><div class="banner">还没有对话模型。打开 数据流 › 模型分配。</div><div class="steps"><div class="dim">Ask 输入框在配置后可用</div></div></div></div></div></template></doc-mock></div>
+    <div data-state="crashed"><doc-mock frame="none" w="400"><template>
+<div class="ui"><div class="center"><h3 class="bad">本地服务已退出（code 1）</h3><p>最后 3 行日志：</p></div>
+<div class="log">DataDirLockedError: milvus.db<br>another instance holds the lock<br>shutdown complete</div>
+<div class="ft"><span class="btn pri">重启服务</span><span class="btn">打开日志目录</span></div></div></template></doc-mock></div>
+    <div data-state="stopped"><doc-mock frame="none" w="400"><template>
+<div class="ui"><div class="center"><h3>正在关闭…</h3><p>停止定时任务 → 刷盘 Milvus → 关闭数据库</p></div></div></template></doc-mock></div>
+  </doc-machine>
+  <doc-ask id="shell">
+    <p>桌面壳用什么技术？</p>
+    <p>Tauri 与 Electron 的窗口内仍用 Web 技术绘制界面。但没有浏览器，没有对外端口，也没有登录页。</p>
+    <label><input type="radio" name="shell" value="tauri" checked> Tauri 2 + 现有 React 界面 <small>安装包小，17k 行界面代码复用</small></label>
+    <label><input type="radio" name="shell" value="electron"> Electron + 现有 React 界面 <small>自带 Chromium，安装包更大</small></label>
+    <label><input type="radio" name="shell" value="qt"> PySide6 原生界面 <small>重写全部前端；claim 3、4 的界面重做</small></label>
+  </doc-ask>
+  <div data-if="shell=qt"><doc-note tone="warn">Phase 4 变成一个全新的 Qt 前端。工作量是其他选项的数倍。</doc-note></div>
+
+  <doc-claim>
+    <p>Tauri 壳启动 Python 后端，只把端口和 token 交给自己的窗口。</p>
+    <doc-calls title="启动链" caption="后端在 127.0.0.1 上运行。token 只经环境变量传递。">
+<script type="text/plain">
++ **main**() · Tauri                                   @ desktop/src-tauri/src/main.rs:1
++   single_instance::init()                            @ desktop/src-tauri/src/main.rs:1   -- 第二个实例只聚焦已有窗口
++   **spawn_backend**(data_dir, token)                 @ desktop/src-tauri/src/sidecar.rs:1
++     python -I -m ka_server serve --port 0            @ ka_server/__main__.py:1
+~       AppInitializer(settings, data_dir)             @ kacore/plugin_initializer.py:75   -- 原 PluginInitializer，去掉 context
+~       build_app(api, token=…)                        @ web/server.py:1738
++       print("KA_READY port=…")                       @ ka_server/lifecycle.py:1
++   **backend_info**() → { base_url, token }           @ desktop/src-tauri/src/sidecar.rs:1   -- 前端用 invoke 取得
++   on_exit → POST /api/shutdown，超时后 kill          @ desktop/src-tauri/src/sidecar.rs:1
+</script>
+    </doc-calls>
+    <doc-claim at="ka_server/__main__.py:1">
+      <p><b>ka_server/__main__.py</b> · serve()</p>
+      <doc-code title="ka_server/__main__.py · sketch" lang="py">
+<script type="text/plain">
+async def serve(args: argparse.Namespace) -> None:
+    token = os.environ.pop("KA_TOKEN")            # Tauri 生成；不进命令行，不打印
+    paths = AppPaths.resolve(args.data_dir)        # platformdirs：三平台标准目录
+    settings = SettingsStore(paths.settings_file, SecretStore(paths.secrets))
+    app_init = AppInitializer(settings, paths.data)
+    await app_init.initialize()
+    runner = web.AppRunner(build_app(api=app_init.api, token=token))
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", args.port)   # 0 = 系统分配
+    await site.start()
+    print(f"KA_READY port={bound_port(site)}", flush=True)
+    await wait_for_shutdown(parent_pid=args.parent_pid)  # 父进程消失也退出
+    await runner.cleanup()
+    await app_init.teardown()                            # 释放 Milvus Lite 锁
+</script>
+        <doc-pin line="12" tone="risk" title="防止孤儿进程持有 Milvus 锁">10-08 的 DataDirLockedError 就是这类问题。</doc-pin>
+      </doc-code>
+    </doc-claim>
+  </doc-claim>
+
+  <doc-claim>
+    <p>后端用每次启动的 token 鉴权。登录页删除。</p>
+    <doc-code src="web/server.py" lines="1738-1756" hl="1741,1743-1745">
+      <doc-pin line="1741" title="删除：界面由 Tauri 从安装包加载"></doc-pin>
+      <doc-pin line="1744" tone="warn" title="密码登录改为 Bearer token">CORS 只允许 tauri://localhost 与 http://tauri.localhost。</doc-pin>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>安装包自带 Python 运行时。大的可选组件按需下载。</p>
+    <doc-tree caption="核心依赖在构建时装好。torch 不进安装包。">
+<script type="text/plain">
+Knowledge Arch (.app / .msi / .AppImage / .deb)
+  + ka-desktop              # Tauri 可执行文件
+  + resources/frontend/     # next build 的静态导出
+  + resources/python/       # python-build-standalone 3.12 + 核心依赖
+  + resources/ka/           # kacore · web · migrations · ka_server
+<app_data>/
+  + settings.json           # 新设置文件
+  + secrets/                # 主密钥在系统钥匙串
+  + knowledge_repository.db # 与插件版同一 schema
+  + extras/local_embedding/ # torch + sentence-transformers，按需
+  + extras/lightrag/        # lightrag-hku，按需
+</script>
+    </doc-tree>
+    <doc-note tone="risk"><strong>Risk</strong> macOS 公证要求 python/ 内每个 .so 与 .dylib 都签名。Windows 没有代码签名证书时，SmartScreen 会警告。</doc-note>
+  </doc-claim>
+
+  <doc-claim>
+    <p>首次启动可以导入旧插件的数据和配置。</p>
+    <doc-calls title="导入器" caption="导入只复制。原 AstrBot 目录不变。">
+<script type="text/plain">
++ **import_legacy_plugin**(astrbot_root)                @ kacore/legacy_import/importer.py:1   -- 用户用原生对话框选目录
++   copy plugin_data/astrbot_plugin_knowledge_repository  @ kacore/legacy_import/importer.py:1
++   **rewrite_paths**(old_root, new_root)               @ kacore/legacy_import/paths.py:1      -- documents.file_path 是绝对路径
++   run_migrations(db)                                  @ kacore/migration_runner.py:21
++   **translate_settings**(plugin_cfg, runtime_cfg)     @ kacore/settings/legacy_keys.py:1     -- 见 claim 4.1
+    embedding_fingerprint(config, dim)                  @ kacore/index_compatibility.py:21     -- astr 指纹不再匹配 → 走既有重建
+</script>
+    </doc-calls>
+    <doc-claim at="kacore/managers/ingest_manager.py:300">
+      <p><b>ingest_manager.py:300</b> · file_path 存绝对路径</p>
+      <doc-code src="kacore/managers/ingest_manager.py" lines="295-303" hl="300">
+        <doc-pin line="300" tone="warn" title="导入时必须改写这个前缀"></doc-pin>
+      </doc-code>
+    </doc-claim>
+  </doc-claim>
+</doc-claim>
+
+<!-- ═════ 2 · 模型供应商 ═════ -->
+<doc-claim>
+  <p>用户在数据流的「模型供应商」节点里管理 API Key。</p>
+  <doc-mock frame="none" w="460"><template>
+<div class="ui">
+  <div class="hd">模型供应商 <span class="new">NEW</span> <small>3 个连接</small><span class="push btn sm">+ 添加</span></div>
+  <div class="row"><b>OpenAI</b><span class="ok">已连接</span><small>openai_compatible · sk-…a3F2 · 42 个模型</small></div>
+  <div class="row on"><b>DeepSeek</b><span class="ok">已连接</span><small>openai_compatible · sk-…91c0 · 2 个模型</small></div>
+  <div class="row"><b>LM Studio</b><span class="bad">连接被拒绝</span><small>http://localhost:1234/v1 · 无密钥</small></div>
+  <div class="form">
+    <div class="f"><span>Base URL</span><code>https://api.deepseek.com/v1</code><span></span></div>
+    <div class="f" data-ref="key"><span>API Key</span><code>••••••••••••91c0</code><span class="btn sm">替换</span></div>
+    <div class="f"><span>超时</span><code>120 s</code><span></span></div>
+  </div>
+  <div class="ft"><span class="btn pri" data-ref="test">测试连接</span><span class="btn">获取模型列表</span></div>
+</div></template>
+    <doc-pin ref="key" anchor="r" offset="10,0" title="界面只显示后 4 位">完整的值只在加密库里。</doc-pin>
+    <doc-pin ref="test" anchor="tr" title="见 claim 2.4"></doc-pin>
+  </doc-mock>
+
+  <doc-claim>
+    <p>一个连接保存地址和密钥引用。密钥不写进 settings.json。</p>
+    <doc-schema id="provider" lang="py" title="kacore/providers/base.py · sketch" caption="v1 只有两种 kind。OpenAI 兼容覆盖大多数国内外服务。">
+<script type="text/plain">
+@dataclass(frozen=True)
+class ProviderProfile:
+    id: str                       # "deepseek"
+    kind: Literal["openai_compatible", "anthropic"]
+    label: str
+    base_url: str                 # 预设：OpenAI / DeepSeek / DashScope / Moonshot /
+                                  #   智谱 / SiliconFlow / OpenRouter / Ollama / LM Studio
+    api_key_ref: str              # "provider.deepseek.api_key" → EncryptedSecretStore
+    timeout_sec: int = 120
+    models: tuple[str, ...] = ()  # 「获取模型列表」的缓存
+
+@dataclass(frozen=True)
+class ModelRef:
+    provider_id: str
+    model: str
+</script>
+    </doc-schema>
+    <doc-note tone="info">EncryptedSecretStore 保留。它的 master.key 改存系统钥匙串（keyring）。没有钥匙串的 Linux 回退到现在的文件方式。</doc-note>
+  </doc-claim>
+
+  <doc-claim>
+    <p>所有 LLM 调用按角色取模型，不再读 AstrBot context。</p>
+    <doc-calls title="LLMAdapter" caption="GenerationResult 与用量账本的契约不变。">
+<script type="text/plain">
+~ LLMAdapter.generate_result(prompt, system)          @ kacore/adapters/llm.py:247
+-   _call_astrbot_llm_generate()                       @ kacore/adapters/llm.py:378   -- context.llm_generate
+-   _get_astrbot_chat_provider()                       @ kacore/adapters/llm.py:423   -- provider_manager
+-   _call_legacy_context_llm()                         @ kacore/adapters/llm.py:461
++   **ModelRouter**.client_for(role)                   @ kacore/providers/router.py:1   -- chat / research / graph
++     **OpenAICompatChat**.generate()                  @ kacore/providers/openai_compat.py:1
++     **AnthropicChat**.generate()                     @ kacore/providers/anthropic.py:1
+    _build_result(response, provider_id)               @ kacore/adapters/llm.py:604
+- LMStudioLLMAdapter                                   @ kacore/adapters/llm.py:63    -- 并入 OpenAICompatChat
+</script>
+    </doc-calls>
+    <doc-claim at="kacore/adapters/llm.py:378">
+      <p><b>llm.py:378</b> · _call_astrbot_llm_generate()</p>
+      <doc-code src="kacore/adapters/llm.py" lines="378-392" hl="382-383">
+        <doc-pin line="382" tone="warn" title="这一段与 423–480 全部删除"></doc-pin>
+      </doc-code>
+    </doc-claim>
+  </doc-claim>
+
+  <doc-claim>
+    <p>Embedding 的外部来源用同一个连接。astr 来源删除。</p>
+    <doc-code src="kacore/repository/embedding/factory.py" lines="36-50" hl="41-47">
+      <doc-pin line="41" tone="warn" title="删除 astr 分支">external 改为 ModelRef，密钥从连接读取。</doc-pin>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>「测试连接」发一次最小请求，并刷新模型列表。</p>
+    <doc-calls title="测试连接" caption="错误按原因分类，界面给出可读提示。">
+<script type="text/plain">
++ POST /api/providers/{id}/test                       @ web/server.py:1772
++   **ProviderRegistry**.test(id)                     @ kacore/providers/registry.py:1
++     GET {base_url}/models                           @ kacore/providers/openai_compat.py:1   -- 401 → 「API Key 无效」
++     chat("ping", max_tokens=1)                      @ kacore/providers/openai_compat.py:1   -- 没有 /models 时的退路
+</script>
+    </doc-calls>
+  </doc-claim>
+</doc-claim>
+
+<!-- ═════ 3 · 数据流 ═════ -->
+<doc-claim>
+  <p>数据流多出 4 个模块。每个节点管理本阶段的设置。</p>
+  <doc-flow caption="绿色是新节点。sync 拆成 Notion 与 R2。模型分配也给图谱 graph 角色。" dashed="提供模型或密钥 / 可选">
+<script type="text/plain">
++ providers = 模型供应商 / API Key [green]
++ models    = 模型分配 / 3 个角色 [green]
+zotero    = Zotero / 可选来源
+ingest    = 本地导入 / 清洗 · OCR
+embedding = Embedding / 本地或连接
+vector    = 向量库 / Milvus [db]
+graph     = 知识图谱 / LightRAG
+retrieval = 检索 / 六档模式
+answer    = 回答 / 系统提示词
++ notion  = Notion / token [green]
++ r2      = R2 备份 / 凭据 [green]
+
+| zotero    | ingest    | r2     |
+| providers | embedding | .      |
+| .         | vector    | graph  |
+| models    | retrieval | .      |
+| .         | answer    | notion |
+
+zotero -> ingest
+ingest -> embedding
+ingest --> r2 : 备份
+embedding -> vector
+vector -> retrieval
+vector -> graph
+graph -> answer
+retrieval -> answer
+answer --> notion : QA
+providers --> embedding : key
+providers -> models
+models --> retrieval : research
+models --> answer : chat
+</script>
+  </doc-flow>
+  <doc-ask id="roles">
+    <p>LLM 角色在哪里选模型？</p>
+    <label><input type="radio" name="roles" value="node" checked> 一个「模型分配」节点列出全部角色 <small>一处看清所有 LLM 开销</small></label>
+    <label><input type="radio" name="roles" value="inline"> 图谱、检索、回答节点各自选择 <small>「模型分配」节点删除</small></label>
+  </doc-ask>
+  <div data-if="roles=inline"><doc-note tone="info">新模块变为 3 个。图谱、检索、回答节点各加一个模型选择框。</doc-note></div>
+
+  <doc-claim>
+    <p>每个设置项只在一个 schema 里登记一次。</p>
+    <doc-schema id="spec" lang="py" title="kacore/settings/schema.py · sketch" caption="它替代 _conf_schema.json 与 ConfigKeyPolicy 表。">
+<script type="text/plain">
+@dataclass(frozen=True)
+class SettingSpec:
+    key: str                      # "flow.graph.query_mode"
+    kind: Literal["bool", "int", "float", "str", "enum",
+                  "path", "secret", "model_ref"]
+    default: Any
+    home: str                     # 显示位置："flow.graph" / "prefs.storage"
+    tier: Literal["basic", "advanced"] = "basic"
+    consequence: Literal["none", "restart", "rebuild"] = "none"
+    options: tuple[str, ...] = ()
+    bounds: tuple[float, float] | None = None
+    label_key: str = ""           # i18n.ts 的键
+
+SPECS: tuple[SettingSpec, ...] = (
+    SettingSpec("flow.graph.query_mode", "enum", "mix", "flow.graph",
+                options=("mix", "local", "global", "hybrid", "naive", "bypass"),
+                consequence="restart"),
+    # … 约 85 项。XxxConfig dataclass 保留，改从 SettingsStore 读值。
+)
+</script>
+    </doc-schema>
+  </doc-claim>
+
+  <doc-claim>
+    <p>节点面板从 schema 渲染，不再手写字段。</p>
+    <doc-calls title="节点面板" caption="一个通用面板替代 QuickConfigPanel 里的手写字段。">
+<script type="text/plain">
+~ <FlowPageContent/>                                  @ web/frontend/components/panels/FlowPageContent.tsx:34
++   <**NodePanel** node="flow.graph"/>                @ web/frontend/components/flow/NodePanel.tsx:1
++     GET /api/settings/schema?home=flow.graph        @ web/frontend/lib/api.ts:547
++     PATCH /api/settings { key, value }              @ web/frontend/lib/api.ts:547   -- 返回 none / restart / rebuild
+-   buildQuickConfig(stage, config)                   @ web/frontend/components/flow/QuickConfigPanel.tsx:151   -- 手写 60 多个字段
+~   STAGE_META / GRID / EDGES                         @ web/frontend/components/flow/model.ts:35   -- 加 4 个节点，删 sync
++ **get_schema**(home)                                @ kacore/settings/schema.py:1
+~ update_config_value(section, key, value)            @ kacore/api.py:3756   -- 改读 SettingSpec
+- ConfigKeyPolicy 表                                  @ kacore/config.py:978
+</script>
+    </doc-calls>
+  </doc-claim>
+</doc-claim>
+
+<!-- ═════ 4 · 偏好设置 ═════ -->
+<doc-claim>
+  <p>偏好设置只保留应用级选项，分 6 组。</p>
+  <doc-mock frame="none" w="480"><template>
+<div class="ui prefs">
+  <div class="side"><div>通用</div><div>外观</div><div>存储</div><div>本地模型</div><div class="on" data-ref="comp">组件</div><div>诊断</div></div>
+  <div>
+    <div class="hd">组件 <small>可选依赖，装到 extras/</small></div>
+    <div class="row"><b>本地 Embedding</b><span class="btn sm">安装</span><small>torch · sentence-transformers · 离线向量</small></div>
+    <div class="row"><b>知识图谱</b><span class="ok">1.5.0</span><small>lightrag-hku</small></div>
+    <div class="row"><b>本地 Rerank</b><span class="dim">随本地 Embedding</span><small>cross-encoder</small></div>
+    <div class="row"><b>R2 备份</b><span class="ok">已安装</span><small>boto3</small></div>
+  </div>
+</div></template>
+    <doc-pin ref="comp" anchor="r" title="替代 AstrBot 的 pip 安装">见 claim 5.3。</doc-pin>
+  </doc-mock>
+
+  <doc-claim>
+    <p>旧键自动换成新键。AstrBot 专属键删除。</p>
+    <doc-code title="kacore/settings/legacy_keys.py · sketch" lang="py">
+<script type="text/plain">
+RENAMED = {
+    "ask.answer_language":          "flow.answer.language",
+    "ask.llm_timeout_seconds":      "flow.answer.llm_timeout_sec",
+    "source_store.*":               "flow.import.*",
+    "vector_db.*":                  "flow.vector_store.*",
+    "rerank.*":                     "flow.retrieval.rerank.*",
+    "embedding.device":             "prefs.local_models.device",
+    "rerank.device":                "prefs.local_models.device",
+    "zotero_sync.*":                "flow.zotero.*",
+    "notion_sync.*":                "flow.notion.*",
+    "r2_sync.*":                    "flow.r2.*",   # 两个密钥转入加密库
+}
+TO_PROVIDER = {   # 一组 URL + key + model → 一个 ProviderProfile + 一个 ModelRef
+    "deep_thinking.llm_base_url/llm_model/llm_api_key": "flow.models.research",
+    "graph.lightrag_llm_base_url/lightrag_llm_model":   "flow.models.graph",
+    "embedding.base_url/model + KR_EMBEDDING_API_KEY":  "flow.embedding.source",
+}
+DROPPED = (
+    "web_console.*",                  # 没有 Web 控制台
+    "embedding.astrbot_provider_id",  # 密钥在 AstrBot 里 → 索引标记重建
+    "notion_sync.mcp_server_name",    # 改用 flow.notion.token
+    "ask.agent_enabled", "ask.research_enabled", "ask.persona_enabled",
+)
+</script>
+      <doc-pin line="8" tone="warn" title="两个 device 合并为一个">rerank 仍在设备不可用时静默回退。</doc-pin>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>4 个旧入口合并。_conf_schema.json 删除。</p>
+    <doc-calls title="设置入口" caption="合并后，一个设置项只出现在一个地方。">
+<script type="text/plain">
+- _conf_schema.json（AstrBot 插件面板）               @ _conf_schema.json:1
+- <AstrBotModal/>                                     @ web/frontend/components/modals/AstrBotModal.tsx:35
+- <LoginScreen/>                                      @ web/frontend/components/auth/LoginScreen.tsx:203
+~ <SettingModal/> → <**PreferencesWindow**/>          @ web/frontend/components/modals/SettingModal.tsx:1066   -- config 标签删除，进节点
+~ <ModelsModal/> → 偏好 › 本地模型                     @ web/frontend/components/modals/ModelsModal.tsx:12
+~ <WorkflowModal/> → 主窗口的「数据流」页              @ web/frontend/components/modals/WorkflowModal.tsx:11
++ 菜单 Preferences…（⌘, / Ctrl+,）                    @ desktop/src-tauri/src/menu.rs:1
+</script>
+    </doc-calls>
+  </doc-claim>
+</doc-claim>
+
+<!-- ═════ 5 · AstrBot 能力迁入 ═════ -->
+<doc-claim>
+  <p>AstrBot 原来提供的其余能力都由 KA 自己完成。</p>
+  <doc-calls title="AstrBot 薄壳" caption="薄壳整个删除。业务门面 api.* 不变。">
+<script type="text/plain">
+- KnowledgeRepositoryPlugin(Star) · @register         @ main.py:71
+-   /ka status · r2 · notion · zotero                 @ main.py:115   -- 改为节点上的按钮
+-   /ka agent · persona · research on|off             @ main.py:123   -- 没有宿主对话
+-   on_llm_request()：向 AstrBot 对话注入 RAG          @ main.py:96
+-   llm_tool research_execute · notion_push_note      @ main.py:241
+-   _send_plain_message()：把进度发回聊天              @ main.py:629
+- EventHandler.on_ka_*()                              @ kacore/event_handler.py:79
+~ <ProgressDock/>：后台任务进度                        @ web/frontend/components/progress/ProgressDock.tsx:242
++   **notify**(title, body)：系统通知                  @ desktop/src-tauri/src/main.rs:1
+</script>
+  </doc-calls>
+  <doc-ask id="inject">
+    <p>AstrBot 对话里的 RAG 注入和 research 工具怎么处理？</p>
+    <label><input type="radio" name="inject" value="drop" checked> 删除。KA 的 Ask 页就是对话入口 <small>research_skill.py 删除</small></label>
+    <label><input type="radio" name="inject" value="mcp"> KA 提供本地 MCP server，外部 AI 客户端可以调用 <small>保留 research_skill.py</small></label>
+  </doc-ask>
+  <div data-if="inject=mcp"><doc-note tone="info">加 ka_server/mcp.py：research_probe、research_execute、notion_push_note 三个工具。Phase 3 多一项。</doc-note></div>
+
+  <doc-claim>
+    <p>Notion 同步直接调用 Notion API。用户在节点里填 token。</p>
+    <doc-calls title="Notion" caption="adapter 的方法签名不变，sync_targets 不用改。">
+<script type="text/plain">
+~ NotionMCPAdapter → **NotionClient**                 @ kacore/adapters/notion_mcp.py:75
+-   _get_client()：context.get_llm_tool_manager()     @ kacore/adapters/notion_mcp.py:119
++   **NotionRestClient**(token)                       @ kacore/adapters/notion_rest.py:1   -- aiohttp，Notion-Version 2026-03-11
+    retrieve_data_source / query / append_blocks …    @ kacore/adapters/notion_mcp.py:347
+</script>
+    </doc-calls>
+    <doc-ask id="notion">
+      <p>Notion 用什么方式接入？</p>
+      <label><input type="radio" name="notion" value="rest" checked> 直接调用 Notion REST API <small>用户机器不需要 Node.js</small></label>
+      <label><input type="radio" name="notion" value="mcp"> 内置 MCP client，启动 @suekou/mcp-notion-server <small>用户机器需要 Node.js</small></label>
+    </doc-ask>
+  </doc-claim>
+
+  <doc-claim>
+    <p>原 AstrBot 人格改为「回答」节点里的系统提示词。</p>
+    <doc-code title="kacore/api.py" lang="py" start="482" hl="482">
+<script type="text/plain">
+def _get_astrbot_persona_prompt(context: Any) -> str:
+    """从 AstrBot context 中动态检索当前的 persona prompt。"""
+    if context is None:
+        return ""
+    try:
+        get_active_prompt = getattr(context, "get_active_persona_prompt", None)
+        if callable(get_active_prompt):
+            return str(get_active_prompt())
+
+        active_persona = getattr(context, "active_persona", None)
+        if active_persona is not None:
+            prompt = getattr(active_persona, "prompt", None) or getattr(
+                active_persona, "system_prompt", None
+            )
+            if prompt:
+                return str(prompt)
+</script>
+      <doc-pin line="482" tone="warn" title="删除：改读 flow.answer.system_prompt">空值时不加人格，与现在 persona off 一致。</doc-pin>
+    </doc-code>
+  </doc-claim>
+
+  <doc-claim>
+    <p>可选依赖由应用内的 uv 装到 extras 目录。</p>
+    <doc-code src="kacore/api_capabilities.py" lines="323-337" hl="330-334">
+      <doc-pin line="330" tone="warn" title="改为 uv pip install --target extras/&lt;pack&gt;">安装包内的 Python 只读，不能往里装。</doc-pin>
+    </doc-code>
+  </doc-claim>
+</doc-claim>
+
+<!-- ═════ shared ═════ -->
+<doc-claim aux="shared">
+  <p>共用：一份 settings.json，两层归属。</p>
+  <doc-claim>
+    <p>偏好设置有 5 组设置项，另有一个「组件」状态页。</p>
+    <doc-schema id="prefs" lang="ts" title="settings.json · prefs" caption="这些项只在偏好设置窗口里出现。">
+<script type="text/plain">
+interface Prefs {
+  general: {
+    language: "zh" | "en"; close_to_tray: boolean;
+    launch_at_login: boolean; check_updates: boolean;
+  };
+  appearance: { theme_mode: "system" | "light" | "dark"; palette: string };
+  storage: { data_dir: string /* restart */; embedding_cache_mb: number };
+  local_models: {
+    device: "auto" | "cpu" | "cuda" | "mps";
+    idle_unload_sec: number; load_timeout_sec: number;
+  };
+  diagnostics: { log_level: "info" | "debug"; log_keep_days: number };
+  // 「组件」页只显示安装状态，没有设置项
+}
+</script>
+    </doc-schema>
+  </doc-claim>
+  <doc-claim>
+    <p>数据流有 11 个节点，每个节点拥有自己的设置项。</p>
+    <doc-schema id="flow" lang="ts" title="settings.json · flow" caption="Secret 只存引用，值在加密库。点 Edit 可以直接改这份列表。">
+<script type="text/plain">
+type Secret = { ref: string };
+type ModelRef = { provider_id: string; model: string };
+
+interface Flow {
+  providers: ProviderProfile[];                       // 新
+  models: { chat: ModelRef; research: ModelRef | null;
+            graph: ModelRef | null };                 // 新；null = 跟随 chat
+  import: { default_collection: string; ocr_enabled: boolean };
+  zotero: { enabled: boolean; access_mode: "local" | "server";
+    data_dir: string; api_port: number; server_api_key: Secret;
+    storage_mode: "managed_copy" | "linked" | "zotmoov";
+    linked_root: string; zotmoov_root: string;
+    sync_mode: "strict_mirror" | "conservative" | "archive";
+    auto_sync: boolean; auto_sync_interval_sec: number };
+  embedding: { source: "local" | ModelRef /* rebuild */;
+    local_model: string; max_token_size: number };
+  vector_store: { backend: "milvus" | "lexical"; auto_index: boolean;
+    auto_rebuild: boolean; auto_rebuild_delay_sec: number };
+  graph: { enabled: boolean; query_mode: "mix" | "local" | "global"
+    | "hybrid" | "naive" | "bypass"; max_doc_chars: number;
+    llm_max_async: number; embedding_max_async: number; llm_timeout_sec: number };
+  retrieval: {
+    rerank: { provider: "auto" | "cross_encoder" | "noop"; model: string;
+      batch_size: number; max_candidates: number; keep: number };
+    enhanced_recall: { max_sub_queries: number; wide_top_k: number;
+      max_final_evidence: number; rerank_weight: number; corrective_enabled: boolean };
+    deep_thinking: { max_rounds: number; max_sub_queries: number; wide_top_k: number;
+      rerank_weight: number; verify_enabled: boolean; max_verify_rounds: number } };
+  answer: { language: "auto" | "zh" | "en"; system_prompt: string; // 新
+    llm_timeout_sec: number; task_timeout_sec: number };
+  notion: { enabled: boolean; token: Secret /* 新 */; database_id: string;
+    qa_database_id: string; data_source_id: string; qa_data_source_id: string;
+    parent_page_id: string; database_title: string; sync_mode: "preserve" | "strict";
+    auto_sync: boolean; auto_sync_interval_sec: number };
+  r2: { enabled: boolean; account_id: string; access_key_id: Secret;
+    secret_access_key: Secret; bucket: string; warn_threshold: number;
+    backup_interval_sec: number };
+}
+</script>
+    </doc-schema>
+  </doc-claim>
+</doc-claim>
+
+<!-- ═════ phases ═════ -->
+<doc-claim aux="phases">
+  <p>执行顺序：7 个 Phase。每个 Phase 测试全绿后再进入下一个。</p>
+  <div class="cols">
+    <div class="card"><h4>P0 · 基线</h4><p>建 projects/Knowledge-Arch 独立仓库。导入代码。记录测试基线：1289 passed，3 个既有失败。</p></div>
+    <div class="card"><h4>P1 · 后端脱钩</h4><p>ka_server 薄壳与 AppInitializer。删除 main.py、EventHandler、astr Embedding、kb_reader。验收：除 kacore/legacy_import 外，grep astrbot 无结果。</p></div>
+    <div class="card"><h4>P2 · 设置与模型</h4><p>SettingSpec、SettingsStore、legacy_keys。ProviderRegistry、ModelRouter。LLMAdapter 改造。</p></div>
+    <div class="card"><h4>P3 · 外部能力</h4><p>NotionRestClient、uv extras、system_prompt、旧数据导入器。</p></div>
+    <div class="card"><h4>P4 · 前端</h4><p>backend.ts 与 token。NodePanel 与 4 个新节点。PreferencesWindow。删 LoginScreen 与 AstrBotModal。</p></div>
+    <div class="card"><h4>P5 · 桌面壳</h4><p>Tauri 工程、sidecar、单实例、原生对话框、托盘、Python 打包脚本。三个平台本地出包。</p></div>
+    <div class="card"><h4>P6 · 发布</h4><p>Actions 三平台矩阵、签名与公证、updater、文档改写、v2.0.0。远端操作另行批准。</p></div>
+  </div>
+  <doc-ask id="repo">
+    <p>新 KA 仓库的 Git 历史从哪里开始？</p>
+    <p>两种方式都只在本地操作。推送到 Gar1ton/Knowledge-Arch 时用新分支。替换 main 需要你单独批准。</p>
+    <label><input type="radio" name="repo" value="keep"> 克隆 Astrbot_KAPlugin 的历史，在新仓库里改 <small>blame 与 CHANGELOG 连续</small></label>
+    <label><input type="radio" name="repo" value="fresh" checked> 全新历史，首个提交导入当前代码 <small>旧提交只留在插件仓库</small></label>
+  </doc-ask>
+</doc-claim>
+
+<!-- ═════ scope ═════ -->
+<doc-claim aux="scope">
+  <p>不改：检索算法、数据 schema、同步语义。</p>
+  <ul>
+    <li>检索、chunking、清洗、六档检索模式、引用格式保持原样。</li>
+    <li>migrations/ 的 SQL 文件不改。旧库导入后直接可用。</li>
+    <li>Zotero、Notion、R2 的同步语义不变。只换接入方式和设置位置。</li>
+    <li>不读取 AstrBot 自己的模型密钥。首次启动由用户在「模型供应商」里填写。</li>
+    <li>不做局域网或远程访问的 Web 控制台。不做 API 型 rerank。</li>
+    <li>Astrbot_KAPlugin 仓库保持原样，不删除，不归档。</li>
+    <li>不参考 Gar1ton/Knowledge-Arch 旧实现的代码。</li>
+    <li>header 里的文件数是估算值。</li>
+  </ul>
+</doc-claim>
+
+</doc-plan>
+</main>
+</body>
+</html>

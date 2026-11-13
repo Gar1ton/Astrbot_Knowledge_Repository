@@ -12,8 +12,13 @@
   验证：1289 passed / 2 skipped / 3 failed（沿用既有三项：两项缺 torch、`bad19` 测试桩）；
   ruff 7 项均为既有问题（`test_embedding_database_compatibility.py` / `test_external_embedding_contract.py` /
   `tools/chunk_preview.py`）；mypy、`git diff --check`、`npm run build` 与 `sync_frontend.py --check` 通过。
-- [ ] Phase 4：从冻结 SHA 生成发布树，基于 `origin/main` 建 `publish/v1.2.0` 并提交。
-- [ ] Phase 5：推送 developer 与发布分支，创建 PR 到 main。
+- [x] Phase 4：从冻结 SHA 生成发布树，基于 `origin/main` 建 `publish/v1.2.0` 并提交。
+  源提交 `8e6f1af`（amend 去除 `025_notion_scan_state.sql` 末尾空行），发布提交 `99fcc9f`，
+  528 个文件 / ZIP 4.12 MiB，`build_published_tree.py --check publish/v1.2.0` 一致。
+- [x] Phase 5：推送 developer 与发布分支，创建 PR 到 main（用户手动执行，PR #7）。
+- [x] Phase 6：PR #7 squash 合并为 main `19aa6df`（保留 `Source-Developer-Commit` 行）；
+  `build_published_tree.py --check origin/main` 与源提交重新生成结果一致。
+- [ ] Phase 7：推送 `v1.2.0` tag（指向 `19aa6df`）。
 - 待决：`conservative` 模式下 Zotero 陈旧集合在代码中总会清理，与 `config.py` 注释及
   WebUI 帮助文案「集合只增不减」不一致；README 按代码行为描述，文案/代码修正未纳入本轮。
 
